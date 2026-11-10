@@ -17,8 +17,9 @@ AUTHORING/LIFECYCLE CONTRACT
     The browser UI is ``webapp/terminal.js``. The native C++ host owns the
     process lifetime, and ``Cinter`` owns all build/setup/publish commands.
     Runtime files must work *without* the original source checkout installed.
-    All generated data belongs under sibling Builds/ or the approved steamapps
-    tree. Do not repurpose or terminate another process's managed VM.
+    Installed apps write exclusively to their resolved Steam library; explicit
+    repository development/lifecycle runs use sibling Builds. Do not repurpose
+    or terminate another process's managed VM.
     Do not change the Infinite Mac guest-input automation in this backend.
 
 Configuration and externally callable dispatch are at the beginning of this
@@ -47,6 +48,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 
 if os.name != 'nt':
@@ -64,6 +66,8 @@ if os.name != 'nt':
 MAX_BODY = 65_536                 # bytes per HTTP request
 MAX_SESSIONS = 6                  # concurrent terminal tabs
 MAX_OUTPUT = 1024 * 1024         # maximum buffered PTY output bytes
+SERVER_LOG_MEMORY_LINES = 2048     # rolling Server tab backlog
+SERVER_LOG_BATCH_LINES = 120       # bounded HTTP response per poll
 ASSETS = Path(__file__).resolve().parent  # bundled webapp/ (not cwd)
 
 # The guest VM is *different* from the Setup-only 'w'/'c' environments.
@@ -176,7 +180,7 @@ def _lagomorph_media_url(builds: Path) -> dict:
         # Published, range/CORS-verified production disk. This object is independent
         # of the four release ZIPs, and must also work from the packaged app's
         # resource-only Builds directory (which has no local publish receipt).
-        release = ASSETS.parents[1].name
+        release = ASSETS.parent.name
         if not __import__('re').fullmatch(r'20[0-9]{2}\.[0-9]{2}\.[0-9]{2}', release):
             release = '2026.11.23'
         value = ('https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/'
@@ -415,7 +419,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
 
 
 def _session_environment(builds: Path, system: str) -> dict[str, str]:
-    """Confine shell-generated caches, history, temp and profile data to Builds."""
+    """Confine shell history/cache/temp to developer Builds or installed Steam."""
     root = builds / 'Run' / 'CinterForgeTerminal' / system
     paths = {name: root / name for name in ('home', 'tmp', 'cache', 'config', 'data')}
     for path in paths.values():
@@ -430,7 +434,7 @@ def _session_environment(builds: Path, system: str) -> dict[str, str]:
         except (ImportError, KeyError, OSError):
             user_home = str(Path.home())
     env['CINTER_USER_HOME'] = str(user_home)
-    # The interactive shell HOME is intentionally relocated to managed Builds.
+    # The interactive shell HOME is relocated into managed per-session state.
     # Preserve the *real* Steam root before rewriting HOME, otherwise an
     # optional public DevTools install would target the session sandbox.
     # An installed application may be on any Steam library drive. Its real
@@ -459,7 +463,7 @@ def _session_environment(builds: Path, system: str) -> dict[str, str]:
         env['CINTER_STEAMAPPS'] = str(steam)
     # In the installed Host tree this directory is named <release>.
     # The checkout path uses the same canonical pinned release as the builder.
-    release = ASSETS.parents[1].name
+    release = ASSETS.parent.name
     if not (release[:4].isdigit() and release.count('.') == 2):
         from host import HOST_RELEASE
         release = HOST_RELEASE
@@ -471,9 +475,13 @@ def _session_environment(builds: Path, system: str) -> dict[str, str]:
                 'XDG_CACHE_HOME': str(paths['cache']), 'XDG_CONFIG_HOME': str(paths['config']),
                 'XDG_DATA_HOME': str(paths['data']), 'HISTFILE': str(paths['home'] / 'history'),
                 'TERM': 'xterm-256color', 'COLORTERM': 'truecolor', 'PYTHONDONTWRITEBYTECODE': '1'})
-    logs = builds / 'Logs/CinterForgeTerminal'
+    logs = _runtime_logs_root(builds)
     logs.mkdir(parents=True, exist_ok=True)
     env['CINTER_TERMINAL_DIRECTORY_LOG'] = str(logs / ('native-terminal-' + system + '.log'))
+    if _steam_library_for_installed_root(builds) is not None and builds.name != 'Builds':
+        # The optional guest VM and downloaded DevTools must never use ~/Builds.
+        env.pop('CINTER_BUILDS_ROOT', None)
+        env['CINTER_TERMINAL_RUNTIME_MODE'] = 'installed'
     if system == 'win':
         env.update({'USERPROFILE': str(paths['home']), 'APPDATA': str(paths['data']),
                     'LOCALAPPDATA': str(paths['data'])})
@@ -508,6 +516,8 @@ class TerminalSession:
         scripts = _install_shell_commands(self.root, system, env)
         self.shell = command if command is not None else _shell_command(system, scripts, builds)
         working_directory = working_directory or self.root
+        if output_log is None:
+            output_log = _runtime_logs_root(builds) / 'Sessions' / (self.id + '.log')
         if output_log is not None:
             output_log.parent.mkdir(parents=True, exist_ok=True)
             self.output_log = output_log.open('ab')
@@ -682,27 +692,196 @@ def _load_bedrock_manager():
     return BedrockManager
 
 
+def _runtime_steam_locations() -> list[Path]:
+    """Discover existing Steam libraries without source-only host imports.
+
+    Steam's libraryfolders.vdf is authoritative for nondefault disk volumes.
+    Never create or infer a library merely from the default home pathname.
+    """
+    if sys.platform == 'darwin':
+        try:
+            import pwd
+            home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (ImportError, KeyError, OSError):
+            home = Path.home()
+        roots = [home / 'Library/Application Support/Steam']
+    elif os.name == 'nt':
+        roots = [Path(os.environ.get('PROGRAMFILES(X86)', 'C:/Program Files (x86)')) / 'Steam']
+    else:
+        try:
+            import pwd
+            home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (ImportError, KeyError, OSError):
+            home = Path.home()
+        roots = [home / '.local/share/Steam', home / '.steam/steam', home / '.steam/root']
+    candidates: list[Path] = []
+    for root in roots:
+        for config in (root / 'config/libraryfolders.vdf',
+                       root / 'steamapps/libraryfolders.vdf'):
+            if not config.is_file() or config.is_symlink():
+                continue
+            try:
+                source = config.read_text(encoding='utf-8-sig', errors='replace')
+            except OSError:
+                continue
+            for raw in re.findall(r'(?im)^\s*"path"\s*"((?:\\.|[^"\\])*)"', source):
+                library = Path(raw.replace('\\\\', '\\').replace('\\"', '"')).expanduser()
+                if library.is_absolute():
+                    candidates.append(library / 'steamapps')
+        candidates.append(root / 'steamapps')
+    found: list[Path] = []
+    for candidate in candidates:
+        if candidate.name.casefold() == 'steamapps' and candidate.is_dir() and not candidate.is_symlink():
+            resolved = candidate.resolve(strict=True)
+            if resolved not in found:
+                found.append(resolved)
+    return found
+
+
+def _cinterforge_steam_manifest(steamapps: Path) -> bool:
+    for entry in steamapps.glob('appmanifest_*.acf'):
+        if not entry.is_file() or entry.is_symlink():
+            continue
+        try:
+            source = entry.read_text(encoding='utf-8-sig', errors='replace')
+        except OSError:
+            continue
+        found = re.search(r'(?i)"(?:installdir|name)"\s*"(cinterforge[^"\r\n]*)"', source)
+        if found:
+            return True
+    return False
+
+
+def _steam_library_for_installed_root(builds: Path) -> Path | None:
+    """Resolve the installed Steam library from the staged application's path.
+
+    A Steam library outside the default disk is authoritative. An explicitly
+    supplied Steam root permits stand-alone package launches, without creating
+    a developer Builds directory or inventing a Steam installation path.
+    """
+    for item in (builds.resolve(), ASSETS.resolve()):
+        for ancestor in (item, *item.parents):
+            if ancestor.name.lower() != 'steamapps':
+                continue
+            rel = item.relative_to(ancestor).parts
+            if rel[:3] == ('common', 'CinterForge', 'Applications'):
+                return ancestor
+    value = os.environ.get('CINTER_STEAMAPPS', '').strip()
+    if value:
+        candidate = Path(value).expanduser()
+        if candidate.name.lower() != 'steamapps' or not candidate.is_dir() or candidate.is_symlink():
+            raise RuntimeError('CINTER_STEAMAPPS must identify an existing real Steam steamapps directory')
+        return candidate.resolve(strict=True)
+    candidates = _runtime_steam_locations()
+    manifested = [item for item in candidates if _cinterforge_steam_manifest(item)]
+    if len(manifested) == 1:
+        return manifested[0]
+    if len(manifested) > 1:
+        raise RuntimeError('Multiple Steam libraries report CinterForge installations; set CINTER_STEAMAPPS')
+    active = [item for item in candidates if any(
+        manifest.is_file() and not manifest.is_symlink()
+        for manifest in item.glob('appmanifest_*.acf'))]
+    if len(active) == 1:
+        return active[0]
+    existing = [item for item in candidates if (item / 'common/CinterForge').is_dir() and
+                not (item / 'common/CinterForge').is_symlink()]
+    if len(existing) == 1:
+        return existing[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    if candidates:
+        raise RuntimeError('Multiple Steam libraries found; select the real one with CINTER_STEAMAPPS')
+    return None
+
+
 def _terminal_mutable_root(builds: Path) -> Path:
-    """Keep writable shell state outside the signed macOS application bundle."""
-    physical = builds.resolve()
-    # The packaged Mac executable reads its frozen Builds closure inside
-    # Contents/Resources, but runtime files must never modify that seal.
-    if any(part.endswith('.app') for part in physical.parts):
-        for parent in (physical, *physical.parents):
-            if parent.name.lower() == 'steamapps':
-                candidate = parent / 'common/CinterForge/Applications/TerminalState'
-                candidate.mkdir(parents=True,exist_ok=True)
-                return candidate
+    """Separate signed, read-only packaged content from writable session state.
+
+    Source/lifecycle and explicit developer stage use sibling Builds. Installed
+    native app (even one invoked from Finder) uses its actual Steam library.
+    The existence of VS Code elsewhere is not an authorization to write Builds.
+    """
+    physical = builds.resolve(strict=True)
+    embedded_app = any(part.endswith('.app') for part in physical.parts)
+    if not embedded_app and physical.name == 'Builds':
+        return physical  # ./Cinter and explicit repository development stage
+    if not embedded_app:
         for parent in physical.parents:
             if parent.name == 'Builds':
-                return parent  # Developer-built .app under sibling Builds.
-        configured = os.environ.get('CINTER_STEAMAPPS')
-        if configured and Path(configured).name.lower() == 'steamapps' and Path(configured).is_dir():
-            candidate = Path(configured).resolve() / 'common/CinterForge/Applications/TerminalState'
-            candidate.mkdir(parents=True,exist_ok=True)
-            return candidate
-        raise RuntimeError('Installed Terminal requires its actual host Steam library for writable runtime state')
-    return physical
+                return parent  # developer stage beneath sibling Builds
+    if (embedded_app and os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'developer'
+            and not any(parent.name.lower() == 'steamapps' for parent in physical.parents)):
+        for parent in physical.parents:
+            if parent.name == 'Builds' and not any(part.endswith('.app') for part in parent.parts):
+                return parent  # explicitly launched repository/development app only
+    steam = _steam_library_for_installed_root(physical)
+    if steam is not None:
+        candidate = steam / 'common/CinterForge/Applications/TerminalState'
+        if candidate.is_symlink() or (candidate.exists() and not candidate.is_dir()):
+            raise RuntimeError('Unsafe installed Terminal state root: ' + str(candidate))
+        candidate.mkdir(parents=True, exist_ok=True)
+        return candidate
+    if embedded_app:
+        # Only explicit repository development runs may write a sibling Builds.
+        # A downloaded .app can itself sit inside a directory named Builds.
+        if os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'developer':
+            for parent in physical.parents:
+                if parent.name == 'Builds' and not any(p.endswith('.app') for p in parent.parts):
+                    return parent
+        raise RuntimeError('Packaged Terminal needs an actual Steam library for runtime state; set CINTER_STEAMAPPS')
+    raise RuntimeError('Runtime state needs a repository Builds or an installed Steam library')
+
+
+def _runtime_logs_root(writable_root: Path) -> Path:
+    """Return logs in developer Builds or installed steamapps/common/CinterForge."""
+    root = writable_root.resolve()
+    for parent in (root, *root.parents):
+        if parent.name.lower() == 'steamapps':
+            return parent / 'common/CinterForge/Logs/CinterForgeTerminal'
+    if root.name == 'Builds':
+        return root / 'Logs/CinterForgeTerminal/Runtime'
+    raise RuntimeError('Runtime logs cannot escape developer Builds or the Steam installation')
+
+
+class ServerRuntimeLog:
+    """Thread-safe, bounded live Server tab with a persistent session log."""
+    def __init__(self, directory: Path):
+        if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+            raise RuntimeError('Unsafe CinterForge Terminal log directory: ' + str(directory))
+        directory.mkdir(parents=True, exist_ok=True)
+        filename = time.strftime('server-%Y%m%d-%H%M%S-') + str(os.getpid()) + '-' + secrets.token_hex(4) + '.log'
+        self.path = directory / filename
+        self.stream = self.path.open('x', encoding='utf-8', buffering=1)
+        self.lock = threading.Lock()
+        self.cursor = 0
+        self.lines = deque(maxlen=SERVER_LOG_MEMORY_LINES)
+        self.append('HTTP/Python server log opened; path=' + str(self.path))
+
+    def append(self, message: str) -> None:
+        # Never log API tokens, request bodies, cookies, or whole URL queries.
+        line = time.strftime('%Y-%m-%dT%H:%M:%S') + ' ' + str(message).replace('\r', ' ').replace('\x00', '')
+        with self.lock:
+            for part in line.splitlines():
+                self.cursor += 1
+                self.lines.append((self.cursor, part))
+                self.stream.write(part + '\n')
+            self.stream.flush()
+
+    def since(self, cursor: int) -> dict:
+        if cursor < 0:
+            raise ValueError('Invalid Server log cursor')
+        with self.lock:
+            values = [(i, line) for i, line in self.lines if i > cursor][:SERVER_LOG_BATCH_LINES]
+            return {'lines': [line for _, line in values],
+                    'cursor': values[-1][0] if values else max(cursor, self.cursor),
+                    'log_path': str(self.path), 'read_only': True,
+                    'truncated': bool(self.lines and cursor < self.lines[0][0]-1)}
+
+    def close(self) -> None:
+        with self.lock:
+            if not self.stream.closed:
+                self.stream.flush()
+                self.stream.close()
 
 
 def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
@@ -769,6 +948,7 @@ class CinterShellServer(ThreadingHTTPServer):
         self.builds = builds
         self.mutable_builds = _terminal_mutable_root(builds)
         self.system = target_platform()
+        self.log = ServerRuntimeLog(_runtime_logs_root(self.mutable_builds))
         self.token = secrets.token_urlsafe(36)
         self.sessions: dict[str, TerminalSession] = {}
         self.sessions_lock = threading.Lock()
@@ -796,6 +976,10 @@ class CinterShellServer(ThreadingHTTPServer):
                   file=sys.stderr, flush=True)
         super().__init__(('127.0.0.1', 0), Handler)
         self.origin = f'http://127.0.0.1:{self.server_port}'
+        self.log_event('backend ready; platform=' + self.system + ' port=' + str(self.server_port))
+
+    def log_event(self, message: str) -> None:
+        self.log.append(message)
 
     def stop(self) -> None:
         for item in list(self.sessions.values()):
@@ -809,8 +993,10 @@ class CinterShellServer(ThreadingHTTPServer):
                 print('[DEVTOOLS] Terminal VM cleanup: '+str(error), file=sys.stderr, flush=True)
         if self.bedrock is not None:
             self.bedrock.stop()
+        self.log_event('backend shutdown completed')
         self.shutdown()
         self.server_close()
+        self.log.close()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -834,9 +1020,11 @@ class Handler(BaseHTTPRequestHandler):
         if not allowed:
             # No token, URL, or session identifier in logs. Keep a precise
             # rejection reason for diagnosing native WebView initialization.
-            sys.stderr.write('[CinterForgeTerminal] rejected local API request: '
-                             f'host={host_ok} token={token_ok} origin={origin_ok} '
-                             f'fetch_site={site!r}\n')
+            message = (f'rejected local API request: host={host_ok} token={token_ok} '
+                       f'origin={origin_ok} fetch_site={site!r}')
+            if hasattr(self.server, 'log_event'):
+                self.server.log_event(message)
+            sys.stderr.write('[CinterForgeTerminal] ' + message + '\n')
         return allowed
 
     def _send(self, code: int, body: bytes, ctype='application/json; charset=utf-8', *, same_origin_frame: bool = False) -> None:
@@ -1009,6 +1197,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == '/healthz':
             self._json(200, {'ready': True})
+            return
+        if path == '/api/server/log':
+            if not self._authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            from urllib.parse import parse_qs
+            raw = parse_qs(urlsplit(self.path).query).get('cursor', ['0'])[0]
+            try:
+                self._json(200, self.server.log.since(int(raw)))
+            except (ValueError, OverflowError) as error:
+                self._json(400, {'error': str(error)})
             return
         if path == '/api/status':
             if not self._authorized():
@@ -1329,6 +1528,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if route == '/api/terminal/open':
                 backend=body.get('backend', 'native')
+                self.server.log_event('opening terminal session: backend=' + str(backend) +
+                    ' platform=' + self.server.system)
                 if backend not in ('native','mac','linux','win','minecraft'):
                     raise ValueError('Unknown Terminal backend')
                 command=None
@@ -1359,6 +1560,8 @@ class Handler(BaseHTTPRequestHandler):
                                                url=self.server.origin, token=self.server.token,
                                                command=command)
                     self.server.sessions[terminal.id] = terminal
+                self.server.log_event('terminal opened: id=' + terminal.id[:10] +
+                    ' command=' + Path(terminal.shell[0]).name + ' output=' + str(terminal.output_log.name if terminal.output_log else 'none'))
                 self._json(200, {'id': terminal.id, 'shell': 'Minecraft' if backend=='minecraft' else (backend.title()+' Bash' if self.server.system == 'mac' and backend in ('win','linux') else Path(terminal.shell[0]).name),
                                  'platform': backend if backend!='native' else self.server.system})
                 return
@@ -1431,11 +1634,31 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(404, {'error': 'Not found'})
         except (ValueError, TypeError, RuntimeError, PermissionError, OSError, json.JSONDecodeError) as exc:
-            self._json(400, {'error': str(exc)})
+            route = urlsplit(self.path).path
+            if route == '/api/terminal/open':
+                self.server.log_event('SHELL START FAILURE: ' + repr(exc) +
+                    '\n' + traceback.format_exc(limit=8))
+                self._json(400, {'error': 'Shell start failed: ' + str(exc) +
+                    ' (see Server tab: ' + str(self.server.log.path) + ')'})
+            else:
+                self.server.log_event('API failure on ' + route + ': ' + repr(exc))
+                self._json(400, {'error': str(exc)})
+        except Exception as exc:
+            route = urlsplit(self.path).path
+            self.server.log_event('UNEXPECTED API EXCEPTION at ' + route + ': ' + repr(exc) +
+                                  '\n' + traceback.format_exc(limit=12))
+            self._json(500, {'error': 'Internal Terminal failure; see Server log at ' +
+                                  str(self.server.log.path)})
 
     def log_message(self, fmt, *args):
-        # No request URI or auth token in host stdout's RPC protocol.
-        return
+        # Log useful errors/terminal lifecycle without recording private bodies,
+        # bearer tokens, query strings or every Server tab poll.
+        route = urlsplit(self.path).path
+        if route in ('/api/server/log', '/api/terminal/poll'):
+            return
+        status = str(args[1]) if len(args) > 1 else ''
+        if status.startswith(('4', '5')) or route in ('/api/terminal/open', '/api/terminal/close'):
+            self.server.log_event('HTTP ' + self.command + ' ' + route + ' status=' + status)
 
 
 _server = None
@@ -1455,7 +1678,7 @@ def handle(method: str, params: dict) -> dict:
         _server_thread = threading.Thread(target=_server.serve_forever, name='cinter-http', daemon=True)
         _server_thread.start()
         return {'url': _server.origin + '/', 'port': _server.server_port,
-                'platform': _server.system}
+                'platform': _server.system, 'server_log': str(_server.log.path)}
     if method == 'next_debugger_request':
         if _server is None:
             return {'requested': False}
@@ -1661,6 +1884,9 @@ def _user_steamapps(builds: Path) -> Path:
     HOME may deliberately point inside Builds/CFTVM during native acceptance.
     """
     builds = builds.resolve(strict=True)
+    chosen = _steam_library_for_installed_root(builds)
+    if chosen is not None:
+        return chosen
     from_install = (builds, ASSET_LOCATION, *builds.parents, *ASSET_LOCATION.parents)
     for location in from_install:
         if location.name.lower() != 'steamapps':
@@ -3935,44 +4161,45 @@ def sdk_root() -> Path | None:
 
 
 def _state_root() -> Path:
-    """Choose a short, writable Builds root for app-owned runtime VM sockets.
+    """Short, app-owned VM socket root: Builds in developer mode, Steam at runtime.
 
-    Packaged Mac apps also carry a read-only Contents/Resources/Builds tree.
-    `CINTER_BUILDS_ROOT` may refer to that nested tree, which produces an
-    unusably long Unix socket path. Reuse the outer, existing workspace Builds
-    when available; otherwise use a visible user Builds (never ~/.lima).
-    All runtime state remains owned by this Terminal and never borrows w or c.
+    Never create ~/Builds when an installed app invokes optional DevTools.
+    The resolved Steam library is inherited from the authenticated PTY host.
     """
-    configured = os.environ.get('CINTER_BUILDS_ROOT', '')
-    roots: list[Path] = []
-    if configured:
+    if os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'installed':
+        value = os.environ.get('CINTER_STEAMAPPS', '')
+        if not value:
+            raise RuntimeError('Installed DevTools require the real Steam library')
+        steam = Path(value).expanduser()
+        if steam.name.lower() != 'steamapps' or not steam.is_dir():
+            raise RuntimeError('Installed DevTools require an existing steamapps directory')
+        # LIMA_HOME must be short enough for its own nested socket filename.
+        # Place the VM profile directly under the selected steamapps root;
+        # additional optional DevTools state goes in small named subfolders.
+        roots = [steam.resolve(strict=True)]
+    else:
+        configured = os.environ.get('CINTER_BUILDS_ROOT', '')
+        if not configured:
+            raise RuntimeError('Developer VM state requires explicit CINTER_BUILDS_ROOT')
         source = Path(configured).expanduser()
-        if source.name != 'Builds' or source.is_symlink():
-            raise RuntimeError('CINTER_BUILDS_ROOT must be an ordinary Builds directory')
-        if not source.is_dir():
-            raise RuntimeError('CINTER_BUILDS_ROOT is not an existing Builds directory')
-        # Choose the shortest containing Builds root, without leaving the
-        # owner's designated workspace. An outer Builds ancestor is preferred
-        # to the read-only Builds copied inside CinterForge Terminal.app.
-        for parent in reversed((source, *source.parents)):
-            if parent.name == 'Builds' and parent.is_dir() and not parent.is_symlink():
-                roots.append(parent)
-        if not roots:
-            roots.append(source)
-    home = Path(os.environ.get('CINTER_USER_HOME', str(Path.home()))).expanduser()
-    user_builds = home / 'Builds'
-    if user_builds.is_symlink() or (user_builds.exists() and not user_builds.is_dir()):
-        raise RuntimeError('Unsafe managed Builds directory: ' + str(user_builds))
-    roots.append(user_builds)
-    # Lima/Colima create further socket names below this path. Budget for the
-    # longest known name, rather than comparing a deliberately long fake path
-    # only *after* paths have been committed inside the signed app.
-    tail = '/CFTVM/T/l/colima-t/ssh.sock.1234567890123456'
+        if source.name != 'Builds' or source.is_symlink() or not source.is_dir():
+            raise RuntimeError('CINTER_BUILDS_ROOT must identify the existing developer Builds directory')
+        # The explicit repository Builds is authoritative. Older developer
+        # stages can also contain nested signed .app/Contents/Resources/Builds;
+        # those copies are read-only and must not hold VM state. Prefer the
+        # shortest *containing* Builds, not a home-directory fallback.
+        roots = [parent / 'CFTVM/T' for parent in reversed((source, *source.parents))
+                 if parent.name == 'Builds' and parent.is_dir() and not parent.is_symlink()]
+    tail = ('/colima-t/ssh.sock.1234567890123456'
+            if os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'installed'
+            else '/l/colima-t/ssh.sock.1234567890123456')
     for root in roots:
         if len(os.fsencode(str(root) + tail)) < 96:
+            if root.is_symlink() or (root.exists() and not root.is_dir()):
+                raise RuntimeError('Unsafe managed VM state: ' + str(root))
             root.mkdir(parents=True, exist_ok=True)
-            return root / 'CFTVM/T'
-    raise RuntimeError('Managed VM socket path is too long even under user Builds')
+            return root
+    raise RuntimeError('Managed VM socket root too long under permitted developer Builds / Steam library')
 
 
 def _env(sdk: Path) -> dict[str, str]:
@@ -3983,14 +4210,16 @@ def _env(sdk: Path) -> dict[str, str]:
         if path.is_symlink() or (path.exists() and not path.is_dir()):
             raise RuntimeError('Unsafe managed VM directory: ' + str(path))
         path.mkdir(parents=True, exist_ok=True)
-    socket = root / 'l' / ('colima-' + PROFILE) / 'ssh.sock.1234567890123456'
+    installed = os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'installed'
+    lima_home = root if installed else root / 'l'
+    socket = lima_home / ('colima-' + PROFILE) / 'ssh.sock.1234567890123456'
     if len(os.fsencode(socket)) >= 100:
-        raise RuntimeError('Managed VM socket path too long. Set CINTER_BUILDS_ROOT to a shorter physical Builds path.')
+        raise RuntimeError('Managed VM socket path too long within the permitted Steam / Builds tree: ' + str(socket))
     env = dict(os.environ)
     for key in ('DOCKER_HOST', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
         env.pop(key, None)
     env.update(HOME=str(root/'h'), COLIMA_HOME=str(root/'c'),
-               LIMA_HOME=str(root/'l'), COLIMA_CACHE_HOME=str(root/'cache/colima'),
+               LIMA_HOME=str(lima_home), COLIMA_CACHE_HOME=str(root/'cache/colima'),
                DOCKER_CONFIG=str(root/'d'), XDG_CONFIG_HOME=str(root/'config'),
                XDG_CACHE_HOME=str(root/'cache'), TMPDIR=str(root/'tmp'),
                DOCKER_CONTEXT='colima-' + PROFILE,

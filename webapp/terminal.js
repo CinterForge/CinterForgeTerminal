@@ -61,6 +61,25 @@
     lagomorphDisk: Object.freeze({x: 600, y: 160}),
     lagomorphApplication: Object.freeze({x: 40, y: 142}),
   });
+  // -------------------------------------------------------------------------
+  // CONFIGURATION: compact icons for Terminal menus and in-window Session tabs
+  // -------------------------------------------------------------------------
+  // Text glyphs avoid an external icon font or CDN dependency in the native
+  // WebViews. Color and fixed-size framing are defined in terminal.css.
+  // Decorative icons are hidden from screen readers; labels remain unchanged.
+  const TERMINAL_ICON_GLYPHS = Object.freeze({
+    terminal: '>_',
+    macintosh: '⌘',
+    beos: '▥',
+    nextstep: '◆',
+    windows: '⊞',
+    linux: '◆',
+    minecraft: '▦',
+    codeoss: '</>',
+    joshua: '★',
+    server: '≡',
+  });
+
   // Keep the token in the served document, not a CSP-sensitive inline script.
   // A native WebView and a browser-only preview share this same authenticated API.
   const token = document.documentElement?.getAttribute('data-cph-token') || window.__CPH_TOKEN__;
@@ -172,6 +191,31 @@
   let session=null, generation=0, platform='linux', selected='', profiles=[], waiting=false;
   let macCatalog=new Map();
   const museumKind = x => x?.kind || 'terminal';
+  // Display icons identify the same real terminal/emulator category on menu
+  // buttons and tabs. No categories or launch behavior are changed here.
+  function iconCategoryForProfile(profile, backend = 'native') {
+    if (backend === 'server') return 'server';
+    if (backend === 'minecraft') return 'minecraft';
+    if (backend === 'win') return 'windows';
+    if (backend === 'linux') return 'linux';
+    if (profile?.kind === 'joshua') return 'joshua';
+    if (profile?.kind === 'codeoss' || profile?.id === 'codeoss') return 'codeoss';
+    if (profile?.kind !== 'emulator') return 'terminal';
+    if (profile.id?.startsWith('beos-')) return 'beos';
+    if (profile.id?.startsWith('next-')) return 'nextstep';
+    return 'macintosh';
+  }
+
+  function appendDecorativeIcon(target, category) {
+    const icon = document.createElement('span');
+    icon.className = `terminal-icon terminal-icon--${category}`;
+    icon.textContent = TERMINAL_ICON_GLYPHS[category] || TERMINAL_ICON_GLYPHS.terminal;
+    icon.setAttribute('aria-hidden', 'true');
+    // Appending after the label retains the existing textContent contract in
+    // lightweight UI tests. CSS visually orders the icon before its label.
+    target.append(icon);
+  }
+
   const frame=$('computer-frame'), computerView=$('computer-view');
   // Older staged HTML lacked this diagnostic node even when terminal.js was
   // newer. Repair that mixed-version presentation rather than crashing the
@@ -409,6 +453,8 @@
       const tabButton=document.createElement('button');tabButton.type='button';
       tabButton.className='session-tab'+(activeTab===tab?' active':'');
       tabButton.textContent=tab.label;
+      const tabProfile = profiles.find(profile => profile.id === tab.profileId);
+      appendDecorativeIcon(tabButton, iconCategoryForProfile(tabProfile, tab.backend));
       tabButton.setAttribute('role','tab');
       tabButton.setAttribute('aria-selected',String(activeTab===tab));
       tabButton.addEventListener('click',()=>{void activateTab(tab);});
@@ -431,7 +477,13 @@
     activeTab=tab;session=tab.session;selected=tab.profileId;display=tab.display;
     display.target=$('terminal-output');display.render();
     const profile=profiles.find(p=>p.id===tab.profileId)||profiles[0];
-    if(museumKind(profile)==='terminal'){
+    if(tab.kind==='server'){
+      showTerminal();applyProfile(profile);
+      $('terminal-input').disabled=true;
+      $('terminal-keys').hidden=true;
+      $('terminal-shell').textContent='Server · live HTTP/Python log (read-only)';
+      notice(tab.logPath ? 'Server log: '+tab.logPath : 'Connecting to live Server log…');
+    }else if(museumKind(profile)==='terminal'){
       showTerminal();applyProfile(profile);
       $('terminal-shell').textContent=tab.session?(tab.kind==='bedrock'?'Bedrock · live server console':`${platform} · ${tab.label}`):'Disconnected';
       focusTerminal();
@@ -447,7 +499,7 @@
   async function closeTab(tab){
     if(!tabs.includes(tab))return;
     if(game && activeTab===tab)await stopGame(game.name);
-    tab.closed=true;
+    tab.closed=true;tab.pollGeneration=(tab.pollGeneration||0)+1;
     if(tab.session)try{await api('/api/terminal/close',{id:tab.session.id});}catch(_){/* already closed */}
     const index=tabs.indexOf(tab);tabs.splice(index,1);
     if(activeTab===tab){
@@ -458,6 +510,39 @@
   }
   // Other tabs keep their own PTYs alive; a Minecraft console running in one
   // must never be closed just because another shell or emulator is selected.
+  // Server is a read-only Terminal type, not a shell and not an emulator.
+  // The same authenticated stream is written to the selected runtime Logs root.
+  async function pollServerTab(tab){
+    const stamp=++tab.pollGeneration;
+    while(!tab.closed && tab.pollGeneration===stamp){
+      try{
+        const result=await api('/api/server/log?cursor='+tab.cursor);
+        if(tab.closed || tab.pollGeneration!==stamp)return;
+        tab.logPath=result.log_path;
+        if(result.truncated)tab.display.push('[Server] Earlier events remain in '+tab.logPath+'\n');
+        for(const line of result.lines||[])tab.display.push(line+'\n');
+        tab.cursor=result.cursor;
+        if(activeTab===tab)notice('Server log: '+tab.logPath);
+      }catch(error){
+        if(tab.closed || tab.pollGeneration!==stamp)return;
+        tab.display.push('[Server] Log connection failed: '+error.message+'\n');
+        if(activeTab===tab)notice('Server log connection failed');
+      }
+      await new Promise(resolve=>setTimeout(resolve,750));
+    }
+  }
+  async function openServerTab(){
+    const buffer=makeBuffer();
+    const tab={key:++tabSerial,label:'Server',profileId:'modern',backend:'server',kind:'server',
+      session:null,closed:false,cursor:0,pollGeneration:0,logPath:'',
+      display:new VTOutput(buffer),buffer};
+    tab.display.target=tab.buffer;
+    tabs.push(tab);
+    await activateTab(tab);
+    tab.display.push('Connecting to the CinterForgeTerminal HTTP/Python server log…\n');
+    void pollServerTab(tab);
+    return tab;
+  }
   window.CinterTerminalNewTab=async(kind='mac')=>{
     if(game){notice('Leave the active IF game before creating another terminal');return;}
     if(typeof kind==='string' && kind.startsWith('profile:')){
@@ -466,6 +551,7 @@
         return openSession(id);
       notice('Unknown museum machine');return;
     }
+    if(kind==='server')return openServerTab();
     if(kind==='mac')return openSession('modern');
     if(kind==='linux')return openSession('vt100-terminal','linux');
     if(kind==='win')return openSession('ibm-pc-vga','win');
@@ -790,6 +876,12 @@
   async function reconnectTab(){
     if(!activeTab){await openSession('modern');return;}
     const tab=activeTab;
+    if(tab.kind==='server'){
+      tab.pollGeneration++;
+      tab.cursor=0;tab.display.reset();
+      void pollServerTab(tab);
+      return;
+    }
     if(tab.kind==='bedrock'){
       notice('Bedrock is a dedicated server Session. Start a new world with bedrock run from a regular terminal.');
       return;
@@ -905,7 +997,9 @@
   };
   const addMuseumEntry=(target,profile)=>{
     const button=document.createElement('button');button.type='button';
+    button.className = 'museum-entry';
     button.textContent=`${profile.year} ${profile.name}`;
+    appendDecorativeIcon(button, iconCategoryForProfile(profile));
     button.addEventListener('click',()=>openMuseumProfile(profile.id));target.append(button);
   };
   // Input events carry printable text; keydown handles control sequences.
@@ -1096,6 +1190,14 @@
         beos:$('beos-menu-list'),nextstep:$('nextstep-menu-list')};
       if(Object.values(menuLists).some(list=>!list))throw new Error('Museum menus missing');
       Object.values(menuLists).forEach(list=>list.replaceChildren());
+      const serverEntry=document.createElement('button');serverEntry.type='button';
+      serverEntry.className='museum-entry';serverEntry.textContent='Server · Live log';
+      appendDecorativeIcon(serverEntry,'server');
+      serverEntry.addEventListener('click',()=>{
+        titleMenus.forEach(menu=>menu.open=false);
+        void openServerTab();
+      });
+      menuLists.terminal.append(serverEntry);
       const groupOf=profile=>{
         if(profile.kind!=='emulator')return 'terminal';
         if(profile.id.startsWith('beos-'))return 'beos';

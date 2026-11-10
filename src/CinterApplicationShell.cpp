@@ -239,8 +239,9 @@ void installMacFileMenu(webview::webview& window, const ApplicationShellConfig& 
     NSDictionary *labels=@{@"mac":@"New Mac Bash Terminal",
                            @"win":@"New Windows Bash Terminal",
                            @"linux":@"New Linux Bash Terminal",
-                           @"minecraft":@"New Minecraft Console"};
-    for (NSString *kind in @[@"mac", @"win", @"linux", @"minecraft"]) {
+                           @"minecraft":@"New Minecraft Console",
+                           @"server":@"New Server Log Terminal"};
+    for (NSString *kind in @[@"mac", @"win", @"linux", @"minecraft", @"server"]) {
         NSString *key=[kind isEqualToString:@"mac"] ? @"n" : @"";
         NSMenuItem *item=[fileMenu addItemWithTitle:labels[kind]
             action:@selector(newTerminal:) keyEquivalent:key];

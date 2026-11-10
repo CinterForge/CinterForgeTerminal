@@ -12,13 +12,13 @@ required to complete this drop.
 ./Cinter all all
 ```
 
-This single command runs Setup → Build → Stage → native macOS Test. It does
-**not** publish. Setup now checks repository inputs, expected directories,
-terminal-style/example JSON and Python syntax automatically *before* expensive
-provisioning. It also provisions cross-platform prerequisites and runs its
-existing LinuxKit/Bedrock acceptance. Mac Test runs Python and JavaScript
-source regressions, then the existing native macOS acceptance; cross-built
-Windows and Linux applications are **not** reported as native accepted.
+This single command runs Setup → Build → Stage → Test. It does **not**
+publish or launch the Terminal GUI. Setup checks repository inputs, expected
+directories and syntax before expensive provisioning, and runs existing
+LinuxKit/Bedrock acceptance. Test performs Python and JavaScript regressions,
+release ZIP/signature and Stage receipt checks without starting the application.
+Interactive native acceptance of Mac/Windows/Linux shells is a later DevTools
+work item; none is inferred from container tests or successful packaging.
 
 When diagnosing a lifecycle phase, supported independent commands remain:
 
@@ -31,6 +31,29 @@ When diagnosing a lifecycle phase, supported independent commands remain:
 
 No other test commands are expected from the builder. If one fails, the full
 console transcript and a machine-readable result are retained automatically.
+
+## Incremental DevTools Build (persistent dirty checking)
+
+`./Cinter build all` stores a small per-target input/ZIP metadata cache in
+`<workspace>/Builds/Intermediates/CinterForgeTerminal/ReleaseInputCache/<release>/`.
+The first run with the new implementation may perform a full checksum comparison
+of an existing artifact to establish the cache. Subsequent builds with unchanged
+source toolchains and output ZIP identity print:
+
+```text
+[TERMINAL BUILD] devtools clean (cached inputs and ZIP): reusing ...zip
+```
+
+Changes to tools or the archive invalidate the fast path and trigger the
+existing full ZIP and source SHA-256 verification. A real changed toolchain is
+rebuilt; application-only changes cannot dirty DevTools. The cache does not
+change release contents, publication requirements, or stage receipts.
+
+**Builder action:** only the normal `./Cinter all all` lifecycle or the
+existing `./Cinter build all` phase. The entire decision and final PASS/FAIL
+appear automatically in `Builds/Logs/CinterForgeTerminal/Lifecycle/`.
+If Build fails, provide the dated `.log` named by `latest-build-all.json`;
+a prior successful Build log cannot explain a new failure.
 
 ## Automatic macOS Stage recovery (restart-safe-v2)
 
@@ -70,6 +93,26 @@ Alternatively, `./Cinter all all` repeats Setup → Build → Stage → Test.
 The Stage log and `latest-stage-all.json` must show PASS on the real Mac
 before considering this fix host-accepted. Container tests alone are not native
 macOS acceptance.
+
+## Development and installed-runtime log separation
+
+The mode of execution is authoritative. Invoking `./Cinter` lifecycle commands
+or launching Terminal explicitly in repository/VS Code development mode uses the
+sibling workspace `Builds` for developer artifacts, dependencies, caches,
+and `Builds/Logs/CinterForgeTerminal/Runtime/` for development server logs.
+
+An installed/downloaded native app uses the actual installed Steam library for
+writable state, optional DevTools, and live Server and shell session logs:
+
+```text
+<selected-steamapps>/common/CinterForge/Logs/CinterForgeTerminal/server-*.log
+<selected-steamapps>/common/CinterForge/Logs/CinterForgeTerminal/Sessions/*.log
+```
+
+**The installed app must never create or write `Builds`.** The packaged
+read-only `Contents/Resources/Builds` directory is merely the historical
+resource closure name, not a runtime output location. The Server Terminal tab
+streams the same authenticated log and displays its exact disk location.
 
 ## Where all results are stored
 

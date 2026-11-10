@@ -15,6 +15,20 @@ CinterForge Terminal is a native application for **macOS, Windows and Linux**. Y
 3. Type `help` to discover commands, `games` to see the catalog, or `code` to enter the development workspace.
 4. Navigate between Sessions using the application tabs. Games and consoles open in their own tabs rather than replacing your original terminal.
 
+### Finding your way around the Terminal
+
+The **entire central area is the Terminal Session**: shell output or the selected
+emulator fills that area. There is no permanent Code-OSS panel or navigation
+sidebar. At the top, four icon-labeled dropdowns group the existing choices:
+**Terminals** (screen styles and historic terminals), **Macintosh** (classic
+Mac configurations), **BeOS**, and **NeXTSTEP**. Each dropdown row also has a
+small category icon. Opened sessions appear in the tab strip with a matching
+icon, a tab name, and their own close button. The keyboard shortcuts and
+Reconnect buttons stay on the row directly below the tabs.
+
+Icons are decorative: the written names remain the accessible labels, and
+opening/closing sessions still uses the same commands and controls.
+
 The three lightweight native applications are separate downloads. A fourth, **optional unified DevTools** archive is only needed for certain development and additional platform environments, not simply to play a game.
 
 ## 2. At a glance
@@ -106,7 +120,13 @@ CinterForge Terminal supports native platform shells and integrated developer se
 | **Linux** | Real Linux shell/PTY on the Linux host |
 | **Windows or Linux on a Mac** | Requires the supported guest environment and optional unified DevTools package; it never substitutes a disguised Mac shell |
 
-The native menu can create supported terminal or Minecraft console sessions. It must not silently launch a second Bedrock server. To open the **Code-OSS** workbench, type `code`; platform developer terminals are integrated there as well. Ordinary commands such as `pwd`, `ls`, `cd`, Git or a compiler belong in a real shell, not in a game/emulator text field.
+The native menu can create supported terminal, Server log or Minecraft console sessions. **Server** is a read-only Terminal tab showing the live local Python/HTTP backend log, not a new shell or a second server process. Choose **Terminals → Server · Live log** or **File → New Server Log Terminal**. Its footer displays the complete log path so you can retrieve it after a failure. It must not silently launch a second Bedrock server. To open the **Code-OSS** workbench, type `code`; platform developer terminals are integrated there as well. Ordinary commands such as `pwd`, `ls`, `cd`, Git or a compiler belong in a real shell, not in a game/emulator text field.
+
+### Runtime files and diagnostic logs
+
+A downloaded/installed application stores all writable runtime logs, shell session transcripts, optional DevTools and session state under **the Steam library that actually contains the installed app**, including `steamapps/common/CinterForge/Logs/CinterForgeTerminal/`. The read-only app bundle can contain a folder named `Builds` as a packaged resource layout; that is **not** a writable developer Builds directory. An installed app must not create `~/Builds` or write to a sibling workspace Builds.
+
+In repository development mode—when using `./Cinter` or an explicit repository/VS Code development launch—the **sibling `Builds`** holds development logs, caches and toolchains. The live Server tab reports the log path chosen for its own launch context. This distinction is based on how Terminal was launched, not whether VS Code happens to be open elsewhere.
 
 ## 8. Code-OSS: edit, save and build projects
 
@@ -129,7 +149,7 @@ When your open folder is the `CinterForgeTerminal` source repository, its own **
 ./Cinter all all
 ```
 
-`./Cinter all all` runs **Setup → Build → Stage → Test** and **never publishes**. On Windows, the source repository provides a `Cinter.cmd` entry point. Setup handles prerequisites and preflight checks; Test invokes automatic regression and native acceptance checks applicable to the host. Persistent results are saved to sibling `Builds/Logs/CinterForgeTerminal/Lifecycle/`. You should not need to perform a collection of manual preflight commands in addition to the lifecycle.
+`./Cinter all all` runs **Setup → Build → Stage → Test** and **never publishes**. On Windows, the source repository provides a `Cinter.cmd` entry point. Setup handles prerequisites and preflight checks; Test invokes automated regressions and release integrity checks without launching the native GUI; interactive launch acceptance belongs to the later DevTools phase. Persistent results are saved to sibling `Builds/Logs/CinterForgeTerminal/Lifecycle/`. You should not need to perform a collection of manual preflight commands in addition to the lifecycle.
 
 ## 9. Optional DevTools
 
@@ -180,7 +200,7 @@ Use the [Architecture](Architecture.md), [Integrating the Host](Integrating%20th
 
 **A Windows/Linux shell is unavailable on macOS:** The real guest environment or optional DevTools may be missing. Follow the in-app install flow if offered; Terminal will not fake the platform shell.
 
-**A build fails:** Rerun the appropriate `./Cinter` lifecycle command. Prerequisite checks occur during Setup; detailed PASS/FAIL transcripts and structured summaries remain under sibling `Builds/Logs/CinterForgeTerminal/Lifecycle/`.
+**A build fails:** Rerun the appropriate `./Cinter` lifecycle command. Prerequisite checks occur during Setup; detailed PASS/FAIL transcripts and structured summaries remain under sibling `Builds/Logs/CinterForgeTerminal/Lifecycle/`. For an installed application failure, open the read-only Server tab and use its on-disk log under the selected Steam library instead.
 
 **Security or content:** The official Bedrock server and third-party games, operating systems and images have their own licenses and access requirements. The local HTTP service is authenticated and loopback-only; do not open control routes on a public network.
 

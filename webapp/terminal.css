@@ -78,13 +78,61 @@ a {
 }
 
 .terminal-menu summary {
-   display: block;
+   display: flex;
+   align-items: center;
+   gap: 6px;
    cursor: pointer;
    list-style: none;
-   padding: 5px 8px;
+   padding: 4px 7px;
    border: 1px solid color-mix(in srgb, var(--fg) 48%, transparent);
    white-space: nowrap
 }
+
+/* Four familiar museum groups in one compact row; the chevron is kept at
+   the far edge of its own button rather than appended to the menu name. */
+.terminal-menu-name {
+   white-space: nowrap
+}
+
+.terminal-menu-chevron {
+   color: var(--accent);
+   margin-left: 3px;
+   font-size: 11px;
+   opacity: .85
+}
+
+/* Unicode symbols are bundled with system fonts: no runtime network request
+   and no need to ship duplicate icon sets for three native WebView engines. */
+.terminal-icon {
+   order: -1;
+   display: inline-flex;
+   align-items: center;
+   justify-content: center;
+   flex: 0 0 19px;
+   width: 19px;
+   height: 18px;
+   border: 1px solid currentColor;
+   border-radius: 3px;
+   background: color-mix(in srgb, currentColor 10%, var(--bg));
+   color: #62dfff;
+   font-family: ui-monospace, 'Courier New', monospace;
+   font-size: 11px;
+   font-weight: 700;
+   letter-spacing: -.06em;
+   line-height: 1;
+   text-shadow: none;
+   white-space: nowrap
+}
+
+.terminal-icon--macintosh { color: #f2f4f8; font-size: 15px }
+.terminal-icon--beos { color: #61e7cf; font-size: 15px }
+.terminal-icon--nextstep { color: #d7a3ff; font-size: 13px }
+.terminal-icon--windows { color: #52adff; font-size: 17px }
+.terminal-icon--linux { color: #ffd36a; font-size: 12px }
+.terminal-icon--minecraft { color: #82df76; font-size: 16px }
+.terminal-icon--codeoss { color: #46c6ff; font-size: 10px }
+.terminal-icon--joshua { color: #ffb768; font-size: 14px }
+.terminal-icon--server { color: #8cf7b1; font-size: 15px }
 
 .terminal-menu summary::-webkit-details-marker {
    display: none
@@ -107,12 +155,14 @@ a {
 }
 
 .terminal-menu-list button {
-   display: block;
+   display: flex;
+   align-items: center;
+   gap: 8px;
    width: 100%;
    text-align: left;
    border: 0;
    background: transparent;
-   padding: 7px 9px;
+   padding: 6px 9px;
    white-space: nowrap
 }
 
@@ -458,6 +508,12 @@ a {
    flex-shrink: 0;
    padding: 4px 7px;
    white-space: nowrap
+}
+
+.terminal-tabs .session-tab {
+   display: inline-flex;
+   align-items: center;
+   gap: 6px
 }
 
 .terminal-tabs .session-tab.active {

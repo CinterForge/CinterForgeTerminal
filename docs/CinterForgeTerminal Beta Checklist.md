@@ -146,6 +146,14 @@ Native Windows failure observed
 - [x] Source implementation for macOS native PTY, Win/Linux Session tabs, and optional DevTools previously delivered.
 - [x] Source correction for Windows `pywinpty` provisioning previously delivered.
 - [x] Source correction for the short managed guest socket path previously delivered.
+- [x] Correct packaged host release folder detection for native shell startup.
+- [x] Add Server as a read-only live Python/HTTP log Terminal with an on-disk log.
+- [x] Persist native-shell session output and backend failures under the correct Logs root.
+- [x] Keep installed application runtime state and optional DevTools under the actual Steam library, never a writable Builds directory.
+- [x] Keep lifecycle and explicit repository/VS Code developer state in sibling Builds.
+- [x] Add a packaged-layout regression exercising a real native shell session and the authenticated Server log.
+- [ ] Verify the packaged shell styles connect in the installed macOS application.
+- [ ] Verify the Server tab reports the exact runtime log and captures native startup failures.
 - [ ] Revalidate Mac Bash with a real native PTY.
 - [ ] Revalidate Windows Bash on Mac via the supported guest environment.
 - [ ] Revalidate Linux Bash on Mac via the supported guest environment.

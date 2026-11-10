@@ -80,13 +80,21 @@ void fillMacAppDefaults(cinterforge::ApplicationShellConfig& cfg) {
     if (cfg.python.empty()) cfg.python = (builds / "Python/Environments/mac/arm64/cinterterminalenv/bin/python").string();
     if (cfg.worker.empty()) cfg.worker = (host / "python/worker.py").string();
     if (cfg.service.empty()) cfg.service = (host / "webapp/CinterForgeTerminal.py").string();
-    setenv("CINTER_BUILDS_ROOT", cfg.builds.c_str(), 1);
-    const fs::path state = builds / "CFTVM";
-    useIfUnset("COLIMA_HOME", (state / "colima").string());
-    useIfUnset("LIMA_HOME", (state / "lima").string());
-    useIfUnset("COLIMA_CACHE_HOME", (state / "cache/colima").string());
-    useIfUnset("DOCKER_CONFIG", (state / "docker").string());
-    useIfUnset("DOCKER_CONTEXT", "colima-cinterforge-windows");
+    // A packaged app reads its embedded Builds-shaped resource closure but
+    // must never treat it as a writable developer Builds tree. In developer
+    // sessions the Python PTY exports CINTER_BUILDS_ROOT explicitly.
+    if (cfg.developer) setenv("CINTER_BUILDS_ROOT", cfg.builds.c_str(), 1);
+    if (cfg.developer) {
+        // Explicit developer launcher: lifecycle and VM state belong to Builds.
+        // A downloaded app must not inherit runtime VM paths inside the signed
+        // Contents/Resources/Builds payload; Python chooses its Steam root.
+        const fs::path state = builds / "CFTVM";
+        useIfUnset("COLIMA_HOME", (state / "colima").string());
+        useIfUnset("LIMA_HOME", (state / "lima").string());
+        useIfUnset("COLIMA_CACHE_HOME", (state / "cache/colima").string());
+        useIfUnset("DOCKER_CONFIG", (state / "docker").string());
+        useIfUnset("DOCKER_CONTEXT", "colima-cinterforge-windows");
+    }
     // On HOPE-DEV, developer tools may exist in sibling Builds. The lightweight
     // released app does not require them for its normal WebView startup.
     const fs::path tools = builds / "CinterForgeTerminal/Toolchains/mac";
