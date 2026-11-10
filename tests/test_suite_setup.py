@@ -673,3 +673,87 @@ class DevToolingReportTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'versions missing'):
                 devtooling._staged_windows_versions(root)
 
+
+
+class CodeOSSHostOptionalDependencyTests(unittest.TestCase):
+    """Upstream Code-OSS nested npm installs must match the native build host."""
+
+    def setUp(self):
+        build_root = BOOTSTRAP_BUNDLE_BUILDS / "Intermediates/CinterForgeTerminalTests"
+        build_root.mkdir(parents=True, exist_ok=True)
+        self.tmp = Path(tempfile.mkdtemp(dir=build_root, prefix="codeoss-npm-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.source = self.tmp / "Source"
+        self.source.mkdir()
+        (self.source / "package.json").write_text('{}\n', encoding="utf-8")
+        (self.source / "package-lock.json").write_text('{}\n', encoding="utf-8")
+        copilot = self.source / "extensions" / "copilot"
+        copilot.mkdir(parents=True)
+        self.lock = copilot / "package-lock.json"
+        self.lock.write_text(json.dumps({"packages": {
+            "node_modules/@github/copilot": {"version": "1.0.73"},
+            "node_modules/@github/copilot-darwin-arm64": {
+                "version": "1.0.73", "optional": True,
+                "integrity": "sha512-" + "A" * 88,
+            },
+        }}), encoding="utf-8")
+
+    def test_environment_preserves_optional_sdk_and_clears_cross_target_flags(self):
+        inherited = {
+            "NPM_CONFIG_ARCH": "x64", "npm_config_platform": "win32",
+            "npm_config_omit": "optional", "NPM_CONFIG_OPTIONAL": "false",
+            "npm_config_include": "dev", "NPM_CONFIG_IGNORE_SCRIPTS": "true",
+            "HTTPS_PROXY": "http://127.0.0.1:1234", "PATH": "/usr/bin",
+        }
+        actual = producer._codeoss_npm_environment(inherited)
+        self.assertEqual(actual["npm_config_include"], "optional")
+        for key in inherited:
+            if key.lower() in {
+                "npm_config_arch", "npm_config_platform", "npm_config_omit",
+                "npm_config_optional", "npm_config_ignore_scripts", "npm_config_include",
+            } and key != "npm_config_include":
+                self.assertNotIn(key, actual)
+        self.assertEqual(actual["HTTPS_PROXY"], inherited["HTTPS_PROXY"])
+        self.assertEqual(actual["PATH"], inherited["PATH"])
+
+    def test_locked_darwin_arm64_copilot_sdk_is_accepted(self):
+        with mock.patch.object(producer.platform, "system", return_value="Darwin"), \
+             mock.patch.object(producer.platform, "machine", return_value="arm64"):
+            producer._verify_locked_copilot_sdk_platform(self.source)
+
+    def test_missing_host_sdk_fails_before_npm_install(self):
+        self.lock.write_text(json.dumps({"packages": {
+            "node_modules/@github/copilot": {"version": "1.0.73"},
+        }}), encoding="utf-8")
+        with mock.patch.object(producer.platform, "system", return_value="Darwin"), \
+             mock.patch.object(producer.platform, "machine", return_value="arm64"):
+            with self.assertRaisesRegex(RuntimeError, "absent from lockfile"):
+                producer._verify_locked_copilot_sdk_platform(self.source)
+
+    def test_unpinned_platform_dependency_is_rejected(self):
+        data = json.loads(self.lock.read_text(encoding="utf-8"))
+        data["packages"]["node_modules/@github/copilot-darwin-arm64"]["version"] = "1.0.108"
+        self.lock.write_text(json.dumps(data), encoding="utf-8")
+        with mock.patch.object(producer.platform, "system", return_value="Darwin"), \
+             mock.patch.object(producer.platform, "machine", return_value="arm64"):
+            with self.assertRaisesRegex(RuntimeError, "lock mismatch"):
+                producer._verify_locked_copilot_sdk_platform(self.source)
+
+    def test_build_uses_optional_deps_in_root_and_nested_npm(self):
+        seen = []
+        def verify_npm_command(argv, **kwargs):
+            seen.append((argv, kwargs))
+            raise RuntimeError("controlled stop before any real npm installation")
+        with mock.patch.object(producer, "_ensure_pinned_node", return_value=(
+            self.tmp / "node" / "bin" / "node", self.tmp / "node" / "npm-cli.js", "24.18.0",
+        )), mock.patch.object(producer.platform, "system", return_value="Darwin"), \
+             mock.patch.object(producer.platform, "machine", return_value="arm64"), \
+             mock.patch.dict(producer.os.environ, {"npm_config_platform": "win32", "npm_config_omit": "optional"}), \
+             mock.patch.object(producer, "_run_checked", side_effect=verify_npm_command):
+            with self.assertRaisesRegex(RuntimeError, "controlled stop"):
+                producer._build_web(self.source)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0][-2:], ["ci", "--include=optional"])
+        self.assertEqual(seen[0][1]["env"]["npm_config_include"], "optional")
+        self.assertNotIn("npm_config_platform", seen[0][1]["env"])
+        self.assertNotIn("npm_config_omit", seen[0][1]["env"])

@@ -553,12 +553,83 @@ def _audit_ascii_javascript_tree(root: Path, *, label: str) -> None:
     _log(f"{label} JavaScript ASCII audit passed")
 
 
+def _codeoss_npm_environment(inherited: dict[str, str]) -> dict[str, str]:
+    """Use the build host's npm platform and retain platform optional packages.
+
+    CinterForge builds Windows and Linux artifacts on a Mac before Code-OSS.
+    Some cross-builder npm variables can therefore leak into the upstream
+    Code-OSS install.  The upstream Copilot postinstall expects the host's
+    locked @github/copilot-<platform> package, which is optional to npm; if
+    omitted it fails with `Could not find @github/copilot SDK files`.
+
+    Do not erase npm registry, proxy, or certificate settings.  Only remove
+    variables that would cause npm to install for a different operating system,
+    CPU, libc, or to skip scripts / optional platform packages.
+    """
+    environment = dict(inherited)
+    platform_options = {
+        "npm_config_platform", "npm_config_os", "npm_config_arch",
+        "npm_config_cpu", "npm_config_libc", "npm_config_omit",
+        "npm_config_optional", "npm_config_ignore_scripts", "npm_config_include",
+    }
+    for key in list(environment):
+        if key.lower() in platform_options:
+            environment.pop(key)
+    # An explicit include wins over an upstream `.npmrc` omit=optional.  This
+    # environment variable is inherited by VS Code's nested npm-ci processes.
+    environment["npm_config_include"] = "optional"
+    return environment
+
+
+def _verify_locked_copilot_sdk_platform(source: Path) -> None:
+    """Fail before npm ci if upstream's platform SDK is missing from the lock.
+
+    This checks the pinned dependency *declaration*, not the downloaded SDK.
+    npm ci verifies package integrity against the lock and Copilot's upstream
+    postinstall checks for the actual sdk/index.js after installation.
+    """
+    os_name = platform.system().lower()
+    machine_name = platform.machine().lower()
+    architecture = {"arm64": "arm64", "aarch64": "arm64", "amd64": "x64", "x86_64": "x64"}.get(machine_name)
+    if not architecture:
+        raise RuntimeError(f"Unsupported host CPU for Code-OSS Copilot SDK: {machine_name}")
+    if os_name == "darwin":
+        platform_suffix = f"darwin-{architecture}"
+    elif os_name == "windows":
+        platform_suffix = f"win32-{architecture}"
+    elif os_name == "linux":
+        libc_kind = "linux" if platform.libc_ver()[0].lower() == "glibc" else "linuxmusl"
+        platform_suffix = f"{libc_kind}-{architecture}"
+    else:
+        raise RuntimeError(f"Unsupported host OS for Code-OSS Copilot SDK: {os_name}")
+
+    lock_path = source / "extensions" / "copilot" / "package-lock.json"
+    if not lock_path.is_file():
+        raise RuntimeError(f"Pinned Code-OSS Copilot lockfile is missing: {lock_path}")
+    try:
+        locked_packages = json.loads(lock_path.read_text(encoding="utf-8"))["packages"]
+        copilot_version = locked_packages["node_modules/@github/copilot"]["version"]
+        package_name = f"node_modules/@github/copilot-{platform_suffix}"
+        platform_entry = locked_packages[package_name]
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError(f"Code-OSS Copilot platform SDK is absent from lockfile: {lock_path} ({platform_suffix})") from error
+    if (platform_entry.get("version") != copilot_version
+            or platform_entry.get("optional") is not True
+            or not str(platform_entry.get("integrity", "")).startswith("sha512-")):
+        raise RuntimeError(
+            f"Code-OSS Copilot platform SDK lock mismatch: {package_name}; "
+            f"expected optional version {copilot_version} with sha512 integrity"
+        )
+    _log(f"Copilot SDK optional package locked for build host: @github/copilot-{platform_suffix}@{copilot_version}")
+
+
 def _build_web(source: Path) -> None:
     if not (source / "package.json").is_file() or not (source / "package-lock.json").is_file():
         raise RuntimeError(f"Code - OSS checkout is incomplete: {source}")
     root = source.parent
+    _verify_locked_copilot_sdk_platform(source)
     node, npm_cli, version = _ensure_pinned_node(source, root)
-    env = dict(os.environ)
+    env = _codeoss_npm_environment(dict(os.environ))
     path_parts = [str(node.parent)]
     # node-gyp's Unix make generator invokes `libtool -static` for static
     # archives. On macOS that is Apple's /usr/bin/libtool syntax. A Homebrew
@@ -593,7 +664,8 @@ def _build_web(source: Path) -> None:
         )
     if install_trees:
         _log(f"removed {len(install_trees)} stale node_modules tree(s) before npm ci")
-    _run_checked([*npm, "ci"], cwd=source, timeout=3600, env=env)
+    _log("npm ci: preserving locked host-platform optional dependencies (including Copilot SDK)")
+    _run_checked([*npm, "ci", "--include=optional"], cwd=source, timeout=3600, env=env)
     # The build-next server-web bundle resolves codicon.css from the source tree,
     # but a clean checkout does not carry the generated font beside that CSS.
     # Upstream VS Code build workflows seed it from the pinned @vscode/codicons

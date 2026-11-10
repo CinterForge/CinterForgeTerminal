@@ -1,45 +1,29 @@
-# CinterForgeTerminal Beta Checklist
 
-## RULES: Readability and open-source documentation
-- [ ] Add a substantial file-header comment explaining purpose, components, external dependencies and execution flow.
-- [ ] Place all configurable paths, filenames, port numbers, timeouts and delays near the top.
-- [ ] Document each configuration variable and its units.
-- [ ] Put external/public entry points at the top in a clearly marked section.
-- [ ] Put implementation helpers beneath a distinct section divider.
-- [ ] Use descriptive variable and function names.
-- [ ] Unroll dense conditionals and hard-to-follow loops.
-- [ ] Break very large functions into understandable, focused helpers.
-- [ ] Remove repeated functionality, unnecessary wrappers and obsolete compatibility paths.
-- [ ] Add explanatory comments, particularly around platform differences, VM ownership and guest automation.
-- [ ] Keep public-facing code understandable to a developer new to the repository.
-- [ ] Preserve behavior while refactoring; do not silently redesign subsystems.
-- [ ] Update README, usage and architecture documentation to reflect the reorganized source.
-- [ ] Update HopeDocs AI Context.
-- [ ] Verify all runtime guest VMs and helper processes are cleaned up on normal exit and failure.
+# CinterForgeTerminal — Complete Beta 1 Master Checklist
 
-## 1 Repository restructuring
+**Checklist legend:** 
 
-- [x] Use stable download filenames for macOS, Windows, Linux and unified DevTools.
-- [x] Publish all four archives directly under `CinterForgeTerminal/Distribution/`.
-- [x] Keep release/version and checksum metadata in `four-artifacts.json`.
-- [x] Update the four README download links only after successful public verification.
-- [x] Preserve versioned Lagomorph media publishing.
-- [x] Reuse verified legacy ZIPs when migrating to stable artifact filenames.
-- [x] Repair portable macOS test fixtures without relaxing production signature checks.
-- [ ] Verify `./Cinter all all` completes successfully on macOS.
-- [ ] Verify all four stable public URLs through `./Cinter publish public` and `./Cinter verify public`.
-- [x] `webapp/` moved to repository root.
-- [x] `webapp/codeoss/` moved under `webapp/`.
-- [x] `build/terminal_bootstrap/` moved into `build/`.
-- [x] `build/resources/` moved into `build/`.
-- [x] `build/fork.py` and `build/library.py` relocated.
+```
+`[x]` = Source implementation or source-level verification observed; 
+`[ ]` = Pending or native acceptance not yet established. 
+```
+
+## 1 Repository Restructuring 
+
+The root-level `build/` contains authored build resources and code. The separate sibling workspace `Builds/` continues to hold all generated artifacts, dependencies, caches and staging.
+
+- [ ] `webapp/` moved to repository root.
+- [ ] `webapp/codeoss/` moved under `webapp/`.
+- [ ] `build/terminal_bootstrap/` moved into `build/`.
+- [ ] `build/resources/` moved into `build/`.
+- [ ] `build/fork.py` and `build/library.py` relocated.
 - [x] Two example JSON files moved from root into `build/`.
 - [x] `profiles.json` renamed `webapp/terminal_styles.json`.
 - [x] Finish migrating all callers of `examples/shell/` to `webapp/`.
 - [x] Eliminate `examples/shell/` after verifying nothing still references it.
 - [x] Eliminate `examples/http/`.
 - [x] Remove the obsolete `examples/` directory.
-- [x] Eliminate the obsolete `scripts/` directory, migrating necessary functionality into `Cinter` or `build/`.
+- [ ] Eliminate the obsolete `scripts/` directory, migrating necessary functionality into `Cinter` or `build/`.
 - [x] Update all references to `build/resources/` and `build/terminal_bootstrap/`.
 - [x] Update all references to `webapp/codeoss/`.
 - [ ] Update CMake, native launchers, packaging, staging, tests, server routes and documentation.
@@ -56,12 +40,15 @@
 - [ ] Ensure packaging does not depend on the source checkout existing on the user's machine.
 - [ ] Verify native macOS, Windows and Linux application outputs.
 
-## 2. Consolidate all authored Python code
+## 2. Consolidate Python Code
+
+Target: one main Python runtime file and one lifecycle driver.
+
 - [x] Merge `webapp/bedrock_move.py` into `webapp/CinterForgeTerminal.py`.
 - [x] Merge `webapp/command_cli_move.py` into `webapp/CinterForgeTerminal.py`.
 - [x] Merge `webapp/devtools_shell_move.py` into `webapp/CinterForgeTerminal.py`.
 - [ ] Merge other authored runtime Python modules into the appropriate main file.
-- [x] Merge the functionality from `build/fork.py` and `build/library.py` into `Cinter` where it belongs.
+- [ ] Merge the functionality from `build/fork.py` and `build/library.py` into `Cinter` where it belongs.
 - [ ] Inventory Python implementation in `linuxos/`, `host/`, and other directories.
 - [ ] Consolidate lifecycle, provisioning and orchestration Python into `Cinter` where practical.
 - [ ] Preserve the native C++ library and C ABI that the application needs.
@@ -70,16 +57,18 @@
 - [ ] Delete superseded Python implementation files only after their replacement entry points are wired and checked.
 - [ ] Ensure `CinterForgeTerminal.py` runs both locally and from the installed app without a source checkout.
 
-## 3. Eliminate CPH
+## 3. Eliminate CPH 
+
 - [x] Remove the separate user-facing `CPH` CLI.
 - [x] Move its command dispatch into `Cinter`.
 - [ ] Preserve all required commands and behavior.
-- [ ] Preserve the existing `CinterForgePythonHost` native library and `cph_*` ABI where still used.
+- [x] Preserve the existing `CinterForgePythonHost` native library and `cph_*` ABI where still used.
 - [ ] Update callers, documentation, tests and packaging.
-- [ ] Keep `Cinter.cmd` as a minimal Windows entry-point wrapper, not a duplicate lifecycle implementation.
-- [ ] Remove the obsolete `CPH` executable/script once all callers have migrated.
+- [x] Keep `Cinter.cmd` as a minimal Windows entry-point wrapper, not a duplicate lifecycle implementation.
+- [x] Remove the obsolete `CPH` executable/script once all callers have migrated.
 
-## 4. JSON and future web API
+## 4. JSON and future web API 
+
 - [x] Rename `profiles.json` to `terminal_styles.json`.
 - [x] Update every reference to `profiles.json`.
 - [x] Verify terminal style loading from `webapp/terminal_styles.json`.
@@ -92,7 +81,8 @@
 - [ ] Keep the web application compatible with future website/API delivery.
 - [ ] Preserve current local and Cloudflare behavior; no new API server is required for this cleanup.
 
-## 5. macOS — Xcode, signing and debugging
+## 5. macOS — Xcode, signing and debugging 
+
 - [ ] Create a native Xcode project for CinterForgeTerminal.
 - [ ] Include the existing application sources rather than maintaining a separate implementation.
 - [ ] Provide Debug and Release configurations.
@@ -109,15 +99,18 @@
 - [ ] Test actual macOS WKWebView startup under the debugger.
 
 ## 6. Windows — MSYS2 Bash startup — BUG
-- [x] Native Windows app launches.
-- [x] Real UCRT64 Bash prompt appears inside Terminal.
+
+Native Windows failure observed
+
+- [ ] Native Windows app launches.
+- [ ] Real UCRT64 Bash prompt appears inside Terminal.
 - [ ] Fix missing `/tmp` directory.
 - [ ] Provide writable temporary runtime state.
 - [ ] Investigate read-only `/dev/shm` and `/dev/mqueue` initialization.
 - [ ] Restore missing `pacman-key` support scripts:
-  - [ ] `message.sh`
-  - [ ] `parseopts.sh`
-  - [ ] `utils_fixed_path.sh`
+  - `message.sh`
+  - `parseopts.sh`
+  - `utils_fixed_path.sh`
 - [ ] Verify the MSYS2 package closure copied into the Windows release.
 - [ ] Check Bash executable paths and argument construction.
 - [ ] Check `MSYSTEM`, `PATH`, root mapping and related environment variables.
@@ -129,10 +122,13 @@
 - [ ] Confirm Windows GUI application launch without an extra console window.
 - [ ] Confirm tab close/reopen/reconnect behavior using native WebView2/ConPTY.
 
-## 7. Lagomorph — current timing and first-launch bug
-- [ ] Verify those constants directly against the current newest source.
+## 7. Infinite-Mac — current timing and first-launch bug
+
+- [x] Current delay values were identified and reported.
+- [x] Existing automation's configured delay total was reported as 26.23 seconds, including the 18-second post-`emulator_loaded` wait.
+- [x] Verify those constants directly against the current newest source.
 - [x] Move configuration values into a documented section near the top of `terminal.js` without changing them.
-- [ ] Preserve the exact launch sequence, event order, clicks and guest inputs.
+- [x] Preserve the exact launch sequence, event order, clicks and guest inputs.
 - [ ] Determine why leaving the page and returning allows it to work.
 - [ ] Add diagnostic visibility to the first-launch path.
 - [ ] Repair the actual cold-start problem without introducing arbitrary long waits.
@@ -142,6 +138,11 @@
 
 ## 8. Native terminals and DevTools
 - [ ] Fix local project loading
+- [x] Include locked native-platform Copilot SDK dependencies during Code-OSS Setup.
+- [ ] Verify Code-OSS Setup completes after the Copilot SDK correction on macOS.
+- [x] Source implementation for macOS native PTY, Win/Linux Session tabs, and optional DevTools previously delivered.
+- [x] Source correction for Windows `pywinpty` provisioning previously delivered.
+- [x] Source correction for the short managed guest socket path previously delivered.
 - [ ] Revalidate Mac Bash with a real native PTY.
 - [ ] Revalidate Windows Bash on Mac via the supported guest environment.
 - [ ] Revalidate Linux Bash on Mac via the supported guest environment.
@@ -163,7 +164,7 @@
 - [ ] Test `./Cinter test all`.
 - [ ] Verify `./Cinter all all` executes the complete lifecycle.
 - [ ] Verify the optional unified DevTools archive.
-- [ ] Ensure exactly four current distribution artifacts: mac, linux, win and devtools.
+- [x] Ensure exactly four current distribution artifacts: mac, linux, win and devtools.
 - [ ] Verify archive contents, manifests, checksums and relocation.
 - [ ] Ensure signed macOS content is not modified after signing.
 - [ ] Check all generated output stays under sibling `Builds/` or designated `steamapps`.
@@ -171,7 +172,9 @@
 - [ ] Ensure no source reaches into sibling repositories.
 - [ ] Revalidate the complete clean-builder lifecycle on both HOPE-DEV and Kevin's Mac.
 
-## 9. website
+## 9. Web Site
 - [ ] Add a demo for CinterForgeTerminal
 - [ ] Make sure all integrated webapps do not show on live site - except terminal
 - [ ] Push to main
+
+BETA ACIEVED!
