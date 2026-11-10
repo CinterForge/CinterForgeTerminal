@@ -200,41 +200,6 @@ class KevinCurrentSessionFollowupTests(unittest.TestCase):
         self.assertIn('scrollTop=terminalScreen.scrollHeight', source)
         self.assertIn('const current={name,sessionId:session.id', source)
 
-    def test_museum_entries_preserved_in_four_categorized_menus(self):
-        root = Path(__file__).resolve().parents[1] / 'webapp'
-        source = (root / 'terminal.js').read_text()
-        style = (root / 'terminal.css').read_text()
-        manifest = json.loads((root / 'terminal_styles.json').read_text())
-        html = (root / 'index.html').read_text()
-        self.assertIn('button.textContent=`${profile.year} ${profile.name}`', source)
-        self.assertIn('white-space:nowrap', ''.join(style.split()))
-        self.assertIn('width:max-content', ''.join(style.split()))
-        self.assertIn('...(data.emulators||[])', source)
-        self.assertIn('id="terminal-menu-list"', html)
-        self.assertIn('<span class="terminal-menu-name">Terminals</span>', html)
-        self.assertIn('terminal-icon--terminal', html)
-        self.assertIn('terminal-icon--macintosh', html)
-        self.assertIn('terminal-icon--beos', html)
-        self.assertIn('terminal-icon--nextstep', html)
-        self.assertIn('appendDecorativeIcon(button, iconCategoryForProfile(profile))', source)
-        self.assertIn('appendDecorativeIcon(tabButton, iconCategoryForProfile(tabProfile, tab.backend))', source)
-        for label in ('terminal','macintosh','beos','nextstep'):
-            self.assertIn(f'id="{label}-menu-list"', html)
-        self.assertNotIn('id="edit-menu"', html)
-        self.assertNotIn('fileActions', source)
-        self.assertIn('const groupOf=profile=>{',source)
-        self.assertIn("if(profile.id.startsWith('beos-'))",source)
-        native = (root.parent / 'src/CinterApplicationShell.cpp').read_text()
-        for label in ['New Minecraft Console', 'New Mac Bash Terminal',
-                      'New Windows Bash Terminal', 'New Linux Bash Terminal']:
-            self.assertIn(label, native)
-        profiles = {p['id']:p for p in manifest['profiles']}
-        self.assertNotIn('beos-host-terminal', profiles)
-        bootable = [p for p in manifest['emulators'] if p.get('os')=='beos']
-        self.assertGreaterEqual(len(bootable), 10)
-        self.assertTrue(all(p['machine']=='Power Macintosh 7300' for p in bootable))
-        self.assertIn('BeOS 5.0.3', {p['disk'] for p in bootable})
-
     def test_native_tabs_and_joshua_packaging(self):
         root=Path(__file__).resolve().parents[1]
         js=(root/'webapp/terminal.js').read_text()

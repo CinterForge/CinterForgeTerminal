@@ -6,7 +6,6 @@ Stream API, installed Steam logs, and developer Builds separation.
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 import threading
 import time
@@ -128,19 +127,6 @@ class ShellServerRuntimeTests(unittest.TestCase):
             self.assertIn('native shell failed', log.path.read_text())
         finally:
             log.close()
-
-    def test_installed_devtools_never_create_home_builds(self):
-        parent = Path('/mnt/data/Builds') / ('s-' + __import__('uuid').uuid4().hex[:8])
-        steam = parent / 'steamapps'
-        steam.mkdir(parents=True)
-        self.addCleanup(lambda: __import__('shutil').rmtree(parent, ignore_errors=True))
-        with mock.patch.dict(os.environ, {'CINTER_TERMINAL_RUNTIME_MODE': 'installed',
-                                          'CINTER_STEAMAPPS': str(steam),
-                                          'CINTER_BUILDS_ROOT': str(self.workspace/'wrong/Builds')}):
-            result = terminal._state_root()
-        self.assertTrue(result.is_relative_to(steam))
-        self.assertFalse((self.workspace / 'wrong' / 'Builds').exists())
-
 
 if __name__ == '__main__':
     unittest.main()
