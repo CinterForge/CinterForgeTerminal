@@ -307,7 +307,33 @@ class SetupPreflightOrderingTests(unittest.TestCase):
             self.assertEqual(cli.main(['all', 'all']), 0)
         self.assertEqual([tuple(x.args[-2:]) for x in invoke.call_args_list],
                          [('setup', 'all'), ('build', 'all'),
-                          ('stage', 'all'), ('test', 'mac')])
+                          ('stage', 'all'), ('test', 'all')])
+
+    def test_test_all_runs_available_automated_checks_without_launch(self):
+        cli = self.cli_module()
+        from host import universal_package
+        report = {'complete_build_receipt': True, 'complete_stage_receipt': True,
+                  'steam_destination': '/SteamLibrary/steamapps/common/CinterForge/Applications',
+                  'targets': {target: {'archive_present': True, 'size_matches_receipt': True}
+                              for target in universal_package.FOUR_TARGETS}}
+        with mock.patch.object(cli.platform, 'system', return_value='Darwin'), \
+             mock.patch.object(cli, 'invoke') as invoke, \
+             mock.patch.object(universal_package, 'status_four', return_value=report):
+            self.assertEqual(cli.main(['test', 'all']), 0)
+        self.assertEqual(invoke.call_count, 1)
+        self.assertEqual(tuple(invoke.call_args.args[-2:]), ('test', 'mac'))
+        self.assertNotIn('launch', invoke.call_args.args)
+
+    def test_test_all_refuses_missing_stage_receipts(self):
+        cli = self.cli_module()
+        from host import universal_package
+        report = {'complete_build_receipt': True, 'complete_stage_receipt': False,
+                  'steam_destination': '/some/library', 'targets': {}}
+        with mock.patch.object(cli.platform, 'system', return_value='Darwin'), \
+             mock.patch.object(cli, 'invoke'), \
+             mock.patch.object(universal_package, 'status_four', return_value=report):
+            with self.assertRaisesRegex(RuntimeError, 'four built and staged'):
+                cli.main(['test', 'all'])
 
     def test_missing_tool_fails_setup_before_expensive_build(self):
         cli = self.cli_module()

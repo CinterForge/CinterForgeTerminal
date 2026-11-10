@@ -578,7 +578,10 @@ class ProcessLifetimeTests(unittest.TestCase):
             colima = builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/colima'
             colima.parent.mkdir(parents=True)
             colima.touch()
+            # Socket path-length protection has separate tests. Do not let
+            # a deeply nested fixture path reject a mock-only cleanup test.
             with mock.patch.object(mac_bootstrap.platform, 'system', return_value='Darwin'), \
+                 mock.patch.object(mac_bootstrap, 'managed_environment', return_value={}), \
                  mock.patch.object(mac_bootstrap, '_probe', side_effect=subprocess.TimeoutExpired('colima status', 10)), \
                  mock.patch.object(mac_bootstrap, '_run') as execute:
                 mac_bootstrap.stop_managed_colima(builds)
@@ -625,7 +628,8 @@ class ProcessLifetimeTests(unittest.TestCase):
                     (root / 'linuxkit/source/src/cmd/linuxkit/go.mod').touch()
                 elif len(command) > 2 and command[1] == 'build':
                     pathlib.Path(command[3]).touch()
-            with mock.patch.object(mac_bootstrap, '_run', side_effect=execute) as runner, \
+            with mock.patch.object(mac_bootstrap, 'managed_environment', return_value={}), \
+                 mock.patch.object(mac_bootstrap, '_run', side_effect=execute) as runner, \
                  mock.patch.object(mac_bootstrap.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout='v1.3.0\n')):
                 exe = mac_bootstrap.ensure_linuxkit_cli(builds)
             self.assertTrue(exe.is_file())

@@ -32,7 +32,10 @@ The root-level `build/` contains authored build resources and code. The separate
 - [ ] Ensure no runtime dependency reaches into sibling source repositories.
 - [ ] Update `./Cinter build all`.
 - [ ] Update `./Cinter stage all`.
+- [x] Discover the installed Steam library from Steam library configuration and app manifests before staging.
+- [ ] Confirm Stage installs to the actual Steam application library on both build machines.
 - [ ] Update `./Cinter test all`.
+- [x] Run available automated regression and four-artifact integrity checks in `./Cinter test all` without launching an application.
 - [ ] Verify `./Cinter all all` executes the complete lifecycle.
 - [ ] Keep `all all` free of automatic publishing.
 - [ ] Preserve read-only `./Cinter status all`.
@@ -171,6 +174,8 @@ Native Windows failure observed
 - [ ] Eliminate hidden generated dependencies, caches and runtime directories outside those permitted locations.
 - [ ] Ensure no source reaches into sibling repositories.
 - [ ] Revalidate the complete clean-builder lifecycle on both HOPE-DEV and Kevin's Mac.
+- [ ] During the final DevTools phase, launch the installed macOS, Windows and Linux apps and verify native WebView startup.
+- [ ] During the final DevTools phase, verify interactive shells, Code-OSS project loading, menus, session tabs and JS/native callbacks in the launched apps.
 
 ## 9. Web Site
 - [ ] Add a demo for CinterForgeTerminal

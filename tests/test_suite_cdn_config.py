@@ -53,7 +53,10 @@ class ManagedCloudflareConfigTests(unittest.TestCase):
                     'CINTERFORGE_CLOUDFLARE_R2_DEV_ACCESS_KEY_ID': 'dummy-key',
                     'CINTERFORGE_CLOUDFLARE_R2_DEV_SECRET_ACCESS_KEY': 'dummy-secret',
                 }}}}))
-            result = r2._load_config(config, 'auto', required_bucket='cdn-assets-dev')
+            # This tests the supplied fixture, not any real login user's R2
+            # accounts (the production loader intentionally searches those).
+            with mock.patch.object(r2, '_candidate_config_paths', return_value=[config]):
+                result = r2._load_config(config, 'auto', required_bucket='cdn-assets-dev')
             self.assertEqual(result['bucket'], 'cdn-assets-dev')
             self.assertEqual(result['endpoint_url'], 'https://example.r2.cloudflarestorage.com')
             self.assertEqual(result['object_prefix'], 'cdn-assets-dev')
@@ -69,8 +72,9 @@ class ManagedCloudflareConfigTests(unittest.TestCase):
                 'CINTERFORGE_CLOUDFLARE_R2_DEV_ACCESS_KEY_ID': 'dummy-key',
                 'CINTERFORGE_CLOUDFLARE_R2_DEV_SECRET_ACCESS_KEY': 'dummy-secret',
             }}}))
-            with self.assertRaisesRegex(KeyError, "bucket 'cinterforge'"):
-                r2._load_config(config, 'auto', required_bucket='cinterforge')
+            with mock.patch.object(r2, '_candidate_config_paths', return_value=[config]):
+                with self.assertRaisesRegex(KeyError, "bucket 'cinterforge'"):
+                    r2._load_config(config, 'auto', required_bucket='cinterforge')
 
     def test_cloudflare_config_never_switches_private_to_public_bucket(self):
         with tempfile.TemporaryDirectory(prefix='cinter-r2-', dir=TEST_SCRATCH) as folder:

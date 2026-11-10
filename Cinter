@@ -238,9 +238,9 @@ def invoke(*args: str) -> None:
 def _run_automated_regression_tests() -> None:
     """Run offline source checks as part of native Test, never as user chores.
 
-    The outer lifecycle log captures every regression result. The native
-    macOS UI acceptance still runs afterward; passing these checks does NOT
-    certify a Windows/Linux native UI build.
+    The outer lifecycle log captures every regression result. Test does not
+    launch the native GUI; interactive WebView acceptance is tracked separately
+    in the final DevTools phase on each target platform.
     """
     print('[Cinter test] Running Python source regressions', flush=True)
     invoke(sys.executable, '-B', '-m', 'unittest', 'discover', '-s', 'tests',
@@ -428,9 +428,10 @@ def main(argv: list[str]) -> int:
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'setup', 'all')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'build', 'all')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'stage', 'all')
-        # On a Mac, only native macOS UI acceptance is represented as tested.
-        # Windows/Linux artifacts are built and staged, not falsely certified.
-        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'mac')
+        # Mac Test checks signed/staged files and automated regressions only.
+        # Real GUI launch and cross-platform interactive acceptance remain
+        # separately tracked in the final DevTools phase.
+        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'all')
         return 0
     if len(argv) == 2 and argv[0] in ('stage', 'test', 'launch') and argv[1] == 'mac':
         if platform.system() != 'Darwin':
@@ -443,8 +444,9 @@ def main(argv: list[str]) -> int:
             stage_four(BUILDS, targets=('mac',))
         else:
             if action == 'test':
-                # Users run lifecycle commands only. Source regressions and
-                # native acceptance belong to Test and its persistent log.
+                # Users run lifecycle commands only. Test runs automated
+                # regressions and non-launch staged Mac verification; native
+                # GUI acceptance is deferred to the final DevTools phase.
                 _run_automated_regression_tests()
             invoke(sys.executable, '-B', '-m', 'host.mac_app', action,
                    '--builds', str(BUILDS))
@@ -526,8 +528,23 @@ def main(argv: list[str]) -> int:
               + report['release'], flush=True)
         return 0
     if argv == ['test', 'all']:
-        raise RuntimeError('Native Windows and Linux UI acceptance must run on those platforms; '
-                           'do not claim three-platform test acceptance from a Mac')
+        # Test all available deliverables without launching an application.
+        # This is not native Windows/Linux GUI certification.
+        if platform.system() != 'Darwin':
+            raise RuntimeError('The four-artifact automated Test orchestrator requires macOS')
+        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'mac')
+        from host.universal_package import status_four
+        result = status_four(BUILDS)
+        if not result['complete_build_receipt'] or not result['complete_stage_receipt']:
+            raise RuntimeError('Automated Test requires four built and staged verified releases; '
+                               'run ./Cinter all all. Stage state: ' +
+                               str(result['steam_destination']))
+        if not all(item['archive_present'] and item['size_matches_receipt']
+                   for item in result['targets'].values()):
+            raise RuntimeError('Four-artifact automated Test found missing/mismatched release archives')
+        print('[Cinter test] PASS four staged release receipts, archive sizes and Mac '
+              'signature/resources (interactive native GUI acceptance deferred)', flush=True)
+        return 0
     raise ValueError('Usage: ./Cinter host <legacy-host-action> [options]\n'
                      '       ./Cinter setup all\n'
                      '       ./Cinter toolchain check\n'

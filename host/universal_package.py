@@ -1015,29 +1015,135 @@ def build_four(builds: Path, *, release: str = HOST_RELEASE) -> dict:
     return report
 
 
+def _steam_library_entries(config: Path) -> list[Path]:
+    """Read Steam's own libraryfolders.vdf, not just its default install root.
+
+    Valve KeyValues stores a `path` for each numbered library; the associated
+    `apps` mapping may omit locally-installed development apps. A Steam library
+    path points to the library root, *not* to its steamapps subdirectory.
+    """
+    if not config.is_file() or config.is_symlink():
+        return []
+    try:
+        text = config.read_text(encoding='utf-8-sig', errors='replace')
+    except OSError:
+        return []
+    # Preserve a literal backslash in Windows paths; only unescape VDF's
+    # doubled backslash and escaped quote. No shell or env-var expansion.
+    values = re.findall(r'(?im)^\s*"path"\s*"((?:\\.|[^"\\])*)"', text)
+    roots = []
+    for value in values:
+        value = value.replace('\\\\', '\\').replace('\\"', '"').strip()
+        if not value:
+            continue
+        root = Path(value).expanduser()
+        if root.is_absolute():
+            roots.append(root)
+    return roots
+
+
+def _cinterforge_installed_in_library(steamapps: Path) -> bool:
+    """Find Steam's recorded CinterForge installation, not an old Stage folder.
+
+    Steam app display names and physical installdirs are not guaranteed to
+    match. A matching appmanifest wins even if the application folder is named
+    differently from our CinterForge/Applications staging hierarchy.
+    """
+    for manifest in steamapps.glob('appmanifest_*.acf'):
+        if not manifest.is_file() or manifest.is_symlink():
+            continue
+        try:
+            data = manifest.read_text(encoding='utf-8-sig', errors='replace')
+        except OSError:
+            continue
+        installed = re.search(r'(?im)^\s*"installdir"\s*"([^"\r\n]+)"', data)
+        name = re.search(r'(?im)^\s*"name"\s*"([^"\r\n]+)"', data)
+        if ((installed and installed.group(1).casefold().startswith('cinterforge')) or
+                (name and name.group(1).casefold().startswith('cinterforge'))):
+            return True
+    return False
+
+
 def steamapps_root(explicit: Path | None = None) -> Path:
-    """Use a real Steam library, never an invented folder inside Builds."""
+    """Find the Steam library with CinterForge installed; never invent one.
+
+    Explicit CLI/environment selection remains supported. Otherwise read
+    Steam's libraryfolders.vdf, look for an installed CinterForge appmanifest,
+    then an existing CinterForge directory. Multiple matches are an error:
+    silently choosing the default can install to the wrong physical drive.
+    """
     import platform as host_platform
     configured = explicit or os.environ.get('CINTER_STEAMAPPS') or os.environ.get('CFOS_STEAMAPPS')
     if configured:
         path = Path(configured).expanduser()
-    elif host_platform.system() == 'Darwin':
-        # Build runs with HOME deliberately redirected under Builds/CFTVM for
-        # hermetic Colima. Steam is installed under the *login account* home,
-        # not that temporary toolchain HOME. Never create a fake steamapps.
+        if path.name.casefold() != 'steamapps' or not path.is_dir() or path.is_symlink():
+            raise RuntimeError('Provide an existing Steam steamapps root via CINTER_STEAMAPPS: ' + str(path))
+        return path.resolve(strict=True)
+
+    system = host_platform.system()
+    if system in ('Darwin', 'Linux'):
+        # Colima/DevTools intentionally redirects HOME into Builds. Never use
+        # that temporary HOME to locate a real user's Steam installation.
         try:
             import pwd
-            home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+            login_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
         except (ImportError, KeyError, OSError):
-            home = Path.home()
-        path = home / 'Library/Application Support/Steam/steamapps'
-    elif host_platform.system() == 'Linux':
-        path = Path.home() / '.local/share/Steam/steamapps'
+            login_home = Path.home()
     else:
-        path = Path(os.environ.get('PROGRAMFILES(X86)', 'C:/Program Files (x86)')) / 'Steam/steamapps'
-    if path.name.lower() != 'steamapps' or not path.is_dir() or path.is_symlink():
-        raise RuntimeError('Provide an existing Steam steamapps root via CINTER_STEAMAPPS: ' + str(path))
-    return path.resolve()
+        login_home = Path.home()
+    if system == 'Darwin':
+        steam_homes = [login_home / 'Library/Application Support/Steam']
+    elif system == 'Linux':
+        steam_homes = [login_home / '.local/share/Steam',
+                       login_home / '.steam/steam', login_home / '.steam/root']
+    else:
+        steam_homes = [Path(os.environ.get('PROGRAMFILES(X86)', 'C:/Program Files (x86)')) / 'Steam']
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    def add(candidate: Path) -> None:
+        steam = candidate if candidate.name.casefold() == 'steamapps' else candidate / 'steamapps'
+        if steam.is_dir() and not steam.is_symlink():
+            resolved = steam.resolve(strict=True)
+            if resolved not in seen:
+                seen.add(resolved)
+                candidates.append(resolved)
+
+    for home in steam_homes:
+        # Both configurations occur in the wild; prefer Steam's own records
+        # over a guessed default, regardless of directory ordering.
+        for file in (home / 'steamapps/libraryfolders.vdf',
+                     home / 'config/libraryfolders.vdf'):
+            for library in _steam_library_entries(file):
+                add(library)
+        add(home)
+
+    recorded = [path for path in candidates if _cinterforge_installed_in_library(path)]
+    if len(recorded) == 1:
+        return recorded[0]
+    if len(recorded) > 1:
+        raise RuntimeError('Multiple Steam libraries report an installed CinterForge app: '
+                           + ', '.join(map(str, recorded)) + '; select with CINTER_STEAMAPPS')
+    # If the default Steam root has only a directory accidentally created by
+    # an old Stage, do not treat it as evidence of an installed Steam app.
+    # Prefer a library with actual Steam app manifests when that is unique.
+    active = [path for path in candidates if any(manifest.is_file() and not manifest.is_symlink()
+                for manifest in path.glob('appmanifest_*.acf'))]
+    if len(active) == 1:
+        return active[0]
+    existing = [path for path in candidates if (path / 'common/CinterForge').is_dir() and
+                not (path / 'common/CinterForge').is_symlink()]
+    if len(existing) == 1:
+        return existing[0]
+    if len(existing) > 1:
+        raise RuntimeError('CinterForge exists in multiple Steam libraries with no unique appmanifest: '
+                           + ', '.join(map(str, existing)) + '; select with CINTER_STEAMAPPS')
+    if len(candidates) == 1:
+        # First installation into the sole real Steam library is unambiguous.
+        return candidates[0]
+    raise RuntimeError('Cannot uniquely locate the installed CinterForge Steam library: '
+                       + (', '.join(map(str, candidates)) or 'no Steam libraries found')
+                       + '; install CinterForge through Steam or select CINTER_STEAMAPPS')
 
 
 def _steam_release_path(steam: Path, target: str, release: str) -> Path:
@@ -1272,6 +1378,7 @@ def stage_four(builds: Path, *, release: str = HOST_RELEASE,
     if not targets or len(set(targets)) != len(targets) or not set(targets) <= set(FOUR_TARGETS):
         raise ValueError("Invalid Stage target selection")
     steam = steamapps_root(steamapps)
+    print(f'[TERMINAL STAGE] Steam installation library: {steam}', flush=True)
     # Validate the selected final Build ZIPs before extracting anything.
     manifests = {}
     for target in targets:

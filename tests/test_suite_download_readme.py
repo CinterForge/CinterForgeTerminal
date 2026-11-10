@@ -104,9 +104,17 @@ class PublicReadmeDownloadTests(unittest.TestCase):
             release.update_readme_public_downloads(self.path, verified_receipt())
         self.assertEqual(self.path.read_text(), original)
 
-    def test_initial_checked_in_readme_is_current_release(self):
+    def test_initial_checked_in_readme_is_publisher_idempotent(self):
+        # A real README may have been updated by a newer verified publish.
+        # Only assert that a verified receipt yields a stable, repeatable block.
         self.path.write_bytes((REPO / 'README.md').read_bytes())
+        release.update_readme_public_downloads(self.path, verified_receipt())
         self.assertFalse(release.update_readme_public_downloads(self.path, verified_receipt()))
+        text = self.path.read_text(encoding='utf-8')
+        self.assertEqual(text.count(release.README_DOWNLOADS_START), 1)
+        self.assertEqual(text.count(release.README_DOWNLOADS_END), 1)
+        for target in ('mac', 'linux', 'win', 'devtools'):
+            self.assertIn(verified_receipt()['public_urls'][target], text)
 
 
 class CinterPublicationReadmeTests(unittest.TestCase):
