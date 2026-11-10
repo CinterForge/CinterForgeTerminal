@@ -1,0 +1,511 @@
+/* CinterForgeTerminal's Kevin Terminal Sessions presentation.
+ * Ported visual treatment from CinterForgeWebApp/IFPlayer/Style/04-session.css:
+ * the selectable original palettes, CRT scanlines, screen-glass falloff and
+ * whole-screen retro mode. The native Python PTY remains the input authority.
+ */
+:root {
+   color-scheme: dark;
+   --bg: #001400;
+   --fg: #66ff66;
+   --accent: #b8ffb8;
+   --columns: 40;
+   font-family: 'Courier New', Consolas, monospace;
+   background: var(--bg);
+   color: var(--fg)
+}
+
+* {
+   box-sizing: border-box
+}
+
+html,
+body {
+   margin: 0;
+   width: 100%;
+   height: 100%;
+   overflow: hidden
+}
+
+body {
+   display: flex;
+   flex-direction: column
+}
+
+button,
+select {
+   font: inherit;
+   font-size: 12px;
+   color: var(--fg);
+   background: color-mix(in srgb, var(--bg) 80%, white 20%);
+   border: 1px solid color-mix(in srgb, var(--fg) 48%, transparent);
+   border-radius: 2px;
+   padding: 5px 8px;
+   cursor: pointer
+}
+
+button:hover,
+select:hover,
+summary:hover {
+   background: color-mix(in srgb, var(--bg) 67%, white 33%)
+}
+
+button:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+   outline: 2px solid var(--accent)
+}
+
+button:disabled {
+   opacity: .45;
+   cursor: not-allowed
+}
+
+a {
+   color: var(--accent)
+}
+
+/* Kevin's native Terminal Sessions page is the entire WebView, without an outer toolbar. */
+.terminal-menus {
+   display: flex;
+   gap: 6px;
+   align-items: center;
+   flex-wrap: wrap;
+   margin-left: 8px
+}
+
+.terminal-menu {
+   position: relative
+}
+
+.terminal-menu summary {
+   display: block;
+   cursor: pointer;
+   list-style: none;
+   padding: 5px 8px;
+   border: 1px solid color-mix(in srgb, var(--fg) 48%, transparent);
+   white-space: nowrap
+}
+
+.terminal-menu summary::-webkit-details-marker {
+   display: none
+}
+
+.terminal-menu-list {
+   position: absolute;
+   top: calc(100% + 5px);
+   right: 0;
+   z-index: 40;
+   min-width: max(205px, 100%);
+   width: max-content;
+   max-width: calc(100vw - 30px);
+   max-height: 60vh;
+   overflow: auto;
+   background: var(--bg);
+   border: 1px solid var(--accent);
+   padding: 5px;
+   box-shadow: 0 9px 24px #000c
+}
+
+.terminal-menu-list button {
+   display: block;
+   width: 100%;
+   text-align: left;
+   border: 0;
+   background: transparent;
+   padding: 7px 9px;
+   white-space: nowrap
+}
+
+.terminal-menu-list button:disabled {
+   opacity: .38;
+   cursor: default;
+   pointer-events: none
+}
+
+.terminal-menu-list button:hover,
+.terminal-menu-list button:focus-visible {
+   background: color-mix(in srgb, var(--fg) 18%, var(--bg))
+}
+
+.menu-unavailable {
+   display: block;
+   padding: 8px;
+   opacity: .7;
+   white-space: nowrap
+}
+
+/* Bedrock has no top-level UI; the EULA dialog is requested by the shell command. */
+.actions {
+   display: flex;
+   gap: 8px;
+   flex-wrap: wrap
+}
+
+.small {
+   font-size: 12px;
+   opacity: .8
+}
+
+#app-content {
+   flex: 1;
+   min-height: 0;
+   padding: 0;
+   background: color-mix(in srgb, var(--bg) 86%, black 14%)
+}
+
+.terminal-overlay {
+   position: relative;
+   display: flex;
+   flex-direction: column;
+   width: 100%;
+   height: 100%;
+   min-height: 0;
+   color: var(--fg);
+   background: var(--bg);
+   border: 3px solid color-mix(in srgb, var(--fg) 38%, var(--bg));
+   box-shadow: inset 0 0 0 4px color-mix(in srgb, var(--bg) 82%, white 18%), inset 0 0 3rem #0004;
+   isolation: isolate;
+   overflow: hidden;
+   text-shadow: 0 0 .08em color-mix(in srgb, var(--fg) 55%, transparent)
+}
+
+.terminal-overlay[hidden],
+.license-backdrop[hidden],
+#terminal-screen[hidden],
+.computer-view[hidden] {
+   display: none
+}
+
+/* The same restrained glass and scanline effects from Kevin's IFPlayer Session. */
+.terminal-overlay::before,
+.terminal-overlay::after {
+   content: '';
+   position: absolute;
+   inset: 0;
+   pointer-events: none;
+   z-index: 5
+}
+
+.terminal-overlay::before {
+   background: linear-gradient(105deg, #ffffff17, transparent 22%, transparent 76%, #ffffff07), repeating-linear-gradient(to bottom, #ffffff09 0, #ffffff09 1px, transparent 1px, transparent 3px);
+   opacity: .72;
+   mix-blend-mode: screen
+}
+
+.terminal-overlay::after {
+   background: radial-gradient(ellipse at center, transparent 54%, #00000014 72%, #00000085 100%);
+   box-shadow: inset 0 0 3rem #0004;
+   animation: terminal-crt-flicker 7s steps(1, end) infinite
+}
+
+@keyframes terminal-crt-flicker {
+
+   0%,
+   18%,
+   20%,
+   62%,
+   64%,
+   100% {
+      opacity: 1
+   }
+
+   19%,
+   63% {
+      opacity: .965
+   }
+}
+
+.terminal-titlebar,
+.terminal-footer {
+   display: flex;
+   align-items: center;
+   gap: 12px;
+   padding: 8px 12px;
+   border-bottom: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+   background: color-mix(in srgb, var(--bg) 94%, white 6%);
+   z-index: 6;
+   font-size: 12px;
+   flex-shrink: 0
+}
+
+/* The emulator iframe is a separate embedded rendering layer. The titlebar
+   must establish a higher stacking context so its dropdowns remain clickable
+   and never render beneath the guest framebuffer. */
+.terminal-titlebar {
+   position: relative;
+   z-index: 30;
+   overflow: visible
+}
+
+.terminal-titlebar .terminal-menu {
+   z-index: 31
+}
+
+.terminal-titlebar .terminal-menu[open] {
+   z-index: 32
+}
+
+.terminal-titlebar strong {
+   letter-spacing: .1em
+}
+
+.terminal-titlebar #terminal-shell {
+   margin-left: auto;
+   opacity: .75;
+   font-size: 11px
+}
+
+.terminal-led {
+   width: 8px;
+   height: 8px;
+   border-radius: 50%;
+   background: var(--fg);
+   box-shadow: 0 0 8px var(--fg)
+}
+
+.terminal-keys {
+   display: flex;
+   gap: 5px;
+   align-items: center;
+   flex-wrap: wrap;
+   padding: 4px 8px;
+   border-bottom: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+   z-index: 6
+}
+
+.terminal-keys[hidden] {
+   display: none
+}
+
+.terminal-keys button {
+   min-width: 36px;
+   touch-action: manipulation
+}
+
+#terminal-screen {
+   flex: 1;
+   min-height: 0;
+   overflow: auto;
+   outline: none;
+   cursor: text;
+   padding: 16px clamp(15px, 3vw, 45px);
+   font-family: 'Courier New', Consolas, monospace;
+   font-size: clamp(13px, 1.35vw, 18px);
+   line-height: 1.35;
+   z-index: 1
+}
+
+#terminal-output {
+   margin: 0;
+   white-space: pre-wrap;
+   overflow-wrap: anywhere;
+   min-height: 100%;
+   color: var(--fg);
+   font: inherit
+}
+
+/* Only the live, unsubmitted IF line. The underlying textarea retains native
+   keyboard editing and selection; the interpreter alone commits on Enter. */
+#terminal-output[data-if-echo]::after {
+   content: attr(data-if-echo);
+   white-space: pre-wrap;
+   color: var(--fg);
+   font: inherit
+}
+
+/* A real full-area keyboard target: the former invisible 1px textarea was not
+   reliably focusable in native WebViews, leaving keys to the OS beep handler. */
+#terminal-input {
+   position: absolute;
+   inset: 82px 0 34px;
+   width: 100%;
+   height: auto;
+   opacity: .01;
+   z-index: 3;
+   resize: none;
+   border: 0;
+   outline: 0;
+   background: transparent;
+   color: transparent;
+   cursor: text;
+   caret-color: transparent;
+   font-size: 16px;
+   overflow: hidden
+}
+
+#terminal-input:disabled {
+   pointer-events: none
+}
+
+.terminal-footer {
+   border-top: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+   border-bottom: 0;
+   justify-content: space-between;
+   min-height: 32px;
+   overflow: hidden
+}
+
+.terminal-footer span {
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis
+}
+
+.computer-view {
+   flex: 1;
+   min-height: 0;
+   background: #05070b;
+   z-index: 6
+}
+
+.computer-view iframe {
+   width: 100%;
+   height: 100%;
+   border: 0;
+   background: #05070b
+}
+
+.terminal-overlay[data-profile="commodore-64"] {
+   border-color: #18134b;
+   box-shadow: inset 0 0 0 .2rem #5d55a5, inset 0 0 3rem #0003
+}
+
+.terminal-overlay[data-profile="trs-80"] {
+   border-color: #303030;
+   box-shadow: inset 0 0 0 .2rem #171717, inset 0 0 2rem #ffffff0a
+}
+
+.license-backdrop {
+   position: fixed;
+   inset: 0;
+   display: grid;
+   place-items: center;
+   background: #000c;
+   z-index: 100;
+   padding: 20px
+}
+
+.license-card {
+   width: min(620px, 100%);
+   max-height: 90vh;
+   overflow: auto;
+   background: var(--bg);
+   color: var(--fg);
+   border: 1px solid var(--accent);
+   padding: 22px;
+   box-shadow: 0 12px 45px #000b
+}
+
+.license-card label {
+   display: block;
+   padding: 12px 0
+}
+
+.license-card h2 {
+   margin-top: 0
+}
+
+@media(max-width:760px) {
+   .terminal-menus {
+      gap: 3px
+   }
+
+   .terminal-menu summary {
+      padding: 4px
+   }
+
+   .terminal-shell {
+      display: none
+   }
+
+   #app-content {
+      padding: 0
+   }
+
+   .terminal-titlebar {
+      gap: 5px;
+      padding: 5px
+   }
+
+   .terminal-titlebar strong {
+      font-size: 11px
+   }
+
+   .terminal-footer span:last-child {
+      display: none
+   }
+}
+
+@media(prefers-reduced-motion:reduce) {
+   .terminal-overlay::after {
+      animation: none
+   }
+}
+
+/* A separate PTY per tab. Menus remain in the original title bar. */
+.terminal-tabs {
+   display: flex;
+   align-items: center;
+   gap: 2px;
+   padding: 3px 8px;
+   overflow-x: auto;
+   flex-shrink: 0;
+   border-bottom: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
+   z-index: 7
+}
+
+.terminal-tabs button {
+   flex-shrink: 0;
+   padding: 4px 7px;
+   white-space: nowrap
+}
+
+.terminal-tabs .session-tab.active {
+   background: color-mix(in srgb, var(--fg) 23%, var(--bg));
+   border-bottom: 2px solid var(--accent)
+}
+
+.terminal-tabs .session-tab-close {
+   padding-inline: 4px;
+   margin-left: -3px
+}
+
+.terminal-tabs .session-tab-new {
+   font-weight: bold;
+   font-size: 16px;
+   line-height: 1
+}
+
+/* Visible insertion point, exactly at the VT cursor rather than at the end
+   of a hidden textarea. Zero-width element does not alter Copy transcript. */
+#terminal-output .terminal-cursor {
+   display: inline-block;
+   position: relative;
+   width: 0;
+   height: 1em;
+   vertical-align: text-bottom
+}
+
+#terminal-output .terminal-cursor::after {
+   content: '';
+   position: absolute;
+   left: 0;
+   top: .05em;
+   width: .62ch;
+   height: .95em;
+   background: var(--accent);
+   opacity: .82;
+   animation: terminal-caret-blink 1s steps(1) infinite
+}
+
+@keyframes terminal-caret-blink {
+   50% {
+      opacity: 0
+   }
+}
+
+@media(prefers-reduced-motion:reduce) {
+   #terminal-output .terminal-cursor::after {
+      animation: none
+   }
+}

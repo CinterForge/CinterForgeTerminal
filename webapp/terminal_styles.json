@@ -1,0 +1,949 @@
+{
+  "schema": "cinterforge.terminal.profiles.v1",
+  "defaults": {
+    "mac": "apple-ii",
+    "linux": "vt100-terminal",
+    "win": "ibm-pc-vga"
+  },
+  "profiles": [
+    {
+      "id": "modern",
+      "name": "Modern",
+      "foreground": "#E0E0E0",
+      "background": "#101820",
+      "accent": "#7ac1ff",
+      "columns": 80,
+      "year": 2026,
+      "kind": "terminal"
+    },
+    {
+      "id": "apple-ii",
+      "name": "Apple II",
+      "foreground": "#66FF66",
+      "background": "#001400",
+      "accent": "#B8FFB8",
+      "columns": 40,
+      "year": 1977,
+      "kind": "terminal"
+    },
+    {
+      "id": "commodore-pet",
+      "name": "Commodore PET",
+      "foreground": "#B7B7B7",
+      "background": "#1A1A1A",
+      "accent": "#FFFFFF",
+      "columns": 40,
+      "year": 1977,
+      "kind": "terminal"
+    },
+    {
+      "id": "commodore-vic-20",
+      "name": "Commodore VIC-20",
+      "foreground": "#8FE8E8",
+      "background": "#18243D",
+      "accent": "#FFFFFF",
+      "columns": 22,
+      "year": 1980,
+      "kind": "terminal"
+    },
+    {
+      "id": "commodore-64",
+      "name": "Commodore 64",
+      "foreground": "#A8A8A8",
+      "background": "#352879",
+      "accent": "#FFFFFF",
+      "columns": 40,
+      "year": 1982,
+      "kind": "terminal"
+    },
+    {
+      "id": "atari-400-800",
+      "name": "Atari 400/800",
+      "foreground": "#FFB84D",
+      "background": "#160900",
+      "accent": "#FFE0A3",
+      "columns": 40,
+      "year": 1979,
+      "kind": "terminal"
+    },
+    {
+      "id": "zx-spectrum",
+      "name": "ZX Spectrum",
+      "foreground": "#FFFFFF",
+      "background": "#0000AA",
+      "accent": "#FFFF00",
+      "columns": 256,
+      "year": 1982,
+      "kind": "terminal"
+    },
+    {
+      "id": "bbc-micro",
+      "name": "BBC Micro",
+      "foreground": "#33FF33",
+      "background": "#001800",
+      "accent": "#FFFF33",
+      "columns": 40,
+      "year": 1981,
+      "kind": "terminal"
+    },
+    {
+      "id": "msx1",
+      "name": "MSX1",
+      "foreground": "#FFFFFF",
+      "background": "#183A8A",
+      "accent": "#FF4444",
+      "columns": 40,
+      "year": 1983,
+      "kind": "terminal"
+    },
+    {
+      "id": "amstrad-cpc",
+      "name": "Amstrad CPC",
+      "foreground": "#FFFF00",
+      "background": "#000080",
+      "accent": "#00FFFF",
+      "columns": 320,
+      "year": 1984,
+      "kind": "terminal"
+    },
+    {
+      "id": "ibm-pc-cga",
+      "name": "IBM PC with CGA",
+      "foreground": "#55FFFF",
+      "background": "#0000AA",
+      "accent": "#FF55FF",
+      "columns": 80,
+      "year": 1981,
+      "kind": "terminal"
+    },
+    {
+      "id": "ibm-pc-ega",
+      "name": "IBM PC with EGA",
+      "foreground": "#FFFF55",
+      "background": "#000055",
+      "accent": "#55FF55",
+      "columns": 80,
+      "year": 1984,
+      "kind": "terminal"
+    },
+    {
+      "id": "ibm-pc-vga",
+      "name": "IBM PC",
+      "foreground": "#E0E0E0",
+      "background": "#101820",
+      "accent": "#55AAFF",
+      "columns": 80,
+      "year": 1987,
+      "kind": "terminal"
+    },
+    {
+      "id": "vt100-terminal",
+      "name": "VT100",
+      "foreground": "#33FF33",
+      "background": "#001800",
+      "accent": "#99FF99",
+      "columns": 80,
+      "year": 1978,
+      "kind": "terminal"
+    },
+    {
+      "id": "unix-ansi-terminal",
+      "name": "UNIX ANSI",
+      "foreground": "#FFB000",
+      "background": "#050505",
+      "accent": "#FFFF66",
+      "columns": 80,
+      "year": 1979,
+      "kind": "terminal"
+    },
+    {
+      "id": "macintosh-128k",
+      "name": "Macintosh 128K",
+      "foreground": "#000000",
+      "background": "#FFFFFF",
+      "accent": "#000000",
+      "columns": 512,
+      "year": 1984,
+      "kind": "terminal"
+    },
+    {
+      "id": "atari-st",
+      "name": "Atari ST",
+      "foreground": "#202020",
+      "background": "#C0C0C0",
+      "accent": "#000080",
+      "columns": 320,
+      "year": 1985,
+      "kind": "terminal"
+    },
+    {
+      "id": "amiga-ocs",
+      "name": "Amiga",
+      "foreground": "#FFFFFF",
+      "background": "#0055AA",
+      "accent": "#FF8800",
+      "columns": 320,
+      "year": 1985,
+      "kind": "terminal"
+    },
+    {
+      "id": "trs-80",
+      "name": "TRS-80",
+      "foreground": "#D8D8D8",
+      "background": "#000000",
+      "accent": "#FFFFFF",
+      "columns": 64,
+      "year": 1977,
+      "kind": "terminal"
+    }
+  ],
+  "emulators": [
+    {
+      "id": "mac-128k",
+      "name": "Mac 128K",
+      "machine": "Mac 128K",
+      "disk": "System 1.0",
+      "year": 1984,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-128k-snow",
+      "name": "Mac 128K (Snow)",
+      "machine": "Mac 128K (Snow)",
+      "disk": "System 1.0",
+      "year": 1984,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-512k-snow",
+      "name": "Mac 512K (Snow)",
+      "machine": "Mac 512K (Snow)",
+      "disk": "System 2.0",
+      "year": 1984,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-512ke",
+      "name": "Mac 512Ke",
+      "machine": "Mac 512Ke",
+      "disk": "System 3.0",
+      "year": 1986,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-512ke-snow",
+      "name": "Mac 512Ke (Snow)",
+      "machine": "Mac 512Ke (Snow)",
+      "disk": "System 3.0",
+      "year": 1986,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-plus",
+      "name": "Mac Plus",
+      "machine": "Mac Plus",
+      "disk": "System 6.0.8",
+      "year": 1986,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-plus-snow",
+      "name": "Mac Plus (Snow)",
+      "machine": "Mac Plus (Snow)",
+      "disk": "System 6.0.8",
+      "year": 1986,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-se",
+      "name": "Mac SE",
+      "machine": "Mac SE",
+      "disk": "System 6.0.8",
+      "year": 1987,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-se-snow",
+      "name": "Mac SE (Snow)",
+      "machine": "Mac SE (Snow)",
+      "disk": "System 6.0.8",
+      "year": 1987,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-se-fdhd-snow",
+      "name": "Mac SE FDHD (Snow)",
+      "machine": "Mac SE FDHD (Snow)",
+      "disk": "System 6.0.8",
+      "year": 1989,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-classic-snow",
+      "name": "Mac Classic (Snow)",
+      "machine": "Mac Classic (Snow)",
+      "disk": "System 6.0.8",
+      "year": 1990,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-ii",
+      "name": "Mac II",
+      "machine": "Mac II",
+      "disk": "System 7.1",
+      "year": 1987,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-ii-snow",
+      "name": "Mac II (Snow)",
+      "machine": "Mac II (Snow)",
+      "disk": "System 7.1",
+      "year": 1987,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-ii-fdhd-snow",
+      "name": "Mac II FDHD (Snow)",
+      "machine": "Mac II FDHD (Snow)",
+      "disk": "System 7.1",
+      "year": 1988,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-iix",
+      "name": "Mac IIx",
+      "machine": "Mac IIx",
+      "disk": "System 7.1",
+      "year": 1988,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-iix-snow",
+      "name": "Mac IIx (Snow)",
+      "machine": "Mac IIx (Snow)",
+      "disk": "System 7.1",
+      "year": 1988,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-iicx-snow",
+      "name": "Mac IIcx (Snow)",
+      "machine": "Mac IIcx (Snow)",
+      "disk": "System 7.1",
+      "year": 1989,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-se30-snow",
+      "name": "Mac SE/30 (Snow)",
+      "machine": "Mac SE/30 (Snow)",
+      "disk": "System 7.1",
+      "year": 1989,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-portable-snow",
+      "name": "Mac Portable (Snow)",
+      "machine": "Mac Portable (Snow)",
+      "disk": "System 6.0.8",
+      "year": 1989,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-iifx",
+      "name": "Mac IIfx",
+      "machine": "Mac IIfx",
+      "disk": "System 7.1",
+      "year": 1990,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-lc-snow",
+      "name": "Mac LC (Snow)",
+      "machine": "Mac LC (Snow)",
+      "disk": "System 7.1",
+      "year": 1990,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-lc-ii-snow",
+      "name": "Mac LC II (Snow)",
+      "machine": "Mac LC II (Snow)",
+      "disk": "System 7.1",
+      "year": 1992,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-lc-iii-snow",
+      "name": "Mac LC III (Snow)",
+      "machine": "Mac LC III (Snow)",
+      "disk": "System 7.1",
+      "year": 1993,
+      "kind": "emulator"
+    },
+    {
+      "id": "quadra-650",
+      "name": "Quadra 650",
+      "machine": "Quadra 650",
+      "disk": "Mac OS 7.6",
+      "lagomorph": true,
+      "year": 1993,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-6100",
+      "name": "Power Macintosh 6100",
+      "machine": "Power Macintosh 6100",
+      "disk": "Mac OS 8.1",
+      "year": 1994,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-7200",
+      "name": "Power Macintosh 7200",
+      "machine": "Power Macintosh 7200",
+      "disk": "Mac OS 8.1",
+      "year": 1995,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-7300",
+      "name": "Power Macintosh 7300",
+      "machine": "Power Macintosh 7300",
+      "disk": "Mac OS 8.1",
+      "year": 1997,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-7500",
+      "name": "Power Macintosh 7500",
+      "machine": "Power Macintosh 7500",
+      "disk": "Mac OS 8.1",
+      "year": 1995,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-9500",
+      "name": "Power Macintosh 9500",
+      "machine": "Power Macintosh 9500",
+      "disk": "Mac OS 8.1",
+      "year": 1995,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-g3-beige",
+      "name": "Power Macintosh G3 (Beige)",
+      "machine": "Power Macintosh G3 (Beige)",
+      "disk": "Mac OS 8.1",
+      "year": 1997,
+      "kind": "emulator"
+    },
+    {
+      "id": "imac-g3",
+      "name": "iMac G3 (233 Mhz)",
+      "machine": "iMac G3 (233 Mhz)",
+      "disk": "Mac OS 9.0.4",
+      "year": 1998,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-g3-blue-white-experimental",
+      "name": "Power Macintosh G3 (Blue & White) - Experimental",
+      "machine": "Power Macintosh G3 (Blue & White) - Experimental",
+      "disk": "Mac OS 9.0.4",
+      "year": 1999,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-g3-blue-white",
+      "name": "Power Macintosh G3 (Blue & White)",
+      "machine": "Power Macintosh G3 (Blue & White)",
+      "disk": "Mac OS 9.0.4",
+      "year": 1999,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-g4-pci",
+      "name": "Power Macintosh G4 (PCI Graphics)",
+      "machine": "Power Macintosh G4 (PCI Graphics)",
+      "disk": "Mac OS X 10.3",
+      "year": 1999,
+      "kind": "emulator"
+    },
+    {
+      "id": "next-computer",
+      "name": "NeXT Computer",
+      "machine": "NeXT Computer",
+      "disk": "NeXTSTEP 3.3",
+      "year": 1988,
+      "kind": "emulator"
+    },
+    {
+      "id": "nextcube",
+      "name": "NeXTcube",
+      "machine": "NeXTcube",
+      "disk": "NeXTSTEP 3.3",
+      "year": 1990,
+      "kind": "emulator"
+    },
+    {
+      "id": "nextstation",
+      "name": "NeXTstation",
+      "machine": "NeXTstation",
+      "disk": "NeXTSTEP 3.3",
+      "year": 1990,
+      "kind": "emulator"
+    },
+    {
+      "id": "nextstation-turbo-color",
+      "name": "NeXTstation Turbo Color",
+      "machine": "NeXTstation Turbo Color",
+      "disk": "NeXTSTEP 3.3",
+      "year": 1992,
+      "kind": "emulator"
+    },
+    {
+      "id": "beos-beos-5-0-3",
+      "name": "BeOS 5.0.3",
+      "machine": "Power Macintosh 7300",
+      "disk": "BeOS 5.0.3",
+      "year": 2000,
+      "kind": "emulator",
+      "os": "beos"
+    },
+    {
+      "id": "beos-beos-5-0-1",
+      "name": "BeOS 5.0.1",
+      "machine": "Power Macintosh 7300",
+      "disk": "BeOS 5.0.1",
+      "year": 2000,
+      "kind": "emulator",
+      "os": "beos"
+    },
+    {
+      "id": "beos-beos-5",
+      "name": "BeOS 5",
+      "machine": "Power Macintosh 7300",
+      "disk": "BeOS 5",
+      "year": 2000,
+      "kind": "emulator",
+      "os": "beos"
+    },
+    {
+      "id": "beos-beos-release-4-5",
+      "name": "BeOS Release 4.5",
+      "machine": "Power Macintosh 7300",
+      "disk": "BeOS Release 4.5",
+      "year": 1999,
+      "kind": "emulator",
+      "os": "beos"
+    },
+    {
+      "id": "beos-beos-release-4",
+      "name": "BeOS Release 4",
+      "machine": "Power Macintosh 7300",
+      "disk": "BeOS Release 4",
+      "year": 1998,
+      "kind": "emulator",
+      "os": "beos"
+    },
+    {
+      "id": "beos-beos-release-3",
+      "name": "BeOS Release 3",
+      "machine": "Power Macintosh 7300",
+      "disk": "BeOS Release 3",
+      "year": 1998,
+      "kind": "emulator",
+      "os": "beos"
+    },
+    {
+      "id": "beos-beos-preview-release-2",
+      "name": "BeOS Preview Release 2",
+      "machine": "Power Macintosh 7300",
+      "disk": "BeOS Preview Release 2",
+      "year": 1997,
+      "kind": "emulator",
+      "os": "beos"
+    },
+    {
+      "id": "beos-beos-preview-release-1",
+      "name": "BeOS Preview Release 1",
+      "machine": "Power Macintosh 7300",
+      "disk": "BeOS Preview Release 1",
+      "year": 1997,
+      "kind": "emulator",
+      "os": "beos"
+    },
+    {
+      "id": "beos-beos-dr8-3",
+      "name": "BeOS DR8.3",
+      "machine": "Power Macintosh 7300",
+      "disk": "BeOS DR8.3",
+      "year": 1997,
+      "kind": "emulator",
+      "os": "beos"
+    },
+    {
+      "id": "beos-beos-dr8-2",
+      "name": "BeOS DR8.2",
+      "machine": "Power Macintosh 7300",
+      "disk": "BeOS DR8.2",
+      "year": 1996,
+      "kind": "emulator",
+      "os": "beos"
+    }
+  ],
+  "emulator_provider": "https://infinitemac.org/embed",
+  "emulator_source": "https://github.com/mihaip/infinite-mac/blob/main/src/defs/machines.ts",
+  "museum": [
+    {
+      "id": "apple-ii",
+      "year": 1977,
+      "kind": "terminal"
+    },
+    {
+      "id": "commodore-pet",
+      "year": 1977,
+      "kind": "terminal"
+    },
+    {
+      "id": "trs-80",
+      "year": 1977,
+      "kind": "terminal"
+    },
+    {
+      "id": "vt100-terminal",
+      "year": 1978,
+      "kind": "terminal"
+    },
+    {
+      "id": "atari-400-800",
+      "year": 1979,
+      "kind": "terminal"
+    },
+    {
+      "id": "unix-ansi-terminal",
+      "year": 1979,
+      "kind": "terminal"
+    },
+    {
+      "id": "commodore-vic-20",
+      "year": 1980,
+      "kind": "terminal"
+    },
+    {
+      "id": "bbc-micro",
+      "year": 1981,
+      "kind": "terminal"
+    },
+    {
+      "id": "ibm-pc-cga",
+      "year": 1981,
+      "kind": "terminal"
+    },
+    {
+      "id": "commodore-64",
+      "year": 1982,
+      "kind": "terminal"
+    },
+    {
+      "id": "zx-spectrum",
+      "year": 1982,
+      "kind": "terminal"
+    },
+    {
+      "id": "msx1",
+      "year": 1983,
+      "kind": "terminal"
+    },
+    {
+      "id": "amstrad-cpc",
+      "year": 1984,
+      "kind": "terminal"
+    },
+    {
+      "id": "ibm-pc-ega",
+      "year": 1984,
+      "kind": "terminal"
+    },
+    {
+      "id": "mac-128k",
+      "year": 1984,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-128k-snow",
+      "year": 1984,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-512k-snow",
+      "year": 1984,
+      "kind": "emulator"
+    },
+    {
+      "id": "macintosh-128k",
+      "year": 1984,
+      "kind": "terminal"
+    },
+    {
+      "id": "amiga-ocs",
+      "year": 1985,
+      "kind": "terminal"
+    },
+    {
+      "id": "atari-st",
+      "year": 1985,
+      "kind": "terminal"
+    },
+    {
+      "id": "mac-512ke",
+      "year": 1986,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-512ke-snow",
+      "year": 1986,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-plus",
+      "year": 1986,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-plus-snow",
+      "year": 1986,
+      "kind": "emulator"
+    },
+    {
+      "id": "ibm-pc-vga",
+      "year": 1987,
+      "kind": "terminal"
+    },
+    {
+      "id": "mac-ii",
+      "year": 1987,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-ii-snow",
+      "year": 1987,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-se",
+      "year": 1987,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-se-snow",
+      "year": 1987,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-ii-fdhd-snow",
+      "year": 1988,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-iix",
+      "year": 1988,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-iix-snow",
+      "year": 1988,
+      "kind": "emulator"
+    },
+    {
+      "id": "next-computer",
+      "year": 1988,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-iicx-snow",
+      "year": 1989,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-portable-snow",
+      "year": 1989,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-se-fdhd-snow",
+      "year": 1989,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-se30-snow",
+      "year": 1989,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-classic-snow",
+      "year": 1990,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-iifx",
+      "year": 1990,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-lc-snow",
+      "year": 1990,
+      "kind": "emulator"
+    },
+    {
+      "id": "nextcube",
+      "year": 1990,
+      "kind": "emulator"
+    },
+    {
+      "id": "nextstation",
+      "year": 1990,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-lc-ii-snow",
+      "year": 1992,
+      "kind": "emulator"
+    },
+    {
+      "id": "nextstation-turbo-color",
+      "year": 1992,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-lc-iii-snow",
+      "year": 1993,
+      "kind": "emulator"
+    },
+    {
+      "id": "quadra-650",
+      "year": 1993,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-6100",
+      "year": 1994,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-7200",
+      "year": 1995,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-7500",
+      "year": 1995,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-9500",
+      "year": 1995,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-7300",
+      "year": 1997,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-g3-beige",
+      "year": 1997,
+      "kind": "emulator"
+    },
+    {
+      "id": "imac-g3",
+      "year": 1998,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-g3-blue-white",
+      "year": 1999,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-g3-blue-white-experimental",
+      "year": 1999,
+      "kind": "emulator"
+    },
+    {
+      "id": "power-macintosh-g4-pci",
+      "year": 1999,
+      "kind": "emulator"
+    },
+    {
+      "id": "codeoss",
+      "year": 2015,
+      "kind": "codeoss"
+    },
+    {
+      "id": "modern",
+      "year": 2026,
+      "kind": "terminal"
+    },
+    {
+      "id": "beos-beos-5-0-3",
+      "year": 2000,
+      "kind": "emulator"
+    },
+    {
+      "id": "beos-beos-5-0-1",
+      "year": 2000,
+      "kind": "emulator"
+    },
+    {
+      "id": "beos-beos-5",
+      "year": 2000,
+      "kind": "emulator"
+    },
+    {
+      "id": "beos-beos-release-4-5",
+      "year": 1999,
+      "kind": "emulator"
+    },
+    {
+      "id": "beos-beos-release-4",
+      "year": 1998,
+      "kind": "emulator"
+    },
+    {
+      "id": "beos-beos-release-3",
+      "year": 1998,
+      "kind": "emulator"
+    },
+    {
+      "id": "beos-beos-preview-release-2",
+      "year": 1997,
+      "kind": "emulator"
+    },
+    {
+      "id": "beos-beos-preview-release-1",
+      "year": 1997,
+      "kind": "emulator"
+    },
+    {
+      "id": "beos-beos-dr8-3",
+      "year": 1997,
+      "kind": "emulator"
+    },
+    {
+      "id": "beos-beos-dr8-2",
+      "year": 1996,
+      "kind": "emulator"
+    }
+  ],
+  "codeoss": {
+    "id": "codeoss",
+    "name": "VS Code / CinterForgeCode",
+    "year": 2015,
+    "kind": "codeoss"
+  },
+  "museum_title": "Computer History Museum",
+  "year_note": "Release year of the named computer/model or originating UI/terminal standard; Modern is a 2026 interface."
+}

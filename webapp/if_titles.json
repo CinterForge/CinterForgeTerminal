@@ -1,0 +1,86 @@
+{
+  "schema": "cinterforge.terminal.external-if-titles.v1",
+  "description": "16 independently downloaded Z-machine stories; filename stem is the case-sensitive shell command. No story bytes are bundled or republished.",
+  "titles": [
+    {
+      "title": "Colossal Cave Adventure",
+      "file": "Advent.z5",
+      "url": "https://ifarchive.org/if-archive/games/zcode/Advent.z5"
+    },
+    {
+      "title": "Oh no, Mr.Crab stole your hat!",
+      "file": "Hat.z5",
+      "url": "https://ifarchive.org/if-archive/games/zcode/Hat.z5"
+    },
+    {
+      "title": "Adventure In Humongous Cave",
+      "file": "HugeCave.z8",
+      "url": "https://ifarchive.org/if-archive/games/zcode/HugeCave.z8"
+    },
+    {
+      "title": "Forest Demo",
+      "file": "Forest_Demo.zblorb",
+      "url": "https://ifarchive.org/if-archive/games/zcode/Forest_Demo.zblorb"
+    },
+    {
+      "title": "Zork I: The Great Underground Empire",
+      "file": "zork1.z3",
+      "url": "https://raw.githubusercontent.com/historicalsource/zork1/master/COMPILED/zork1.z3"
+    },
+    {
+      "title": "Zork II: The Wizard of Frobozz",
+      "file": "zork2.z3",
+      "url": "https://raw.githubusercontent.com/historicalsource/zork2/master/COMPILED/zork2.z3"
+    },
+    {
+      "title": "Zork III: The Dungeon Master",
+      "file": "zork3.z3",
+      "url": "https://raw.githubusercontent.com/historicalsource/zork3/master/COMPILED/zork3.z3"
+    },
+    {
+      "title": "The Library of Horror",
+      "file": "library_of_horror.z3",
+      "url": "https://ifarchive.org/if-archive/games/zcode/library_of_horror.z3"
+    },
+    {
+      "title": "404- Life not Found (Beta)",
+      "file": "404-Life_not_found.zblorb",
+      "url": "https://ifarchive.org/if-archive/games/zcode/404-Life_not_found.zblorb"
+    },
+    {
+      "title": "Bed Time",
+      "file": "BedTime.zblorb",
+      "url": "https://ifarchive.org/if-archive/games/zcode/BedTime.zblorb"
+    },
+    {
+      "title": "The Quest for The Magic Muffin",
+      "file": "QuestForTheMagicMuffin.zblorb",
+      "url": "https://ifarchive.org/if-archive/games/zcode/QuestForTheMagicMuffin.zblorb"
+    },
+    {
+      "title": "When I Was Shot By Elephants III",
+      "file": "Elephants.z5",
+      "url": "https://ifarchive.org/if-archive/games/zcode/Elephants.z5"
+    },
+    {
+      "title": "Mini-Cluedo",
+      "file": "cluedo.z5",
+      "url": "https://ifarchive.org/if-archive/games/zcode/cluedo.z5"
+    },
+    {
+      "title": "Hell's Basement",
+      "file": "HellsBasement.zblorb",
+      "url": "https://ifarchive.org/if-archive/games/zcode/HellsBasement.zblorb"
+    },
+    {
+      "title": "The Quest for The Magic Bagel...Err Muffin 3",
+      "file": "QuestForTheMagicMuffin3.zblorb",
+      "url": "https://ifarchive.org/if-archive/games/zcode/QuestForTheMagicMuffin3.zblorb"
+    },
+    {
+      "title": "All Things Devours",
+      "file": "devours.z5",
+      "url": "https://ifarchive.org/if-archive/games/zcode/devours.z5"
+    }
+  ]
+}

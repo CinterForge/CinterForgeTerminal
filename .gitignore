@@ -1,0 +1,12 @@
+/work/
+.DS_Store
+/host/launcher/.build/
+/host/launcher/Sources/CZstd/zstd/
+DerivedData/*
+.derived*
+*.xcuserstate
+
+# Generated Python bytecode and test caches belong in Builds, not source.
+__pycache__/
+*.py[cod]
+.pytest_cache/

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Inform 6",
+  "scopeName": "source.inform6",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#directives" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": { "patterns": [{ "name": "comment.line.exclamation.inform6", "match": "!.*$" }] },
+    "strings": { "patterns": [
+      { "name": "string.quoted.double.inform6", "begin": "\"", "end": "\"", "patterns": [{ "name": "constant.character.escape.inform6", "match": "@@[0-9]+|\\\\." }] },
+      { "name": "string.quoted.single.inform6", "begin": "'", "end": "'" }
+    ] },
+    "directives": { "patterns": [{ "name": "keyword.control.directive.inform6", "match": "(?i)\\b(?:Abbreviate|Array|Attribute|Class|Constant|Default|End|Endif|Extend|Fake_Action|Global|Ifdef|Ifndef|Ifnot|Iftrue|Iffalse|Import|Include|Link|Lowstring|Message|Object|Property|Release|Replace|Serial|Statusline|Stub|Switches|System_file|Trace|Undef|Verb|Zcharacter)\\b" }] },
+    "declarations": { "patterns": [{ "name": "storage.type.inform6", "match": "(?i)\\b(?:with|has|class|private|provides|ofclass|or|in|nearby)\\b" }] },
+    "keywords": { "patterns": [{ "name": "keyword.control.inform6", "match": "(?i)\\b(?:if|else|switch|while|do|for|objectloop|break|continue|return|rtrue|rfalse|jump|print|print_ret|new_line|spaces|font|style|give|move|remove|quit|restore|save|read|box)\\b" }] },
+    "numbers": { "patterns": [{ "name": "constant.numeric.inform6", "match": "(?<![A-Za-z_])(?:\\$[0-9A-Fa-f]+|[0-9]+)(?![A-Za-z_])" }] }
+  }
+}

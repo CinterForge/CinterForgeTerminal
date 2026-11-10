@@ -1,0 +1,45 @@
+{
+  "name": "ZIL",
+  "scopeName": "source.zil",
+  "patterns": [
+    {
+      "name": "comment.line.semicolon.zil",
+      "match": ";.*$"
+    },
+    {
+      "name": "string.quoted.double.zil",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.zil",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "keyword.control.zil",
+      "match": "(?i)(?<=<)(IF|COND|T|PROG|PROG2|REPEAT|MAPF|MAPR|AND|OR|NOT|RETURN|RTRUE|RFALSE|AGAIN|GOTO|JUMP|QUIT|RESTART|RESTORE|SAVE)(?=\\s|>)"
+    },
+    {
+      "name": "storage.type.function.zil",
+      "match": "(?i)(?<=<)(ROUTINE|DEFINE|DEFMAC|FUNCTION|OBJECT|ROOM|GLOBAL|CONSTANT|TABLE|VOC|SYNTAX|VERB|ACTION|PROPERTY|DIRECTIONS)(?=\\s|>)"
+    },
+    {
+      "name": "variable.other.global.zil",
+      "match": "\\b[A-Z][A-Z0-9-]*\\b"
+    },
+    {
+      "name": "constant.numeric.zil",
+      "match": "(?<![A-Za-z0-9_-])-?\\b\\d+\\b"
+    },
+    {
+      "name": "punctuation.definition.tag.zil",
+      "match": "[<>]"
+    },
+    {
+      "name": "punctuation.section.group.zil",
+      "match": "[\\[\\]()]"
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "schema": "cinterforge.python-host.projects.v1",
+  "environments": {
+    "cinterenv": {
+      "python": "3.11.0",
+      "requirements": {
+        "common": "Input/Requirements/cinterenv/requirements.txt",
+        "mac": "Input/Requirements/cinterenv/requirements-mac.txt",
+        "win": "Input/Requirements/cinterenv/requirements-win.txt",
+        "linux": "Input/Requirements/cinterenv/requirements-linux.txt"
+      },
+      "imports": []
+    },
+    "convertenv": {
+      "python": "3.11.0",
+      "requirements": {
+        "common": "Input/Requirements/convertenv/requirements.txt",
+        "mac": "Input/Requirements/convertenv/requirements-mac.txt",
+        "win": "Input/Requirements/convertenv/requirements-win.txt",
+        "linux": "Input/Requirements/convertenv/requirements-linux.txt"
+      },
+      "imports": []
+    }
+  },
+  "services": {
+    "server": {
+      "environment": "cinterenv",
+      "script": "Services/server/server.py",
+      "arguments": []
+    },
+    "CinterForgeConversionServer": {
+      "environment": "convertenv",
+      "script": "Services/converter/ConverterLocalServer.py",
+      "arguments": []
+    }
+  },
+  "applications": {
+    "CinterForgeServer": {"environment": "cinterenv", "services": ["server"]},
+    "CinterForgeConverter": {"environment": "convertenv", "services": ["CinterForgeConversionServer"]}
+  }
+}

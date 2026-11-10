@@ -1,0 +1,31 @@
+# One reusable AMD64 CinterForge Linux distribution. Applications are NEVER
+# installed into this image; they are mounted from persistent Applications/.
+FROM debian:bookworm-slim
+ENV DEBIAN_FRONTEND=noninteractive
+# Debian installs the Steam launcher under /usr/games, absent from some container PATHs.
+ENV PATH="/usr/games:${PATH}"
+# Fail before apt downloads anything if the builder selected the host ARM64 image.
+RUN test "$(dpkg --print-architecture)" = amd64
+# Steam is an AMD64 application with required i386 compatibility dependencies.
+# Enable Debian's contrib/non-free components and i386 only for Steam.
+RUN sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources && \
+    dpkg --add-architecture i386
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates locales python3 python3-venv python3-pip chromium \
+    wine wine64 wine32:i386 xvfb xauth x11-utils x11-xserver-utils openbox dbus-x11 \
+    mesa-utils mesa-vulkan-drivers mesa-vulkan-drivers:i386 vulkan-tools libgl1-mesa-dri:i386 libgtk-3-0 libgtk2.0-0 libasound2 libjack-jackd2-0 libpulse0 libgl1 libglib2.0-0 \
+    libx11-6 libxext6 libxrender1 libxrandr2 libxi6 \
+    procps tini fonts-dejavu-core x11vnc steam-installer gdb file \
+    libopenal1:amd64 libopenal1:i386 libsm6:i386 libice6:i386 \
+    libxtst6:i386 libxrandr2:i386 libxrender1:i386 \
+    libglib2.0-0:i386 \
+    libgtk2.0-0:i386 libpipewire-0.3-0:i386 libpulse0:i386 \
+    libgdk-pixbuf-2.0-0:i386 libxcb-res0:i386 libvdpau1:i386 libbz2-1.0:i386 && \
+    sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen && locale-gen && \
+    rm -rf /var/lib/apt/lists/*
+# Installed applications live outside the disposable distribution.
+RUN mkdir -p /opt/cinterforge/Applications /opt/cinterforge/Runtime
+ENV CINTER_APPLICATIONS_ROOT=/opt/cinterforge/Applications
+WORKDIR /opt/cinterforge
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/bin/bash"]

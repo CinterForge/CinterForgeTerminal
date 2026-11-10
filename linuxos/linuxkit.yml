@@ -1,0 +1,214 @@
+# CFOS-owned ARM64 LinuxKit dedicated-server appliance with host Rosetta.
+kernel:
+  image: linuxkit/kernel:6.6.71-cinter-virtiofs-819af9d59279506dd2994e7aea1cbbaaebfdb0a2-dirty-2d674b9
+  cmdline: console=hvc0
+init:
+- 'linuxkit/init:v1.3.0-arm64'
+- 'linuxkit/runc:v1.3.0-arm64'
+- 'linuxkit/containerd:v1.3.0-arm64'
+- 'linuxkit/ca-certificates:v1.3.0-arm64'
+onboot:
+- name: resolver-init
+  image: alpine:3.20
+  binds:
+  - /tmp:/tmp
+  command:
+  - /bin/sh
+  - -c
+  - mkdir -p /tmp/etc
+- name: dhcpcd
+  image: 'linuxkit/dhcpcd:v1.3.0-arm64'
+  net: host
+  binds:
+  - /var:/var
+  - /tmp/etc:/etc
+  capabilities:
+  - CAP_NET_ADMIN
+  - CAP_NET_BIND_SERVICE
+  - CAP_NET_RAW
+  command:
+  - /sbin/dhcpcd
+  - --nobackground
+  - -f
+  - /dhcpcd.conf
+  - '-1'
+services:
+- name: cinter-bds
+  image: alpine:3.20
+  net: host
+  binds:
+  - /proc:/proc
+  - /sys:/sys
+  - /var:/var
+  - /usr/local/bin/cinter-bds-guest.sh:/usr/local/bin/cinter-bds-guest.sh
+  - /etc/ssl/certs:/etc/ssl/certs
+  - /tmp/etc/resolv.conf:/etc/resolv.conf
+  devices:
+  - path: /dev/console
+    type: c
+    major: 5
+    minor: 1
+    mode: '0666'
+  capabilities:
+  - CAP_SYS_ADMIN
+  - CAP_SYS_CHROOT
+  - CAP_SYS_BOOT
+  - CAP_NET_ADMIN
+  - CAP_NET_RAW
+  command:
+  - /bin/sh
+  - -c
+  - |
+    exec >/dev/console 2>&1
+    set -eux
+    echo CINTER_BDS_GUEST_BOOT
+    echo CINTER_BDS_NETWORK_READY_CHECK_BEGIN
+    ip -4 addr show dev eth0 2>&1 || true
+    ip route 2>&1 || true
+    cat /etc/resolv.conf 2>&1 || true
+    ip -4 addr show dev eth0 | grep -q 'inet ' || { echo CINTER_BDS_ERROR network-no-ipv4; exit 29; }
+    ip route | grep -q '^default ' || { echo CINTER_BDS_ERROR network-no-default-route; exit 30; }
+    grep -Eq '^[[:space:]]*nameserver[[:space:]]+[^[:space:]]+' /etc/resolv.conf || { echo CINTER_BDS_ERROR network-no-dns; exit 31; }
+    echo CINTER_BDS_NETWORK_READY_CHECK_PASS
+    mkdir -p /mnt/cinter-bds /mnt/rosetta
+    echo CINTER_BDS_MOUNT_BEGIN cinter-bds
+    timeout 10 mount -t virtiofs cinter-bds /mnt/cinter-bds || { rc=$?; echo CINTER_BDS_ERROR cinter-bds-mount rc=$rc; dmesg | tail -40; exit 24; }
+    echo CINTER_BDS_MOUNT_PASS cinter-bds
+    mkdir -p /mnt/cinter-bds/.cinter
+    GUEST_IP=$(ip -4 -o addr show dev eth0 | awk '{split($4,a,"/"); print a[1]; exit}')
+    printf '%s\n' "$GUEST_IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || { echo CINTER_BDS_ERROR guest-ip-unavailable; exit 32; }
+    printf '%s\n' "$GUEST_IP" > /mnt/cinter-bds/.cinter/guest-ip
+    echo "CINTER_BDS_GUEST_IP_PUBLISHED $GUEST_IP"
+    echo CINTER_BDS_MOUNT_BEGIN rosetta
+    timeout 10 mount -t virtiofs rosetta /mnt/rosetta || { rc=$?; echo CINTER_BDS_ERROR rosetta-mount rc=$rc; dmesg | tail -40; exit 25; }
+    echo CINTER_BDS_MOUNT_PASS rosetta
+    mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc || true
+    exec /usr/local/bin/cinter-bds-guest.sh </dev/console >/dev/console 2>&1
+files:
+- path: usr/local/bin/cinter-bds-guest.sh
+  mode: '0755'
+  contents: |
+    #!/bin/sh
+    set -eu
+    BDS_ROOT="${CINTER_BDS_ROOT:-/mnt/cinter-bds}"
+    ROSETTA_ROOT="${CINTER_ROSETTA_ROOT:-/mnt/rosetta}"
+    GLIBC_ROOT="$BDS_ROOT/.cinter/glibc-x86_64"
+    [ -x "$BDS_ROOT/bedrock_server" ] || { echo "CINTER_BDS_ERROR missing $BDS_ROOT/bedrock_server" >&2; exit 20; }
+    [ -x "$ROSETTA_ROOT/rosetta" ] || { echo "CINTER_BDS_ERROR missing $ROSETTA_ROOT/rosetta" >&2; exit 21; }
+    [ -x "$GLIBC_ROOT/ld-linux-x86-64.so.2" ] || { echo "CINTER_BDS_ERROR missing $GLIBC_ROOT/ld-linux-x86-64.so.2" >&2; exit 26; }
+    if [ -w /proc/sys/fs/binfmt_misc/register ] && [ ! -e /proc/sys/fs/binfmt_misc/rosetta ]; then
+      # Apple's documented Rosetta-for-Linux binfmt rule.  The mask is required:
+      # without it, ordinary x86-64 ELF files do not match and /bin/sh tries to
+      # interpret the BDS executable as a shell script.
+      printf ':rosetta:M::\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x3e\\x00:\\xff\\xff\\xff\\xff\\xff\\xfe\\xfe\\x00\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xfe\\xff\\xff\\xff:%s:OCF' "$ROSETTA_ROOT/rosetta" > /proc/sys/fs/binfmt_misc/register
+    fi
+    [ -r /proc/sys/fs/binfmt_misc/rosetta ] || { echo "CINTER_BDS_ERROR rosetta-binfmt-registration-missing" >&2; exit 23; }
+    grep -q '^enabled$' /proc/sys/fs/binfmt_misc/rosetta || { echo "CINTER_BDS_ERROR rosetta-binfmt-disabled" >&2; cat /proc/sys/fs/binfmt_misc/rosetta >&2; exit 23; }
+    echo "CINTER_BDS_ROSETTA_REGISTERED"
+    echo "CINTER_BDS_GUEST_CONTRACT direct-bds-v2"
+    CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+    [ -s "$CA_BUNDLE" ] || { echo "CINTER_BDS_ERROR missing CA bundle $CA_BUNDLE" >&2; exit 27; }
+    echo "CINTER_BDS_CA_BUNDLE_READY $CA_BUNDLE"
+    echo "CINTER_BDS_NETWORK_DIAGNOSTIC_BEGIN"
+    echo "CINTER_BDS_NETWORK_RESOLV_CONF_BEGIN"
+    cat /etc/resolv.conf 2>&1 || true
+    echo "CINTER_BDS_NETWORK_RESOLV_CONF_END"
+    echo "CINTER_BDS_NETWORK_ROUTE_BEGIN"
+    (ip addr 2>&1 || true)
+    (ip route 2>&1 || true)
+    echo "CINTER_BDS_NETWORK_ROUTE_END"
+    echo "CINTER_BDS_FIREWALL_BEGIN"
+    if command -v iptables >/dev/null 2>&1; then iptables -L -n -v 2>&1 || true; else echo "CINTER_BDS_FIREWALL iptables=unavailable"; fi
+    if command -v nft >/dev/null 2>&1; then nft list ruleset 2>&1 || true; else echo "CINTER_BDS_FIREWALL nft=unavailable"; fi
+    echo "CINTER_BDS_FIREWALL_END"
+    echo "CINTER_BDS_UDP_PRELAUNCH_BEGIN port=19132"
+    if command -v nc >/dev/null 2>&1; then
+      set +e
+      printf 'CINTER_BDS_UDP_BROADCAST_PROBE\n' | nc -u -w 1 255.255.255.255 19132 >/dev/null 2>&1
+      UDP_RC=$?
+      set -e
+      echo "CINTER_BDS_UDP_BROADCAST_SEND rc=$UDP_RC destination=255.255.255.255:19132"
+    else
+      echo "CINTER_BDS_UDP_BROADCAST_SEND nc=unavailable"
+    fi
+    echo "CINTER_BDS_UDP_TABLE_BEGIN"
+    cat /proc/net/udp 2>&1 || true
+    cat /proc/net/udp6 2>&1 || true
+    echo "CINTER_BDS_UDP_TABLE_END"
+    echo "CINTER_BDS_UDP_PRELAUNCH_END"
+    echo "CINTER_BDS_NETWORK_DIAGNOSTIC_END"
+    cd "$BDS_ROOT"
+    echo "CINTER_BDS_ROOT_RESOLVED $BDS_ROOT"
+    echo "CINTER_BDS_WORKDIR $(pwd)"
+    if [ -f "$BDS_ROOT/server.properties" ]; then
+      echo "CINTER_BDS_PROPERTIES_VISIBLE path=$BDS_ROOT/server.properties bytes=$(wc -c < "$BDS_ROOT/server.properties" | tr -d ' ')"
+      LEVEL_NAME=$(sed -n 's/^level-name=//p' "$BDS_ROOT/server.properties" | head -n 1)
+      echo "CINTER_BDS_LEVEL_NAME ${LEVEL_NAME:-<unset>}"
+    else
+      echo "CINTER_BDS_ERROR server.properties-not-visible root=$BDS_ROOT cwd=$(pwd)" >&2
+      exit 28
+    fi
+    echo "CINTER_BDS_WORLDS_BEGIN"
+    find worlds -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null || true
+    echo "CINTER_BDS_WORLDS_END"
+    # Execute BDS as BDS, not as ld-linux.  Invoking the loader as argv[0] makes
+    # /proc/self/exe identify the loader, which causes BDS to resolve data files
+    # (for example profiler bootstrap.json) under .cinter/glibc-x86_64/data.
+    # Materialize the interpreter at the ELF-requested path, then let Rosetta's
+    # binfmt handler execute bedrock_server directly.
+    mkdir -p /lib64
+    cp "$GLIBC_ROOT/ld-linux-x86-64.so.2" /lib64/ld-linux-x86-64.so.2
+    chmod 755 /lib64/ld-linux-x86-64.so.2
+    export LD_LIBRARY_PATH="$GLIBC_ROOT:$BDS_ROOT${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    [ -x "$BDS_ROOT/.cinter/cinter-nethernet-probe" ] || { echo "CINTER_BDS_ERROR missing $BDS_ROOT/.cinter/cinter-nethernet-probe" >&2; exit 22; }
+    echo "CINTER_BDS_EXEC $BDS_ROOT/bedrock_server"
+    # BDS is launched as an asynchronous command so the NetherNet readiness probe can
+    # run beside it.  In a non-interactive POSIX shell an asynchronous command with no
+    # explicit stdin redirection may receive /dev/null instead of the shell's stdin.
+    # Attach all three BDS console descriptors directly to the VM serial console.
+    # This deliberately avoids the former FIFO/cat relay, which put Rosetta BDS behind
+    # a Linux pipe and native runs eventually wedged in pipe_read.
+    echo "CINTER_BDS_CONSOLE_MODE direct-serial-console"
+    ./bedrock_server </dev/console >/dev/console 2>&1 &
+    BDS_PID=$!
+    (
+      # Keep this deadline comfortably inside the host-side smoke deadline.
+      # One probe already tries IPv6 loopback and IPv4 loopback.
+      # address, so probing a second port doubled the wall time without adding
+      # evidence for the configured BDS port (19132).
+      i=0
+      while [ "$i" -lt 12 ]; do
+        # This subshell is a child of the LinuxKit service.  Write acceptance
+        # markers to the service stdout/stderr inherited by containerd.  Writing
+        # them to /dev/console races BDS, which also owns /dev/console for its
+        # interactive stdin/stdout and caused the host smoke to wait forever even
+        # after BDS printed "Server started.".
+        echo "CINTER_BDS_NETHERNET_ATTEMPT attempt=$((i+1)) port=19132"
+        if "$BDS_ROOT/.cinter/cinter-nethernet-probe" 19132 >/dev/null 2>&1; then
+          echo "CINTER_BDS_NETHERNET_PASS port=19132"
+          exit 0
+        fi
+        i=$((i+1)); sleep 1
+      done
+      echo "CINTER_BDS_NETHERNET_DIAGNOSTIC_BEGIN"
+      echo "CINTER_BDS_NETHERNET_DIAGNOSTIC port=19132"
+      "$BDS_ROOT/.cinter/cinter-nethernet-probe" 19132 2>&1 || true
+      echo "CINTER_BDS_NETHERNET_FAIL timeout attempts=$i port=19132"
+    ) &
+    PROBE_PID=$!
+    set +e
+    wait "$BDS_PID"
+    RC=$?
+    kill "$PROBE_PID" 2>/dev/null || true
+    wait "$PROBE_PID" 2>/dev/null || true
+    echo "CINTER_BDS_EXIT rc=$RC"
+    # This script runs inside a LinuxKit service container. `poweroff` here is not a
+    # reliable way to stop the enclosing Virtualization.framework VM. Publish the
+    # completed BDS result through the writable VirtioFS share; CinterBDSVM owns the
+    # VM lifecycle and will stop the VM only after seeing this marker.
+    printf '%s\n' "$RC" > "$BDS_ROOT/.cinter/vm-stop-request"
+    echo "CINTER_BDS_VM_STOP_REQUEST rc=$RC"
+    exit "$RC"
+trust:
+  org:
+  - linuxkit

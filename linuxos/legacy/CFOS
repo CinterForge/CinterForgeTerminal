@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# CFOS: public entry point for the CinterForgeOS lifecycle.
+#
+# Each lifecycle phase lives in one readable script under build/.
+# This file only parses arguments and supplies shared, small helpers.
+set -euo pipefail
+
+CFOS_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+CFOS_WORKSPACE="$(dirname "$CFOS_ROOT")"
+CFOS_BUILD_ROOT="$CFOS_WORKSPACE/Builds/CreativeSuite/Built/cinterforge-os/mac"
+CFOS_PRODUCT_ROOT="$CFOS_BUILD_ROOT/CFOS/work/out/XcodeProduct"
+# Steam discovery is required by Stage/Test/Publish, not Setup/Build. Do not
+# require Steam to be installed just to provision or compile CFOS.
+cfos_steamapps() {
+  if [[ -z "${CFOS_STEAMAPPS:-}" ]]; then
+    CFOS_STEAMAPPS="$(python3 "$CFOS_ROOT/scripts/resolve-steamapps.py")" || return 1
+  fi
+  printf '%s\n' "$CFOS_STEAMAPPS"
+}
+cfos_install_root() {
+  if [[ -n "${CFOS_INSTALL_ROOT:-}" ]]; then printf '%s\n' "$CFOS_INSTALL_ROOT"; return; fi
+  if (( CFOS_DRY_RUN )) && [[ -z "${CFOS_STEAMAPPS:-}" ]]; then
+    printf '%s\n' '<resolved Steam library>/common/CinterForge/Applications/macOS/CinterForgeOS'
+    return 0
+  fi
+  local steamapps
+  steamapps="$(cfos_steamapps)" || return 1
+  printf '%s/common/CinterForge/Applications/macOS/CinterForgeOS\n' "$steamapps"
+}
+cfos_linux() {
+  local op="$1"
+  # The one tested shipping Ubuntu Release image is shared by both macOS
+  # Debug and Release builds. Linux can still build its own Debug identity.
+  local prerequisite_configuration="$CFOS_CONFIGURATION"
+  local args=("$op" --repo-root "$CFOS_ROOT" --configuration "$prerequisite_configuration")
+  (( ! CFOS_DRY_RUN )) || args+=(--dry-run)
+  cfos_run python3 -u "$CFOS_ROOT/build/linux/ubuntu_pipeline.py" "${args[@]}"
+}
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: ./CFOS clone all [--dry-run]       # dry-run checks local Git checkouts, fails if missing
+       ./CFOS fork all [--dry-run]        # GitHub fork management (explicit)
+       ./CFOS <setup|build|stage|test|publish|all> cinterforge-os <mac|linux> <Release|Debug|all> [--dry-run]
+       ./CFOS build cinterforge-os linuxkit Release [--dry-run]
+       ./CFOS test cinterforge-os linuxkit Release [--dry-run]
+       ./CFOS launch cinterforge-os linuxkit Release --server /path/to/Bedrock/Server [--dry-run]
+
+Examples:
+  ./CFOS setup cinterforge-os mac Release
+  ./CFOS all cinterforge-os mac all
+  ./CFOS build cinterforge-os linux Release
+  ./CFOS publish cinterforge-os mac Release
+  ./CFOS test cinterforge-os mac Debug --dry-run
+  ./CFOS test cinterforge-os linux Release
+  ./CFOS build cinterforge-os linuxkit Release
+  ./CFOS test cinterforge-os linuxkit Release
+  ./CFOS launch cinterforge-os linuxkit Release --server /path/to/Bedrock/Server
+
+The fourth argument "all" means Debug and Release.
+The first argument "all" means Setup, Build, Stage, and Test (in that order).
+USAGE
+  exit 64
+}
+
+if [[ "${1:-}" == clone || "${1:-}" == fork ]]; then
+  source_action="$1"
+  shift
+  if (( $# == 0 )); then set -- all; fi
+  exec python3 -u "$CFOS_ROOT/scripts/fork.py" "$source_action" "$@"
+fi
+
+# Model provenance/installation is CFOS-owned, not Server update-data.
+if [[ $# -ge 2 && "${2:-}" == 'models' ]]; then
+  case "${1:-}" in setup|build|stage|test)
+    phase="$1"; shift 2
+    exec python3 -u "$CFOS_ROOT/build/models/lifecycle.py" "$phase" "$@" ;;
+  esac
+fi
+
+# CFOS owns the complete Creative Suite recipe lifecycle across all platforms.
+# Only the OS itself continues through the specialized native CFOS image flow.
+if [[ $# -ge 3 && "${2:-}" != 'cinterforge-os' ]]; then
+  case "${1:-}" in setup|build|stage|test|publish|inspect|all)
+    exec python3 -u "$CFOS_ROOT/build/creativeSuite/command.py" "$@" ;;
+  esac
+fi
+
+[[ $# -ge 4 ]] || usage
+CFOS_ACTION="$1"
+CFOS_APPLICATION="$2"
+CFOS_PLATFORM="$3"
+CFOS_CONFIGURATION="$4"
+shift 4
+
+case "$CFOS_ACTION" in setup|build|stage|test|publish|all|launch) ;; *) usage ;; esac
+[[ "$CFOS_APPLICATION" == 'cinterforge-os' ]] || usage
+case "$CFOS_PLATFORM" in mac|linux|linuxkit) ;; *) usage ;; esac
+case "$CFOS_CONFIGURATION" in Release|Debug|all) ;; *) usage ;; esac
+if [[ "$CFOS_PLATFORM" == linuxkit ]]; then
+  [[ "$CFOS_CONFIGURATION" == Release ]] || usage
+  case "$CFOS_ACTION" in build|test|launch) ;; *) usage ;; esac
+elif [[ "$CFOS_ACTION" == launch ]]; then
+  echo 'CFOS: launch is LinuxKit-only.' >&2; exit 64
+fi
+if [[ "$CFOS_ACTION" == publish && "$CFOS_CONFIGURATION" != Release ]]; then
+  echo "CFOS: Publish requires a staged Release." >&2; exit 64
+fi
+CFOS_DRY_RUN=0
+CFOS_LINUXKIT_SERVER=""
+if [[ "$CFOS_ACTION" == launch ]]; then
+  [[ $# -ge 2 && "$1" == --server && -n "$2" ]] || usage
+  CFOS_LINUXKIT_SERVER="$2"
+  shift 2
+fi
+if (( $# )); then
+  [[ $# -eq 1 && "$1" == '--dry-run' ]] || usage
+  CFOS_DRY_RUN=1
+fi
+
+# Print every command, including commands skipped by --dry-run.
+cfos_run() {
+  printf 'CFOS:'
+  printf ' %q' "$@"
+  printf '\n'
+  if (( ! CFOS_DRY_RUN )); then "$@"; fi
+}
+
+cfos_require_mac() {
+  if (( ! CFOS_DRY_RUN )); then
+    [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || {
+      echo 'CFOS: Apple Silicon macOS (arm64) is required.' >&2
+      return 1
+    }
+  fi
+}
+
+cfos_configurations() {
+  if [[ "$CFOS_CONFIGURATION" == all ]]; then
+    printf 'Debug\nRelease\n'
+  else
+    printf '%s\n' "$CFOS_CONFIGURATION"
+  fi
+}
+
+cfos_built_app() {
+  printf '%s/%s/CinterForge OS.app\n' "$CFOS_PRODUCT_ROOT" "$1"
+}
+
+cfos_installed_app() {
+  local root; root="$(cfos_install_root)" || return 1
+  case "$1" in
+    Release) printf '%s/2026/CinterForge OS.app\n' "$root" ;;
+    Debug) printf '%s/2026-Debug/CinterForge OS.app\n' "$root" ;;
+  esac
+}
+
+# This checks packaging identity, not full runtime/graphics functionality.
+cfos_validate_app() {
+  local app="$1"
+  [[ -d "$app" && -x "$app/Contents/MacOS/cfos-vm" ]] || {
+    echo "CFOS: missing native executable: $app/Contents/MacOS/cfos-vm" >&2
+    return 1
+  }
+  [[ -f "$app/Contents/Info.plist" ]] || {
+    echo "CFOS: missing Info.plist in $app" >&2
+    return 1
+  }
+  local ubuntu="$app/Contents/Resources/Ubuntu"
+  [[ -f "$ubuntu/ubuntu_adapter.py" && -f "$ubuntu/managed_backend.py" && -f "$ubuntu/headless_contract.sh" ]] || {
+    echo "CFOS: built/staged .app missing the CFOS Ubuntu host adapter: $ubuntu" >&2
+    return 1
+  }
+}
+
+# CFOS owns LinuxKit Build, Test, and Launch. Build produces the shared VM
+# image; Test installs/runs isolated official BDS; consumers use Launch and
+# never recompile the bootstrap through CraftMaster or the Creative Suite.
+cfos_linuxkit() {
+  local op="$1"
+  local bootstrap="$CFOS_WORKSPACE/Builds/CreativeSuite/CFOS/LinuxKit"
+  if [[ "$op" == build ]]; then
+    cfos_run python3 -u "$CFOS_ROOT/build/linux/build_linux.py" --repo-root "$CFOS_ROOT"
+    return
+  fi
+  if (( CFOS_DRY_RUN )); then
+    cfos_run python3 -u "$CFOS_ROOT/build/linux/build_linux.py" --repo-root "$CFOS_ROOT" --verify-only
+  else
+    python3 -u "$CFOS_ROOT/build/linux/build_linux.py" --repo-root "$CFOS_ROOT" --verify-only || return $?
+  fi
+  cfos_require_mac || return $?
+  local server="$CFOS_LINUXKIT_SERVER"
+  if (( ! CFOS_DRY_RUN )); then
+    [[ -d "$server" ]] || { echo "CFOS: Bedrock server directory not found: $server" >&2; return 1; }
+    server="$(cd -- "$server" && pwd -P)" || return 1
+    local required
+    for required in bedrock_server server.properties .cinter/glibc-x86_64/ld-linux-x86-64.so.2 .cinter/cinter-nethernet-probe; do
+      [[ -f "$server/$required" ]] || { echo "CFOS: Bedrock runtime missing: $server/$required" >&2; return 1; }
+    done
+    [[ -x "$server/bedrock_server" && -x "$server/.cinter/cinter-nethernet-probe" ]] || {
+      echo 'CFOS: Bedrock server/probe is not executable.' >&2; return 1;
+    }
+    [[ -x "$bootstrap/CinterBDSVM" ]] || {
+      echo "CFOS: built LinuxKit VM launcher missing: $bootstrap/CinterBDSVM" >&2; return 1;
+    }
+  fi
+  cfos_run env \
+    "CINTER_VM_KERNEL=$bootstrap/cinter-bds-kernel" \
+    "CINTER_VM_INITRD=$bootstrap/cinter-bds-initrd.img" \
+    "CINTER_VM_CMDLINE=$bootstrap/cinter-bds-cmdline" \
+    "CINTER_BDS_HOST_DIR=$server" \
+    "$bootstrap/CinterBDSVM"
+}
+
+# Source phase definitions without running them. Their only public entry
+# points are cfos_setup, cfos_build, cfos_stage, and cfos_test.
+source "$CFOS_ROOT/build/setup.sh"
+source "$CFOS_ROOT/build/build.sh"
+source "$CFOS_ROOT/build/stage.sh"
+source "$CFOS_ROOT/build/test.sh"
+source "$CFOS_ROOT/build/all.sh"
+source "$CFOS_ROOT/build/publish.sh"
+
+case "$CFOS_ACTION" in
+  setup) cfos_setup ;;
+  build) if [[ "$CFOS_PLATFORM" == linuxkit ]]; then cfos_linuxkit build; else cfos_build; fi ;;
+  stage) cfos_stage ;;
+  test)  cfos_test ;;
+  launch) cfos_linuxkit launch ;;
+  all)   cfos_all ;;
+  publish) cfos_publish ;;
+esac

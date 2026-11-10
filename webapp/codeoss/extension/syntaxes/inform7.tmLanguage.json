@@ -1,0 +1,46 @@
+{
+  "name": "Inform 7",
+  "scopeName": "source.inform7",
+  "patterns": [
+    {
+      "name": "comment.block.inform7",
+      "begin": "\\[",
+      "end": "\\]"
+    },
+    {
+      "name": "markup.heading.inform7",
+      "match": "(?i)^(volume|book|part|chapter|section)\\b.*$"
+    },
+    {
+      "name": "string.quoted.double.inform7",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.inform7",
+          "match": "\\[[^\\]]+\\]"
+        }
+      ]
+    },
+    {
+      "name": "keyword.control.inform7",
+      "match": "(?i)\\b(if|otherwise|unless|while|repeat|through|instead|before|after|when|every turn|check|carry out|report|rule|rules|this is|understand|does the player mean)\\b"
+    },
+    {
+      "name": "storage.type.inform7",
+      "match": "(?i)\\b(room|thing|person|man|woman|animal|container|supporter|device|door|vehicle|region|direction|kind|action|relation|property|number|text|truth state|table)\\b"
+    },
+    {
+      "name": "keyword.declaration.inform7",
+      "match": "(?i)\\b(is|are|has|have|can be|usually|always|never|either|or|called|means|specifies|varies|understand)\\b"
+    },
+    {
+      "name": "constant.language.inform7",
+      "match": "(?i)\\b(true|false|nothing|nowhere)\\b"
+    },
+    {
+      "name": "constant.numeric.inform7",
+      "match": "\\b\\d+(?:\\.\\d+)?\\b"
+    }
+  ]
+}

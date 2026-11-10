@@ -1,0 +1,17 @@
+# Steam-only ARM64 execution environment. Does not replace Dockerfile.distro.
+# Steam and the FEX x86 rootfs remain persistent application data, not image assets.
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN test "$(dpkg --print-architecture)" = arm64 && \
+    apt-get update && apt-get install -y --no-install-recommends \
+      software-properties-common ca-certificates python3 xvfb xauth x11-utils \
+      x11-xserver-utils openbox x11vnc dbus-x11 procps tini file \
+      squashfs-tools squashfuse fuse3 xz-utils && \
+    add-apt-repository -y ppa:fex-emu/fex && \
+    apt-get update && apt-get install -y --no-install-recommends fex-emu-armv8.0 && \
+    command -v FEX && command -v FEXRootFSFetcher && \
+    rm -rf /var/lib/apt/lists/*
+ENV HOME=/opt/cinterforge/Applications/.steam-fex-home
+WORKDIR /opt/cinterforge
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/bin/bash"]

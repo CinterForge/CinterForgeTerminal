@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en" data-cph-token="__CPH_TOKEN__">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CinterForgeTerminal — Computer History Museum</title>
+  <link rel="stylesheet" href="/terminal.css">
+  <script defer src="/terminal.js"></script>
+</head>
+<body>
+  <!-- The main product is Kevin's retro Terminal Sessions presentation, not
+       a separate demonstration dashboard with a terminal floating above it. -->
+  <main id="app-content">
+    <section id="terminal-overlay" class="terminal-overlay" aria-label="Kevin's retro terminal session">
+      <div class="terminal-titlebar">
+        <span class="terminal-led" aria-hidden="true"></span>
+        <strong id="terminal-machine-title">TERMINAL SESSION</strong>
+        <span id="terminal-shell" role="status"></span>
+        <nav id="terminal-menus" class="terminal-menus" aria-label="Terminal and Computer History Museum">
+          <details class="terminal-menu" id="terminal-menu"><summary>Terminals ▾</summary><div id="terminal-menu-list" class="terminal-menu-list"></div></details>
+          <details class="terminal-menu" id="macintosh-menu"><summary>Macintosh ▾</summary><div id="macintosh-menu-list" class="terminal-menu-list"></div></details>
+          <details class="terminal-menu" id="beos-menu"><summary>BeOS ▾</summary><div id="beos-menu-list" class="terminal-menu-list"></div></details>
+          <details class="terminal-menu" id="nextstep-menu"><summary>NeXTSTEP ▾</summary><div id="nextstep-menu-list" class="terminal-menu-list"></div></details>
+        </nav>
+      </div>
+      <nav id="terminal-tabs" class="terminal-tabs" role="tablist" aria-label="Terminal sessions"></nav>
+      <nav id="terminal-keys" class="terminal-keys" aria-label="Terminal keys">
+        <button type="button" data-terminal-key="Escape">Esc</button>
+        <button type="button" data-terminal-key="Tab">Tab</button>
+        <button type="button" data-terminal-key="ArrowUp" aria-label="Up arrow">↑</button>
+        <button type="button" data-terminal-key="ArrowDown" aria-label="Down arrow">↓</button>
+        <button type="button" data-terminal-key="ArrowLeft" aria-label="Left arrow">←</button>
+        <button type="button" data-terminal-key="ArrowRight" aria-label="Right arrow">→</button>
+        <button type="button" data-terminal-key="ControlC">Ctrl+C</button>
+        <button type="button" data-terminal-key="Enter">Enter</button>
+        <button type="button" id="terminal-reconnect">Reconnect</button>
+      </nav>
+      <div id="terminal-screen" tabindex="0" role="textbox" aria-label="Native terminal output; type to send input to the shell" aria-multiline="true"><pre id="terminal-output" aria-live="off"></pre></div>
+      <div id="computer-view" class="computer-view" hidden>
+        <iframe id="computer-frame" title="Computer History Museum emulator" referrerpolicy="no-referrer" allow="cross-origin-isolated"></iframe>
+        <!-- Required by terminal.js to report workbench errors without breaking PTY startup. -->
+        <div id="computer-error" class="computer-error" role="alert" hidden></div>
+      </div>
+      <textarea id="terminal-input" aria-label="Terminal input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+      <div class="terminal-footer"><span id="terminal-message" role="status">Opening shell…</span><span>Ctrl+Shift+` · help · debugger · bedrock</span></div>
+    </section>
+  </main>
+  <div id="license-dialog" class="license-backdrop" hidden>
+    <section class="license-card" role="dialog" aria-modal="true" aria-labelledby="license-title">
+      <h2 id="license-title">Minecraft Bedrock dedicated server — license</h2>
+      <p>Before downloading the official Bedrock server, review the Minecraft End User License Agreement and Privacy Policy.</p>
+      <p><a href="https://www.minecraft.net/en-us/eula" target="_blank" rel="noopener noreferrer">Minecraft EULA</a> · <a href="https://www.minecraft.net/en-us/privacy" target="_blank" rel="noopener noreferrer">Minecraft Privacy Policy</a> · <a href="https://www.minecraft.net/en-us/download/server/bedrock" target="_blank" rel="noopener noreferrer">Official server download</a></p>
+      <label><input type="checkbox" id="license-accept"> I have reviewed and accept the EULA and Privacy Policy.</label>
+      <div class="actions"><button id="license-cancel" type="button">Cancel</button><button id="license-confirm" type="button" disabled>Accept &amp; Install</button></div>
+      <p class="small">Accepting downloads the official server into your Steam library. If installation fails, type <code>bedrock install</code> to retry.</p>
+    </section>
+  </div>
+</body>
+</html>

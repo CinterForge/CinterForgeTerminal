@@ -1,0 +1,1011 @@
+#!/usr/bin/env python3
+"""CinterForgeTerminal: documented entry point for developers and builders.
+
+This script is the *single user-facing command driver* for the Terminal repo.
+Use ``./Cinter <command>`` on macOS/Linux or ``Cinter.cmd`` on Windows.
+
+PUBLIC INTERFACES
+    setup / build / stage / test / all   — application lifecycle
+    host                                 — C++ Host lifecycle / diagnostics
+    clone / fork                         — maintained source management
+    pull / publish / fetch / verify      — explicitly scoped R2 transfers
+    status / toolchain / install         — read-only diagnostics or SDK install
+
+BUILD SAFETY
+    Setup prepares pinned dependencies and runs real Bedrock acceptance.
+    Build produces the three native apps and unified optional DevTools ZIP.
+    Stage installs and checks archives; ``all all`` never publishes.
+    Child build tools, not this CLI, own their detailed platform implementations.
+    Only the lifecycle that started managed VMs may stop them.
+    Every lifecycle invocation produces persistent Build/Stage/Setup/Test logs
+    and PASS/FAIL summaries, not console-only output.
+
+DIRECTORY OWNERSHIP
+    ``build/`` is authored source (bootstrap/resource inputs).
+    ``webapp/`` is authored browser and Python application source.
+    The *sibling* ``Builds/`` is the sole generated-artifact/cache directory,
+    unless a documented runtime belongs in the designated steamapps tree.
+
+Internal helpers are below the public dispatcher and grouped by purpose.
+Source-management code was moved here from ``build/fork.py``; it never resets
+an existing checkout. A separate ``CPH`` user-facing script is not required.
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import csv
+import ast
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+from urllib.parse import urlparse
+
+# -----------------------------------------------------------------------------
+# Configuration — authored paths and user-overridable generated outputs
+# -----------------------------------------------------------------------------
+# Directory containing the actual source checkout, not the current working dir.
+REPO = Path(__file__).resolve().parent
+# Generated content. The environment override supports controlled build agents.
+BUILDS = Path(os.environ.get('CINTER_BUILDS_ROOT', str(REPO.parent / 'Builds'))).resolve()
+# Source repositories are declared, not discovered or inferred from siblings.
+SOURCE_ORGANIZATION = 'CinterForge'
+SOURCE_DEVELOPMENT_BRANCH = 'cinterforge/cinterforge'
+SOURCE_REPOSITORIES_CSV = REPO / 'build' / 'source_repositories.csv'
+SOURCE_WORKSPACE_ROOT = REPO.parent
+# The local build log is authoritative even when the console scrolls away.
+# One complete log and one machine-readable JSON result are written per command.
+LIFECYCLE_LOG_DIRECTORY = BUILDS / 'Logs' / 'CinterForgeTerminal' / 'Lifecycle'
+# Status is deliberately omitted: ./Cinter status all remains read-only.
+LOGGED_LIFECYCLE_ACTIONS = frozenset({
+    'setup', 'build', 'stage', 'test', 'all', 'publish', 'verify',
+    'fetch', 'pull', 'toolchain', 'host', 'windows', 'install',
+})
+# The worker marker prevents a second wrapper for the exact same command.
+LOGGED_WORKER_MARKER = 'CINTER_TERMINAL_LOG_WORKER_COMMAND'
+SOURCE_MAINTAINED_FORKS = {
+    'cinterforgewebview': 'cinterforge-webview',
+    'cinterforgeterminal': 'CinterForgeTerminal',
+}
+
+
+def _run_with_persistent_lifecycle_log(arguments: list[str]) -> int:
+    """Stream all child output to both console and a persistent, dated log.
+
+    The same ``Cinter`` implementation executes in a worker subprocess; it
+    still owns VM startup, cleanup and interrupt handling. Nested lifecycle
+    commands receive their own per-phase logs, while ``all all`` also keeps a
+    complete parent transcript. No extra commands are required from the user.
+    """
+    LIFECYCLE_LOG_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    started_at = datetime.now(timezone.utc)
+    label = '-'.join(re.sub(r'[^a-zA-Z0-9]+', '-', part).strip('-') for part in arguments)
+    label = label[:80] or 'unknown'
+    unique_name = f'{started_at.strftime("%Y%m%d-%H%M%S-%f")}-{os.getpid()}-{label}'
+    log_path = LIFECYCLE_LOG_DIRECTORY / f'{unique_name}.log'
+    result_path = LIFECYCLE_LOG_DIRECTORY / f'{unique_name}.json'
+    worker_environment = dict(os.environ)
+    worker_environment[LOGGED_WORKER_MARKER] = json.dumps(arguments)
+    worker_environment['PYTHONDONTWRITEBYTECODE'] = '1'
+    worker_environment['PYTHONUNBUFFERED'] = '1'
+    exit_code = 1
+    interrupted = False
+    print(f'[CinterForgeTerminal] Persistent lifecycle log: {log_path}', flush=True)
+    # We read pipe chunks, not lines, because native subprocesses and progress
+    # indicators do not necessarily emit newline-terminated output.
+    with log_path.open('wb') as log_stream:
+        try:
+            process = subprocess.Popen(
+                [sys.executable, '-B', str(REPO / 'Cinter'), *arguments],
+                cwd=REPO, env=worker_environment, stdin=None,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
+            )
+            try:
+                assert process.stdout is not None
+                while True:
+                    chunk = os.read(process.stdout.fileno(), 65536)
+                    if not chunk:
+                        break
+                    log_stream.write(chunk)
+                    log_stream.flush()
+                    console_stream = getattr(sys.stdout, 'buffer', None)
+                    if console_stream is not None:
+                        console_stream.write(chunk)
+                        console_stream.flush()
+                    else:
+                        sys.stdout.write(chunk.decode('utf-8', errors='replace'))
+                        sys.stdout.flush()
+                exit_code = process.wait()
+            except KeyboardInterrupt:
+                interrupted = True
+                # Ctrl-C is delivered to the worker too in normal terminal use.
+                # Never orphan a worker when the supervising CLI is interrupted.
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                exit_code = 130
+            finally:
+                if process.stdout is not None:
+                    process.stdout.close()
+        except (OSError, ValueError) as error:
+            message = f'[CinterForgeTerminal] Failed to start lifecycle command: {error}\n'
+            log_stream.write(message.encode('utf-8', errors='replace'))
+            print(message, file=sys.stderr, end='', flush=True)
+        finished_at = datetime.now(timezone.utc)
+        result = 'PASS' if exit_code == 0 else ('INTERRUPTED' if interrupted else 'FAIL')
+        summary = {
+            'command': ['Cinter', *arguments],
+            'result': result,
+            'exit_code': exit_code,
+            'started_utc': started_at.isoformat(),
+            'finished_utc': finished_at.isoformat(),
+            'duration_seconds': round((finished_at - started_at).total_seconds(), 3),
+            'log': str(log_path),
+        }
+        # The last line of the human-readable transcript includes the result;
+        # the JSON sidecar can also be consumed by CI or a later handoff.
+        summary_line = (f'[CinterForgeTerminal] RESULT {result}: '
+                        f'{" ".join(summary["command"])} (exit {exit_code})\n')
+        log_stream.write(summary_line.encode('utf-8'))
+        log_stream.flush()
+        # The JSON sidecar is the durable PASS/FAIL result; the .log preserves
+        # full console context. Neither is stored under the source checkout.
+        result_path.write_text(json.dumps(summary, indent=2) + '\n', encoding='utf-8')
+        latest = LIFECYCLE_LOG_DIRECTORY / f'latest-{label}.json'
+        latest.write_text(json.dumps(summary, indent=2) + '\n', encoding='utf-8')
+        print(f'[CinterForgeTerminal] {result}: {" ".join(summary["command"])} '
+              f'(exit {exit_code}, {summary["duration_seconds"]}s)', flush=True)
+        print(f'[CinterForgeTerminal] Full log: {log_path}', flush=True)
+        print(f'[CinterForgeTerminal] Result:   {result_path}', flush=True)
+    return exit_code
+
+
+def _preflight_source_layout() -> None:
+    """Check authored build inputs before costly Setup and log each result.
+
+    This runs *inside* ``./Cinter setup all``. No separate preflight command
+    or manual folder checks are required from the person running the lifecycle.
+    """
+    expected_files = (
+        'Cinter', 'Cinter.cmd', 'CMakeLists.txt',
+        'webapp/index.html', 'webapp/terminal.js',
+        'webapp/CinterForgeTerminal.py', 'webapp/terminal_styles.json',
+        'webapp/mac_games.json', 'webapp/if_titles.json',
+        'webapp/codeoss/setup.py', 'build/projects.example.json',
+        'build/powershell.packages.example.json',
+    )
+    expected_directories = ('build/resources', 'build/terminal_bootstrap', 'webapp/codeoss')
+    problems = []
+    for relative_path in expected_files:
+        source_path = REPO / relative_path
+        if source_path.is_file():
+            print(f'[Cinter preflight] PASS file {relative_path}', flush=True)
+        else:
+            print(f'[Cinter preflight] FAIL missing file {relative_path}', flush=True)
+            problems.append(relative_path)
+    for relative_path in expected_directories:
+        source_path = REPO / relative_path
+        if source_path.is_dir():
+            print(f'[Cinter preflight] PASS directory {relative_path}', flush=True)
+        else:
+            print(f'[Cinter preflight] FAIL missing directory {relative_path}', flush=True)
+            problems.append(relative_path)
+    # Validate authored JSON data before the browser or native shell loads it.
+    for relative_path in ('webapp/terminal_styles.json', 'webapp/mac_games.json',
+                          'webapp/if_titles.json', 'build/projects.example.json',
+                          'build/powershell.packages.example.json'):
+        file_path = REPO / relative_path
+        if not file_path.is_file():
+            continue
+        try:
+            json.loads(file_path.read_text(encoding='utf-8'))
+        except (OSError, UnicodeError, ValueError) as error:
+            problems.append(relative_path)
+            print(f'[Cinter preflight] FAIL invalid JSON {relative_path}: {error}', flush=True)
+        else:
+            print(f'[Cinter preflight] PASS JSON {relative_path}', flush=True)
+    # Parse only; don't import modules or start guest services in the preflight.
+    for relative_path in ('Cinter', 'webapp/CinterForgeTerminal.py',
+                          'webapp/codeoss/setup.py'):
+        try:
+            ast.parse((REPO / relative_path).read_text(encoding='utf-8'), filename=relative_path)
+        except (OSError, UnicodeError, SyntaxError) as error:
+            problems.append(relative_path)
+            print(f'[Cinter preflight] FAIL Python syntax {relative_path}: {error}', flush=True)
+        else:
+            print(f'[Cinter preflight] PASS Python syntax {relative_path}', flush=True)
+    if problems:
+        raise RuntimeError('Setup preflight failed: ' + ', '.join(sorted(set(problems))))
+    print('[Cinter preflight] PASS source layout, JSON and Python syntax', flush=True)
+
+
+def invoke(*args: str) -> None:
+    print('[CinterForgeTerminal] ' + ' '.join(args), flush=True)
+    subprocess.run(args, cwd=REPO, check=True,
+                   env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+
+
+def _run_automated_regression_tests() -> None:
+    """Run offline source checks as part of native Test, never as user chores.
+
+    The outer lifecycle log captures every regression result. The native
+    macOS UI acceptance still runs afterward; passing these checks does NOT
+    certify a Windows/Linux native UI build.
+    """
+    print('[Cinter test] Running Python source regressions', flush=True)
+    invoke(sys.executable, '-B', '-m', 'unittest', 'discover', '-s', 'tests',
+           '-p', 'test_suite_*.py', '-q')
+    node_executable = shutil.which('node')
+    if not node_executable:
+        raise RuntimeError('Node.js unavailable in Test environment. Run ./Cinter setup all '
+                           'to provision the managed toolchain before Test.')
+    javascript_checks = (
+        ('--check', 'webapp/terminal.js'),
+        ('tests/lagomorph-timing-smoke.cjs',),
+        ('tests/test_lagomorph_controls.cjs',),
+        ('tests/ui-smoke.cjs',),
+        ('tests/museum-ui-smoke.cjs',),
+        ('tests/ui-acceptance-smoke.cjs',),
+    )
+    for check_arguments in javascript_checks:
+        print('[Cinter test] JavaScript ' + ' '.join(check_arguments), flush=True)
+        invoke(node_executable, *check_arguments)
+    print('[Cinter test] PASS Python and JavaScript source regressions', flush=True)
+
+
+@contextmanager
+def _temporary_build_services(argv: list[str]):
+    """Outer Setup/Build owns Colima, including failure and SIGKILL cleanup."""
+    owner = (bool(argv) and argv[0] in ('setup', 'build') and
+             not os.environ.get('CINTER_LIFECYCLE_PARENT') and
+             platform.system() == 'Darwin')
+    if not owner:
+        yield
+        return
+    previous = os.environ.get('CINTER_LIFECYCLE_PARENT')
+    os.environ['CINTER_LIFECYCLE_PARENT'] = '1'
+    logfile = BUILDS / 'Logs/CinterForgeTerminal/colima-cleanup.log'
+    logfile.parent.mkdir(parents=True, exist_ok=True)
+    with logfile.open('ab') as stream:
+        watcher = subprocess.Popen(
+            [sys.executable, '-B', '-m', 'host.mac_bootstrap',
+             '--cleanup-watchdog', '--builds', str(BUILDS)],
+            cwd=REPO, stdin=subprocess.PIPE, stdout=stream, stderr=stream,
+            close_fds=True, start_new_session=True)
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop('CINTER_LIFECYCLE_PARENT', None)
+            else:
+                os.environ['CINTER_LIFECYCLE_PARENT'] = previous
+            try:
+                from host.mac_bootstrap import stop_setup_build_vms
+                stop_setup_build_vms(BUILDS)
+            except BaseException:
+                # The watchdog must perform cleanup if the outer command
+                # could not; leave its pipe to close without 'finished'.
+                if watcher.stdin is not None:
+                    watcher.stdin.close()
+                raise
+            else:
+                if watcher.stdin is not None:
+                    try:
+                        watcher.stdin.write(b'finished\n')
+                        watcher.stdin.flush()
+                    except BrokenPipeError:
+                        pass
+                    finally:
+                        watcher.stdin.close()
+                watcher.wait(timeout=10)
+
+def main(argv: list[str]) -> int:
+    """Dispatch the supported developer/user commands; returns a process exit code.
+
+    The command parser is purposefully exact: a release operation must name
+    its application/channel rather than inferring targets or publishing in
+    response to a general Setup/Build/Stage action.
+    """
+    if argv and argv[0] in ('clone', 'fork'):
+        return _source_repository_main(argv)
+    # Legacy native Host lifecycle was formerly exposed as ./CPH.
+    # Preserve its implementation until it can be merged without risking VM
+    # provisioning, while presenting one public command: ./Cinter host ...
+    if argv and argv[0] == 'host':
+        from host.manager import main as host_lifecycle_main
+        return host_lifecycle_main(argv[1:])
+    if len(argv) >= 5 and argv[:4] == ['launch','cinterforge-os','linuxkit','Release'] and argv[4] == '--server':
+        if len(argv) != 6:
+            raise ValueError('Usage: ./Cinter launch cinterforge-os linuxkit Release --server <server-dir>')
+        invoke(sys.executable, '-B', str(REPO / 'linuxos/lifecycle.py'), 'launch', '--server', argv[5])
+        return 0
+    if len(argv) == 3 and argv[:2] == ['linuxkit', 'build']:
+        raise ValueError('Use ./Cinter setup all (no per-platform lifecycle stages)')
+    if argv == ['setup', 'all']:
+        # Setup owns preflight diagnostics: prepare its one permitted output root
+        # and run the native sign-of-life before any build or download.
+        BUILDS.mkdir(parents=True, exist_ok=True)
+        _preflight_source_layout()
+        if platform.system() == 'Darwin':
+            # Xcode alone must be sufficient to ENTER Setup. Stage all other
+            # tools (and the container backend) before probing their versions.
+            invoke(sys.executable, '-B', '-m', 'host.mac_bootstrap',
+                   '--builds', str(BUILDS))
+            # Subsequent child lifecycles MUST use the staged Colima Docker
+            # context, Lima state, caches and VM under sibling Builds.
+            from host.mac_bootstrap import managed_environment
+            os.environ.update(managed_environment(BUILDS))
+        # Windows is a required target, not a best-effort add-on. Stage the
+        # FULL MinGW/Wine/Xvfb image and Windows SDK/runtime acquisition into
+        # Builds BEFORE any other cross build or Linux SDK preflight. Verify
+        # local dependency closure; DevTools transfer packaging comes later.
+        if platform.system() in ('Darwin', 'Linux'):
+            invoke(sys.executable, '-B', '-m', 'host.windows_dependencies',
+                   '--builds', str(BUILDS))
+        # For this Setup phase, verify the full developer tool inventory first.
+        # The resulting Markdown report includes every failed probe as well as
+        # successful versions and measured executable sizes.
+        invoke(sys.executable, '-B', '-m', 'host.devtooling',
+               '--builds', str(BUILDS))
+        from host.bootstrap_bundle import provision_zmachine
+        provision_zmachine(BUILDS)
+        # Setup prepares EVERY dependency (including foreign Python runtimes)
+        # and executes the real Minecraft acceptance before any release ZIP.
+        from host.portable_python import provision
+        provision(BUILDS, 'mac', 'arm64')
+        from host.universal_package import provision_release_runtimes
+        provision_release_runtimes(BUILDS)
+        # LinuxKit's custom-kernel producer uses the *existing w Docker
+        # engine*. It must finish before we release w and start c. The LinuxKit
+        # Setup lifecycle owns this handoff, not Build or Stage.
+        invoke(sys.executable, '-B', str(REPO / 'linuxos/lifecycle.py'), 'setup')
+        if platform.system() == 'Darwin':
+            # Setup produced the glibc/probe closure; c is no longer needed.
+            # Release its memory before starting the real LinuxKit/Bedrock VM.
+            from host.mac_bootstrap import stop_linuxkit_build_backend
+            print('[CinterForgeTerminal] Releasing guest-input builder c before Bedrock acceptance', flush=True)
+            stop_linuxkit_build_backend(BUILDS)
+        # This is an actual official-Bedrock launch through the signed,
+        # native-bridged LinuxKit VM, not a placeholder compile check.
+        invoke(sys.executable, '-B', str(REPO / 'linuxos/lifecycle.py'), 'test')
+        invoke(sys.executable, '-B', str(REPO / 'webapp/codeoss/setup.py'),
+               '--workspace', str(REPO.parent))
+        # Required source pull is internal-only, before HFS media construction.
+        # Do not access the public bucket or publish anything in Setup.
+        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'pull', 'lagomorph', 'source')
+        invoke(sys.executable, '-B', '-m', 'host.lagomorph_setup', '--builds', str(BUILDS))
+        print('[CinterForgeTerminal] Setup complete: dependencies, LinuxKit, guest runtime and real Bedrock acceptance verified', flush=True)
+        return 0
+    # Four separate release ZIPs: Mac, Linux, Windows and one unified DevTools.
+    # Mac orchestrates real Linux OCI/Windows cross builds, without presenting
+    # Wine or Xvfb execution as native Windows/Linux GUI certification.
+    if argv == ['build', 'all']:
+        if platform.system() != 'Darwin':
+            raise RuntimeError('The four-target release orchestrator currently requires macOS/Xcode; '
+                               'run target-native acceptance separately before production publish')
+        from host.mac_bootstrap import managed_environment, ensure_docker
+        os.environ.update(managed_environment(BUILDS))
+        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'build', 'mac')
+        # Setup-produced runtime prerequisites are immutable here. Build
+        # recompiles the apps, assembles and signs them, and emits four ZIPs.
+        invoke(sys.executable, '-B', str(REPO / 'linuxos/lifecycle.py'), 'verify')
+        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'stage')
+        invoke(sys.executable, '-B', '-m', 'host.mac_app', 'stage', '--builds', str(BUILDS))
+        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'build', 'win')
+        from host.linux_runner import build_terminal
+        build_terminal(BUILDS, docker=ensure_docker(BUILDS),
+                       logfile=BUILDS / 'Logs/CinterForgeTerminal/linux-native-build.log')
+        from host.universal_package import build_four
+        report = build_four(BUILDS)
+        if set(report['artifacts']) != {'mac', 'linux', 'win', 'devtools'}:
+            raise RuntimeError('Build did not create exactly four release archives')
+        return 0
+    if argv == ['status', 'all']:
+        # Read-only: useful even when a previous Build/Stage stopped midway.
+        import json
+        from host.universal_package import status_four
+        print(json.dumps(status_four(BUILDS), indent=2, sort_keys=True), flush=True)
+        return 0
+    if argv == ['stage', 'all']:
+        if not BUILDS.is_dir():
+            raise RuntimeError('No Setup/Build outputs to stage; run ./Cinter all all')
+        from host.universal_package import stage_four
+        stage_four(BUILDS)
+        return 0
+    if argv in (['all', 'all'], ['all', 'mac']):
+        # A fresh builder must be able to use ONE command. Never publish from
+        # 'all'; Cloudflare upload remains an explicit publish action only.
+        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'setup', 'all')
+        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'build', 'all')
+        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'stage', 'all')
+        # On a Mac, only native macOS UI acceptance is represented as tested.
+        # Windows/Linux artifacts are built and staged, not falsely certified.
+        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'mac')
+        return 0
+    if len(argv) == 2 and argv[0] in ('stage', 'test', 'launch') and argv[1] == 'mac':
+        if platform.system() != 'Darwin':
+            raise RuntimeError('Mac application lifecycle requires macOS')
+        from host.mac_bootstrap import managed_environment
+        os.environ.update(managed_environment(BUILDS))
+        action = argv[0]
+        if action == 'stage':
+            from host.universal_package import stage_four
+            stage_four(BUILDS, targets=('mac',))
+        else:
+            if action == 'test':
+                # Users run lifecycle commands only. Source regressions and
+                # native acceptance belong to Test and its persistent log.
+                _run_automated_regression_tests()
+            invoke(sys.executable, '-B', '-m', 'host.mac_app', action,
+                   '--builds', str(BUILDS))
+        return 0
+    if len(argv) == 2 and argv[0] == 'build' and argv[1] in ('mac', 'linux', 'win'):
+        target = argv[1]
+        native = {'Darwin': 'mac', 'Linux': 'linux', 'Windows': 'win'}.get(platform.system())
+        if target == native:
+            if target == 'mac':
+                from host.mac_bootstrap import managed_environment
+                os.environ.update(managed_environment(BUILDS))
+            invoke(sys.executable, '-B', '-m', 'host.toolchain',
+                   '--builds', str(BUILDS))
+            invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'build', '--application-shell')
+            return 0
+        if target == 'win' and native in ('mac', 'linux'):
+            invoke(sys.executable, '-B', '-m', 'host.cross_build', '--builds', str(BUILDS))
+            return 0
+        raise RuntimeError(f'Target {target} requires its native runner; refusing to claim a foreign target passed')
+    if argv == ['windows', 'cross-test']:
+        # Windows PE compilation and CLI execution under Wine. WebView2 GUI
+        # acceptance is deferred to native Windows.
+        if platform.system() not in ('Darwin', 'Linux'):
+            raise RuntimeError('windows cross-test requires macOS or Linux')
+        BUILDS.mkdir(parents=True, exist_ok=True)
+        invoke(sys.executable, '-B', '-m', 'host.cross_build',
+               '--builds', str(BUILDS))
+        return 0
+    if argv == ['toolchain', 'check']:
+        invoke(sys.executable, '-B', '-m', 'host.toolchain',
+               '--builds', str(BUILDS),
+               *(['--require-cross'] if platform.system() == 'Darwin' else []))
+        return 0
+    if argv == ['install', 'devtools']:
+        # The same self-contained command is bundled into each native app.
+        # It retrieves the optional shared SDK from the published public URLs
+        # ONLY after showing size/path and receiving explicit confirmation.
+        from webapp.CinterForgeTerminal import install_devtools
+        return install_devtools()
+    if argv == ['verify', 'public']:
+        from host.universal_package import verify_public_four, update_readme_public_downloads
+        receipt = verify_public_four(BUILDS)
+        # Never update links if the public CDN has not passed real HTTP checks.
+        changed = update_readme_public_downloads(REPO / 'README.md', receipt)
+        print('[CinterForgeTerminal] Public HTTP VERIFIED for ' + receipt['release'], flush=True)
+        print('[CinterForgeTerminal] README download links ' +
+              ('updated' if changed else 'already current'), flush=True)
+        return 0
+    if argv in (['publish', 'lagomorph'], ['publish', 'lagomorph', 'public']):
+        # Public HFS images AND complete private original source (internal CDN).
+        from host.universal_package import publish_lagomorph
+        publish_lagomorph(BUILDS)
+        return 0
+    if argv == ['pull', 'lagomorph', 'source']:
+        from host.lagomorph_cloudflare import pull_lagomorph
+        pull_lagomorph(BUILDS, source_only=True)
+        return 0
+    if argv in (['pull', 'lagomorph'], ['pull', 'lagomorph', 'internal']):
+        from host.lagomorph_cloudflare import pull_lagomorph
+        pull_lagomorph(BUILDS)
+        return 0
+    if argv in (['publish', 'all'], ['publish', 'public']):
+        from host.universal_package import publish_four
+        channel = 'public' if argv[1] == 'public' else 'dev'
+        report = publish_four(BUILDS, channel=channel)
+        if channel == 'public':
+            from host.universal_package import update_readme_public_downloads
+            changed = update_readme_public_downloads(REPO / 'README.md', report)
+            print('[CinterForgeTerminal] README download links ' +
+                  ('updated' if changed else 'already current'), flush=True)
+        print('[CinterForgeTerminal] Cloudflare ' + channel + ' R2 round-trip VERIFIED: '
+              + report['bucket'] + '/' + report['prefix'], flush=True)
+        return 0
+    if argv in (['fetch', 'all'], ['fetch', 'public']):
+        from host.universal_package import fetch_four
+        channel = 'public' if argv[1] == 'public' else 'dev'
+        report = fetch_four(BUILDS, channel=channel)
+        print('[CinterForgeTerminal] Downloaded ' + channel + ' four verified ZIPs into Builds for '
+              + report['release'], flush=True)
+        return 0
+    if argv == ['test', 'all']:
+        raise RuntimeError('Native Windows and Linux UI acceptance must run on those platforms; '
+                           'do not claim three-platform test acceptance from a Mac')
+    raise ValueError('Usage: ./Cinter host <legacy-host-action> [options]\n'
+                     '       ./Cinter setup all\n'
+                     '       ./Cinter toolchain check\n'
+                     '       ./Cinter build all  # 3 native app ZIPs + 1 unified DevTools ZIP\n'
+                     '       ./Cinter stage all  # verify and install all four to Steam steamapps\n'
+                     '       ./Cinter status all # show four ZIPs and Steam receipt (read-only)\n'
+                     '       ./Cinter all mac    # setup, build four, stage, native Mac test; no publish\n'
+                     '       ./Cinter all all    # setup, build, stage, native Mac test; NEVER publish\n'
+                     '       ./Cinter build mac|linux|win\n'
+                     '       ./Cinter stage|test|launch|all mac\n'
+                     '       ./Cinter windows cross-test\n'
+                     '       ./Cinter publish all     # private dev R2 upload+download\n'
+                     '       ./Cinter publish public  # verify public HTTP, then update README downloads\n'
+                     '       ./Cinter verify public   # retry public HTTP and README links; no ZIP upload/download\n'
+                     '       ./Cinter publish lagomorph public # public HFS media + private Builds/Lagomorph to internal CDN\n'
+                     '       ./Cinter pull lagomorph source # required internal folder pull (also in setup/all)\n'
+                     '       ./Cinter pull lagomorph    # private source + public HFS media into Builds\n'
+                     '       ./Cinter fetch all       # private dev R2 -> Builds Distribution\n'
+                     '       ./Cinter fetch public    # production R2 -> Builds Distribution\n'
+                     '       ./Cinter install devtools # confirm optional public SDK install to Steam\n'
+                     '       ./Cinter launch cinterforge-os linuxkit Release --server <directory>')
+
+
+# =============================================================================
+# SOURCE REPOSITORY MANAGEMENT (formerly build/fork.py)
+# =============================================================================
+# This code is a leaf of the lifecycle, not part of runtime/guest startup.
+# It never mutates already-present sources: new clones use a managed branch.
+def _source_destination_for(name: str, upstream_repo: str) -> str:
+    """Resolve the maintained fork name from the app ID, not the upstream URL."""
+    return SOURCE_MAINTAINED_FORKS.get(name.casefold().replace("-", "").replace(" ", ""), _source_fork_destination(upstream_repo))
+
+
+def _source_fork_destination(repo_name: str) -> str:
+    # SteamTinkerLaunch is deliberately branded differently from upstream.
+    return "cinterforge-steamtinkerlaunch" if repo_name == "steamtinkerlaunch" else repo_name
+
+
+def _source_create_github_fork(upstream: str, repo_name: str, app_name: str) -> None:
+    """Create upstream fork and rename only when the registry requests a distinct name."""
+    _source_command("gh", "repo", "fork", upstream, "--org", SOURCE_ORGANIZATION, "--clone=false")
+    destination = _source_destination_for(app_name, repo_name)
+    if destination != repo_name:
+        _source_command("gh", "api", "-X", "PATCH", f"repos/{SOURCE_ORGANIZATION}/{repo_name}",
+                "-f", f"name={destination}")
+
+
+def _source_load_repositories() -> dict[str, tuple[str, str, str, str]]:
+    if not SOURCE_REPOSITORIES_CSV.is_file():
+        raise RuntimeError(f"Terminal source manifest missing: {SOURCE_REPOSITORIES_CSV}")
+    result: dict[str, tuple[str, str, str, str]] = {}
+    with SOURCE_REPOSITORIES_CSV.open(newline="", encoding="utf-8-sig") as fp:
+        for row in csv.DictReader(fp):
+            name = (row.get("Name") or "").strip()
+            remote = (row.get("Git Repo URL") or "").strip()
+            if not name or not remote:
+                continue
+            parsed = urlparse(remote)
+            parts = parsed.path.removesuffix(".git").strip("/").split("/")
+            if parsed.scheme != "https" or not parsed.hostname or not parts or not parts[-1]:
+                raise RuntimeError(f"Invalid Git Repo URL for {name}: {remote}")
+            repo = parts[-1]
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+", repo) or repo in (".", ".."):
+                raise RuntimeError(f"Invalid repository folder name for {name}: {repo}")
+            key = name.casefold().replace(" ", "").replace("-", "")
+            if key in result:
+                raise RuntimeError(f"Duplicate Terminal source repository: {name}")
+            # The CSV's Git Repo URL is the authoritative upstream. Some projects
+            # also publish an official GitHub mirror suitable for GitHub forking.
+            # Never infer a GitHub mirror from a non-GitHub URL.
+            github_mirror = (row.get("GitHub Fork Source URL") or "").strip()
+            if github_mirror:
+                mirror_repo = _source_github_path(github_mirror).rsplit("/", 1)[-1]
+                if mirror_repo.casefold() != repo.casefold():
+                    raise RuntimeError(
+                        f"GitHub fork source for {name} has different repo name: {github_mirror}"
+                    )
+            acquisition = (row.get("Source Acquisition") or "source").strip().casefold()
+            if acquisition not in ("source", "prebuilt"):
+                raise RuntimeError(f"Invalid Source Acquisition for {name}: {acquisition}")
+            result[key] = (remote, repo, github_mirror, acquisition)
+    return result
+
+
+
+def _source_command(*argv: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(argv, text=True, capture_output=True, check=False, env=env)
+    if result.returncode:
+        raise RuntimeError(f"{' '.join(argv)} failed: {(result.stderr or result.stdout).strip()}")
+    return result
+
+
+
+def _source_checkout_development_branch(target: Path) -> None:
+    """Create/check out the CinterForge development branch in a fresh clone.
+
+    When a fork already publishes origin/cinterforge/cinterforge, track it.
+    Some upstream forks have their default branch named `cinterforge`; Git
+    cannot keep refs/heads/cinterforge alongside refs/heads/cinterforge/cinterforge.
+    Rename that fresh clone's local branch rather than losing its commit.
+    Never change an existing checkout: this helper runs only after cloning.
+    """
+    remote_branch = f"refs/remotes/origin/{SOURCE_DEVELOPMENT_BRANCH}"
+    has_remote = subprocess.run(
+        ["git", "-C", str(target), "show-ref", "--verify", "--quiet", remote_branch],
+        check=False,
+    ).returncode == 0
+    local_branch = _source_command("git", "-C", str(target), "branch", "--show-current").stdout.strip()
+    if local_branch == SOURCE_DEVELOPMENT_BRANCH:
+        # A fork can already designate the requested branch as its default.
+        pass
+    elif local_branch == "cinterforge":
+        # A local `cinterforge` ref blocks creation of `cinterforge/...`.
+        # This is a brand-new clone, so renaming cannot affect user edits.
+        _source_command("git", "-C", str(target), "branch", "-m", SOURCE_DEVELOPMENT_BRANCH)
+        if not has_remote:
+            # Git preserves the renamed branch's upstream configuration. Do not
+            # accidentally push this new branch into origin/cinterforge.
+            _source_command("git", "-C", str(target), "branch", "--unset-upstream", SOURCE_DEVELOPMENT_BRANCH)
+    elif has_remote:
+        _source_command("git", "-C", str(target), "switch", "--track", "-c", SOURCE_DEVELOPMENT_BRANCH,
+                f"origin/{SOURCE_DEVELOPMENT_BRANCH}")
+    else:
+        _source_command("git", "-C", str(target), "switch", "-c", SOURCE_DEVELOPMENT_BRANCH)
+    if has_remote:
+        _source_command("git", "-C", str(target), "branch", "--set-upstream-to",
+                f"origin/{SOURCE_DEVELOPMENT_BRANCH}", SOURCE_DEVELOPMENT_BRANCH)
+    else:
+        print(f"[Terminal clone] NOTE: origin/{SOURCE_DEVELOPMENT_BRANCH} is absent; created local "
+              f"{SOURCE_DEVELOPMENT_BRANCH} without pushing. Publish it explicitly when ready.", flush=True)
+    branch = _source_command("git", "-C", str(target), "branch", "--show-current").stdout.strip()
+    if branch != SOURCE_DEVELOPMENT_BRANCH:
+        raise RuntimeError(f"Expected branch {SOURCE_DEVELOPMENT_BRANCH!r}, got {branch!r}: {target}")
+    print(f"[Terminal clone] CHECKED OUT: {target} [{SOURCE_DEVELOPMENT_BRANCH}]", flush=True)
+
+
+def _source_clone_without_lfs_smudge(source: str, target: Path) -> None:
+    """Clone Git and checkout LFS pointer files without using a fork's LFS store.
+
+    GitHub forks can contain Git LFS pointers whose binary objects were not
+    copied into the fork's LFS storage. Fetching during checkout causes a 404
+    and leaves an incomplete worktree. Asset acquisition is a separate step.
+    """
+    env = os.environ.copy()
+    env["GIT_LFS_SKIP_SMUDGE"] = "1"
+    print(f"[Terminal clone] Git LFS checkout downloads skipped (source objects may live upstream): {source}", flush=True)
+    _source_command("git", "clone", "--progress", source, str(target), env=env)
+    _source_checkout_development_branch(target)
+
+
+def _source_gh_info(full_name: str) -> dict | None:
+    result = subprocess.run(["gh", "api", f"repos/{full_name}"], capture_output=True, text=True)
+    if result.returncode == 0:
+        return json.loads(result.stdout)
+    if "404" in result.stderr:
+        return None
+    raise RuntimeError(f"Cannot inspect {full_name}: {(result.stderr or result.stdout).strip()}")
+
+
+def _source_github_path(url: str) -> str:
+    parsed = urlparse(url)
+    parts = parsed.path.removesuffix(".git").strip("/").split("/")
+    if parsed.hostname != "github.com" or len(parts) != 2:
+        raise RuntimeError(f"GitHub organization forks require a GitHub upstream: {url}")
+    return "/".join(parts)
+
+
+
+def _source_external_git_source(url: str, mirror: str) -> bool:
+    """A CSV upstream without a declared GitHub mirror needs local source preparation."""
+    return not mirror and urlparse(url).hostname != "github.com"
+
+
+
+def _source_prepare_external_source(upstream_url: str, repo_name: str, name: str) -> None:
+    """Prepare a fresh, pushable source snapshot without moving Git submodules.
+
+    The upstream Git directory must stay in place: .git/modules owns the
+    submodule gitdirs and moving/deleting it breaks nested submodules.
+    An unborn development branch plus an empty index gives the next commit no parent,
+    while retaining the pinned gitlinks. Submodules are fetched during setup.
+    """
+    target = SOURCE_WORKSPACE_ROOT / _source_destination_for(name, repo_name)
+    if target.exists() or target.is_symlink():
+        # Never overwrite or mutate an existing directory. The user explicitly
+        # prefers to delete the failed checkout and re-run from scratch.
+        print(f"[Terminal fork] SKIP: existing local directory {target} (unchanged); remove it to start again", flush=True)
+        return
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["GIT_LFS_SKIP_SMUDGE"] = "1"
+    print(f"[Terminal fork] Fetching current source {upstream_url} -> {target}", flush=True)
+    result = subprocess.run(
+        ["git", "clone", "--depth", "1", "--single-branch", "--no-tags", "--progress",
+         upstream_url, str(target)], env=env, check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(f"Source clone failed ({result.returncode}); files preserved at {target}")
+
+    # Keep submodules as pinned gitlinks; setup handles fetching them for builds.
+    # There is no reason to download nested repositories for an initial commit.
+
+    # Do not silently turn Git LFS pointer files into supposed source assets.
+    lfs = subprocess.run(["git", "lfs", "version"], capture_output=True, text=True)
+    if lfs.returncode == 0:
+        # Submodules are not checked out here; inspect only the parent.
+        root_lfs = _source_command("git", "-C", str(target), "lfs", "ls-files").stdout
+        if root_lfs.strip():
+            raise RuntimeError(f"Git LFS pointers detected; no snapshot prepared. Checkout preserved at {target}")
+
+    # Preserve the upstream commit tree (including gitlink entries) in the index.
+    # Stage it as the first commit on an unborn development branch. No submodules need
+    # to be initialized, moved, or flattened. GitLab refs stay local.
+    if subprocess.run(["git", "-C", str(target), "show-ref", "--verify", "--quiet", f"refs/heads/{SOURCE_DEVELOPMENT_BRANCH}"]).returncode == 0:
+        raise RuntimeError(f"Upstream checkout already has a {SOURCE_DEVELOPMENT_BRANCH} branch; refusing to overwrite it: {target}")
+    snapshot_commit = _source_command("git", "-C", str(target), "rev-parse", "HEAD").stdout.strip()
+    snapshot_tree = _source_command("git", "-C", str(target), "rev-parse", "HEAD^{tree}").stdout.strip()
+    _source_command("git", "-C", str(target), "remote", "rename", "origin", "upstream")
+    _source_command("git", "-C", str(target), "remote", "add", "origin", f"https://github.com/{SOURCE_ORGANIZATION}/{_source_destination_for(name, repo_name)}.git")
+    _source_command("git", "-C", str(target), "symbolic-ref", "HEAD", f"refs/heads/{SOURCE_DEVELOPMENT_BRANCH}")
+    # read-tree keeps 160000-mode gitlinks even if submodule folders are empty.
+    # `git add -A` here can drop those gitlinks in an uninitialized clone.
+    _source_command("git", "-C", str(target), "read-tree", snapshot_tree)
+    staged = _source_command("git", "-C", str(target), "ls-files", "--stage").stdout
+    links = sum(line.startswith("160000 ") for line in staged.splitlines())
+    upstream_links = _source_command("git", "-C", str(target), "ls-tree", "-r", snapshot_commit).stdout
+    expected_links = sum(line.startswith("160000 ") for line in upstream_links.splitlines())
+    if links != expected_links:
+        raise RuntimeError(f"Expected {expected_links} submodule links, staged {links}; checkout preserved at {target}")
+    print(f"[Terminal fork] READY: {target} ({links} original upstream submodule links staged)", flush=True)
+    print("[Terminal fork] No commits or pushes made. Submodules remain uninitialized until setup.", flush=True)
+    print(f"[Terminal fork] Commit and push: cd {target} && git commit -m 'Initial CinterForge source' && git push -u origin {SOURCE_DEVELOPMENT_BRANCH}", flush=True)
+
+
+def _source_check_fork_existing(existing: dict, upstream: str, destination_name: str) -> None:
+    ancestors = {(existing.get("parent") or {}).get("full_name", "").casefold(),
+                 (existing.get("source") or {}).get("full_name", "").casefold()}
+    if not existing.get("fork") or upstream.casefold() not in ancestors:
+        raise RuntimeError(f"{destination_name} exists but is not a fork of {upstream}; refusing to overwrite")
+
+
+
+def _source_validate_local_sources(repositories: dict[str, tuple[str, str, str, str]], workspace: Path) -> list[str]:
+    """Read-only check for all required source checkouts, including broken paths.
+
+    No GitHub/network access, checkout, branch modification or implicit clone.
+    Directory existence alone is not proof of a usable source checkout.
+    """
+    missing: list[str] = []
+    visited: set[str] = set()
+    checked = 0
+    for name, (_, upstream_repo, _, acquisition) in repositories.items():
+        if acquisition != "source":
+            print(f"[Terminal clone all] SKIP {name}: acquisition={acquisition}", flush=True)
+            continue
+        target = workspace / _source_destination_for(name, upstream_repo)
+        if str(target).casefold() in visited:
+            continue
+        visited.add(str(target).casefold())
+        if target.is_symlink() or not target.is_dir() or not (target / '.git').exists():
+            reason = 'missing' if not target.exists() and not target.is_symlink() else 'not a Git checkout'
+            print(f"[Terminal clone all] MISSING {name}: {target} ({reason})", flush=True)
+            missing.append(str(target))
+            continue
+        probe = subprocess.run(['git', '-C', str(target), 'rev-parse', '--is-inside-work-tree'],
+                               capture_output=True, text=True, check=False)
+        if probe.returncode or probe.stdout.strip() != 'true':
+            print(f"[Terminal clone all] INVALID {name}: {target} (Git worktree unreadable)", flush=True)
+            missing.append(str(target))
+            continue
+        print(f"[Terminal clone all] PRESENT {name}: {target}", flush=True)
+        checked += 1
+    print(f"[Terminal clone all] DRY RUN SUMMARY: present={checked} missing_or_invalid={len(missing)}", flush=True)
+    if missing:
+        print('[Terminal clone all] Ubuntu Setup is blocked. Run ./Cinter clone all to obtain missing forks. '
+              'Existing broken checkout paths require manual repair; no source was changed.', file=sys.stderr, flush=True)
+    return missing
+
+
+def _source_repository_main(arguments: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="CinterForge-owned maintained source forks and clones")
+    parser.add_argument("action", choices=("fork", "clone"))
+    parser.add_argument("repository", nargs="?", default="all", help="Terminal source ID or all")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--resume-import", action="store_true", help="Deprecated: external sources now prepare a local checkout for manual push")
+
+    args = parser.parse_args(arguments)
+    if args.resume_import:
+        parser.error("--resume-import is obsolete; local source preparation never pushes to GitHub")
+    repositories = _source_load_repositories()
+    if args.repository.casefold() == 'all' and args.action == 'clone' and args.dry_run:
+        return 1 if _source_validate_local_sources(repositories, SOURCE_WORKSPACE_ROOT) else 0
+    if args.repository.casefold() == "all" and args.action == "fork":
+        # Inspect the organization first, including in dry-run. The command must
+        # never create a duplicate or misidentify an unrelated repository as a fork.
+        if not shutil.which("gh"):
+            raise RuntimeError("GitHub CLI 'gh' is required; install it and run gh auth login")
+        _source_command("gh", "auth", "status")
+        created = existing_count = excluded = unsupported = 0
+        failures = []
+        visited: set[str] = set()
+        for name, (url, repo_name, mirror, acquisition) in repositories.items():
+            if acquisition != "source":
+                print(f"[Terminal fork all] SKIP {name}: acquisition={acquisition}", flush=True)
+                excluded += 1
+                continue
+            fork_source = mirror or url
+            try:
+                external = _source_external_git_source(url, mirror)
+                upstream = None if external else _source_github_path(fork_source)
+                destination_name = f"{SOURCE_ORGANIZATION}/{_source_destination_for(name, repo_name)}"
+                if not external and _source_github_path(fork_source).casefold() == destination_name.casefold():
+                    print(f"[Terminal fork all] SKIP {name}: already CinterForge-owned repository", flush=True)
+                    existing_count += 1
+                    continue
+                if destination_name.casefold() in visited:
+                    print(f"[Terminal fork all] SKIP {name}: repository already handled ({destination_name})", flush=True)
+                    excluded += 1
+                    continue
+                visited.add(destination_name.casefold())
+                if external:
+                    target = SOURCE_WORKSPACE_ROOT / _source_destination_for(name, repo_name)
+                    if target.exists() or target.is_symlink():
+                        print(f"[Terminal fork all] SKIP {name}: local source already exists {target} (unchanged)", flush=True)
+                        existing_count += 1
+                    elif args.dry_run:
+                        print(f"[Terminal fork all] DRY RUN: prepare source {url} -> {target} (no GitHub push)", flush=True)
+                        created += 1
+                    else:
+                        _source_prepare_external_source(url, repo_name, name)
+                        created += 1
+                    continue
+                existing = _source_gh_info(destination_name)
+                if existing is not None:
+                    _source_check_fork_existing(existing, upstream, destination_name)
+                    print(f"[Terminal fork all] SKIP {name}: already forked https://github.com/{destination_name}", flush=True)
+                    existing_count += 1
+                    continue
+                if _source_gh_info(upstream) is None:
+                    raise RuntimeError(f"Upstream GitHub repository unavailable: {upstream}")
+                if args.dry_run:
+                    print(f"[Terminal fork all] DRY RUN: fork {fork_source} -> https://github.com/{destination_name}", flush=True)
+                else:
+                    print(f"[Terminal fork all] CREATE {name}: {fork_source} -> https://github.com/{destination_name}", flush=True)
+                    _source_create_github_fork(upstream, repo_name, name)
+                    print(f"[Terminal fork all] CREATED https://github.com/{destination_name}", flush=True)
+                created += 1
+            except (RuntimeError, OSError, ValueError, json.JSONDecodeError) as exc:
+                print(f"[Terminal fork all] FAILED {name}: {exc}", file=sys.stderr, flush=True)
+                failures.append(name)
+        print(f"[Terminal fork all] {'DRY RUN ' if args.dry_run else ''}SUMMARY: "
+              f"{'would_create' if args.dry_run else 'created'}={created} "
+              f"already_forked={existing_count} prebuilt_or_duplicate={excluded} "
+              f"unsupported={unsupported} failed={len(failures)}", flush=True)
+        return 1 if failures else 0
+    if args.repository.casefold() == "all":
+        failures = []
+        cloned = skipped = excluded = 0
+        for name, (url, repo_name, mirror, acquisition) in repositories.items():
+            target = SOURCE_WORKSPACE_ROOT / _source_destination_for(name, repo_name)
+            if acquisition != "source":
+                print(f"[Terminal clone all] SKIP {name}: acquisition={acquisition}", flush=True)
+                excluded += 1
+                continue
+            # 'Completely missing' means no directory or file at the destination.
+            # Never inspect, repair, validate or contact a remote for existing paths.
+            if target.exists() or target.is_symlink():
+                if target.is_symlink() or not (target / '.git').exists():
+                    print(f"[Terminal clone all] FAILED {name}: existing path is not a Git checkout: {target}; "
+                          "repair it explicitly; no overwrite performed", file=sys.stderr, flush=True)
+                    failures.append(name)
+                    continue
+                print(f"[Terminal clone all] SKIP {name}: already exists {target}", flush=True)
+                skipped += 1
+                continue
+            # Imported external projects also clone from their CinterForge GitHub
+            # copies after `fork all`; GitLab upstream remains authoritative in CSV.
+            source = f"https://github.com/{SOURCE_ORGANIZATION}/{_source_destination_for(name, repo_name)}.git"
+            try:
+                print(f"[Terminal clone all] CLONE {name}: {source} -> {target}", flush=True)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _source_clone_without_lfs_smudge(source, target)
+                cloned += 1
+            except (RuntimeError, OSError) as exc:
+                print(f"[Terminal clone all] FAILED {name}: {exc}", file=sys.stderr, flush=True)
+                failures.append(name)
+        print(f"[Terminal clone all] {'DRY RUN ' if args.dry_run else ''}SUMMARY: "
+              f"clone={cloned} existing={skipped} prebuilt={excluded} failed={len(failures)}", flush=True)
+        return 1 if failures else 0
+    key = args.repository.casefold().replace(" ", "").replace("-", "")
+    if key not in repositories:
+        raise RuntimeError(f"Unknown Terminal source repository {args.repository!r}; available: {', '.join(sorted(repositories))}")
+    url, repo_name, mirror, acquisition = repositories[key]
+    if acquisition == "prebuilt":
+        print(f"[Cinter {args.action}] {args.repository}: prebuilt components; fork/clone not applicable.", flush=True)
+        print(f"[Cinter {args.action}] Use ./Cinter setup {args.repository.replace(chr(32), chr(45)).lower()} <mac|linux|win> for the acquisition policy.", flush=True)
+        return 0
+    # Clone never modifies a pre-existing target, including a partial checkout.
+    # Check this before network access, GitHub verification, or authentication.
+    target = SOURCE_WORKSPACE_ROOT / _source_destination_for(key, repo_name)
+    if args.action == "clone" and (target.exists() or target.is_symlink()):
+        branch = "unknown"
+        if (target / ".git").exists():
+            probe = subprocess.run(["git", "-C", str(target), "branch", "--show-current"],
+                                   text=True, capture_output=True, check=False)
+            if probe.returncode == 0:
+                branch = probe.stdout.strip() or "detached"
+        print(f"[Terminal clone] SKIP {args.repository}: target already exists {target} (unchanged); "
+              f"branch={branch}, requested={SOURCE_DEVELOPMENT_BRANCH}", flush=True)
+        return 0
+    fork_source = mirror or url
+    external = _source_external_git_source(url, mirror)
+    upstream = None if external else _source_github_path(fork_source)
+    destination_name = f"{SOURCE_ORGANIZATION}/{_source_destination_for(key, repo_name)}"
+    destination_url = f"https://github.com/{destination_name}"
+    if args.action == "fork" and external:
+        target = SOURCE_WORKSPACE_ROOT / _source_destination_for(key, repo_name)
+        if args.dry_run:
+            print(f"[Terminal fork] DRY RUN: prepare current source {url} -> {target} (no GitHub push)", flush=True)
+        else:
+            _source_prepare_external_source(url, repo_name, key)
+        return 0
+    if args.dry_run:
+        print(f"[Cinter {args.action}] DRY RUN: CSV upstream: {url}", flush=True)
+        if mirror:
+            print(f"[Cinter {args.action}] DRY RUN: official GitHub fork source: {mirror}", flush=True)
+        if args.action == "fork":
+            print(f"[Terminal fork] DRY RUN: fork {fork_source} -> {destination_url}", flush=True)
+        else:
+            print(f"[Terminal clone] DRY RUN: clone {destination_url} -> {SOURCE_WORKSPACE_ROOT / _source_destination_for(key, repo_name)}; create/checkout {SOURCE_DEVELOPMENT_BRANCH} branch", flush=True)
+        return 0
+    if args.action == 'clone':
+        # Cloning an already-created CinterForge repository needs only git;
+        # do not require GitHub CLI or edit remote branch state.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _source_clone_without_lfs_smudge(f'https://github.com/{destination_name}.git', target)
+        print(f'[Terminal clone] Cloned https://github.com/{destination_name} -> {target}')
+        return 0
+    if not shutil.which("gh"):
+        raise RuntimeError("GitHub CLI 'gh' is required for fork management; install it and run gh auth login")
+    _source_command("gh", "auth", "status")
+    first_party = upstream is not None and upstream.casefold() == destination_name.casefold()
+    if not external and not first_party and _source_gh_info(upstream) is None:
+        raise RuntimeError(f"Upstream GitHub repository unavailable: {upstream}")
+    existing = _source_gh_info(destination_name)
+    if args.action == "fork":
+        if first_party:
+            if existing is None:
+                raise RuntimeError(f"First-party repository missing: {destination_url}; cannot fork a repository from itself")
+            print(f"[Terminal fork] SKIP first-party repository: {destination_url}")
+            return 0
+        if existing is not None:
+            if not external:
+                _source_check_fork_existing(existing, upstream, destination_name)
+            print(f"[Terminal fork] SKIP: existing verified fork: {destination_url}", flush=True)
+            return 0
+        print(f"[Terminal fork] Creating {destination_url} from {fork_source}", flush=True)
+        _source_create_github_fork(upstream, repo_name, args.repository)
+        print(f"[Terminal fork] Created {destination_url}", flush=True)
+        return 0
+
+
+
+
+
+if __name__ == '__main__':
+    arguments = sys.argv[1:]
+    # A lifecycle invocation is always persisted before attempting expensive
+    # setup, build, stage, test, or publish operations. The worker uses the
+    # same script and owns the actual lifecycle and managed-service cleanup.
+    worker_command = os.environ.get(LOGGED_WORKER_MARKER)
+    same_worker = worker_command == json.dumps(arguments)
+    if arguments and arguments[0] in LOGGED_LIFECYCLE_ACTIONS and not same_worker:
+        raise SystemExit(_run_with_persistent_lifecycle_log(arguments))
+    try:
+        with _temporary_build_services(arguments):
+            raise SystemExit(main(arguments))
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
+        print(f'[CinterForgeTerminal] {error}', file=sys.stderr)
+        raise SystemExit(1)

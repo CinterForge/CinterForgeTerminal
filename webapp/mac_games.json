@@ -1,0 +1,426 @@
+{
+  "schema": "cinterforge.terminal.macgames.v1",
+  "source": "https://github.com/CinterForge/cinterforge-infinite-mac/tree/main/Library/Games",
+  "source_snapshot": "Library.zip provided 2026-11-09",
+  "launch_policy": "experimental: boot supported Infinite Mac emulator with Infinite HD; application auto-open not yet verified",
+  "games": [
+    {
+      "command": "3wiz",
+      "title": "3Wiz!",
+      "library_path": "Library/Games/3Wiz!.json",
+      "format": "json"
+    },
+    {
+      "command": "a10attack",
+      "title": "A-10 Attack!",
+      "library_path": "Library/Games/A-10 Attack!.json",
+      "format": "json",
+      "needs_system_7": true
+    },
+    {
+      "command": "abuse",
+      "title": "Abuse",
+      "library_path": "Library/Games/Bungie/Abuse.json",
+      "format": "json"
+    },
+    {
+      "command": "anotherworld",
+      "title": "Another World",
+      "library_path": "Library/Games/Another World.json",
+      "format": "json"
+    },
+    {
+      "command": "apeiron102",
+      "title": "Apeiron 1.0.2",
+      "library_path": "Library/Games/Ambrosia Software/Apeiron 1.0.2.zip",
+      "format": "zip"
+    },
+    {
+      "command": "apeiron103",
+      "title": "Apeiron 1.0.3",
+      "library_path": "Library/Games/Ambrosia Software/Apeiron 1.0.3.zip",
+      "format": "zip"
+    },
+    {
+      "command": "avara",
+      "title": "Avara",
+      "library_path": "Library/Games/Ambrosia Software/Avara.zip",
+      "format": "zip"
+    },
+    {
+      "command": "barrack",
+      "title": "Barrack",
+      "library_path": "Library/Games/Ambrosia Software/Barrack.zip",
+      "format": "zip"
+    },
+    {
+      "command": "battlechess",
+      "title": "Battle Chess",
+      "library_path": "Library/Games/Battle Chess.json",
+      "format": "json"
+    },
+    {
+      "command": "blobbolite",
+      "title": "Blobbo Lite",
+      "library_path": "Library/Games/Blobbo Lite.zip",
+      "format": "zip"
+    },
+    {
+      "command": "bolo",
+      "title": "Bolo",
+      "library_path": "Library/Games/Bolo.json",
+      "format": "json"
+    },
+    {
+      "command": "boom",
+      "title": "BOOM",
+      "library_path": "Library/Games/BOOM.json",
+      "format": "json",
+      "needs_system_7": true
+    },
+    {
+      "command": "bubbletrouble",
+      "title": "Bubble Trouble",
+      "library_path": "Library/Games/Ambrosia Software/Bubble Trouble.zip",
+      "format": "zip"
+    },
+    {
+      "command": "chainshot",
+      "title": "ChainShot!",
+      "library_path": "Library/Games/ChainShot!.zip",
+      "format": "zip"
+    },
+    {
+      "command": "chiral",
+      "title": "Chiral",
+      "library_path": "Library/Games/Ambrosia Software/Chiral.zip",
+      "format": "zip"
+    },
+    {
+      "command": "civilization",
+      "title": "Civilization",
+      "library_path": "Library/Games/Civilization.json",
+      "format": "json"
+    },
+    {
+      "command": "continuum",
+      "title": "Continuum",
+      "library_path": "Library/Games/Continuum.json",
+      "format": "json"
+    },
+    {
+      "command": "cosmicosmo",
+      "title": "Cosmic Osmo",
+      "library_path": "Library/Games/Cosmic Osmo.json",
+      "format": "json"
+    },
+    {
+      "command": "darkcastle",
+      "title": "Dark Castle",
+      "library_path": "Library/Games/Dark Castle.json",
+      "format": "json"
+    },
+    {
+      "command": "escapevelocity",
+      "title": "Escape Velocity",
+      "library_path": "Library/Games/Ambrosia Software/Escape Velocity.zip",
+      "format": "zip"
+    },
+    {
+      "command": "fa18hornet",
+      "title": "F-A-18 Hornet",
+      "library_path": "Library/Games/F-A-18 Hornet.json",
+      "format": "json",
+      "needs_system_7": true
+    },
+    {
+      "command": "glider",
+      "title": "Glider",
+      "library_path": "Library/Games/Glider.zip",
+      "format": "zip"
+    },
+    {
+      "command": "hellcatsoverthepacific",
+      "title": "Hellcats Over the Pacific",
+      "library_path": "Library/Games/Hellcats Over the Pacific.json",
+      "format": "json"
+    },
+    {
+      "command": "indyandhisdesktopadventures",
+      "title": "Indy and His Desktop Adventures",
+      "library_path": "Library/Games/LucasArts/Indy and His Desktop Adventures.json",
+      "format": "json"
+    },
+    {
+      "command": "indyandthefateofatlantis",
+      "title": "Indy and The Fate of Atlantis",
+      "library_path": "Library/Games/LucasArts/Indy and The Fate of Atlantis.json",
+      "format": "json"
+    },
+    {
+      "command": "indyandthelastcrusade",
+      "title": "Indy and The Last Crusade",
+      "library_path": "Library/Games/LucasArts/Indy and The Last Crusade.json",
+      "format": "json"
+    },
+    {
+      "command": "lemmings",
+      "title": "Lemmings",
+      "library_path": "Library/Games/Lemmings.json",
+      "format": "json"
+    },
+    {
+      "command": "loom",
+      "title": "Loom",
+      "library_path": "Library/Games/LucasArts/Loom.json",
+      "format": "json"
+    },
+    {
+      "command": "maelstrom",
+      "title": "Maelstrom",
+      "library_path": "Library/Games/Ambrosia Software/Maelstrom.zip",
+      "format": "zip"
+    },
+    {
+      "command": "marathon",
+      "title": "Marathon",
+      "library_path": "Library/Games/Bungie/Marathon.json",
+      "format": "json",
+      "needs_system_7": true
+    },
+    {
+      "command": "marathon2",
+      "title": "Marathon 2",
+      "library_path": "Library/Games/Bungie/Marathon 2.json",
+      "format": "json",
+      "needs_system_7": true
+    },
+    {
+      "command": "marathoninfinity",
+      "title": "Marathon Infinity",
+      "library_path": "Library/Games/Bungie/Marathon Infinity.zip",
+      "format": "zip"
+    },
+    {
+      "command": "minotaur",
+      "title": "Minotaur",
+      "library_path": "Library/Games/Bungie/Minotaur.json",
+      "format": "json"
+    },
+    {
+      "command": "missilecommand",
+      "title": "Missile Command",
+      "library_path": "Library/Games/Missile Command.json",
+      "format": "json"
+    },
+    {
+      "command": "nsshaft",
+      "title": "NS-SHAFT",
+      "library_path": "Library/Games/NS-SHAFT.zip",
+      "format": "zip"
+    },
+    {
+      "command": "okasheepgame",
+      "title": "ok - A sheep game",
+      "library_path": "Library/Games/ok - A sheep game.json",
+      "format": "json"
+    },
+    {
+      "command": "pararena",
+      "title": "Pararena",
+      "library_path": "Library/Games/Pararena.json",
+      "format": "json"
+    },
+    {
+      "command": "pathwaysintodarkness",
+      "title": "Pathways Into Darkness",
+      "library_path": "Library/Games/Bungie/Pathways Into Darkness.json",
+      "format": "json"
+    },
+    {
+      "command": "pathwaysintodarknessextras",
+      "title": "Pathways Into Darkness (Extras)",
+      "library_path": "Library/Games/Bungie/Pathways Into Darkness (Extras).json",
+      "format": "json"
+    },
+    {
+      "command": "pipedream",
+      "title": "Pipe Dream",
+      "library_path": "Library/Games/Pipe Dream.json",
+      "format": "json"
+    },
+    {
+      "command": "pongsaver111",
+      "title": "PongSaver 1.1.1",
+      "library_path": "Library/Games/PongSaver 1.1.1.json",
+      "format": "json",
+      "needs_mac_os_x": true
+    },
+    {
+      "command": "princeofpersia",
+      "title": "Prince of Persia",
+      "library_path": "Library/Games/Prince of Persia.json",
+      "format": "json"
+    },
+    {
+      "command": "quinn131",
+      "title": "Quinn 1.3.1",
+      "library_path": "Library/Games/Quinn 1.3.1.json",
+      "format": "json",
+      "needs_mac_os_x": true
+    },
+    {
+      "command": "risk",
+      "title": "Risk",
+      "library_path": "Library/Games/Risk.json",
+      "format": "json"
+    },
+    {
+      "command": "scarabofra",
+      "title": "Scarab of Ra",
+      "library_path": "Library/Games/Scarab of Ra.json",
+      "format": "json"
+    },
+    {
+      "command": "shufflepuckcafe",
+      "title": "Shufflepuck Café",
+      "library_path": "Library/Games/Shufflepuck Cafe╠ü.json",
+      "format": "json"
+    },
+    {
+      "command": "simcity",
+      "title": "SimCity",
+      "library_path": "Library/Games/SimCity.json",
+      "format": "json"
+    },
+    {
+      "command": "simcity2000",
+      "title": "SimCity 2000",
+      "library_path": "Library/Games/SimCity 2000.json",
+      "format": "json",
+      "needs_system_7": true
+    },
+    {
+      "command": "snood",
+      "title": "Snood",
+      "library_path": "Library/Games/Snood.json",
+      "format": "json",
+      "needs_system_7": true
+    },
+    {
+      "command": "snood30",
+      "title": "Snood 3.0",
+      "library_path": "Library/Games/Snood 3.0.json",
+      "format": "json",
+      "needs_mac_os_x": true
+    },
+    {
+      "command": "sokoban",
+      "title": "Sokoban",
+      "library_path": "Library/Games/Sokoban.json",
+      "format": "json"
+    },
+    {
+      "command": "solarianii",
+      "title": "Solarian II",
+      "library_path": "Library/Games/Solarian II.json",
+      "format": "json"
+    },
+    {
+      "command": "spectre",
+      "title": "Spectre",
+      "library_path": "Library/Games/Spectre.json",
+      "format": "json"
+    },
+    {
+      "command": "starbound",
+      "title": "Starbound",
+      "library_path": "Library/Games/Starbound.json",
+      "format": "json",
+      "needs_system_7": true
+    },
+    {
+      "command": "strategicconquest30",
+      "title": "Strategic Conquest 3.0",
+      "library_path": "Library/Games/Strategic Conquest 3.0.json",
+      "format": "json"
+    },
+    {
+      "command": "strategicconquest401",
+      "title": "Strategic Conquest 4.0.1",
+      "library_path": "Library/Games/Strategic Conquest 4.0.1.zip",
+      "format": "zip"
+    },
+    {
+      "command": "strategicconquestplus",
+      "title": "Strategic Conquest Plus",
+      "library_path": "Library/Games/Strategic Conquest Plus.json",
+      "format": "json"
+    },
+    {
+      "command": "stuntcopter",
+      "title": "StuntCopter",
+      "library_path": "Library/Games/StuntCopter.json",
+      "format": "json"
+    },
+    {
+      "command": "swoop",
+      "title": "Swoop",
+      "library_path": "Library/Games/Ambrosia Software/Swoop.json",
+      "format": "json",
+      "needs_system_7": true
+    },
+    {
+      "command": "tetris",
+      "title": "Tetris",
+      "library_path": "Library/Games/Tetris.json",
+      "format": "json"
+    },
+    {
+      "command": "theoregontrail",
+      "title": "The Oregon Trail",
+      "library_path": "Library/Games/The Oregon Trail.json",
+      "format": "json"
+    },
+    {
+      "command": "thesecretofmonkeyisland",
+      "title": "The Secret of Monkey Island",
+      "library_path": "Library/Games/LucasArts/The Secret of Monkey Island.json",
+      "format": "json"
+    },
+    {
+      "command": "troubledsouls",
+      "title": "Troubled Souls",
+      "library_path": "Library/Games/Troubled Souls.json",
+      "format": "json",
+      "needs_system_7": true
+    },
+    {
+      "command": "ultimatedoom",
+      "title": "Ultimate Doom",
+      "library_path": "Library/Games/Ultimate Doom.json",
+      "format": "json",
+      "needs_system_7": true
+    },
+    {
+      "command": "warcraftorcshumans",
+      "title": "Warcraft - Orcs & Humans",
+      "library_path": "Library/Games/Warcraft - Orcs & Humans.json",
+      "format": "json",
+      "needs_system_7": true
+    },
+    {
+      "command": "warcraftiitidesofdarkness",
+      "title": "Warcraft II - Tides of Darkness",
+      "library_path": "Library/Games/Warcraft II - Tides of Darkness.json",
+      "format": "json",
+      "needs_system_7": true
+    },
+    {
+      "command": "wesleyantetris",
+      "title": "Wesleyan Tetris",
+      "library_path": "Library/Games/Wesleyan Tetris.json",
+      "format": "json"
+    }
+  ]
+}

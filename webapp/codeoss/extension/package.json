@@ -1,0 +1,144 @@
+{
+  "name": "cinterforge-if",
+  "displayName": "CinterForge Interactive Fiction",
+  "description": "CinterForge workspace, Inform compile, diagnostics, and live IF terminal bridge.",
+  "version": "0.1.0",
+  "publisher": "cinterforge",
+  "engines": {
+    "vscode": "^1.137.0"
+  },
+  "browser": "./extension.js",
+  "extensionKind": [
+    "ui"
+  ],
+  "enabledApiProposals": [
+    "fileSearchProvider",
+    "textSearchProvider"
+  ],
+  "capabilities": {
+    "virtualWorkspaces": {
+      "supported": true
+    }
+  },
+  "activationEvents": [
+    "onStartupFinished",
+    "onFileSystem:cinterforge",
+    "onCommand:cinterforge.compileInform",
+    "onCommand:cinterforge.openIFTerminal",
+    "onCommand:cinterforge.toggleColorTheme",
+    "onLanguage:zil",
+    "onLanguage:inform6",
+    "onCommand:cinterforge.buildStory",
+    "onCommand:cinterforge.newTerminal",
+    "onCommand:cinterforge.newStory",
+    "onCommand:cinterforge.importStory",
+    "onCommand:cinterforge.loadStory"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "cinterforge.compileInform",
+        "title": "CinterForge: Compile Inform"
+      },
+      {
+        "command": "cinterforge.openIFTerminal",
+        "title": "CinterForge: Open IF Terminal"
+      },
+      {
+        "command": "cinterforge.toggleColorTheme",
+        "title": "CinterForge: Toggle Light/Dark Mode"
+      },
+      {
+        "command": "cinterforge.buildStory",
+        "title": "CinterForge: Build Story Package"
+      },
+      {
+        "command": "cinterforge.newTerminal",
+        "title": "CinterForge: New Terminal"
+      },
+      {
+        "command": "cinterforge.newStory",
+        "title": "New Story\u2026"
+      },
+      {
+        "command": "cinterforge.importStory",
+        "title": "Import Story\u2026"
+      },
+      {
+        "command": "cinterforge.loadStory",
+        "title": "Open Story\u2026"
+      }
+    ],
+    "configuration": {
+      "title": "CinterForge",
+      "properties": {
+        "cinterforge.controlBase": {
+          "type": "string",
+          "default": "",
+          "description": "Optional CinterForge IF control service base URL. Same-origin is used when empty."
+        }
+      }
+    },
+    "languages": [
+      {
+        "id": "inform7",
+        "aliases": [
+          "Inform 7",
+          "Inform"
+        ],
+        "extensions": [
+          ".ni",
+          ".inform"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "inform6",
+        "aliases": [
+          "Inform 6",
+          "Inform"
+        ],
+        "extensions": [
+          ".inf"
+        ],
+        "configuration": "./inform6-language-configuration.json"
+      },
+      {
+        "id": "zil",
+        "aliases": [
+          "ZIL",
+          "Zork Implementation Language"
+        ],
+        "extensions": [
+          ".zil"
+        ],
+        "configuration": "./zil-language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "inform7",
+        "scopeName": "source.inform7",
+        "path": "./syntaxes/inform7.tmLanguage.json"
+      },
+      {
+        "language": "inform6",
+        "scopeName": "source.inform6",
+        "path": "./syntaxes/inform6.tmLanguage.json"
+      },
+      {
+        "language": "zil",
+        "scopeName": "source.zil",
+        "path": "./syntaxes/zil.tmLanguage.json"
+      }
+    ],
+    "terminal": {
+      "profiles": [
+        {
+          "id": "cinterforge.native",
+          "title": "CinterForge Terminal"
+        }
+      ]
+    }
+  }
+}
