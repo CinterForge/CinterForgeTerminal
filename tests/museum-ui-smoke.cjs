@@ -9,7 +9,10 @@ assert.equal(profiles.emulators.length,48);
 assert.equal(profiles.emulators.filter(p=>p.lagomorph).length,1);
 for(const id of ['terminal','macintosh','beos','nextstep'])
   assert.ok(html.includes(`id="${id}-menu-list"`),`missing ${id} menu`);
-assert.doesNotMatch(html,/id="terminal-profile"|<summary>Edit|<summary>File/);
+assert.doesNotMatch(html,/id="terminal-profile"/);
+// File/Edit are Windows-only HTML controls; they are hidden for Mac.
+for(const id of ['windows-file-menu','windows-edit-menu'])
+  assert.match(html,new RegExp(`id="${id}" hidden`));
 const listeners={};
 function element(id){return {id,hidden:false,disabled:false,src:'',value:'',checked:false,textContent:'',
   dataset:{},children:[],style:{setProperty(){}},clientWidth:800,clientHeight:500,

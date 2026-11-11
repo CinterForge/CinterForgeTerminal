@@ -147,7 +147,8 @@ def _dependency_name(spec: str) -> str:
     return re.split(r'[<>=]', spec, maxsplit=1)[0].strip()
 
 
-def _resolve(packages: dict[str, dict], msys_packages: dict[str, dict] | None = None) -> list[str]:
+def _resolve(packages: dict[str, dict], msys_packages: dict[str, dict] | None = None,
+             *, roots: tuple[str, ...] | None = None) -> list[str]:
     """Resolve both UCRT64 and MSYS dependencies, including virtual providers.
 
     UCRT64 packages (notably Node.js) can depend on native MSYS packages
@@ -160,10 +161,9 @@ def _resolve(packages: dict[str, dict], msys_packages: dict[str, dict] | None = 
             for virtual in info['provides']:
                 providers.setdefault(_dependency_name(virtual), []).append(name)
     resolved: set[str] = set()
-    # The base image alone may contain pacman-key without the makepkg utility
-    # scripts it sources. Include the pinned MSYS pacman package closure, not
-    # just the UCRT64 compilers, before distributing native Windows Bash.
-    pending = [*PACKAGES, 'pacman']
+    # The generic resolver serves offline fixtures as well as real Setup.
+    # Only Setup's ensure() requests the extra native MSYS pacman closure.
+    pending = list(PACKAGES if roots is None else roots)
     while pending:
         needed = _dependency_name(pending.pop())
         if needed in resolved:
@@ -273,7 +273,9 @@ def ensure(builds: Path, cross, base: Path) -> Path:
     msys_database = _fetch(MSYS_URL + 'msys.db.tar.zst', cache / 'MSYS/msys.db.tar.zst')
     packages = _repo_packages(database, cross=cross, builds=builds)
     msys_packages = _repo_packages(msys_database, cross=cross, builds=builds)
-    names = _resolve(packages, msys_packages)
+    # Setup owns the complete real Windows dependency closure. Neither Stage
+    # nor Test invokes ensure() or downloads the missing makepkg utilities.
+    names = _resolve(packages, msys_packages, roots=(*PACKAGES, 'pacman'))
     archives = []
     downloaded = {}
     resolved = {}
