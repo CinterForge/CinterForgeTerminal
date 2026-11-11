@@ -17,6 +17,32 @@
         <strong id="terminal-machine-title">TERMINAL SESSION</strong>
         <span id="terminal-shell" role="status"></span>
         <nav id="terminal-menus" class="terminal-menus" aria-label="Terminal and Computer History Museum">
+          <!-- Windows WebView2 has no macOS-style native application menu bar.
+               The same File/Edit actions appear here; no second terminal UI. -->
+          <details class="terminal-menu terminal-application-menu" id="windows-file-menu" hidden><summary>File ▾</summary>
+            <div class="terminal-menu-list" role="group" aria-label="File commands">
+              <button type="button" data-file-new="mac">New Mac Bash Terminal</button>
+              <button type="button" data-file-new="win">New Windows Bash Terminal</button>
+              <button type="button" data-file-new="linux">New Linux Bash Terminal</button>
+              <button type="button" data-file-new="minecraft" id="windows-new-minecraft" disabled>New Minecraft Console</button>
+              <button type="button" data-file-new="server">New Server Log Terminal</button>
+              <div class="terminal-menu-separator" role="separator"></div>
+              <button type="button" data-file-action="debugger">Open Debugger</button>
+              <div class="terminal-menu-separator" role="separator"></div>
+              <button type="button" data-file-action="quit">Quit</button>
+            </div>
+          </details>
+          <details class="terminal-menu terminal-application-menu" id="windows-edit-menu" hidden><summary>Edit ▾</summary>
+            <div class="terminal-menu-list" role="group" aria-label="Edit commands">
+              <button type="button" disabled>Undo</button><button type="button" disabled>Redo</button>
+              <button type="button" disabled>Cut</button>
+              <div class="terminal-menu-separator" role="separator"></div>
+              <button type="button" data-edit-action="copy">Copy <span class="terminal-shortcut">Ctrl+Shift+C</span></button>
+              <button type="button" data-edit-action="paste">Paste <span class="terminal-shortcut">Ctrl+V</span></button>
+              <div class="terminal-menu-separator" role="separator"></div>
+              <button type="button" disabled>Delete</button><button type="button" disabled>Select All</button>
+            </div>
+          </details>
           <details class="terminal-menu" id="terminal-menu">
             <summary><span class="terminal-icon terminal-icon--terminal" aria-hidden="true">&gt;_</span><span class="terminal-menu-name">Terminals</span><span class="terminal-menu-chevron" aria-hidden="true">▾</span></summary>
             <div id="terminal-menu-list" class="terminal-menu-list"></div>

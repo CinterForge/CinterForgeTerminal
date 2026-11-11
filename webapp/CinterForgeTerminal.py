@@ -336,14 +336,34 @@ def _bounded_size(cols: int, rows: int) -> tuple[int, int]:
     return max(20, min(int(cols), 300)), max(5, min(int(rows), 120))
 
 
+def _windows_msys2_root(writable_root: Path) -> Path:
+    """Read Bash from immutable packaged resources, not the Steam state tree.
+
+    The downloaded Windows application bundles its MSYS2 runtime under its
+    read-only Builds/ resources directory; native session state must instead
+    be written under the selected steamapps/TerminalState directory. A source
+    lifecycle run may use its provisioned developer MSYS2 closure directly.
+    """
+    for ancestor in ASSETS.resolve().parents:
+        if ancestor.name == 'Builds':
+            candidate = ancestor / 'CinterForgeTerminal/Runtime/MSYS2'
+            if (candidate / 'usr/bin/bash.exe').is_file():
+                return candidate
+    for relative in ('CinterForgeTerminal/Runtime/MSYS2',
+                     'CinterForgeTerminal/Toolchains/Windows/MSYS2'):
+        candidate = writable_root / relative
+        if (candidate / 'usr/bin/bash.exe').is_file():
+            return candidate
+    raise RuntimeError('Packaged Windows MSYS2 UCRT64 Bash is missing; '
+                       'rebuild the Windows application with the complete runtime')
+
+
 def _shell_command(system: str, scripts: Path, builds: Path | None = None) -> list[str]:
-    """Use the actual native Bash; Windows Bash must be staged MSYS2 UCRT64."""
+    """Use actual native Bash, with Windows binaries read from packaged MSYS2."""
     if system == 'win':
         if builds is None:
-            raise RuntimeError('Windows native Bash requires the staged Builds root')
-        root = builds / 'CinterForgeTerminal/Runtime/MSYS2'
-        if not root.is_dir():
-            root = builds / 'CinterForgeTerminal/Toolchains/Windows/MSYS2'  # developer Setup only
+            raise RuntimeError('Windows native Bash requires a staged runtime')
+        root = _windows_msys2_root(builds)
         bash = root / 'usr/bin/bash.exe'
         if not bash.is_file():
             raise RuntimeError(f'Pinned MSYS2 UCRT64 Bash not staged: {bash}')
@@ -411,9 +431,13 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     functions += ('\ninstall() { if [ "$1" = devtools ]; then '
                   + shlex.quote(python) + ' ' + shlex.quote(str(cli))
                   + ' --terminal-cli install "$@"; else command install "$@"; fi; }')
-    preamble = ("# macOS/Linux native Bash or Windows MSYS2 UCRT64 Bash\n"
-                "if [ \"${MSYSTEM:-}\" = UCRT64 ] && [ -r /etc/profile ]; then . /etc/profile; fi\n"
+    # The package controls MSYSTEM, UCRT64 PATH and HOME. Sourcing the global
+    # /etc/profile on every interactive Session reruns MSYS2 first-start hooks
+    # (pacman-key, /dev/shm and /dev/mqueue setup), even for read-only bundles.
+    # Our explicit --rcfile requires no machine-wide profile or pacman setup.
+    preamble = ("# Native CinterForge Terminal session (preconfigured UCRT64 environment)\n"
                 "printf 'Welcome to CinterForge. Type help for instructions.\\n'\n")
+
     (directory / 'terminal-init.sh').write_text(preamble + functions + '\n', encoding='utf-8')
     return directory
 
@@ -506,11 +530,10 @@ class TerminalSession:
         self.root = builds / 'Run' / 'CinterForgeTerminal' / system
         env['CINTER_TARGET_PLATFORM'] = system
         if system == 'win':
-            msys = builds / 'CinterForgeTerminal/Runtime/MSYS2'
-            if not msys.is_dir():
-                msys = builds / 'CinterForgeTerminal/Toolchains/Windows/MSYS2'
+            msys = _windows_msys2_root(builds)
             env['MSYSTEM'] = 'UCRT64'
             env['CHERE_INVOKING'] = '1'
+            env['MSYS2_PATH_TYPE'] = 'inherit'
             env['PATH'] = os.pathsep.join([str(msys / 'ucrt64/bin'),
                                             str(msys / 'usr/bin'), env.get('PATH', '')])
         scripts = _install_shell_commands(self.root, system, env)
@@ -764,7 +787,12 @@ def _steam_library_for_installed_root(builds: Path) -> Path | None:
             if ancestor.name.lower() != 'steamapps':
                 continue
             rel = item.relative_to(ancestor).parts
-            if rel[:3] == ('common', 'CinterForge', 'Applications'):
+            if (len(rel) >= 3 and rel[:2] == ('common', 'CinterForge') and
+                    rel[2] in ('Applications', 'CinterForge Terminal')):
+                # Both the current Applications/<platform>/... layout and
+                # older native Windows common/CinterForge/CinterForge Terminal
+                # releases are installed apps, even though they contain an
+                # immutable directory literally named Builds.
                 return ancestor
     value = os.environ.get('CINTER_STEAMAPPS', '').strip()
     if value:
@@ -803,6 +831,37 @@ def _terminal_mutable_root(builds: Path) -> Path:
     """
     physical = builds.resolve(strict=True)
     embedded_app = any(part.endswith('.app') for part in physical.parts)
+    installed_steam = None
+    for item in (physical, ASSETS.resolve()):
+        for parent in (item, *item.parents):
+            if parent.name.lower() != 'steamapps':
+                continue
+            relative = item.relative_to(parent).parts
+            if (len(relative) >= 3 and relative[:2] == ('common', 'CinterForge') and
+                    relative[2] in ('Applications', 'CinterForge Terminal')):
+                installed_steam = parent
+                break
+        if installed_steam is not None:
+            break
+    # Critical: the Windows lightweight distribution names its immutable
+    # payload folder Builds. Being named Builds does NOT make it a developer
+    # tree. A downloaded app outside Steam also uses the portable bundle
+    # layout; only explicit repository development may write to that tree.
+    packaged_windows = (os.name == 'nt' and physical.name == 'Builds' and
+                        ASSETS.resolve().is_relative_to(physical) and
+                        ASSETS.resolve().relative_to(physical).parts[:2] == ('Python', 'Host'))
+    if installed_steam is not None or (
+            packaged_windows and os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') != 'developer'
+            and os.environ.get('CINTER_BUILDS_ROOT') != str(physical)):
+        steam = installed_steam or _steam_library_for_installed_root(physical)
+        if steam is None:
+            raise RuntimeError('Installed Windows Terminal requires a real Steam library; '
+                               'set CINTER_STEAMAPPS to select an existing library')
+        candidate = steam / 'common/CinterForge/Applications/TerminalState'
+        if candidate.is_symlink() or (candidate.exists() and not candidate.is_dir()):
+            raise RuntimeError('Unsafe installed Terminal state root: ' + str(candidate))
+        candidate.mkdir(parents=True, exist_ok=True)
+        return candidate
     if not embedded_app and physical.name == 'Builds':
         return physical  # ./Cinter and explicit repository development stage
     if not embedded_app:
@@ -3344,19 +3403,17 @@ def _devtools_release() -> str:
 
 def _devtools_destination(release: str):
     from pathlib import Path
-    import platform
     configured = os.environ.get('CINTER_STEAMAPPS') or os.environ.get('CFOS_STEAMAPPS')
     if configured:
         steamapps = Path(configured).expanduser()
-    elif platform.system() == 'Darwin':
-        steamapps = Path.home() / 'Library/Application Support/Steam/steamapps'
-    elif platform.system() == 'Linux':
-        steamapps = Path.home() / '.local/share/Steam/steamapps'
+        if steamapps.name.lower() != 'steamapps' or steamapps.is_symlink() or not steamapps.is_dir():
+            raise RuntimeError('Provide a real Steam steamapps root via CINTER_STEAMAPPS: ' + str(steamapps))
+        steamapps = steamapps.resolve(strict=True)
     else:
-        steamapps = Path(os.environ.get('PROGRAMFILES(X86)', 'C:/Program Files (x86)')) / 'Steam/steamapps'
-    if steamapps.name.lower() != 'steamapps' or steamapps.is_symlink() or not steamapps.is_dir():
-        raise RuntimeError('Provide a real Steam steamapps root via CINTER_STEAMAPPS: ' + str(steamapps))
-    return steamapps.resolve() / 'common/CinterForge/Applications/DevTools/CinterForge Terminal' / release
+        steamapps = _steam_library_for_installed_root(ASSETS.parent)
+        if steamapps is None:
+            raise RuntimeError('Cannot identify the installed Steam library; set CINTER_STEAMAPPS')
+    return steamapps / 'common/CinterForge/Applications/DevTools/CinterForge Terminal' / release
 
 
 def _public_manifest(release: str) -> tuple[dict, str]:
@@ -3414,10 +3471,19 @@ def _file_sha256(path):
 
 
 def _download_public_devtools(url: str, partial, *, length: int, digest: str):
-    """HTTPS, resumable Range transfer, verified before any install writes."""
+    """Download a verified DevTools ZIP using bounded HTTPS ranges and retries.
+
+    The public archive is several GiB. A single CDN/TLS stream may be severed
+    before the transfer completes, so transfer 64 MiB at a time and resume from
+    the last fully written byte after a transient disconnect. Preserve an
+    incomplete .partial file across sessions; never extract unverified bytes.
+    """
     import time
+    from http.client import HTTPException
+    from urllib.error import HTTPError, URLError
     from urllib.parse import urlsplit
     from urllib.request import Request, urlopen
+
     if urlsplit(url).scheme != 'https' or urlsplit(url).hostname != 'cinterforge.ucreg.io':
         raise RuntimeError('DevTools must come from the approved public Cloudflare host')
     partial.parent.mkdir(parents=True, exist_ok=True)
@@ -3427,42 +3493,87 @@ def _download_public_devtools(url: str, partial, *, length: int, digest: str):
     if current > length:
         partial.unlink()
         current = 0
-    if current == length and _file_sha256(partial) == digest:
-        print('[DEVTOOLS] previously downloaded package verified', flush=True)
-        return
     if current == length:
+        if _file_sha256(partial) == digest:
+            print('[DEVTOOLS] previously downloaded package verified', flush=True)
+            return
         partial.unlink()
         current = 0
-    headers = {'User-Agent': 'CinterForgeTerminal-devtools/1'}
     if current:
-        headers['Range'] = f'bytes={current}-'
-    try:
-        source_context = urlopen(Request(url, headers=headers), timeout=90)
-    except (OSError, __import__('urllib.error', fromlist=['URLError']).URLError) as exc:
-        raise RuntimeError(f'Public DevTools download unavailable at {url}: {exc}') from exc
-    with source_context as source:
-        status = getattr(source, 'status', 200)
-        if current:
-            if status == 200:
-                current = 0  # Server did not honor Range; restart safely.
-            elif status != 206 or not str(source.headers.get('Content-Range', '')).startswith(f'bytes {current}-'):
-                raise RuntimeError('Public DevTools resume response does not match requested range')
-        elif status != 200:
-            raise RuntimeError(f'Public DevTools download HTTP {status}')
-        mode = 'ab' if current else 'wb'
-        received = current
-        last = time.monotonic()
-        with partial.open(mode) as output:
-            for chunk in iter(lambda: source.read(4 * 1024 * 1024), b''):
-                output.write(chunk)
-                received += len(chunk)
-                now = time.monotonic()
-                if now - last >= 2:
-                    print(f'[DEVTOOLS] download {100 * received / length:.1f}% '
-                          f'({received / 1073741824:.2f}/{length / 1073741824:.2f} GiB)', flush=True)
-                    last = now
+        print(f'[DEVTOOLS] resuming saved download at '
+              f'{current / 1073741824:.2f}/{length / 1073741824:.2f} GiB', flush=True)
+
+    window = 64 * 1024 * 1024
+    consecutive_failures = 0
+    max_failures = 12
+    last_report = time.monotonic()
+    while current < length:
+        requested_end = min(current + window, length) - 1
+        headers = {'User-Agent': 'CinterForgeTerminal-devtools/1',
+                   'Accept-Encoding': 'identity',
+                   'Range': f'bytes={current}-{requested_end}'}
+        try:
+            with urlopen(Request(url, headers=headers), timeout=90) as source:
+                status = getattr(source, 'status', 200)
+                if status == 206:
+                    match = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)',
+                                         source.headers.get('Content-Range', '').strip())
+                    if (not match or int(match[1]) != current or
+                            int(match[2]) < current or int(match[2]) > requested_end or
+                            int(match[3]) != length):
+                        raise RuntimeError('Public DevTools CDN returned an invalid byte range; '
+                                           'saved download was not modified')
+                    stop = int(match[2]) + 1
+                elif status == 200 and current == 0:
+                    # A CDN that ignores Range can still deliver one full stream,
+                    # but a later disconnect cannot safely resume on that CDN.
+                    stop = length
+                    print('[DEVTOOLS] CDN ignored Range; streaming full archive', flush=True)
+                else:
+                    raise RuntimeError(f'Public DevTools CDN did not honor resume '
+                                       f'(HTTP {status}); saved download retained')
+                with partial.open('ab') as output:
+                    while current < stop:
+                        block = source.read(min(4 * 1024 * 1024, stop - current))
+                        if not block:
+                            raise ConnectionError('Remote stream closed before the requested bytes arrived')
+                        output.write(block)
+                        current += len(block)
+                        now = time.monotonic()
+                        if now - last_report >= 2 or current == length:
+                            print(f'[DEVTOOLS] download {100 * current / length:.1f}% '
+                                  f'({current / 1073741824:.2f}/{length / 1073741824:.2f} GiB)',
+                                  flush=True)
+                            last_report = now
+            consecutive_failures = 0
+        except HTTPError as error:
+            if error.code not in (408, 429, 500, 502, 503, 504):
+                raise RuntimeError(f'Public DevTools download HTTP {error.code}; '
+                                   f'saved download retained at {partial}') from error
+            failure = error
+        except (URLError, HTTPException, OSError, TimeoutError) as error:
+            # Includes BrokenPipeError, ConnectionResetError and incomplete TLS reads.
+            failure = error
+        else:
+            continue
+        # Read failures can happen after writing part of the requested range.
+        # Recompute the actual durable offset before starting the next request.
+        current = partial.stat().st_size if partial.is_file() else 0
+        consecutive_failures += 1
+        if consecutive_failures > max_failures:
+            raise RuntimeError('Public DevTools download repeatedly disconnected; '
+                               f'{current / 1073741824:.2f} GiB retained at {partial}. '
+                               'The next approved INSTALL resumes this file.') from failure
+        delay = min(2 ** min(consecutive_failures - 1, 4), 16)
+        print(f'[DEVTOOLS] connection interrupted ({type(failure).__name__}: {failure}); '
+              f'resuming from {current / 1073741824:.2f} GiB in {delay}s '
+              f'({consecutive_failures}/{max_failures})', flush=True)
+        time.sleep(delay)
+
     if partial.stat().st_size != length or _file_sha256(partial) != digest:
-        raise RuntimeError('Public DevTools ZIP size or SHA-256 does not match published manifest')
+        # Never stage an archive that differs from the signed-release manifest.
+        partial.unlink(missing_ok=True)
+        raise RuntimeError('Public DevTools ZIP size/SHA-256 mismatch; invalid partial discarded')
     print('[DEVTOOLS] download 100% — verified published SHA-256', flush=True)
 
 
@@ -3488,7 +3599,11 @@ def _stage_devtools_zip(archive_path, destination, release: str, artifact: dict)
             raise RuntimeError('DevTools ZIP member manifest invalid')
         for name, info in files.items():
             parts = PurePosixPath(name).parts
-            if (len(parts) < 4 or parts[:2] != ('DevTools', 'Builds') or
+            # README is an authored root-level member of the published ZIP,
+            # generated by _devtools_assets. It is not a traversal or SDK path.
+            if (not isinstance(info, dict) or
+                    (name != 'DevTools/README.txt' and
+                     (len(parts) < 4 or parts[:2] != ('DevTools', 'Builds'))) or
                     name.startswith('/') or '\\' in name or '..' in parts or '.' in parts or
                     archive.getinfo(name).is_dir() or
                     stat.S_IFMT(archive.getinfo(name).external_attr >> 16) == stat.S_IFLNK or
@@ -3590,6 +3705,7 @@ def _verify_native_devtools(destination) -> bool:
 
 def install_devtools() -> int:
     """User-initiated public download only; never run during Terminal startup."""
+    import zipfile
     from pathlib import Path
     release = _devtools_release()
     destination = _devtools_destination(release)
@@ -3617,11 +3733,24 @@ def install_devtools() -> int:
         print('[DEVTOOLS] canceled; nothing downloaded', flush=True)
         return 1
     pending = destination.parent / 'Downloads' / release / (artifact['filename'] + '.partial')
-    _download_public_devtools(url, pending, length=artifact['bytes'], digest=artifact['sha256'])
-    _stage_devtools_zip(pending, destination, release, artifact)
+    try:
+        _download_public_devtools(url, pending, length=artifact['bytes'], digest=artifact['sha256'])
+        _stage_devtools_zip(pending, destination, release, artifact)
+    except (OSError, RuntimeError, ValueError, zipfile.BadZipFile) as error:
+        print(f'[DEVTOOLS] installation failed: {type(error).__name__}: {error}', flush=True)
+        print('[DEVTOOLS] Mac Session remains open; retry INSTALL to resume any saved download.',
+              flush=True)
+        return 1
+    # Keep the already downloaded, verified archive until the installed SDK
+    # has passed its local tool checks. Otherwise a failed version probe forces
+    # another multi-GiB network download even though the ZIP is still valid.
+    if not _verify_native_devtools(destination):
+        print('[DEVTOOLS] Installed files retained, as is the verified ZIP for '
+              'a local repair; no re-download is needed.', flush=True)
+        return 1
     pending.unlink(missing_ok=True)
     print(f'[DEVTOOLS] installed: {destination}', flush=True)
-    return 0 if _verify_native_devtools(destination) else 1
+    return 0
 
 
 def _api(path: str, *, body: dict | None = None) -> dict:
@@ -4148,8 +4277,12 @@ def sdk_root() -> Path | None:
                 continue
             digest, sha, image = (data.get('dockerfile_sha256'),
                                   data.get('archive_sha256'), data.get('image'))
-            if (isinstance(digest, str) and len(digest) == 64 and
-                    isinstance(sha, str) and len(sha) == 64 and
+            # LinuxSample's actual producer stores only the leading 16 hex
+            # digits of its Dockerfile hash. WindowsCross stores all 64.
+            # Requiring 64 for both rejects valid installed Linux images and
+            # causes every Win/Linux Session to demand DevTools again.
+            if (isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{16}|[0-9a-f]{64}', digest) and
+                    isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{64}', sha) and
                     isinstance(image, str) and image and
                     (directory / (digest[:16] + '.tar')).is_file() and
                     not (directory / (digest[:16] + '.tar')).is_symlink()):

@@ -160,7 +160,10 @@ def _resolve(packages: dict[str, dict], msys_packages: dict[str, dict] | None = 
             for virtual in info['provides']:
                 providers.setdefault(_dependency_name(virtual), []).append(name)
     resolved: set[str] = set()
-    pending = list(PACKAGES)
+    # The base image alone may contain pacman-key without the makepkg utility
+    # scripts it sources. Include the pinned MSYS pacman package closure, not
+    # just the UCRT64 compilers, before distributing native Windows Bash.
+    pending = [*PACKAGES, 'pacman']
     while pending:
         needed = _dependency_name(pending.pop())
         if needed in resolved:
@@ -241,7 +244,11 @@ def _unpack_ucrt(cross, builds: Path, root: Path, archives: list[Path]) -> None:
 def ensure(builds: Path, cross, base: Path) -> Path:
     root = builds / 'CinterForgeTerminal/Toolchains/Windows/MSYS2'
     manifest = root / 'closure.json'
-    required = [root / name for name in (*REQUIRED, 'usr/bin/winpty.exe')]
+    required = [root / name for name in (
+        *REQUIRED, 'usr/bin/winpty.exe',
+        'usr/share/makepkg/util/message.sh',
+        'usr/share/makepkg/util/parseopts.sh',
+        'usr/share/makepkg/utils_fixed_path.sh')]
     if manifest.is_file() and all(path.is_file() for path in required):
         data = json.loads(manifest.read_text(encoding='utf-8'))
         if data.get('schema') != SCHEMA or data.get('packages') != list(PACKAGES):

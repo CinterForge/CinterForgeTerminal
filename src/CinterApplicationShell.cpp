@@ -129,6 +129,31 @@ std::wstring utf8(const std::string& value) {
     output.pop_back();
     return output;
 }
+// Win32 clipboard text is the reliable fallback for WebView2's restricted
+// navigator.clipboard.readText on a loopback-origin packaged application.
+// Only the installed page invokes this user-gesture-bound paste bridge.
+std::string windowsClipboardText() {
+    if (!OpenClipboard(nullptr))
+        throw std::runtime_error("Windows clipboard is busy");
+    HANDLE handle=GetClipboardData(CF_UNICODETEXT);
+    if (!handle) { CloseClipboard(); return {}; }
+    const wchar_t* wide=static_cast<const wchar_t*>(GlobalLock(handle));
+    if (!wide) { CloseClipboard(); throw std::runtime_error("Cannot read Windows clipboard"); }
+    const int bytes=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,
+                                      wide,-1,nullptr,0,nullptr,nullptr);
+    if (!bytes) {
+        GlobalUnlock(handle); CloseClipboard();
+        throw std::runtime_error("Windows clipboard has invalid Unicode text");
+    }
+    std::string value(static_cast<std::size_t>(bytes), '\0');
+    const int written=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,
+                                        wide,-1,value.data(),bytes,nullptr,nullptr);
+    GlobalUnlock(handle);
+    CloseClipboard();
+    if (!written) throw std::runtime_error("Cannot decode Windows clipboard");
+    value.pop_back();  // trailing NUL returned by WideCharToMultiByte
+    return value;
+}
 std::wstring quoteWindows(const std::wstring& value) {
     std::wstring result=L"\"";
     std::size_t slash=0;
@@ -531,6 +556,15 @@ int runApplicationShell(const ApplicationShellConfig& config) {
             }
             return R"("invalid action")";
         });
+#ifdef _WIN32
+        // The UI's File/Edit and Ctrl+V use the actual Windows clipboard.
+        // Read-only, no cross-origin network API and no text in native logs.
+        window.bind("cinterClipboard", [&](const std::string& args) -> std::string {
+            if (args.find("\"action\":\"paste\"") == std::string::npos)
+                return "null";
+            return "\"" + jsonEscape(windowsClipboardText()) + "\"";
+        });
+#endif
         // Native bridge on the real staged application (not a synthetic smoke page).
         // This binding accepts telemetry only; privileged terminal commands continue
         // through the authenticated, loopback-only Python service.

@@ -77,6 +77,14 @@ a {
    position: relative
 }
 
+.terminal-menu[hidden] { display: none }
+.terminal-application-menu .terminal-menu-list { left: 0; right: auto }
+.terminal-menu-separator {
+   border-top: 1px solid color-mix(in srgb, var(--fg) 28%, transparent);
+   margin: 4px 3px;
+}
+.terminal-shortcut { margin-left: auto; opacity: .75; padding-left: 20px }
+
 .terminal-menu summary {
    display: flex;
    align-items: center;

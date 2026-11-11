@@ -145,7 +145,9 @@ def assemble(builds: Path, *, release: str = HOST_RELEASE, arches: dict[str, str
         resources = app / "Contents/Resources/Builds"
         resources.mkdir(parents=True)
         for target in TARGETS:
-            shutil.copytree(packages[target], resources / target, symlinks=False)
+            shutil.copytree(packages[target], resources / target, symlinks=False,
+                            ignore=lambda _directory, names:
+                                [name for name in names if _python_cache_member(name)])
         from host.windows_fixed_runtime import verify as verify_fixed
         fixed = resources / 'win/WebView2FixedRuntime/msedgewebview2.exe'
         if not fixed.is_file() or fixed.open('rb').read(2) != b'MZ':
@@ -245,8 +247,16 @@ def verify_universal_zip(archive_path: Path) -> dict:
 # older universal ZIP verifier above only for reading historical distributions.
 # No Bedrock executable or EULA receipt is a build/stage prerequisite.
 FOUR_SCHEMA = 'cinterforge.terminal.four-artifact-release.v1'
+MAC_ZIP_SEAL = 'signed-after-python-cache-filter-v1'
 # Printed during Stage to prove the running checkout includes interrupted-install recovery.
 MAC_STAGE_RECOVERY_PROTOCOL = 'restart-safe-v2'
+def _python_cache_member(name: str | Path) -> bool:
+    """Never distribute generated Python bytecode or cache directories."""
+    path = Path(name)
+    return (any(part.casefold() == '__pycache__' for part in path.parts) or
+            path.suffix.casefold() in ('.pyc', '.pyo'))
+
+
 FOUR_TARGETS = ('mac', 'linux', 'win', 'devtools')
 FOUR_ARCH = {'mac': 'arm64', 'linux': 'x64', 'win': 'x64'}
 STEAM_PLATFORMS = {'mac': 'macOS', 'linux': 'Linux', 'win': 'Windows', 'devtools': 'DevTools'}
@@ -315,6 +325,8 @@ def _files_under(source: Path, prefix: str, *, require: bool = True) -> dict[str
         parents = ancestors | {actual}
         for item in sorted(actual.iterdir()):
             member = relative / item.name
+            if _python_cache_member(member):
+                continue
             if item.is_symlink():
                 try:
                     target = item.resolve(strict=True)
@@ -526,11 +538,28 @@ def _app_assets(builds: Path, target: str, release: str) -> dict[str, Path | byt
             shell_prefix = builds_prefix + '/CinterForgeTerminal/Runtime/MSYS2'
             assets.update(_files_under(msys / 'usr/bin', shell_prefix + '/usr/bin'))
             _require_windows_shell(assets)
-            for optional in ('usr/etc', 'etc', 'usr/share/terminfo'):
+            # pacman-key and Bash reference makepkg's distributed utility
+            # scripts. Do not ship a truncated usr/bin-only MSYS2 runtime.
+            # Include the authored upstream utilities with their full relative
+            # paths; the optional unified SDK is not required for native Bash.
+            for required in ('usr/share/makepkg/util/message.sh',
+                             'usr/share/makepkg/util/parseopts.sh',
+                             'usr/share/makepkg/utils_fixed_path.sh'):
+                if not (msys / required).is_file():
+                    raise FileNotFoundError('Windows MSYS2 runtime missing required '
+                                            'makepkg utility: ' + str(msys / required))
+            for optional in ('usr/etc', 'etc', 'usr/share/terminfo',
+                             'usr/share/makepkg', 'usr/share/pacman'):
                 folder = msys / optional
                 if folder.is_dir():
                     assets.update(_files_under(folder, shell_prefix + '/' + optional,
                                                require=False))
+            # MSYS2 checks that /tmp exists before executing Bash. This
+            # immutable placeholder materializes the directory in the release;
+            # TMP/TEMP/TMPDIR still point to writable steamapps TerminalState.
+            assets[shell_prefix + '/tmp/README.txt'] = (
+                b'MSYS2 startup directory only. Writable temp is redirected to '
+                b'the CinterForge Steam runtime state via TMPDIR.\n')
             # All recursive non-system DLLs were resolved by cross_build.
             for dll in binary.parent.glob('*.dll'):
                 assets[prefix + '/' + dll.name] = dll
@@ -541,7 +570,7 @@ def _app_assets(builds: Path, target: str, release: str) -> dict[str, Path | byt
 setlocal EnableExtensions
 set "BUILDS=%~dp0Builds"
 set "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=%BUILDS%\CinterForgeTerminal\Dependencies\WebView2FixedRuntime"
-"%~dp0CinterForge Terminal.exe" --builds "%BUILDS%" --python "%BUILDS%\Python\Environments\win\x64\cinterterminalenv\python.exe" --worker "%BUILDS%\Python\Host\win\x64\RELEASE\python\worker.py" --service "%BUILDS%\Python\Host\win\x64\RELEASE\examples\shell\CinterForgeTerminal.py" %*
+"%~dp0CinterForge Terminal.exe" --builds "%BUILDS%" --python "%BUILDS%\Python\Environments\win\x64\cinterterminalenv\python.exe" --worker "%BUILDS%\Python\Host\win\x64\RELEASE\python\worker.py" --service "%BUILDS%\Python\Host\win\x64\RELEASE\webapp\CinterForgeTerminal.py" %*
 exit /b %ERRORLEVEL%
 """.replace('RELEASE', release)
             assets[prefix + '/Terminal.cmd'] = launch.encode()
@@ -625,10 +654,37 @@ def _release_file_mode(name: str, value: Path | bytes) -> int:
     return 0o755 if source_executable or launcher or python_entrypoint else 0o644
 
 
+def _signed_mac_zip_assets(source: dict[str, Path | bytes], staging: Path) -> dict[str, Path]:
+    """Sign the exact bytecode-free, symlink-free tree the ZIP will contain.
+
+    The staged macOS .app is an immutable developer build. Never remove its
+    Python caches or modify its existing signature to prepare a distribution.
+    """
+    app_name = APP_ROOTS['mac']
+    app = staging / 'MacSignedRelease' / app_name
+    for name, value in sorted(source.items()):
+        relative = Path(name)
+        if (not relative.parts or relative.parts[0] != app_name or
+                '..' in relative.parts or _python_cache_member(relative)):
+            raise RuntimeError('Unsafe macOS packaging input: ' + name)
+        output = app.joinpath(*relative.parts[1:])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(value, bytes):
+            output.write_bytes(value)
+        else:
+            # _files_under already resolves internal aliases; copy regular
+            # bytes so the ZIP and the signed app have identical structure.
+            shutil.copy2(value, output)
+        output.chmod(_release_file_mode(name, value))
+    from host.mac_app import _sign_and_verify
+    _sign_and_verify(app)
+    return _files_under(app, app_name)
+
+
 def _write_release_zip(path: Path, files: dict[str, Path | bytes], *, target: str,
                        release: str, root: str) -> dict:
     if not files or any(not n.startswith(root + '/') or '..' in Path(n).parts or '\\' in n
-                        for n in files):
+                        or _python_cache_member(n) for n in files):
         raise RuntimeError('Unsafe or empty release file list')
     details = {}
     total_bytes = sum(len(value) if isinstance(value, bytes) else value.stat().st_size
@@ -669,6 +725,8 @@ def _write_release_zip(path: Path, files: dict[str, Path | bytes], *, target: st
             receipt = {'schema': FOUR_SCHEMA, 'target': target, 'release': release,
                        'root': root, 'files': details,
                        'native_acceptance': 'not-claimed-by-package'}
+            if target == 'mac':
+                receipt['mac_zip_seal'] = MAC_ZIP_SEAL
             archive.writestr('release-manifest.json', json.dumps(receipt, sort_keys=True) + '\n')
         _verify_release_zip(partial, target=target, release=release, hash_files=True, progress_label=f'Verify ZIP {target}')
         partial.replace(path)
@@ -691,9 +749,13 @@ def _verify_release_zip(path: Path, *, target: str, release: str,
         if (manifest.get('schema') != FOUR_SCHEMA or manifest.get('target') != target or
                 manifest.get('release') != release or manifest.get('root') != root):
             raise RuntimeError(f'Release ZIP identity mismatch: {path}')
+        if target == 'mac' and manifest.get('mac_zip_seal') != MAC_ZIP_SEAL:
+            raise RuntimeError('Mac ZIP predates post-filter signing; rebuild required')
         files = manifest.get('files')
         if not isinstance(files, dict) or set(names) != set(files) | {'release-manifest.json'}:
             raise RuntimeError('Release ZIP contains untracked or missing files')
+        if any(_python_cache_member(name) for name in names):
+            raise RuntimeError('Release ZIP contains generated Python bytecode/cache')
         if target == 'win':
             _require_windows_shell(files, zip_archive=archive)
         if any(not name.startswith(root + '/') or '\\' in name or '..' in Path(name).parts or
@@ -790,6 +852,13 @@ def _release_cache_file(builds: Path, release: str, target: str) -> Path:
             release / (target + '.json'))
 
 
+def _release_zip_has_python_cache(path: Path) -> bool:
+    # Central-directory inspection avoids hashing or recompressing a large
+    # unchanged SDK but prevents old dirty ZIPs from being reused as clean.
+    with zipfile.ZipFile(path) as archive:
+        return any(_python_cache_member(name) for name in archive.namelist())
+
+
 def _release_cache_matches(builds: Path, release: str, target: str,
                            fingerprint: str, archive: Path, old: dict) -> bool:
     """Accept a previous verified build only if its inputs and ZIP are unchanged."""
@@ -804,7 +873,8 @@ def _release_cache_matches(builds: Path, release: str, target: str,
                 cached.get('input_fingerprint') == fingerprint and
                 cached.get('filename') == old['filename'] and
                 cached.get('sha256') == old['sha256'] and
-                cached.get('archive') == _release_archive_identity(archive))
+                cached.get('archive') == _release_archive_identity(archive) and
+                not _release_zip_has_python_cache(archive))
     except (OSError, ValueError, TypeError, KeyError):
         return False
 
@@ -957,6 +1027,9 @@ def build_four(builds: Path, *, release: str = HOST_RELEASE) -> dict:
         # All target checks are independent. In particular, touching source for
         # a lightweight app cannot force the huge DevTools archive to rebuild.
         fingerprint = _release_input_fingerprint(assets)
+        if target == 'mac':
+            # Invalidate caches of ZIPs built from the already-signed .app.
+            fingerprint = hashlib.sha256((MAC_ZIP_SEAL + fingerprint).encode()).hexdigest()
         input_fingerprints[target] = fingerprint
         old = previous.get('artifacts', {}).get(target, {})
         try:
@@ -975,14 +1048,20 @@ def build_four(builds: Path, *, release: str = HOST_RELEASE) -> dict:
                   'ZIP and input checksums', flush=True)
             existing = _verify_release_zip(archive, target=target, release=release,
                                            progress_label=f'Verify ZIP {target}')
-            expected = {key: {'sha256': (_hash(value) if isinstance(value, Path) else
-                                                  hashlib.sha256(value).hexdigest()),
-                              'mode': _release_file_mode(key, value)}
-                        for key, value in assets.items()}
-            recorded = {key: {'sha256': item['sha256'], 'mode': item['mode']}
-                        for key, item in existing['files'].items()}
-            if recorded != expected or _hash(archive) != old['sha256']:
-                raise ValueError('Target inputs or ZIP changed')
+            if target == 'mac':
+                # The signed packaging copy necessarily has different
+                # CodeResources bytes from the signed developer build.
+                if old.get('input_fingerprint') != fingerprint or _hash(archive) != old['sha256']:
+                    raise ValueError('Mac source inputs or signed ZIP changed')
+            else:
+                expected = {key: {'sha256': (_hash(value) if isinstance(value, Path) else
+                                                      hashlib.sha256(value).hexdigest()),
+                                  'mode': _release_file_mode(key, value)}
+                            for key, value in assets.items()}
+                recorded = {key: {'sha256': item['sha256'], 'mode': item['mode']}
+                            for key, item in existing['files'].items()}
+                if recorded != expected or _hash(archive) != old['sha256']:
+                    raise ValueError('Target inputs or ZIP changed')
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, zipfile.BadZipFile) as error:
             dirty[target] = str(error)
             print(f'[TERMINAL BUILD] {target} dirty: {error}', flush=True)
@@ -998,8 +1077,17 @@ def build_four(builds: Path, *, release: str = HOST_RELEASE) -> dict:
             root = APP_ROOTS[target]
             name = f'CinterForgeTerminal-{target}.zip'
             archive = staging / name
-            artifacts[target] = _write_release_zip(archive, files_by_target[target],
+            assets = files_by_target[target]
+            if target == 'mac' and all(isinstance(value, Path) for value in assets.values()):
+                # Real macOS assets always come from the staged .app. In-memory
+                # fixture ZIPs have no native Mach-O bundle to re-sign.
+                print('[TERMINAL BUILD] mac: signing filtered release copy '
+                      '(developer .app unchanged)', flush=True)
+                assets = _signed_mac_zip_assets(assets, staging)
+            artifacts[target] = _write_release_zip(archive, assets,
                                                     target=target, release=release, root=root)
+            if target == 'mac':
+                artifacts[target]['input_fingerprint'] = input_fingerprints[target]
         report = {'schema': FOUR_SCHEMA, 'release': release, 'artifacts': artifacts,
                   'bedrock': 'excluded-until-app-eula-acceptance',
                   'native_acceptance': 'separate-target-tests-required'}

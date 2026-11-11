@@ -912,17 +912,25 @@
   const currentTranscript=()=>game ? ($('terminal-output').textContent || '') : display.transcript();
   const copyTranscript=async()=>{
     const transcript=currentTranscript();
-    try{
-      if(!navigator.clipboard?.writeText)throw new Error('Clipboard API unavailable');
-      await navigator.clipboard.writeText(transcript);
-    }catch(error){
-      // execCommand remains necessary in WKWebView and older WebKitGTK releases.
+    // In WebView2, execCommand works synchronously during a real keyboard
+    // gesture even when navigator.clipboard permission is unavailable.
+    const legacyCopy=()=>{
       const field=document.createElement('textarea');
       field.value=transcript;field.setAttribute('readonly','');
       field.style.cssText='position:fixed;left:-10000px;top:0';
       document.body.append(field);field.select();
-      try{if(!document.execCommand('copy'))throw error;}
+      try{return document.execCommand('copy');}
       finally{field.remove();}
+    };
+    try{
+      if(platform==='win' && legacyCopy()){
+        notice('Copied terminal transcript');return transcript;
+      }
+      if(!navigator.clipboard?.writeText)throw new Error('Clipboard API unavailable');
+      await navigator.clipboard.writeText(transcript);
+    }catch(error){
+      // Retain the existing WKWebView/WebKitGTK fallback.
+      if(!legacyCopy()){notice('Copy unavailable: '+error.message);return false;}
     }
     notice('Copied terminal transcript');
     return transcript;
@@ -938,11 +946,34 @@
     return true;
   };
   const pasteClipboard=async()=>{
-    if(!navigator.clipboard?.readText){notice('Clipboard read is unavailable; use the platform Paste shortcut');return false;}
-    try{return pasteIntoSession(await navigator.clipboard.readText());}
-    catch(error){notice('Paste unavailable: '+error.message);return false;}
+    try{
+      // WebView2 does not consistently grant navigator.clipboard.readText
+      // to the application's loopback page. The native Windows clipboard
+      // bridge is read-only and remains local to the user's installed app.
+      if(platform==='win' && typeof window.cinterClipboard==='function')
+        return pasteIntoSession(await window.cinterClipboard({action:'paste'}));
+      if(navigator.clipboard?.readText)
+        return pasteIntoSession(await navigator.clipboard.readText());
+      notice('Paste from your keyboard with Ctrl+V');return false;
+    }catch(error){notice('Paste unavailable: '+error.message);return false;}
   };
   window.CinterEdit=Object.freeze({copy:copyTranscript,paste:pasteClipboard,insert:pasteIntoSession,transcript:currentTranscript});
+
+  // Windows keeps Ctrl+C for interrupting the running Bash process. Use
+  // Ctrl+Shift+C for Copy, and Ctrl+V / Ctrl+Shift+V for Paste. Capture before
+  // the PTY control-key handler so these combinations never send ^C or ^V.
+  document.addEventListener('keydown',event=>{
+    if(platform!=='win' || !event.ctrlKey || event.metaKey || event.altKey ||
+       event.isComposing || computerView.hidden===false)return;
+    const key=event.key.toLowerCase();
+    if(key==='c' && event.shiftKey){
+      event.preventDefault();event.stopImmediatePropagation();void copyTranscript();
+    }else if(key==='v' && (typeof window.cinterClipboard==='function')){
+      event.preventDefault();event.stopImmediatePropagation();void pasteClipboard();
+    }
+    // Browser previews without the native bridge retain Ctrl+V's default
+    // textarea paste event. The input listener sends the pasted text once.
+  },true);
 
   // All platforms receive both mouse and keyboard input inside the WebView.
   // The machine dropdown remains available even when an emulator owns focus.
@@ -976,6 +1007,8 @@
     try{const state=await api('/api/bedrock/status');enabled=!!(state.running||state.starting);}
     catch(_){/* no installed Bedrock manager */}
     if(enabled!==minecraftMenuState){minecraftMenuState=enabled;
+      const windowsItem=$('windows-new-minecraft');
+      if(windowsItem)windowsItem.disabled=!enabled;
       void nativeEvent('minecraft-menu',{enabled});
     }
   };
@@ -983,6 +1016,42 @@
   setInterval(()=>{if(document.visibilityState!=='hidden')void updateMinecraftMenu();},1600);
   // Kevin's installed Terminals selector remains in the existing titlebar.
   const titleMenus=Array.from(document.querySelectorAll('.terminal-menu'));
+  const setWindowsApplicationMenus=()=>{
+    const isWindows=platform==='win';
+    for(const id of ['windows-file-menu','windows-edit-menu']){
+      const menu=$(id);if(menu){menu.hidden=!isWindows;if(!isWindows)menu.open=false;}
+    }
+    // The File menu mirrors the macOS entries, but unavailable guest-native
+    // shells on Windows must not masquerade as runnable native Bash sessions.
+    for(const button of document.querySelectorAll('[data-file-new]')){
+      const kind=button.dataset.fileNew;
+      if(kind==='mac'||kind==='linux')button.disabled=isWindows;
+      if(kind==='minecraft')button.disabled=!minecraftMenuState;
+    }
+  };
+  for(const button of document.querySelectorAll('[data-file-new]')){
+    button.addEventListener('click',()=>{
+      titleMenus.forEach(menu=>menu.open=false);
+      void window.CinterTerminalNewTab(button.dataset.fileNew);
+    });
+  }
+  for(const button of document.querySelectorAll('[data-file-action]')){
+    button.addEventListener('click',()=>{
+      titleMenus.forEach(menu=>menu.open=false);
+      if(button.dataset.fileAction==='debugger')void debuggerRequest();
+      else if(button.dataset.fileAction==='quit'){
+        if(typeof window.cinterWindow==='function')void window.cinterWindow({action:'quit'});
+        else notice('Quit is available in the installed Terminal application');
+      }
+    });
+  }
+  for(const button of document.querySelectorAll('[data-edit-action]')){
+    button.addEventListener('click',()=>{
+      titleMenus.forEach(menu=>menu.open=false);
+      if(button.dataset.editAction==='copy')void copyTranscript();
+      else if(button.dataset.editAction==='paste')void pasteClipboard();
+    });
+  }
   titleMenus.forEach(menu=>menu.addEventListener('toggle',()=>{
     if(menu.open)titleMenus.forEach(other=>{if(other!==menu)other.open=false;});
   }));
@@ -1169,6 +1238,7 @@
   (async()=>{
     try{
       const status=await api('/api/status');platform=status.platform;
+      setWindowsApplicationMenus();
 
       const data=await (await fetch('/terminal_styles.json',{cache:'no-store'})).json();
       profiles=[...(data.profiles||[]),...(data.emulators||[]),data.codeoss,
