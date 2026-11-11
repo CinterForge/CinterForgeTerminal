@@ -14,7 +14,8 @@ PUBLIC INTERFACES
 BUILD SAFETY
     Setup prepares pinned dependencies and runs real Bedrock acceptance.
     Build produces the three native apps and unified optional DevTools ZIP.
-    Stage installs and checks archives; ``all all`` never publishes.
+    Stage installs and checks archives; ``all all`` never publishes unless
+    the user explicitly requests ``all all publish``.
     Child build tools, not this CLI, own their detailed platform implementations.
     Only the lifecycle that started managed VMs may stop them.
     Every lifecycle invocation produces persistent Build/Stage/Setup/Test logs
@@ -430,16 +431,20 @@ def main(argv: list[str]) -> int:
         from host.universal_package import stage_four
         stage_four(BUILDS)
         return 0
-    if argv in (['all', 'all'], ['all', 'mac']):
-        # A fresh builder must be able to use ONE command. Never publish from
-        # 'all'; Cloudflare upload remains an explicit publish action only.
+    if argv in (['all', 'all'], ['all', 'mac'], ['all', 'all', 'publish']):
+        # Publication is opt-in with the exact third argument 'publish'.
+        # Reuse the existing public publisher only AFTER Test succeeds; invoke
+        # uses check=True, so any failed phase prevents later phases/uploads.
+        publish_public = argv == ['all', 'all', 'publish']
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'setup', 'all')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'build', 'all')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'stage', 'all')
-        # Mac Test checks signed/staged files and automated regressions only.
-        # Real GUI launch and cross-platform interactive acceptance remain
-        # separately tracked in the final DevTools phase.
+        # Test verifies staged Mac resources/signatures and offline regressions;
+        # interactive native Windows/Linux acceptance remains a separate gate.
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'all')
+        if publish_public:
+            print('[CinterForgeTerminal] Test PASS; beginning explicit public Publish', flush=True)
+            invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'publish', 'public')
         return 0
     if len(argv) == 2 and argv[0] in ('stage', 'test', 'launch') and argv[1] == 'mac':
         if platform.system() != 'Darwin':
@@ -560,7 +565,8 @@ def main(argv: list[str]) -> int:
                      '       ./Cinter stage all  # verify and install all four to Steam steamapps\n'
                      '       ./Cinter status all # show four ZIPs and Steam receipt (read-only)\n'
                      '       ./Cinter all mac    # setup, build four, stage, native Mac test; no publish\n'
-                     '       ./Cinter all all    # setup, build, stage, native Mac test; NEVER publish\n'
+                     '       ./Cinter all all    # setup, build, stage, native Mac test; no publish\n'
+                     '       ./Cinter all all publish  # same phases, then public Publish only after Test PASS\n'
                      '       ./Cinter build mac|linux|win\n'
                      '       ./Cinter stage|test|launch|all mac\n'
                      '       ./Cinter windows cross-test\n'

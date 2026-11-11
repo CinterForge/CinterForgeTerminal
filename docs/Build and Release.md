@@ -4,6 +4,7 @@ If you want to get started right away:
 
 ```bash
 ./Cinter all all               # Setup -> Build -> Stage -> Test
+./Cinter all all publish       # Same phases; public Publish only after Test PASS
 ```
 
 CinterForge Terminal is a reproducibly source-built product for **macOS, Windows and Linux**, with a separate optional unified DevTools distribution. A clean developer producer can regenerate its required outputs from an authored checkout and an empty sibling `Builds` tree; a consumer who installs the app does **not** run developer Setup.
@@ -18,7 +19,9 @@ repository paths, input JSON and Python source syntax and provisions required
 dependencies before Build. `test mac` runs Python and JavaScript regressions
 before its native macOS UI acceptance. `all all` performs Setup → Build → Stage
 → Test on the Mac without publishing or claiming Windows/Linux native GUI
-acceptance.
+acceptance. The explicit `all all publish` form runs the same phases and,
+only if Test succeeds, delegates to `publish public`. A failed phase stops the
+sequence before publication.
 
 Each lifecycle command streams its output to the console **and** writes a
 UTC timestamped `.log` plus a PASS/FAIL `.json` summary under
@@ -36,7 +39,7 @@ remains read-only and does not create logs. See [Lifecycle Testing](Lifecycle%20
 | **Build** | Compile/link the reusable Host and three native apps; assemble full relocatable runtime closures; sign and create **exactly four finished ZIPs** with manifests and checksums | Download/compile missing Setup dependencies; mutate source inputs; defer app signing to Stage |
 | **Stage** | Verify the four finished ZIPs and their manifests/signatures as applicable; extract their bytes into the designated installation layout and write receipts | Download, patch, compile, sign, regenerate guests, or modify release ZIP contents |
 | **Test** | Launch the **staged** product and execute real native/behavioral tests; record target-specific evidence | Replace native GUI testing with a Wine/headless pass, or run Setup/Build behind the scenes |
-| **Publish** | Explicitly upload the verified release products and manifest to the selected configured channel, then verify remote objects | Run implicitly as part of `all all`, or rebuild an archive after signing |
+| **Publish** | Explicitly upload the verified release products and manifest to the selected configured channel, then verify remote objects | Run from ordinary `all all` without the explicit `publish` argument, or rebuild an archive after signing |
 | **Fetch** | Restore a verified published artifact into its declared `Builds` location | Treat an unverified download as a source/build substitute |
 
 Setup owns even expensive first-time toolchain and guest provisioning. Build may start an **already provisioned** cross-builder to compile but may not install its dependencies. Stage is strictly a verify-and-extract step, so its installed contents are byte-for-byte those produced by Build. The mutable developer work tree can be rebuilt and restaged at the same release label; signed/released ZIPs are always assembled afresh by Build and remain immutable once produced.
@@ -54,8 +57,10 @@ release files):
 ```sh
 export CINTER_MAC_SIGN_IDENTITY='Developer ID Application: <organization> (<team-id>)'
 export CINTER_MAC_NOTARY_PROFILE='<notarytool-keychain-profile>'
-./Cinter all all
-./Cinter publish public          # explicit; not part of all all
+./Cinter all all publish       # opt-in full lifecycle through public Publish
+# Or, separately:
+# ./Cinter all all
+# ./Cinter publish public
 ```
 
 Build signs the final filtered macOS packaging copy with the Developer ID,
@@ -80,6 +85,7 @@ substitute for native interactive acceptance.
 ./Cinter test mac               # target-native macOS acceptance
 ./Cinter status all             # read-only package/stage status
 ./Cinter all all                # Setup -> Build -> Stage -> Test; NO publish
+./Cinter all all publish        # Setup -> Build -> Stage -> Test -> public Publish on PASS
 ./Cinter all mac                # macOS-focused local lifecycle
 ./Cinter windows cross-test     # Windows PE / Wine cross-compatibility evidence
 ./Cinter publish all            # explicit configured private development publication
@@ -90,7 +96,7 @@ substitute for native interactive acceptance.
 
 On Windows, the equivalent supported source bootstrap is `Cinter.cmd`; the installed Terminal application is not the repository bootstrap script. Native Host diagnostics and build actions are available under `./Cinter host ...`; there is no separate `CPH` launcher. App-specific publishing, such as Lagomorph media, remains an explicit, separately scoped operation and is not silently included in a normal Terminal app publish.
 
-**`all all` never publishes**—including when invoked from the Code-OSS workbench. A Code-OSS workspace with `CinterForgeTerminal` loaded can edit any permitted source file and invoke this **same** lifecycle through its real Mac, Win and Linux integrated terminals. The host's producer creates all three target applications; genuinely native Windows and Linux GUI acceptance still takes place on their respective target systems.
+**`all all` never publishes unless `publish` is explicitly supplied as the third argument.** The combined command uses the existing `publish public` operation after Test succeeds, including its notarized-macOS-release gate, SHA-256 checks, and public HTTP verification. A failed Setup, Build, Stage, Test, or Publish exits nonzero and is captured in the normal lifecycle log. Successful automated Test does not by itself establish interactive native Windows/Linux GUI acceptance. This applies in the Code-OSS workbench as well. A Code-OSS workspace with `CinterForgeTerminal` loaded can edit any permitted source file and invoke this **same** lifecycle through its real Mac, Win and Linux integrated terminals. The host's producer creates all three target applications; genuinely native Windows and Linux GUI acceptance still takes place on their respective target systems.
 
 ## Setup from empty generated state
 
