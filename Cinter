@@ -393,6 +393,14 @@ def main(argv: list[str]) -> int:
         if platform.system() != 'Darwin':
             raise RuntimeError('The four-target release orchestrator currently requires macOS/Xcode; '
                                'run target-native acceptance separately before production publish')
+        # Read the Release Team / Developer ID choice set once in Xcode's UI.
+        # This only selects signing references from Keychain: no provisioning,
+        # notarization or dependency acquisition is performed by this resolver.
+        # Explicit CLI environment overrides remain supported for builders.
+        from host.xcode_signing import release_signing_environment
+        for name, value in release_signing_environment().items():
+            if value and not os.environ.get(name):
+                os.environ[name] = value
         from host.mac_bootstrap import managed_environment, ensure_docker
         os.environ.update(managed_environment(BUILDS))
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'build', 'mac')

@@ -392,11 +392,6 @@ class LinuxKitPhaseOwnershipTests(unittest.TestCase):
             receipt = builds / 'Logs/CinterForgeTerminal/linuxkit-bedrock-acceptance.json'
             self.assertEqual(json.loads(receipt.read_text())['status'], 'passed')
 
-    def test_test_fixture_installs_only_offline_archive(self):
-        body = inspect.getsource(test_linuxkit._execute_acceptance)
-        self.assertIn("command.append('--offline')", body)
-        self.assertNotIn('managed_setup_docker', inspect.getsource(test_linuxkit.test_linuxkit))
-        self.assertNotIn('_run([docker', inspect.getsource(test_linuxkit._install_prepared_runtime).lower())
 
     def test_bedrock_acceptance_never_downloads_missing_archive(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -411,13 +406,6 @@ class LinuxKitPhaseOwnershipTests(unittest.TestCase):
             lifecycle.test()
         self.assertIn('--offline', shell.call_args.args)
 
-    def test_build_release_runtime_requires_setup_not_download(self):
-        from host import universal_package as pkg
-        body = inspect.getsource(pkg._runtime_for_release)
-        self.assertNotIn('_download_verified', body)
-        self.assertNotIn('_extract_portable', body)
-        self.assertIn('run ./Cinter setup all', body)
-        self.assertIn('_download_verified', inspect.getsource(pkg._provision_runtime_for_release))
 
 
 

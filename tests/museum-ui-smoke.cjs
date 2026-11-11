@@ -17,7 +17,7 @@ const listeners={};
 function element(id){return {id,hidden:false,disabled:false,src:'',value:'',checked:false,textContent:'',
   dataset:{},children:[],style:{setProperty(){}},clientWidth:800,clientHeight:500,
   parentElement:{scrollTop:0,scrollHeight:0},
-  addEventListener(name,cb){(listeners[id+':'+name]??=[]).push(cb)},setAttribute(){},
+  addEventListener(name,cb){(listeners[id+':'+name]??=[]).push(cb)},setAttribute(){},removeAttribute(){},
   focus(){},append(child){this.children.push(child)},replaceChildren(...items){this.children=items},
   get classList(){return {add(){},remove(){}}}};}
 let nextId=0;

@@ -436,7 +436,8 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     # (pacman-key, /dev/shm and /dev/mqueue setup), even for read-only bundles.
     # Our explicit --rcfile requires no machine-wide profile or pacman setup.
     preamble = ("# Native CinterForge Terminal session (preconfigured UCRT64 environment)\n"
-                "printf 'Welcome to CinterForge. Type help for instructions.\\n'\n")
+                + ("PS1='$ '\n" if system == 'win' else '')
+                + "printf 'Welcome to CinterForge. Type help for instructions.\\n'\n")
 
     (directory / 'terminal-init.sh').write_text(preamble + functions + '\n', encoding='utf-8')
     return directory
@@ -527,6 +528,7 @@ class TerminalSession:
         env = _session_environment(builds, system)
         env['CINTER_TERMINAL_URL'] = url
         env['CINTER_TERMINAL_TOKEN'] = token
+        env['CINTER_TERMINAL_SESSION_ID'] = self.id
         self.root = builds / 'Run' / 'CinterForgeTerminal' / system
         env['CINTER_TARGET_PLATFORM'] = system
         if system == 'win':
@@ -1018,8 +1020,10 @@ class CinterShellServer(ThreadingHTTPServer):
         self.lagomorph_requests = 0
         self.macgame_request = None
         self.wargames_requests = 0
-        self.if_action = None
-        self.if_active = None
+        # Never overwrite pending browser story commands with a later click.
+        # Each title has one live interpreter tab and one launch generation.
+        self.if_actions = deque()
+        self.if_active: dict[str, str] = {}
         self.debug_lock = threading.Lock()
         self.eula_lock = threading.Lock()
         self.eula_requested = False
@@ -1360,8 +1364,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(403,{'error':'not authorized'})
                 return
             with self.server.debug_lock:
-                action = self.server.if_action
-                self.server.if_action = None
+                action = self.server.if_actions.popleft() if self.server.if_actions else None
             self._json(200,action or {})
             return
         if path == '/api/lagomorph/manual':
@@ -1628,18 +1631,40 @@ class Handler(BaseHTTPRequestHandler):
                 command = str(body.get('command',''))
                 if command not in _if_catalog():
                     raise ValueError('Unknown story filename command')
+                source = body.get('session_id')
+                if source is not None:
+                    if not isinstance(source,str) or not re.fullmatch(r'[0-9a-f]{32}', source):
+                        raise ValueError('Invalid source terminal Session ID')
+                    with self.server.sessions_lock:
+                        if source not in self.server.sessions:
+                            raise ValueError('Source terminal Session has closed')
                 if route.endswith('/start'):
                     _if_story(self.server,command)  # Verify installed story first.
                     with self.server.debug_lock:
-                        self.server.if_active = command
-                        self.server.if_action = {'start':command}
-                    self._json(200,{'requested':True})
+                        if len(self.server.if_actions) >= 64:
+                            raise RuntimeError('IF command queue full; retry after browser connects')
+                        # Duplicate launches reselect the same story tab. A new
+                        # generation is minted only after the previous stops.
+                        launch = self.server.if_active.get(command)
+                        if not launch:
+                            launch = uuid.uuid4().hex
+                            self.server.if_active[command] = launch
+                        self.server.if_actions.append({'start':command,
+                            'launch_id':launch, 'session_id':source})
+                    self._json(200,{'requested':True,'launch_id':launch})
                 else:
+                    requested = body.get('launch_id')
+                    if requested is not None and (not isinstance(requested,str) or
+                            not re.fullmatch(r'[0-9a-f]{32}',requested)):
+                        raise ValueError('Invalid IF launch ID')
                     with self.server.debug_lock:
-                        stopped = self.server.if_active == command
+                        launch = self.server.if_active.get(command)
+                        stopped = bool(launch and (requested is None or requested == launch))
                         if stopped:
-                            self.server.if_action = {'stop':command}
-                            self.server.if_active = None
+                            if len(self.server.if_actions) >= 64:
+                                raise RuntimeError('IF command queue full; retry after browser connects')
+                            del self.server.if_active[command]
+                            self.server.if_actions.append({'stop':command,'launch_id':launch})
                     self._json(200,{'stopped':stopped})
                 return
             if route == '/api/wargames/open':
@@ -3372,11 +3397,19 @@ def _if_command(name, operation, entry):
         if not path.is_file():
             print(f'{name} is not installed. Type {name} install.', file=sys.stderr)
             return 1
-        result = _api('/api/if/start', body={'command':name})
-        print(f'{name}: starting with staged JavaScript Z-machine in Terminal WebView')
+        body = {'command': name}
+        source = os.environ.get('CINTER_TERMINAL_SESSION_ID', '')
+        if __import__('re').fullmatch(r'[0-9a-f]{32}', source):
+            body['session_id'] = source
+        result = _api('/api/if/start', body=body)
+        print(f'{name}: opening a separate Z-machine Session tab in Terminal WebView')
         return 0 if result.get('requested') else 1
     if operation == 'stop':
-        result = _api('/api/if/stop', body={'command':name})
+        body = {'command':name}
+        source = os.environ.get('CINTER_TERMINAL_SESSION_ID', '')
+        if __import__('re').fullmatch(r'[0-9a-f]{32}', source):
+            body['session_id'] = source
+        result = _api('/api/if/stop', body=body)
         print(f'{name}: browser interpreter stopped' if result.get('stopped') else f'{name}: not running')
         return 0
     print(f'Usage: {name} [install|start|stop|status]', file=sys.stderr)

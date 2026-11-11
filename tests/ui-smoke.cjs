@@ -7,7 +7,7 @@ const listeners={};let unique=0;
 function element(id){return {id,hidden:false,disabled:false,checked:false,value:'',src:'',textContent:'',
   children:[],dataset:{},style:{setProperty(){}},clientWidth:800,clientHeight:500,
   parentElement:{scrollTop:0,scrollHeight:0},
-  setAttribute(){},focus(){},append(item){this.children.push(item)},replaceChildren(...items){this.children=items},
+  setAttribute(){},removeAttribute(){},focus(){},append(item){this.children.push(item)},replaceChildren(...items){this.children=items},
   addEventListener(name,fn){(listeners[id+':'+name]??=[]).push(fn)}};}
 const elements=new Map(),get=id=>{if(!elements.has(id))elements.set(id,element(id));return elements.get(id)};
 get('license-dialog').hidden=true;

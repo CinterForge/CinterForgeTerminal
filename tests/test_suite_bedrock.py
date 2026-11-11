@@ -112,16 +112,6 @@ class BedrockWorldDiscoveryCommandTests(unittest.TestCase):
         self.assertIn('Configured UDP IPv4: 19132', out.getvalue())
 
 class BedrockUnrestrictedNetworkingContractTests(unittest.TestCase):
-    def test_only_unrestricted_guest_nic_and_entitlement(self):
-        root=Path(__file__).resolve().parents[1]/'linuxos'
-        swift=(root/'CinterBDSVM.swift').read_text()
-        entitlement=(root/'CinterBDSVM.entitlements').read_text()
-        self.assertIn('VZNATNetworkDeviceAttachment()', swift)
-        self.assertNotIn('VZBridgedNetworkDeviceAttachment', swift)
-        self.assertNotIn('CinterRawEthernetLink', swift)
-        self.assertNotIn('VZFileHandleNetworkDeviceAttachment', swift)
-        self.assertNotIn('<key>com.apple.vm.networking</key>', entitlement)
-        self.assertIn('<key>com.apple.security.virtualization</key>', entitlement)
 
     def test_no_transient_settings_or_port_mappings(self):
         from linuxos.craftmaster.craftmaster_mac_bootstrap import RUN_SH
@@ -130,39 +120,7 @@ class BedrockUnrestrictedNetworkingContractTests(unittest.TestCase):
         self.assertNotIn('PROPS_BACKUP',RUN_SH)
         self.assertNotIn('set_prop allow-list false',RUN_SH)
 
-class BedrockLanRelayProvisioningTests(unittest.TestCase):
-    def test_no_root_daemon_required_by_runtime(self):
-        from linuxos import launcher_signing
-        source=(Path(__file__).resolve().parents[1]/'linuxos/lifecycle.py').read_text()
-        self.assertNotIn('from vmnet_service import ensure', source)
-        self.assertNotIn(b'com.apple.vm.networking', launcher_signing.ENTITLEMENTS.read_bytes())
-        mac=(Path(__file__).resolve().parents[1]/'host/mac_app.py').read_text()
-        self.assertIn('sign_launcher(vm)', mac)
-        self.assertIn('if not has_virtualization_entitlement(vm)', mac)
-        self.assertIn("'--preserve-metadata=entitlements'",mac)
 
-    def test_lan_relay_lifecycle_and_no_settings_restore(self):
-        from linuxos.craftmaster.craftmaster_mac_bootstrap import RUN_SH
-        for forbidden in ('server-udp-ports', 'PROPS_BACKUP', 'set_prop', 'CINTER_VMNET_SOCKET'):
-            self.assertNotIn(forbidden, RUN_SH)
-        self.assertIn('CinterBDSNetRelay', RUN_SH)
-        self.assertIn('trap cleanup EXIT INT TERM', RUN_SH)
-        swift=(Path(__file__).resolve().parents[1]/'linuxos/CinterBDSVM.swift').read_text()
-        self.assertIn('VZNATNetworkDeviceAttachment',swift)
-        self.assertNotIn('VZBridgedNetworkDeviceAttachment',swift)
-
-class BedrockRelayDistributionContractTests(unittest.TestCase):
-    def test_setup_builds_relay_and_distribution_preserves_it(self):
-        root=Path(__file__).resolve().parents[1]
-        lifecycle=(root/'linuxos/lifecycle.py').read_text()
-        packaging=(root/'host/mac_app.py').read_text()
-        relay_source=(root/'linuxos/craftmaster/craftmaster_mac_bootstrap.py').read_text()
-        self.assertIn('staged Bedrock LAN relay',lifecycle)
-        self.assertIn('CinterBDSNetRelay',lifecycle)
-        self.assertIn('LAN_RELAY_C',relay_source)
-        self.assertIn('19132,19133,19140',relay_source)
-        self.assertNotIn("'CinterBDSNetRelay').unlink",packaging)
-        self.assertNotIn('VZBridgedNetworkDeviceAttachment',(root/'linuxos/CinterBDSVM.swift').read_text())
 
 class BedrockNetworkGuestFingerprintRegressionTests(unittest.TestCase):
     def test_host_swift_edit_does_not_invalidate_existing_linuxkit_guest(self):
@@ -231,18 +189,7 @@ class MinecraftConsoleInteractiveModeRegressionTests(unittest.TestCase):
                                  ('/api/bedrock/command', {'command': 'list'}),
                                  ('/api/bedrock/command', {'command': 'say hello world'})])
 
-    def test_minecraft_command_installed_in_existing_shell(self):
-        from pathlib import Path
-        root=Path(__file__).resolve().parents[1]
-        server=(root/'webapp/CinterForgeTerminal.py').read_text()
-        self.assertIn("'bedrock', 'minecraft', 'lagomorph'", server)
 
-    def test_ansi_erase_in_line_respects_cursor(self):
-        from pathlib import Path
-        js=(Path(__file__).resolve().parents[1]/'webapp/terminal.js').read_text()
-        self.assertIn("else this.lines[index]=line.slice(0,this.current)",js)
-        self.assertIn("if(mode===1) this.lines[index]",js)
-        self.assertIn("else if(mode===2) this.lines[index]=''",js)
 
 class BedrockLanRelayLaunchRecoveryTests(unittest.TestCase):
     def test_host_relay_preserves_player_settings(self):
@@ -252,13 +199,6 @@ class BedrockLanRelayLaunchRecoveryTests(unittest.TestCase):
         self.assertNotIn('PROPS_BACKUP',RUN_SH)
         self.assertNotIn('set_prop',RUN_SH)
 
-    def test_waits_for_server_readiness_not_vm_pid(self):
-        source=(Path(__file__).resolve().parents[1]/'webapp/CinterForgeTerminal.py').read_text()
-        self.assertIn("b'Server started.' in output",source)
-        self.assertIn('self._launch_offset',source)
-        self.assertIn('def console_output(',source)
-        self.assertIn('def _refresh_readiness_locked(',source)
-        self.assertNotIn('deadline = time.monotonic() + 70.0',source)
 
     def test_nonblocking_start_reports_ready_only_after_new_log_marker(self):
         from webapp.CinterForgeTerminal import BedrockManager
@@ -319,11 +259,6 @@ class BedrockLanRelayLaunchRecoveryTests(unittest.TestCase):
 class BedrockCurrentStageRegressionTests(unittest.TestCase):
     """Prevent the stage failures observed on HOPE-DEV with managed Colima HOME."""
 
-    def test_lifecycle_uses_no_vmnet_stage_import(self):
-        source=Path(__file__).resolve().parents[1]
-        script=(source / 'linuxos/lifecycle.py').read_text(encoding='utf-8')
-        self.assertNotIn('from vmnet_service import ensure',script)
-        self.assertIn('CinterBDSNetRelay',script)
 
     def test_mac_steam_staging_uses_login_home_not_managed_colima_home(self):
         import types

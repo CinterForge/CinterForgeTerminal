@@ -247,7 +247,7 @@ def verify_universal_zip(archive_path: Path) -> dict:
 # older universal ZIP verifier above only for reading historical distributions.
 # No Bedrock executable or EULA receipt is a build/stage prerequisite.
 FOUR_SCHEMA = 'cinterforge.terminal.four-artifact-release.v1'
-MAC_ZIP_SEAL = 'signed-after-python-cache-filter-v1'
+MAC_ZIP_SEAL = 'signed-after-python-cache-filter-v2-notarized'
 # Printed during Stage to prove the running checkout includes interrupted-install recovery.
 MAC_STAGE_RECOVERY_PROTOCOL = 'restart-safe-v2'
 def _python_cache_member(name: str | Path) -> bool:
@@ -678,7 +678,53 @@ def _signed_mac_zip_assets(source: dict[str, Path | bytes], staging: Path) -> di
         output.chmod(_release_file_mode(name, value))
     from host.mac_app import _sign_and_verify
     _sign_and_verify(app)
+    if os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip():
+        _notarize_mac_app(app, staging)
     return _files_under(app, app_name)
+
+
+def _notarize_mac_app(app: Path, staging: Path) -> None:
+    """Notarize and staple the signed Build copy before final ZIP hashing.
+
+    The notary keychain profile contains credentials; no secret is kept in the
+    repository or shipped to users. Neither Stage nor Publish changes the app.
+    """
+    import subprocess
+    profile = os.environ.get('CINTER_MAC_NOTARY_PROFILE', '').strip()
+    if not profile:
+        raise RuntimeError('Developer ID Build requires CINTER_MAC_NOTARY_PROFILE '
+                           '(an xcrun notarytool keychain profile)')
+    submission = staging / 'CinterForgeTerminal-notary-submission.zip'
+    subprocess.run(['/usr/bin/ditto', '-c', '-k', '--keepParent', str(app),
+                    str(submission)], check=True)
+    try:
+        completed = subprocess.run(['xcrun', 'notarytool', 'submit', str(submission),
+                                    '--keychain-profile', profile, '--wait',
+                                    '--output-format', 'json'],
+                                   capture_output=True, text=True, check=False)
+        response = {}
+        try:
+            response = json.loads(completed.stdout)
+        except (ValueError, TypeError):
+            pass
+        if completed.returncode or response.get('status') != 'Accepted':
+            job = response.get('id')
+            details = ''
+            if isinstance(job, str) and job:
+                log = subprocess.run(['xcrun', 'notarytool', 'log', job,
+                                      '--keychain-profile', profile],
+                                     capture_output=True, text=True, check=False)
+                details = (log.stdout or log.stderr)[-12000:]
+            raise RuntimeError('Apple notarization failed: ' +
+                               (completed.stderr or completed.stdout)[-4000:] + '\n' + details)
+        subprocess.run(['xcrun', 'stapler', 'staple', str(app)], check=True)
+        subprocess.run(['xcrun', 'stapler', 'validate', str(app)], check=True)
+        from host.mac_app import _verify_signature
+        _verify_signature(app)
+        print('[TERMINAL BUILD] macOS Developer ID notarization ACCEPTED; '
+              'ticket stapled and signature verified', flush=True)
+    finally:
+        submission.unlink(missing_ok=True)
 
 
 def _write_release_zip(path: Path, files: dict[str, Path | bytes], *, target: str,
@@ -1029,7 +1075,10 @@ def build_four(builds: Path, *, release: str = HOST_RELEASE) -> dict:
         fingerprint = _release_input_fingerprint(assets)
         if target == 'mac':
             # Invalidate caches of ZIPs built from the already-signed .app.
-            fingerprint = hashlib.sha256((MAC_ZIP_SEAL + fingerprint).encode()).hexdigest()
+            signing_id = os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip() or 'ad-hoc'
+            notary_profile = os.environ.get('CINTER_MAC_NOTARY_PROFILE', '').strip()
+            fingerprint = hashlib.sha256((MAC_ZIP_SEAL + signing_id + '\n' +
+                                          notary_profile + '\n' + fingerprint).encode()).hexdigest()
         input_fingerprints[target] = fingerprint
         old = previous.get('artifacts', {}).get(target, {})
         try:
@@ -2151,6 +2200,46 @@ def verify_public_four(builds: Path, *, release: str = HOST_RELEASE) -> dict:
     return _finalize_public_receipt(receipt_path, receipt, report, files)
 
 
+
+def _require_notarized_mac_release(archive: Path, builds: Path) -> None:
+    """Public only: downloaded macOS .app must pass local Gatekeeper checks.
+
+    Inspect the exact immutable release ZIP, not the separately staged
+    developer .app. Prevent uploading an ad-hoc-only Mac release as public.
+    """
+    import platform
+    import subprocess
+    if platform.system() != 'Darwin':
+        raise RuntimeError('Public macOS application release requires Gatekeeper '
+                           'verification on the macOS builder')
+    with tempfile.TemporaryDirectory(prefix='MacPublicVerify-',
+                                     dir=builds / 'Intermediates') as temporary:
+        root = Path(temporary)
+        with zipfile.ZipFile(archive) as z:
+            manifest = json.loads(z.read('release-manifest.json'))
+            for name, entry in manifest['files'].items():
+                relative = Path(name)
+                if relative.parts[0] != APP_ROOTS['mac'] or '..' in relative.parts:
+                    raise RuntimeError('Unsafe public macOS release path')
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(name) as src, path.open('wb') as dst:
+                    shutil.copyfileobj(src, dst)
+                path.chmod(entry['mode'])
+        app = root / APP_ROOTS['mac']
+        from host.mac_app import _verify_signature
+        _verify_signature(app)
+        authority = subprocess.run(['/usr/bin/codesign', '-dv', '--verbose=4', str(app)],
+                                   capture_output=True, text=True, check=True)
+        if 'Authority=Developer ID Application:' not in authority.stderr:
+            raise RuntimeError('Refusing public Mac ZIP without Developer ID Application signature')
+        subprocess.run(['xcrun', 'stapler', 'validate', str(app)], check=True)
+        subprocess.run(['/usr/sbin/spctl', '--assess', '--type', 'execute',
+                        '--verbose=4', str(app)], check=True)
+        print('[TERMINAL PUBLISH] macOS final ZIP: Developer ID, notarization '
+              'ticket and Gatekeeper verified', flush=True)
+
+
 def publish_four(builds: Path, *, release: str = HOST_RELEASE,
                  config: Path | None = None, channel: str = 'dev') -> dict:
     """Explicit channel: private dev by default, public only by command choice.
@@ -2163,6 +2252,7 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
     builds = builds.resolve()
     source, report, files = _distribution_files(builds, release)
     if channel == 'public':
+        _require_notarized_mac_release(files['CinterForgeTerminal-mac.zip'], builds)
         # Explicit user-authorized publication of only the staged content disk.
         # Keep four-artifacts.json exactly four ZIPs; the ISO is a sidecar.
         files[LAGOMORPH_PUBLIC_NAME] = _lagomorph_public_disk(builds)

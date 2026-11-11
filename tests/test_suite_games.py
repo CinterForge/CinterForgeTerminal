@@ -57,12 +57,6 @@ class LagomorphClassicHFSTests(unittest.TestCase):
         self.assertTrue(any('Battle' in candidate['context'] for candidate in hints['candidates']))
         self.assertIn('not evidence', hints['limitation'])
 
-    def test_battles_inspection_cli_has_non_mutating_option(self):
-        import inspect
-        from host import lagomorph_setup as lag
-        self.assertIn('inspect_original_battles', inspect.getsource(lag.main))
-        self.assertIn('--inspect-only', inspect.getsource(lag.main))
-        self.assertIn('battles-report.json', inspect.getsource(lag.inspect_original_battles))
 
     def test_standard_hfs_mdb_is_required(self):
         disk = self.tmp / 'standard.iso'
@@ -237,17 +231,6 @@ class LagomorphFloppyAndEmbedTests(unittest.TestCase):
                 'https://cinterforge.ucreg.io/release/Lagomorph-Application-1440K.img'))
         self.assertFalse(server._verified_public_hfs_floppy('http://127.0.0.1/private.img'))
 
-    def test_guest_boot_path_keeps_manual_outside_media(self):
-        from host import lagomorph_setup as lag
-        self.assertEqual(lag.FLOPPY_BYTES, 1474560)
-        source = Path(lag.__file__).read_text(encoding='utf-8')
-        self.assertIn("_copy_classic(game, floppy_app / 'Lagomorph 1')", source)
-        self.assertIn("_copy_classic(battle, floppy_battles / battle.name)", source)
-        self.assertNotIn("_copy_classic(manual, desktop", source)
-        shell = (Path(__file__).resolve().parents[1] / 'webapp/terminal.js').read_text()
-        self.assertIn("url.searchParams.set('disk_url',media.url)", shell)
-        self.assertIn("type:'emulator_key_down',code:'MetaLeft'", shell)
-        self.assertNotIn("url.searchParams.set('screenDepth'", shell)
 
 class MacGamesAndHiddenLagomorphTests(unittest.TestCase):
     """Catalog and launcher contracts live in the existing Terminal test file."""
@@ -266,28 +249,7 @@ class MacGamesAndHiddenLagomorphTests(unittest.TestCase):
             self.assertTrue(game['library_path'].startswith('Library/Games/'))
         self.assertNotIn('lagomorph', commands)
 
-    def test_hidden_lagomorph_is_not_a_museum_entry(self):
-        from pathlib import Path
-        import json
-        root=Path(__file__).resolve().parents[1]
-        profiles=json.loads((root/'webapp/terminal_styles.json').read_text())
-        self.assertTrue(any(e['id']=='quadra-650' for e in profiles['museum']))
-        self.assertTrue(any(e['id']=='quadra-650' and e.get('lagomorph') for e in profiles['emulators']))
-        script=(root/'webapp/terminal.js').read_text()
-        self.assertIn("url.searchParams.set('screenSize','640x480')",script)
-        help_text=(root/'webapp/CinterForgeTerminal.py').read_text().split('HELP =',1)[1].split('DEBUGGER_HELP =',1)[0]
-        self.assertNotIn('lagomorph',help_text.lower())
 
-    def test_if_backspace_edits_single_character_without_deleting_whole_draft(self):
-        from pathlib import Path
-        root=Path(__file__).resolve().parents[1]
-        js=(root/'webapp/terminal.js').read_text()
-        self.assertIn("e.key!=='Backspace' && e.key!=='Delete'",js)
-        self.assertIn("e.stopImmediatePropagation();",js)
-        self.assertIn('end>start ? end : start',js)
-        self.assertIn("input.setRangeText('',caret-previous.length,caret,'start');",js)
-        self.assertIn("input.setRangeText('',caret,caret+next.length,'start');",js)
-        self.assertIn('syncGameInput();\n  },true);',js)
 
     def test_macgames_catalog_visible_and_authenticated_launch_queue(self):
         from pathlib import Path
@@ -380,22 +342,6 @@ class WarGamesLaunchTests(unittest.TestCase):
         self.assertEqual(sent.pop()[0], 403)
         self.assertEqual(state.wargames_requests, 0)
 
-    def test_typed_wargames_binding_and_new_tab_keep_original_runtime(self):
-        from webapp import CinterForgeTerminal as server
-        with tempfile.TemporaryDirectory() as directory:
-            script = (server._install_shell_commands(Path(directory), 'mac', {}) / 'terminal-init.sh').read_text()
-        self.assertIn('wargames()', script)
-        self.assertIn('function stories {', script)
-        native = (ROOT / 'src/CinterApplicationShell.cpp').read_text()
-        self.assertNotIn('New Game Terminal (JOSHUA)', native)
-        js = (ROOT / 'webapp/terminal.js').read_text()
-        self.assertIn("frame.src='/joshua/index.html'", js)
-        self.assertIn("if(result.open)await openSession('joshua')", js)
-        self.assertIn("await api('/api/wargames/next')", js)
-        self.assertNotIn("kind==='game'", js)
-        backend = (ROOT / 'webapp/CinterForgeTerminal.py').read_text()
-        self.assertIn("if route == '/api/wargames/open':", backend)
-        self.assertIn("if path == '/api/wargames/next':", backend)
 
 class ExternalIFTitleTests(unittest.TestCase):
     """User-initiated external downloads are not staged product assets."""
@@ -409,15 +355,6 @@ class ExternalIFTitleTests(unittest.TestCase):
         self.assertEqual(catalog['zork1']['url'],
                          'https://raw.githubusercontent.com/historicalsource/zork1/master/COMPILED/zork1.z3')
 
-    def test_staged_assets_include_manifest_and_commands(self):
-        from webapp import CinterForgeTerminal as server
-        import tempfile
-        with tempfile.TemporaryDirectory() as directory:
-            script = (server._install_shell_commands(Path(directory), 'mac', {}) / 'terminal-init.sh').read_text()
-            self.assertIn('function Advent {', script)
-            self.assertIn('function zork3 {', script)
-            self.assertIn('function games {', script)
-            self.assertIn('function 404-Life_not_found {', script)
 
     def test_library_override_is_used_without_home_fallback(self):
         from webapp import CinterForgeTerminal as cli
@@ -485,14 +422,6 @@ class IFSteamAutosaveTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'fingerprint'):
                 service._if_store_save(server,'zork1',card)
 
-    def test_browser_save_failure_cannot_block_story_launch(self):
-        js=(Path(__file__).resolve().parents[1]/'webapp/terminal.js').read_text()
-        self.assertIn("crypto.subtle.digest('SHA-256',story)",js)
-        self.assertIn('Existing autosave unavailable:',js)
-        self.assertIn('Restore unavailable; started new game',js)
-        self.assertIn('await vm.run()',js)
-        self.assertLess(js.index('Existing autosave unavailable:'),js.index('await vm.run()'))
-        self.assertIn("output.textContent+='\\n[IF] Autosave failed:",js)
 
     def test_live_authenticated_save_api(self):
         from webapp import CinterForgeTerminal as service

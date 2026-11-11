@@ -41,6 +41,36 @@ remains read-only and does not create logs. See [Lifecycle Testing](Lifecycle%20
 
 Setup owns even expensive first-time toolchain and guest provisioning. Build may start an **already provisioned** cross-builder to compile but may not install its dependencies. Stage is strictly a verify-and-extract step, so its installed contents are byte-for-byte those produced by Build. The mutable developer work tree can be rebuilt and restaged at the same release label; signed/released ZIPs are always assembled afresh by Build and remain immutable once produced.
 
+## macOS public download signing
+
+Local `./Cinter all all` uses the existing ad-hoc macOS signature if no
+Developer ID is configured; this remains appropriate for local development,
+**not** for public downloads. To produce an installable public Mac ZIP, the Mac
+builder must have an Apple **Developer ID Application** certificate with its
+private key in the signing keychain and an authenticated `xcrun notarytool`
+keychain profile. Configure these in the builder process (not in source or
+release files):
+
+```sh
+export CINTER_MAC_SIGN_IDENTITY='Developer ID Application: <organization> (<team-id>)'
+export CINTER_MAC_NOTARY_PROFILE='<notarytool-keychain-profile>'
+./Cinter all all
+./Cinter publish public          # explicit; not part of all all
+```
+
+Build signs the final filtered macOS packaging copy with the Developer ID,
+hardened runtime and timestamp, submits a temporary ZIP to Apple notarization,
+staples the accepted ticket to the `.app`, revalidates its signature, then
+produces the immutable `CinterForgeTerminal-mac.zip`. Stage only verifies and
+installs that finished archive. Public Publish independently checks the *final
+ZIP's extracted app* with `codesign`, `stapler validate` and Gatekeeper before
+uploading. A missing identity/profile or rejected notarization must fail
+explicitly; it must never silently publish an ad-hoc developer build.
+
+The first actual downloaded Mac application must still be tested under normal
+Gatekeeper quarantine. Notarization and zip-level checks alone are not a
+substitute for native interactive acceptance.
+
 ## Repository commands
 
 ```sh

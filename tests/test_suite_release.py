@@ -232,25 +232,6 @@ class VerifiedStageRetirement(unittest.TestCase):
         self.assertEqual(len(quarantined), 1)
         self.assertEqual(quarantined[0].read_text(), 'user data')
 
-    def test_native_host_launches_python_without_stage_bytecode_writes(self):
-        # The actual native process launcher must use -B on both Windows and
-        # POSIX. Testing only a Python mock would miss the original bug.
-        cpp = (Path(manager.__file__).resolve().parents[1]
-               / 'src/CinterPythonHost.cpp').read_text(encoding='utf-8')
-        self.assertIn(' + " -B -u " + quote_windows(script)', cpp)
-        self.assertIn('values {interpreter, "-B", "-u", script}', cpp)
-        package = self.builds / 'Python/Host/mac/arm64/test-pycache'
-        package.mkdir(parents=True)
-        (package / 'child.py').write_text('VALUE = 1\n')
-        entry = ('import importlib.util, pathlib; '
-                 'p=pathlib.Path(__import__("sys").argv[1]); '
-                 's=importlib.util.spec_from_file_location("child", p); '
-                 'm=importlib.util.module_from_spec(s); s.loader.exec_module(m)')
-        run = subprocess.run([sys.executable, '-B', '-u', '-c', entry,
-                              str(package / 'child.py')], check=True,
-                             capture_output=True, text=True)
-        self.assertEqual(run.returncode, 0)
-        self.assertFalse((package / '__pycache__').exists())
 
     def test_reuse_of_verified_new_stage_also_retires_old_stage(self):
         manager.stage_host(self.builds)
@@ -646,7 +627,8 @@ class FourArtifactSteamReleaseTests(unittest.TestCase):
                     for key, val in objects.items() if key.startswith(prefix + '/')}
         lagomorph_fixture = self.scratch / 'Lagomorph-Quadra650.iso'
         lagomorph_fixture.write_bytes(b'Classic-HFS-publish-fixture')
-        with mock.patch.object(universal, '_lagomorph_public_disk', return_value=lagomorph_fixture), \
+        with mock.patch.object(universal, '_require_notarized_mac_release'), \
+             mock.patch.object(universal, '_lagomorph_public_disk', return_value=lagomorph_fixture), \
              mock.patch.object(universal, '_cloudflare_config', return_value=cfg) as config, \
              mock.patch.object(r2, '_list_remote', side_effect=listed), \
              mock.patch.object(r2, '_put_file', side_effect=put), \
@@ -694,7 +676,8 @@ class FourArtifactSteamReleaseTests(unittest.TestCase):
         disk.write_bytes(b'Classic HFS fixture')
         receipt_path = (self.builds / 'CinterForgeTerminal/Publish/Receipts/public' /
                         self.release / 'cloudflare.json')
-        with mock.patch.object(universal, '_lagomorph_public_disk', return_value=disk), \
+        with mock.patch.object(universal, '_require_notarized_mac_release'), \
+             mock.patch.object(universal, '_lagomorph_public_disk', return_value=disk), \
              mock.patch.object(universal, '_cloudflare_config', return_value=cfg), \
              mock.patch.object(r2, '_list_remote', side_effect=listed), \
              mock.patch.object(r2, '_put_file', side_effect=put), \

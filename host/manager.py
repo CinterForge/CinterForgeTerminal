@@ -622,7 +622,12 @@ def build_host(builds: Path, *, zeroconf: bool = True, clean: bool = False,
         extra = ['-G', 'Ninja',
                  '-DCMAKE_MAKE_PROGRAM=' + str(root / 'ucrt64/bin/ninja.exe'),
                  '-DCMAKE_CXX_COMPILER=' + str(root / 'ucrt64/bin/g++.exe')]
-    command = [cmake, '-S', str(repo), '-B', str(directory), *extra, '-DCMAKE_BUILD_TYPE=Release',
+    # Xcode Run requests real C++ debug symbols from this SAME maintained
+    # CMake source/target; ordinary CLI Release builds retain Release flags.
+    # No second native code project or compiler configuration is introduced.
+    build_type = ('RelWithDebInfo' if current_platform() == 'mac' and
+                  os.environ.get('CINTER_XCODE_DEBUG_NATIVE') == '1' else 'Release')
+    command = [cmake, '-S', str(repo), '-B', str(directory), *extra, '-DCMAKE_BUILD_TYPE=' + build_type,
                '-DCPH_ENABLE_ZEROCONF=' + ('ON' if zeroconf else 'OFF'),
                '-DCPH_BUILDS_ROOT=' + str(builds),
                '-DCPH_BUILD_APPLICATION_SHELL=' + ('ON' if application_shell else 'OFF')]
@@ -635,7 +640,7 @@ def build_host(builds: Path, *, zeroconf: bool = True, clean: bool = False,
                             '-DFETCHCONTENT_FULLY_DISCONNECTED=ON'])
     _run(command, env=build_env)
     _refresh_stale_zeroconf_objects(directory, zeroconf)
-    _run([cmake, '--build', str(directory), '--config', 'Release'], env=build_env)
+    _run([cmake, '--build', str(directory), '--config', build_type], env=build_env)
     if zeroconf and current_platform() in ('mac', 'linux'):
         # Catch mixed-source artifacts before staging a broken library.
         presence = _defined_c_symbol(directory / 'libCinterForgePythonHost.a',

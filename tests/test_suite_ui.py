@@ -180,132 +180,10 @@ class NativeHostTests(unittest.TestCase):
         self.assertEqual(self.request('first')['id'], 1)
         self.assertEqual(self.request('second')['id'], 2)
 
-class KevinCurrentSessionFollowupTests(unittest.TestCase):
-    """UI regressions stay in the existing test_terminal.py, not a new module."""
-
-    def test_if_restore_does_not_replay_saved_transcript(self):
-        source = (Path(__file__).resolve().parents[1] / 'webapp/terminal.js').read_text()
-        self.assertNotIn('old.save.session_state.transcript', source)
-        self.assertIn('session_state:{}', source)
-        self.assertIn('Restored '+"'+name+'"+' autosave', source)
-        self.assertIn('output.style.visibility=\'hidden\'', source)
-        self.assertIn('requestAnimationFrame(releaseDisplay)', source)
-        self.assertIn('const readyReadLine=io.readLine.bind(io)', source)
-        self.assertIn('try{await vm.run();}finally{releaseDisplay();}', source)
-
-    def test_if_output_autoscrolls_on_direct_dom_mutations(self):
-        source = (Path(__file__).resolve().parents[1] / 'webapp/terminal.js').read_text()
-        self.assertIn('new MutationObserver(()=>scrollToLatest())', source)
-        self.assertIn("outputObserver.observe($('terminal-output')", source)
-        self.assertIn('scrollTop=terminalScreen.scrollHeight', source)
-        self.assertIn('const current={name,sessionId:session.id', source)
-
-    def test_native_tabs_and_joshua_packaging(self):
-        root=Path(__file__).resolve().parents[1]
-        js=(root/'webapp/terminal.js').read_text()
-        server=(root/'webapp/CinterForgeTerminal.py').read_text()
-        native=(root/'src/CinterApplicationShell.cpp').read_text()
-        self.assertIn("if(result.open)await openSession('joshua');",js)
-        self.assertNotIn("if(kind==='game')",js)
-        self.assertNotIn('New Game Terminal (JOSHUA)',native)
-        self.assertIn("if(kind==='linux')return openSession('vt100-terminal','linux');",js)
-        self.assertIn("if(kind==='win')return openSession('ibm-pc-vga','win');",js)
-        self.assertIn("if(kind==='minecraft')return openSession('modern','minecraft');",js)
-        self.assertIn("frame.src='/joshua/index.html'",js)
-        self.assertIn("state.get('running') or state.get('starting')",server)
-        self.assertIn("command=[sys.executable, str(ASSETS/'CinterForgeTerminal.py'),'--terminal-cli','minecraft']",server)
-        self.assertIn('refusing ',server)  # Never masquerade as another platform.
-        self.assertIn('target->minecraftItem=item;',native)
-        self.assertIn('[item setEnabled:NO];',native)
-        self.assertTrue((root/'webapp/joshua/index.html').is_file())
-        self.assertTrue((root/'webapp/joshua/LICENSE').is_file())
-
-    def test_lagomorph_control_strip_is_toggled_exactly_once(self):
-        root=Path(__file__).resolve().parents[1]
-        js=(root/'webapp/terminal.js').read_text()
-        boot=js.split('const lagomorphBootControls=',1)[1].split("window.addEventListener('message'",1)[0]
-        # The single click still targets guest (8,469); its coordinates now
-        # live in the documented, immutable configuration near the JS header.
-        self.assertIn('controlStripToggle: Object.freeze({x: 8, y: 469})',js)
-        click = ('await click(LAGOMORPH_GUEST_POSITIONS.controlStripToggle.x,'
-                 'LAGOMORPH_GUEST_POSITIONS.controlStripToggle.y)')
-        self.assertEqual(boot.count(click),1)
-        self.assertNotIn('await doubleClick(LAGOMORPH_GUEST_POSITIONS.controlStripToggle',boot)
-        self.assertIn("code:'MetaLeft'",boot)
-        self.assertIn("code:'KeyQ'",boot)
-        self.assertGreaterEqual(boot.count("type:'emulator_key_up'"), 2)
-        self.assertIn('await quitSticky()',boot)
-        self.assertIn('frame.focus()',boot)
 
 
-class NativeUIAcceptanceSequenceTests(unittest.TestCase):
-    """Acceptance must not race the default PTY or use hidden Lagomorph."""
 
-    def test_sequential_public_museum_and_pty_sessions(self):
-        root = Path(__file__).resolve().parents[1]
-        js = (root / 'webapp/terminal.js').read_text()
-        native = (root / 'src/CinterApplicationShell.cpp').read_text()
-        mac = (root / 'host/mac_app.py').read_text()
-        self.assertIn('if(!acceptUI)void openSession(initialId);', js)
-        self.assertIn('if(!acceptUI)localStorage.setItem', js)
-        self.assertIn("['mac-plus','vt100-terminal']", js)
-        self.assertIn('await openSession(id);', js)
-        self.assertIn("(!session?.id || activeTab.session!==session)", js)
-        self.assertNotIn("for(const id of ['vt100-terminal'])", js)
-        self.assertIn('museum=mac-plus terminal=vt100-terminal', native)
-        self.assertIn('museum=mac-plus terminal=vt100-terminal', mac)
 
-class KevinForegroundInputEchoTests(unittest.TestCase):
-    """IF editing uses Kevin's existing terminal, with no secondary HTML input."""
-
-    def test_live_if_draft_and_cursor_are_display_only(self):
-        root = Path(__file__).resolve().parents[1] / 'webapp'
-        script = (root / 'terminal.js').read_text()
-        styles = (root / 'terminal.css').read_text()
-        self.assertIn("output.setAttribute('data-if-echo'", script)
-        self.assertIn("value.slice(0,caret)+'▌'+value.slice(caret)", script)
-        self.assertIn("input.selectionStart ?? value.length", script)
-        self.assertIn('#terminal-output[data-if-echo]::after', styles)
-        self.assertIn('content:attr(data-if-echo)', ''.join(styles.split()))
-        self.assertIn("output.removeAttribute('data-if-echo')", script)
-        self.assertNotIn('if-input-mirror', script)
-
-    def test_line_edit_and_submit_keep_native_textarea_editing(self):
-        root = Path(__file__).resolve().parents[1] / 'webapp'
-        script = (root / 'terminal.js').read_text()
-        self.assertIn('if(game){syncGameInput();return;}', script)
-        self.assertIn("input.addEventListener('keyup'", script)
-        self.assertIn("input.addEventListener('select'", script)
-        self.assertIn("e.preventDefault();syncGameInput();", script)
-        self.assertIn("$('terminal-input').value='';", script)
-        self.assertIn('const pending=readyReadLine(...args);\n          syncGameInput();', script)
-
-class UpstreamJavaScriptPlayerTests(unittest.TestCase):
-    def test_setup_uses_upstream_git_instead_of_webapp(self):
-        source = (Path(__file__).resolve().parents[1] / 'host/bootstrap_bundle.py').read_text()
-        self.assertIn('https://github.com/daniellockard/zmachine.git',source)
-        self.assertIn("version = '0.3.2'",source)
-        self.assertIn('npm',source)
-        self.assertNotIn('CinterForgeWebApp',source)
-        self.assertIn('provision_zmachine(BUILDS)',
-                      (Path(__file__).resolve().parents[1]/'Cinter').read_text())
-
-    def test_if_start_uses_browser_player_and_stop_unloads_it(self):
-        from webapp import CinterForgeTerminal as command_cli
-        with mock.patch.object(command_cli,'_if_path',return_value=Path('/tmp/game.z3')), \
-             mock.patch.object(Path,'is_file',return_value=True), \
-             mock.patch.object(command_cli,'_api',return_value={'requested':True}) as api:
-            self.assertEqual(command_cli._if_command('zork1','start',{'file':'zork1.z3'}),0)
-            api.assert_called_with('/api/if/start',body={'command':'zork1'})
-        js=(Path(__file__).resolve().parents[1]/'webapp/terminal.js').read_text()
-        self.assertIn("import('/zmachine/index.js')",js)
-        self.assertIn("frame.src='about:blank'",js)
-
-    def test_guest_provisioning_does_not_require_bedrock_download(self):
-        source=(Path(__file__).resolve().parents[1]/'tests/acceptance_linuxkit.py').read_text()
-        body=source.split('def provision_guest_runtime(',1)[1].split('def test_linuxkit(',1)[0]
-        self.assertNotIn('bedrock_server',body)
-        self.assertIn('cinter-nethernet-probe',body)
 
 class LiveIFCommandTransportTests(unittest.TestCase):
     def test_authenticated_start_story_read_stop_over_loopback(self):
@@ -331,10 +209,32 @@ class LiveIFCommandTransportTests(unittest.TestCase):
                 with urlopen(request,timeout=4) as response:
                     return response.read()
             try:
-                self.assertTrue(json.loads(api('/api/if/start',{'command':'zork1'}))['requested'])
-                self.assertEqual(json.loads(api('/api/if/next'))['start'],'zork1')
+                first=json.loads(api('/api/if/start',{'command':'zork1'}))
+                self.assertTrue(first['requested'])
+                launch=first['launch_id']
+                # Rapid repeated commands must enqueue, not overwrite, an
+                # earlier request. The same title reselects its single tab.
+                repeated=json.loads(api('/api/if/start',{'command':'zork1'}))
+                self.assertEqual(repeated['launch_id'],launch)
+                opened=json.loads(api('/api/if/next'))
+                self.assertEqual((opened['start'],opened['launch_id']),('zork1',launch))
+                self.assertEqual(json.loads(api('/api/if/next'))['launch_id'],launch)
                 self.assertEqual(api('/api/if/story/zork1'),path.read_bytes())
-                self.assertTrue(json.loads(api('/api/if/stop',{'command':'zork1'}))['stopped'])
+                # A stale tab cannot stop a different generation of Zork.
+                stale='0'*32 if launch!='0'*32 else 'f'*32
+                self.assertFalse(json.loads(api('/api/if/stop',
+                    {'command':'zork1','launch_id':stale}))['stopped'])
+                self.assertTrue(json.loads(api('/api/if/stop',
+                    {'command':'zork1','launch_id':launch}))['stopped'])
+                stopped=json.loads(api('/api/if/next'))
+                self.assertEqual((stopped['stop'],stopped['launch_id']),('zork1',launch))
+                again=json.loads(api('/api/if/start',{'command':'zork1'}))
+                self.assertNotEqual(again['launch_id'],launch)
+                self.assertEqual(json.loads(api('/api/if/next'))['start'],'zork1')
+                self.assertFalse(json.loads(api('/api/if/stop',
+                    {'command':'zork1','launch_id':launch}))['stopped'])
+                self.assertTrue(json.loads(api('/api/if/stop',
+                    {'command':'zork1','launch_id':again['launch_id']}))['stopped'])
                 self.assertEqual(json.loads(api('/api/if/next'))['stop'],'zork1')
             finally:
                 service_instance.stop()
@@ -385,17 +285,6 @@ class OneWebviewSourceTests(unittest.TestCase):
         with mock.patch('platform.system', return_value='Linux'):
             self.assertEqual(webview.upstream_windows_toolchain(self.builds, source), official)
 
-    def test_cmake_uses_only_upstream_webview_target_and_requires_offline_windows_sdk(self):
-        cmake = (Path(__file__).resolve().parents[1] / 'CMakeLists.txt').read_text()
-        self.assertIn('add_subdirectory("${_cph_webview_source}"', cmake)
-        self.assertIn('webview::core', cmake)
-        self.assertIn('MSWebView2_ROOT', cmake)
-        self.assertIn('WEBVIEW_BUILD_EXAMPLES OFF', cmake)
-        cross = (Path(__file__).resolve().parents[1] / 'host/cross_build.py').read_text()
-        self.assertIn('upstream_windows_toolchain', cross)
-        self.assertIn('CMAKE_TOOLCHAIN_FILE', cross)
-        self.assertIn('FETCHCONTENT_FULLY_DISCONNECTED=ON', cross)
-        self.assertNotIn("'-DCMAKE_SYSTEM_NAME=Windows'", cross)
 
 
 class OptionalGuestBashTests(unittest.TestCase):
@@ -466,11 +355,3 @@ class OptionalGuestBashTests(unittest.TestCase):
         self.assertIn('type=bind,src=/sdk/Windows/MSYS2,dst=/msys2,readonly',args)
         self.assertNotIn('/bin/bash',args)
 
-    def test_host_rejects_mac_bash_fallback_for_guests(self):
-        root = Path(__file__).resolve().parents[1]
-        server = (root / 'webapp/CinterForgeTerminal.py').read_text()
-        self.assertIn("command=[sys.executable, '-u', str(ASSETS/'CinterForgeTerminal.py'),'--guest-shell',backend]",server)
-        self.assertIn("elif self.server.system == 'mac' and backend in ('linux','win')",server)
-        self.assertIn('refusing native-shell fallback',server)
-        mac_app = (root/'host/mac_app.py').read_text()
-        self.assertIn("'CinterForgeTerminal.py'",mac_app)

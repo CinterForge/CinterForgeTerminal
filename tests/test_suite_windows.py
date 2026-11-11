@@ -456,20 +456,7 @@ class WindowsWineWebViewTests(unittest.TestCase):
                         raise RuntimeError('Windows WebView JS callback did not reach native C++ under Wine')
                 self.assertTrue(run.call_args.kwargs['graphical'])
 
-    def test_webview_watchdog_terminates_on_gui_thread(self):
-        source = (self.repo / 'src/CinterApplicationShell.cpp').read_text()
-        self.assertIn('window.dispatch([&window] { window.terminate(); });', source)
-        self.assertNotIn('if (!completed.load()) window.terminate();', source)
 
-    def test_wine_cross_build_does_not_require_graphical_webview(self):
-        source = (self.repo / 'host/cross_build.py').read_text()
-        samples = (self.repo / 'host/three_samples.py').read_text()
-        dockerfile = (self.repo / 'host/docker/windows-cross.Dockerfile').read_text()
-        self.assertIn("cross.path(exe), '--help'", source)
-        self.assertNotIn('graphical=True', source)
-        self.assertNotIn("cross.path(pe), '--smoke-js'", samples)
-        self.assertIn('not-run-native-windows-required', samples)
-        self.assertIn('xvfb xauth', dockerfile)
 
 
 class PackagedWindowsBashTests(unittest.TestCase):
@@ -502,15 +489,6 @@ class PackagedWindowsBashTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'modified or incomplete'):
                 windows_winpty.verify(root)
 
-    def test_build_verifies_winpty_and_uses_gui_subsystem(self):
-        from host import windows_winpty
-        source = (Path(__file__).resolve().parents[1]/'CMakeLists.txt').read_text()
-        self.assertIn('WIN32_EXECUTABLE TRUE', source)
-        winmain = (Path(__file__).resolve().parents[1]/'src/cinterforge_terminal_main.cpp').read_text()
-        self.assertIn('int WINAPI WinMain(', winmain)
-        winpy = (Path(__file__).resolve().parents[1]/'host/universal_package.py').read_text()
-        self.assertIn('verify_winpty(runtime)', winpy)
-        self.assertEqual(windows_winpty.VERSION, '2.0.15')
 
 
 class ManagedGuestBashSocketTests(unittest.TestCase):

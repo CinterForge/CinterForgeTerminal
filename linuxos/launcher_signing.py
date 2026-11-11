@@ -33,11 +33,14 @@ def has_virtualization_entitlement(binary: Path) -> bool:
         return False
 
 
-def sign_launcher(binary: Path) -> None:
+def sign_launcher(binary: Path, *, identity: str = '-') -> None:
     if not ENTITLEMENTS.is_file():
         raise FileNotFoundError(f"Missing VM entitlement definition: {ENTITLEMENTS}")
+    flags = (["--options", "runtime", "--timestamp"] if identity != '-'
+             else ["--timestamp=none"])
     subprocess.run(
-        ["codesign", "--force", "--sign", "-", "--entitlements", str(ENTITLEMENTS), str(binary)],
+        ["codesign", "--force", "--sign", identity, *flags,
+         "--entitlements", str(ENTITLEMENTS), str(binary)],
         check=True,
     )
     if not has_virtualization_entitlement(binary):

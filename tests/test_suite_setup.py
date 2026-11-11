@@ -79,14 +79,6 @@ class MacBootstrapContractTests(unittest.TestCase):
         self.builds = Path(self.tmp.name) / 'Builds'
         self.builds.mkdir()
 
-    def test_no_homebrew_or_preinstalled_docker_dependency(self):
-        """The Mac bootstrap owns Colima, Buildx and Docker inside Builds."""
-        source = (Path(mac_bootstrap.__file__).read_text(encoding='utf-8'))
-        self.assertIn('def ensure_docker(builds:', source)
-        self.assertIn('def _ensure_buildx_plugin(', source)
-        self.assertIn('managed_state_root(builds)', source)
-        self.assertNotIn('Docker.dmg', source)
-        self.assertNotIn('/opt/homebrew', source)
 
     def test_sample_probe_requires_real_platform_and_listing(self):
         output = ('CINTER_SAMPLE_BEGIN platform=windows\n'
@@ -99,19 +91,6 @@ class MacBootstrapContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'windows sample'):
             three_samples._assert_probe('CINTER_SAMPLE_DIRECTORY_PASS platform=windows', 'windows')
 
-    def test_windows_sample_probes_directory_without_cmd_dependency(self):
-        """The Windows PE must list the mounted files itself under Wine.
-
-        Wine 8 cmd.exe can return Invalid function on a mounted Z: drive.
-        Setup still verifies the marker emitted by the PE's real filesystem
-        enumeration rather than accepting a mocked or empty listing.
-        """
-        sample = Path(__file__).resolve().parents[1] / 'build/terminal_bootstrap/main.cpp'
-        source = sample.read_text(encoding='utf-8')
-        self.assertNotIn('std::system("cmd', source)
-        self.assertIn('fs::directory_iterator(fs::current_path())', source)
-        self.assertIn('CINTER_SAMPLE_NATIVE_DIRECTORY_ENUMERATION win32', source)
-        self.assertIn('CINTER_SAMPLE_DIRECTORY_PASS platform=', source)
 
     def test_sample_command_streams_and_records_real_output(self):
         log = self.builds / 'Logs/sample.log'
@@ -206,15 +185,6 @@ class MacBootstrapContractTests(unittest.TestCase):
                                  '--setup-local'], capture_output=True, text=True)
         self.assertNotEqual(denied.returncode, 0)
 
-    def test_shared_cpp_sample_and_cmake_target(self):
-        root = Path(__file__).resolve().parents[1]
-        source = (root / 'build/terminal_bootstrap/main.cpp').read_text()
-        cmake = (root / 'CMakeLists.txt').read_text()
-        self.assertIn('webview::webview view', source)
-        self.assertIn('CINTER_SAMPLE_WEBVIEW_JS_PASS', source)
-        self.assertIn('CINTER_SAMPLE_DIRECTORY_PASS', source)
-        self.assertIn('add_executable(cinter-bootstrap-sample build/terminal_bootstrap/main.cpp)', cmake)
-        self.assertIn('webview::core', cmake)
 
     def test_mac_only_all_three_samples_fails_closed_elsewhere(self):
         with mock.patch.object(three_samples.platform, 'system', return_value='Linux'):

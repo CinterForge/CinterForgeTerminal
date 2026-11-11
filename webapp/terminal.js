@@ -189,6 +189,7 @@
     return new TextDecoder('utf-8').decode(bytes);
   };
   let session=null, generation=0, platform='linux', selected='', profiles=[], waiting=false;
+  const queuedSessionOpens=[];
   let macCatalog=new Map();
   const museumKind = x => x?.kind || 'terminal';
   // Display icons identify the same real terminal/emulator category on menu
@@ -472,9 +473,23 @@
   };
   async function activateTab(tab){
     if(!tab || !tabs.includes(tab) || activeTab===tab)return;
-    if(game){notice('Leave the active IF game before switching tabs');return;}
-    if(activeTab){activeTab.display.target=activeTab.buffer;activeTab.display.render();}
+    // The shell, each IF interpreter and each emulator own separate tabs.
+    if(activeTab?.kind==='if' && activeTab.game)activeTab.game.draft=$('terminal-input').value;
+    if(activeTab && activeTab.kind!=='if'){
+      activeTab.display.target=activeTab.buffer;activeTab.display.render();
+    }
     activeTab=tab;session=tab.session;selected=tab.profileId;display=tab.display;
+    if(tab.kind==='if'){
+      showTerminal();applyProfile(profiles.find(p=>p.id===tab.profileId)||profiles[0]);
+      $('terminal-keys').hidden=false;
+      $('terminal-input').value=tab.game?.draft||'';
+      paintIFTab(tab);
+      focusTerminal();
+      renderTabs();
+      return;
+    }
+    $('terminal-input').value='';
+    $('terminal-output').removeAttribute('data-if-echo');
     display.target=$('terminal-output');display.render();
     const profile=profiles.find(p=>p.id===tab.profileId)||profiles[0];
     if(tab.kind==='server'){
@@ -497,16 +512,22 @@
     renderTabs();
   }
   async function closeTab(tab){
-    if(!tabs.includes(tab))return;
-    if(game && activeTab===tab)await stopGame(game.name);
+    if(!tabs.includes(tab) || tab.closed)return;
+    // Mark closed before awaiting network I/O. A late PTY connection or IF
+    // download must never resurrect a closed tab or take over another tab.
     tab.closed=true;tab.pollGeneration=(tab.pollGeneration||0)+1;
-    if(tab.session)try{await api('/api/terminal/close',{id:tab.session.id});}catch(_){/* already closed */}
+    if(tab.game)void stopGame(tab).catch(error=>console.error('IF close:',error));
+    const closingSession=tab.session;
+    tab.session=null;
     const index=tabs.indexOf(tab);tabs.splice(index,1);
     if(activeTab===tab){
       activeTab=null;session=null;
+      $('terminal-input').value='';
       if(tabs.length)await activateTab(tabs[Math.max(0,index-1)]);
       else await openSession('modern');
     }else renderTabs();
+    if(closingSession)try{await api('/api/terminal/close',{id:closingSession.id});}
+      catch(_){/* already closed */}
   }
   // Other tabs keep their own PTYs alive; a Minecraft console running in one
   // must never be closed just because another shell or emulator is selected.
@@ -544,7 +565,6 @@
     return tab;
   }
   window.CinterTerminalNewTab=async(kind='mac')=>{
-    if(game){notice('Leave the active IF game before creating another terminal');return;}
     if(typeof kind==='string' && kind.startsWith('profile:')){
       const id=kind.slice(8);
       if(profiles.some(profile=>profile.id===id && !profile.lagomorph))
@@ -558,111 +578,145 @@
     if(kind==='minecraft')return openSession('modern','minecraft');
     notice('Unknown Terminal mode: '+String(kind));
   };
-  // ZMachine's WebIOAdapter writes directly to the current pre, bypassing
-  // VTOutput.push(). Keep the existing screen pinned to new output, including
-  // asynchronously appended text and restored game output.
+  // Each IF story is a separate Session tab. The interpreter writes only to
+  // its own detached output, and receives input only through its own private
+  // textarea. The visible Terminal output and textarea are a presentation of
+  // the ACTIVE tab, never a global owner of a Z-machine process.
   const terminalScreen=$('terminal-screen');
   const scrollToLatest=()=>{terminalScreen.scrollTop=terminalScreen.scrollHeight;};
   const outputObserver=new MutationObserver(()=>scrollToLatest());
   outputObserver.observe($('terminal-output'),{subtree:true,childList:true,characterData:true});
-
-  // IF is a foreground program bound to the *existing* PTY session's screen
-  // and input. No iframe, duplicate terminal or alternate HTML document.
-  let game=null;
-  let pausedShellOutput='';
-  // Kevin's shared textarea is deliberately transparent over his terminal.
-  // The upstream WebIOAdapter echoes only submitted commands, so expose the
-  // current *unsubmitted* input and insertion point through the existing pre.
-  // CSS ::after keeps the draft separate from committed VM output, avoiding
-  // edits to ZMachine's transcript or the PTY's authoritative scrollback.
-  const syncGameInput=()=>{
-    const output=$('terminal-output'), input=$('terminal-input');
-    if(!game || !game.io?.lineResolver){
-      output.removeAttribute('data-if-echo');
-      return;
-    }
-    const value=input.value;
-    const caret=Math.max(0,Math.min(input.selectionStart ?? value.length,value.length));
+  const activeGame=()=>activeTab?.game||null;
+  function syncGameInput(){
+    const output=$('terminal-output'),input=$('terminal-input'),current=activeGame();
+    if(!current?.io?.lineResolver){output.removeAttribute('data-if-echo');return;}
+    current.draft=input.value;
+    const value=current.draft;
+    const caret=Math.max(0,Math.min(input.selectionStart??value.length,value.length));
     output.setAttribute('data-if-echo',value.slice(0,caret)+'▌'+value.slice(caret));
     scrollToLatest();
-  };
-  async function stopGame(name, notifyServer=true){
-    if(!game || (name && game.name!==name))return;
-    const old=game;
-    game=null;
-    old.releaseDisplay?.();
-    $('terminal-output').removeAttribute('data-if-echo');
-    $('terminal-input').value='';
-    if(old.io?.lineResolver){
-      try{old.io.lineResolver('quit');}catch(_){ /* VM may already have exited */ }
+  }
+  function paintIFTab(tab){
+    if(tab.closed || activeTab!==tab)return;
+    const target=$('terminal-output');
+    if(tab.buffer.childNodes && typeof tab.buffer.cloneNode==='function')
+      target.replaceChildren(...Array.from(tab.buffer.childNodes,node=>node.cloneNode(true)));
+    else target.textContent=tab.buffer.textContent;
+    const current=tab.game;
+    $('terminal-input').disabled=!current?.io;
+    $('terminal-shell').textContent='Interactive Fiction · '+tab.label;
+    notice(current?.statusElement.textContent||tab.statusText||('Playing '+tab.label));
+    syncGameInput();
+    scrollToLatest();
+  }
+  function scheduleIFPaint(tab){
+    if(tab.paintPending || tab.closed)return;
+    tab.paintPending=true;
+    requestAnimationFrame(()=>{tab.paintPending=false;paintIFTab(tab);});
+  }
+  async function stopGame(tab,notifyServer=true){
+    const current=tab?.game;
+    if(!current)return;
+    tab.game=null;
+    current.abort.abort();
+    current.releaseDisplay?.();
+    current.observer?.disconnect();
+    if(current.io?.lineResolver){
+      try{current.io.lineResolver('quit');}catch(_){/* already exited */}
+    }
+    tab.finished=true;
+    tab.statusText=tab.label+' stopped · close this tab to return to the shell';
+    tab.buffer.append(document.createTextNode('\n[IF] '+tab.label+' stopped\n'));
+    if(activeTab===tab){
+      $('terminal-input').value='';
+      paintIFTab(tab);
+      $('terminal-output').removeAttribute('data-if-echo');
     }
     if(notifyServer){
-      try{await api('/api/if/stop',{command:old.name});}catch(error){notice('IF stop: '+error.message);}
+      try{await api('/api/if/stop',{command:current.name,launch_id:current.launchId});}
+      catch(error){if(activeTab===tab)notice('IF stop: '+error.message);}
     }
-    // Hand the authoritative scrollback back to the existing VT renderer.
-    const text=$('terminal-output').textContent;
-    display.reset();display.push(text+'\n');
-    if(pausedShellOutput){display.push(pausedShellOutput);pausedShellOutput='';}
-    notice(old.name+' stopped · terminal session resumed');
-    focusTerminal();
   }
-  async function startGame(name){
-    if(!session || game)return;
-    const current={name,sessionId:session.id,io:null,releaseDisplay:null};
-    game=current;
-    const output=$('terminal-output'),input=$('terminal-input');
-    output.textContent+='\n';
-    $('terminal-screen').scrollTop=$('terminal-screen').scrollHeight;
-    notice('Playing '+name+' in current terminal · Ctrl+C to exit');
-    // Keep the existing screen, textarea, profile, colors and PTY alive.
-      try {
-        const response=await fetch('/api/if/story/'+encodeURIComponent(name),
-          {headers:{'X-CPH-Token':token},cache:'no-store'});
-        if(!response.ok)throw new Error((await response.json()).error||'Story download failed');
-        const story=await response.arrayBuffer();
-        const [{ZMachine},{WebIOAdapter},quetzal]=await Promise.all([
-          import('/zmachine/index.js'),import('/zmachine/web/WebIOAdapter.js'),
-          import('/zmachine/core/state/Quetzal.js')]);
-        // Match IFPlayer's Quetzal/CONV schema; store on the host Steam library,
-        // never in this ephemeral browser's localStorage.
-        const saveURL='/api/if/save/'+encodeURIComponent(name);
-        const auth={'X-CPH-Token':token};
-        // Save storage must never prevent the user from launching a story.
-        // A host Steam library may be unavailable or an earlier save corrupt.
-        const storyHash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',story)),
-          byte=>byte.toString(16).padStart(2,'0')).join('');
-        let old={found:false,story_sha256:storyHash};
-        let saveWarning='';
-        try {
-          const oldResponse=await fetch(saveURL,{headers:auth,cache:'no-store'});
-          if(!oldResponse.ok) {
-            const message=await oldResponse.json().catch(()=>({}));
-            throw new Error(message.error||'HTTP '+oldResponse.status);
-          }
-          old=await oldResponse.json();
-          if(old.story_sha256!==storyHash)throw new Error('Story hash mismatch');
-        } catch(error) {
-          saveWarning='[IF] Existing autosave unavailable: '+error.message+'; starting fresh\n';
+  async function openIFTab(name,launchId,sourceSession){
+    // A story can be requested twice while already open. Re-select its tab;
+    // never bind a second VM to the same named autosave or another shell.
+    const existing=tabs.find(tab=>!tab.closed && tab.kind==='if' && tab.game?.name===name);
+    if(existing){await activateTab(existing);return existing;}
+    const buffer=makeBuffer();
+    const tab={key:++tabSerial,label:name,profileId:'modern',backend:'if',
+      kind:'if',session:null,closed:false,display:new VTOutput(buffer),buffer,
+      statusText:'Loading '+name+'…',paintPending:false,game:null};
+    const current={name,launchId,sourceSession,io:null,draft:'',
+      abort:new AbortController(),inputElement:document.createElement('textarea'),
+      statusElement:document.createElement('span'),releaseDisplay:null,observer:null};
+    tab.game=current;
+    tab.buffer.textContent='[IF] Loading '+name+'…\n';
+    current.observer=new MutationObserver(()=>scheduleIFPaint(tab));
+    current.observer.observe(tab.buffer,{subtree:true,childList:true,characterData:true});
+    // If the user already switched away from the requesting shell, do not
+    // steal focus when the deferred server event finally arrives.
+    const select=!sourceSession || activeTab?.session?.id===sourceSession;
+    tabs.push(tab);
+    if(select)await activateTab(tab);
+    else renderTabs();
+    void startGame(tab,current);
+    return tab;
+  }
+  async function startGame(tab,current){
+    const name=current.name;
+    const alive=()=>!tab.closed && tab.game===current;
+    const output=tab.buffer;
+    const saveURL='/api/if/save/'+encodeURIComponent(name);
+    try{
+      const response=await fetch('/api/if/story/'+encodeURIComponent(name),
+        {headers:{'X-CPH-Token':token},cache:'no-store',signal:current.abort.signal});
+      if(!alive())return;
+      if(!response.ok)throw new Error((await response.json()).error||'Story download failed');
+      const story=await response.arrayBuffer();
+      const [{ZMachine},{WebIOAdapter},quetzal]=await Promise.all([
+        import('/zmachine/index.js'),import('/zmachine/web/WebIOAdapter.js'),
+        import('/zmachine/core/state/Quetzal.js')]);
+      if(!alive())return;
+      const auth={'X-CPH-Token':token};
+      // Save storage is optional, and a bad save must never strand the tab.
+      const storyHash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',story)),
+        byte=>byte.toString(16).padStart(2,'0')).join('');
+      if(!alive())return;
+      let old={found:false,story_sha256:storyHash};
+      let saveWarning='';
+      try{
+        const oldResponse=await fetch(saveURL,{headers:auth,cache:'no-store',signal:current.abort.signal});
+        if(!alive())return;
+        if(!oldResponse.ok){
+          const message=await oldResponse.json().catch(()=>({}));
+          throw new Error(message.error||'HTTP '+oldResponse.status);
         }
-        const vmState=old.found ? old.save.vm_state : null;
-        const base64=bytes=>{
-          let result='';for(let i=0;i<bytes.length;i+=8192)
-            result+=String.fromCharCode(...bytes.subarray(i,i+8192));
-          return btoa(result);
-        };
-        const unbase64=value=>{
-          if(typeof value!=='string'||value.length>12*1024*1024||
-             !/^[A-Za-z0-9+/]*={0,2}$/.test(value))throw new Error('Invalid Quetzal bytes');
-          return Uint8Array.from(atob(value),c=>c.charCodeAt(0));
-        };
-        const io=new WebIOAdapter({outputElement:output,inputElement:input,
-          statusElement:$('terminal-message')});
-        current.io=io;
-        let vm=ZMachine.load(story,io);
-        io.initialize?.(vm.version);
-        if(saveWarning)output.textContent+=saveWarning;
-        if(vmState){
-          try {
+        old=await oldResponse.json();
+        if(old.story_sha256!==storyHash)throw new Error('Story hash mismatch');
+      }catch(error){
+        if(!alive())return;
+        saveWarning='[IF] Existing autosave unavailable: '+error.message+'; starting fresh\n';
+      }
+      if(!alive())return;
+      const vmState=old.found?old.save.vm_state:null;
+      const base64=bytes=>{
+        let result='';for(let i=0;i<bytes.length;i+=8192)
+          result+=String.fromCharCode(...bytes.subarray(i,i+8192));
+        return btoa(result);
+      };
+      const unbase64=value=>{
+        if(typeof value!=='string'||value.length>12*1024*1024||
+           !/^[A-Za-z0-9+/]*={0,2}$/.test(value))throw new Error('Invalid Quetzal bytes');
+        return Uint8Array.from(atob(value),c=>c.charCodeAt(0));
+      };
+      const io=new WebIOAdapter({outputElement:output,inputElement:current.inputElement,
+        statusElement:current.statusElement});
+      current.io=io;
+      let vm=ZMachine.load(story,io);
+      io.initialize?.(vm.version);
+      if(saveWarning)output.textContent+=saveWarning;
+      if(vmState){
+        try{
           if(vmState.schema!=='cinterforge.if.quetzal.v1')throw new Error('Unknown Quetzal save');
           const parsed=quetzal.parseQuetzalSave(unbase64(vmState.data_base64));
           if(!quetzal.verifySaveCompatibility(parsed,vm.memory))
@@ -675,74 +729,70 @@
           vm.executor.randomConfiguredSeed=vmState.random_configured_seed===null?null:
             Number(vmState.random_configured_seed);
           vm.executor.randomXorshiftState=Number(vmState.random_xorshift_state||1)>>>0;
-          // Quetzal restores the VM, not the old terminal transcript. The saved
-          // command stream must never be painted back onto this PTY session.
           output.textContent+='[IF] Restored '+name+' autosave\n';
-          } catch(error) {
-            output.textContent+='[IF] Restore failed: '+error.message+'; starting fresh\n';
-            // A failed restore might have partially changed memory or stack.
-            // Use a clean VM rather than risking a corrupt resumed session.
-            vm=ZMachine.load(story,io);
-            io.initialize?.(vm.version);
-            output.textContent+='[IF] Restore unavailable; started new game\n';
-          }
+        }catch(error){
+          output.textContent+='[IF] Restore failed: '+error.message+'; starting fresh\n';
+          vm=ZMachine.load(story,io);
+          io.initialize?.(vm.version);
+          output.textContent+='[IF] Restore unavailable; started new game\n';
         }
-        let boundary=0;
-        let saving=Promise.resolve();
-        const readLine=io.readLine.bind(io);
-        io.readLine=(...args)=>{
-          const pending=readLine(...args);
-          const serial=++boundary;
-          // The VM has suspended at its next input boundary. Only then is its
-          // stack/PC stable enough for the same Quetzal snapshot as IFPlayer.
-          queueMicrotask(()=>{
-            saving=saving.then(async()=>{
-              if(!io.lineResolver || serial!==boundary)return;
-              const bytes=quetzal.createQuetzalSave(vm.memory,vm.stack.snapshot(),vm.pc);
-              const random=vm.executor;
-              const snapshot={schema:'cinterforge.if.quetzal.v1',
-                data_base64:base64(bytes),random_mode:String(random.randomMode||'random'),
-                random_configured_seed:random.randomConfiguredSeed,
-                random_xorshift_state:random.randomXorshiftState>>>0,
-                native_save_base64:null};
-              const now=new Date().toISOString();
-              const card={schema:'cinterforge.conv.if.v1',card_type:'CONV',
-                story:name,interpreter:'zmachine',story_sha256:old.story_sha256,
-                vm_state:snapshot,session_state:{},
-                updated_at:now};
-              const response=await fetch(saveURL,{method:'POST',headers:{...auth,
-                'Content-Type':'application/json'},body:JSON.stringify(card)});
-              if(!response.ok)throw new Error('HTTP '+response.status);
-            }).catch(error=>{
-              output.textContent+='\n[IF] Autosave failed: '+error.message+'\n';
-            });
+      }
+      let boundary=0;
+      let saving=Promise.resolve();
+      const readLine=io.readLine.bind(io);
+      io.readLine=(...args)=>{
+        const pending=readLine(...args);
+        const serial=++boundary;
+        queueMicrotask(()=>{
+          saving=saving.then(async()=>{
+            if(!alive() || !io.lineResolver || serial!==boundary)return;
+            const bytes=quetzal.createQuetzalSave(vm.memory,vm.stack.snapshot(),vm.pc);
+            const random=vm.executor;
+            const snapshot={schema:'cinterforge.if.quetzal.v1',
+              data_base64:base64(bytes),random_mode:String(random.randomMode||'random'),
+              random_configured_seed:random.randomConfiguredSeed,
+              random_xorshift_state:random.randomXorshiftState>>>0,
+              native_save_base64:null};
+            const card={schema:'cinterforge.conv.if.v1',card_type:'CONV',
+              story:name,interpreter:'zmachine',story_sha256:old.story_sha256,
+              vm_state:snapshot,session_state:{},updated_at:new Date().toISOString()};
+            const result=await fetch(saveURL,{method:'POST',headers:{...auth,
+              'Content-Type':'application/json'},body:JSON.stringify(card)});
+            if(!result.ok)throw new Error('HTTP '+result.status);
+          }).catch(error=>{
+            if(alive()){output.textContent+='\n[IF] Autosave failed: '+error.message+'\n';scheduleIFPaint(tab);}
           });
-          return pending;
-        };
-        // Restored ZMachine states may emit many synchronous writes before the
-        // first prompt. Commit them in one paint instead of visually replaying
-        // an entire save. Fresh games receive the same atomic initial paint.
-        output.style.visibility='hidden';
-        const releaseDisplay=()=>{
-          if(current.releaseDisplay!==releaseDisplay)return;
-          current.releaseDisplay=null;
-          output.style.visibility='';
-          scrollToLatest();
-        };
-        current.releaseDisplay=releaseDisplay;
-        const readyReadLine=io.readLine.bind(io);
-        io.readLine=(...args)=>{
-          const pending=readyReadLine(...args);
-          syncGameInput();
-          requestAnimationFrame(releaseDisplay);
-          return pending;
-        };
-        input.focus();
-        try{await vm.run();}finally{releaseDisplay();}
-      }catch(error){if(game?.name===name)output.textContent+='\n[IF] '+error.message+'\n';}
-
-    finally{
-      if(game===current)await stopGame(name);
+        });
+        return pending;
+      };
+      // Preserve the original atomic initial/restored paint behavior.
+      output.style.visibility='hidden';
+      const releaseDisplay=()=>{
+        if(current.releaseDisplay!==releaseDisplay)return;
+        current.releaseDisplay=null;
+        output.style.visibility='';
+        scheduleIFPaint(tab);
+      };
+      current.releaseDisplay=releaseDisplay;
+      const readyReadLine=io.readLine.bind(io);
+      io.readLine=(...args)=>{
+        const pending=readyReadLine(...args);
+        if(alive()){
+          current.statusElement.textContent='Playing '+name+' · Ctrl+C to exit';
+          if(activeTab===tab){$('terminal-input').disabled=false;focusTerminal();syncGameInput();}
+        }
+        requestAnimationFrame(releaseDisplay);
+        return pending;
+      };
+      if(!alive())return;
+      try{await vm.run();}finally{releaseDisplay();}
+    }catch(error){
+      if(alive() && error.name!=='AbortError'){
+        output.textContent+='\n[IF] '+error.message+'\n';
+        scheduleIFPaint(tab);
+      }
+    }finally{
+      if(alive())await stopGame(tab);
     }
   }
 
@@ -769,8 +819,7 @@
         if(tab.closed || tab.session?.id!==id)return;
         if(result.output){
           const bytes=decode(result.output);
-          if(game && activeTab===tab)pausedShellOutput+=bytes;
-          else tab.display.push(bytes);
+          tab.display.push(bytes);
         }
         if(result.bedrock_eula_requested && activeTab===tab)requestLicense();
         if(result.closed){
@@ -790,7 +839,11 @@
     }
   }
   async function openSession(profileId,backend='native'){
-    if(waiting){notice('Terminal connection in progress');return;}
+    // Do not drop a native/File-menu request while the initial PTY is still
+    // connecting. Windows WebView2 can deliver the click during first startup.
+    if(waiting){
+      return new Promise((resolve,reject)=>queuedSessionOpens.push({profileId,backend,resolve,reject}));
+    }
     if(backend==='minecraft'){
       // Menu and API both gate the attachment: never start a Bedrock VM here.
       try {
@@ -812,8 +865,12 @@
     // into Kevin's existing screen and receives keyboard input.
     tab.display.target=tab.buffer;
     tabs.push(tab);
-    if(activeTab){activeTab.display.target=activeTab.buffer;activeTab.display.render();}
+    if(activeTab?.kind==='if' && activeTab.game)activeTab.game.draft=$('terminal-input').value;
+    if(activeTab && activeTab.kind!=='if'){
+      activeTab.display.target=activeTab.buffer;activeTab.display.render();
+    }
     activeTab=tab;session=null;selected=profile.id;display=tab.display;
+    $('terminal-input').value='';$('terminal-output').removeAttribute('data-if-echo');
     display.target=$('terminal-output');display.render();renderTabs();
     try{
       if(!acceptUI && !profile.lagomorph && !profile.macGame && tab.kind==='terminal')
@@ -830,6 +887,10 @@
       showTerminal();applyProfile(profile);
       notice('Connecting to '+profile.name+' session…');
       const created=await api('/api/terminal/open',{...terminalSize(),profile:profile.id,backend});
+      if(tab.closed){
+        await api('/api/terminal/close',{id:created.id}).catch(()=>{});
+        return;
+      }
       tab.session=created;
       if(activeTab===tab){
         session=created;
@@ -842,7 +903,11 @@
     }catch(e){
       if(activeTab===tab){notice(e.message);tab.display.push(e.message+'\n');}
       await nativeEvent('error',{message:e.message});
-    }finally{waiting=false;renderTabs();}
+    }finally{
+      waiting=false;renderTabs();
+      const next=queuedSessionOpens.shift();
+      if(next)void openSession(next.profileId,next.backend).then(next.resolve,next.reject);
+    }
   }
   // A `bedrock run <world>` command in any regular shell asks the local
   // host to create a separate PTY. Adopt that exact Session, never start a
@@ -886,6 +951,10 @@
       notice('Bedrock is a dedicated server Session. Start a new world with bedrock run from a regular terminal.');
       return;
     }
+    if(tab.kind==='if'){
+      notice(tab.game ? 'Story is running in its own tab' : 'Story ended. Launch it again from a shell.');
+      return;
+    }
     if(tab.kind!=='terminal'){
       await showComputer(profiles.find(p=>p.id===tab.profileId));return;
     }
@@ -898,18 +967,18 @@
       notice('Connected');void pollTab(tab);focusTerminal();
     }catch(error){notice(error.message);}
   }
-  async function send(data){if(game)return;if(session)try{await api('/api/terminal/input',{id:session.id,data});}catch(e){notice(e.message);}}
+  async function send(data){if(activeTab?.kind==='if')return;if(session)try{await api('/api/terminal/input',{id:session.id,data});}catch(e){notice(e.message);}}
   async function debuggerRequest(){
     try{await api('/api/debugger',{});notice('Inspector requested; available when the native Host enables it.');}
     catch(e){notice(e.message);}
   }
   const overlay=$('terminal-overlay');
   const input=$('terminal-input');
-  const focusTerminal=()=>{if(session && !overlay.hidden && !input.disabled) input.focus();};
+  const focusTerminal=()=>{if((session||activeGame()) && !overlay.hidden && !input.disabled)input.focus();};
   // Native Edit uses the existing session transcript and input bridge.
   // Copy uses the entire committed session
   // transcript, never the hidden input textarea or an emulator's document.
-  const currentTranscript=()=>game ? ($('terminal-output').textContent || '') : display.transcript();
+  const currentTranscript=()=>activeTab?.kind==='if' ? (activeTab.buffer.textContent||'') : display.transcript();
   const copyTranscript=async()=>{
     const transcript=currentTranscript();
     // In WebView2, execCommand works synchronously during a real keyboard
@@ -936,9 +1005,9 @@
     return transcript;
   };
   const pasteIntoSession=text=>{
-    if(!session || computerView.hidden===false)return false;
+    if((!session && !activeGame()) || computerView.hidden===false)return false;
     text=String(text ?? '');if(!text)return false;
-    if(game){
+    if(activeGame()){
       input.focus();
       input.setRangeText(text,input.selectionStart,input.selectionEnd,'end');
       input.dispatchEvent(new Event('input',{bubbles:true}));
@@ -978,7 +1047,14 @@
   // All platforms receive both mouse and keyboard input inside the WebView.
   // The machine dropdown remains available even when an emulator owns focus.
   const keys={Enter:'\r',Escape:'\x1b',Backspace:'\x7f',Tab:'\t',ArrowUp:'\u001b[A',ArrowDown:'\u001b[B',ArrowRight:'\u001b[C',ArrowLeft:'\u001b[D',Home:'\u001b[H',End:'\u001b[F',Delete:'\u001b[3~',ControlC:'\x03'};
-  const forwardKey=(name)=>{if(game){if(name==='ControlC'){void stopGame(game.name);return true;}if(name==='Enter'){input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));return true;}return false;}const code=keys[name];if(code && session){send(code);return true;}return false;};
+  const forwardKey=(name)=>{
+    if(activeGame()){
+      if(name==='ControlC'){void closeTab(activeTab);return true;}
+      if(name==='Enter'){input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));return true;}
+      return false;
+    }
+    const code=keys[name];if(code && session){send(code);return true;}return false;
+  };
   for(const button of ($('terminal-keys').querySelectorAll?.('button') || [])){
     button.addEventListener('click',()=>{forwardKey(button.dataset.terminalKey);focusTerminal();});
   }
@@ -986,7 +1062,7 @@
   input.addEventListener('wheel',e=>{$('terminal-screen').scrollTop+=e.deltaY;e.preventDefault();},{passive:false});
   // Keyboard shortcuts work if the screen (rather than the textarea) holds focus.
   document.addEventListener('keydown',e=>{
-    if(!session || game || computerView.hidden===false || e.isComposing || e.target===input)return;
+    if(!session || activeTab?.kind==='if' || computerView.hidden===false || e.isComposing || e.target===input)return;
     if(e.target && ['SELECT','BUTTON','SUMMARY','INPUT','TEXTAREA'].includes(e.target.tagName))return;
     const ctrl=e.ctrlKey && !e.altKey && e.key.length===1 ? String.fromCharCode(e.key.toUpperCase().charCodeAt(0)&31):null;
     const special=keys[e.key];
@@ -994,7 +1070,7 @@
     if(ctrl||special||printable){e.preventDefault();send(ctrl||special||printable);}
   });
   document.addEventListener('paste',e=>{
-    if(!session || game || computerView.hidden===false || e.target===input)return;
+    if(!session || activeTab?.kind==='if' || computerView.hidden===false || e.target===input)return;
     const text=e.clipboardData?.getData('text/plain');
     if(text){e.preventDefault();send(text);}
   });
@@ -1076,22 +1152,22 @@
   // Do not dispatch incomplete IME compositions as shell commands.
   input.addEventListener('input',e=>{
     if(e.isComposing)return;
-    if(game){syncGameInput();return;}
+    if(activeGame()){syncGameInput();return;}
     if(input.value){const value=input.value;input.value='';send(value);}
   });
   input.addEventListener('compositionend',()=>{
-    if(game){syncGameInput();return;}
+    if(activeGame()){syncGameInput();return;}
     if(input.value){const value=input.value;input.value='';send(value);}
   });
   // Cursor positioning is also visible when navigating/editing within a line.
-  input.addEventListener('keyup',()=>{if(game)syncGameInput();});
-  input.addEventListener('click',()=>{if(game)syncGameInput();});
-  input.addEventListener('select',()=>{if(game)syncGameInput();});
+  input.addEventListener('keyup',()=>{if(activeGame())syncGameInput();});
+  input.addEventListener('click',()=>{if(activeGame())syncGameInput();});
+  input.addEventListener('select',()=>{if(activeGame())syncGameInput();});
   // Capture IF editing keys before the interpreter's input listener. The
   // transparent textarea can be select-all after focus/restore; native
   // Backspace would erase the entire draft instead of one character.
   input.addEventListener('keydown',e=>{
-    if(!game || !game.io?.lineResolver || e.isComposing || e.key==='Process')return;
+    if(!activeGame()?.io?.lineResolver || e.isComposing || e.key==='Process')return;
     if(e.key!=='Backspace' && e.key!=='Delete')return;
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -1115,13 +1191,26 @@
     // File accelerators must not leak Ctrl+N/Ctrl+Q to the shell PTY.
     if(e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
        ['n','q'].includes(e.key.toLowerCase()))return;
-    if(game){
+    const current=activeGame();
+    if(current){
       if(e.ctrlKey && e.key.toLowerCase()==='c'){
-        e.preventDefault();e.stopImmediatePropagation();void stopGame(game.name);
-      } else if(e.key==='Enter') {
-        // WebIOAdapter's earlier listener has already read/echoed and cleared
-        // the draft; don't let the full-area textarea insert a stray newline.
-        e.preventDefault();syncGameInput();
+        e.preventDefault();e.stopImmediatePropagation();void closeTab(activeTab);
+      }else if(e.key==='Enter'){
+        e.preventDefault();
+        if(current.io?.lineResolver){
+          // Only the active story's WebIOAdapter receives this command.
+          current.inputElement.value=input.value;
+          current.inputElement.dispatchEvent(new KeyboardEvent('keydown',
+            {key:'Enter',bubbles:false}));
+          input.value='';current.draft='';syncGameInput();
+        }
+      }else if(current.io && e.key!=='Backspace' && e.key!=='Delete'){
+        // Forward readChar / history keys to this story only. Normal text
+        // editing remains in the visible input and never reaches another VM.
+        current.inputElement.value=input.value;
+        current.inputElement.dispatchEvent(new KeyboardEvent('keydown',
+          {key:e.key,code:e.code,ctrlKey:e.ctrlKey,shiftKey:e.shiftKey,
+           altKey:e.altKey,metaKey:e.metaKey,bubbles:false}));
       }
       return;
     }
@@ -1188,15 +1277,24 @@
     }catch(e){notice(e.message);}
     finally{licensePending=false;$('license-cancel').disabled=false;$('license-confirm').disabled=!accepted.checked;}
   });
-  // The native PTY's shell command requests are attached to the existing
-  // terminal session. Never navigate the museum iframe to a separate IF page.
+  // A typed story command creates its OWN tab. Source PTYs and existing
+  // games remain usable. Serial polling preserves start/stop event order.
+  let pollingIF=false;
   setInterval(async()=>{
-    if(document.visibilityState==='hidden' || !session)return;
+    if(document.visibilityState==='hidden' || pollingIF)return;
+    pollingIF=true;
     try{
       const action=await api('/api/if/next');
-      if(action.start)void startGame(action.start);
-      else if(action.stop)await stopGame(action.stop,false);
+      if(action.start){
+        await openIFTab(action.start,action.launch_id,action.session_id);
+      }else if(action.stop){
+        const tab=tabs.find(tab=>tab.kind==='if' &&
+          tab.game?.name===action.stop &&
+          (!action.launch_id || tab.game.launchId===action.launch_id));
+        if(tab)await stopGame(tab,false);
+      }
     }catch(error){notice('IF: '+error.message);}
+    finally{pollingIF=false;}
   },800);
   // Every typed `wargames` command uses the same Session path as the old
   // menu action. The JOSHUA application and iframe are unchanged.

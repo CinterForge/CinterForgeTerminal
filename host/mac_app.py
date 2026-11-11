@@ -238,8 +238,9 @@ def _sign_and_verify(app: Path) -> None:
     """Seal the *finished* app, after the executable, icon and plist are written.
 
     Copying a Mach-O or changing Info.plist after signing invalidates the seal.
-    Ad-hoc signing is sufficient for local native development; distribution
-    identities/notarization are a separate release gate.
+    Ad-hoc signing is for local development only. For distribution, Build
+    uses a Developer ID Application keychain identity and notarizes the exact
+    final package copy before creating the immutable release ZIP.
     """
     if os.uname().sysname != 'Darwin':
         raise RuntimeError('macOS application signing requires the macOS host')
@@ -252,10 +253,36 @@ def _sign_and_verify(app: Path) -> None:
           'LinuxKit/mac/arm64/CinterBDSVM')
     if not vm.is_file():
         raise RuntimeError(f'Packaged VM launcher missing: {vm}')
-    sign_launcher(vm)
+    identity = os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip()
+    if identity and not identity.startswith('Developer ID Application: '):
+        raise RuntimeError('CINTER_MAC_SIGN_IDENTITY must be an installed Developer ID Application identity')
+    if identity:
+        sign_launcher(vm, identity=identity)
+    else:
+        sign_launcher(vm)
+    sign_flags = (['--options', 'runtime', '--timestamp'] if identity
+                  else ['--timestamp=none'])
+    if identity:
+        # Apple notarization inspects *all* nested Mach-O code, including the
+        # private Python/Host runtime below Resources (which --deep alone does
+        # not necessarily discover). Sign inner code before sealing the app.
+        macho_magic = {b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf',
+                       b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca',
+                       b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xce'}
+        for nested in sorted((p for p in (app / 'Contents').rglob('*')
+                              if p.is_file() and not p.is_symlink()),
+                             key=lambda p: (-len(p.parts), str(p))):
+            if nested in (vm, app / 'Contents/MacOS/CinterForgeTerminal'):
+                continue
+            with nested.open('rb') as executable:
+                if executable.read(4) not in macho_magic:
+                    continue
+            subprocess.run(['/usr/bin/codesign', '--force', '--sign', identity,
+                            '--preserve-metadata=entitlements', *sign_flags,
+                            str(nested)], check=True, capture_output=True, text=True)
     subprocess.run(['/usr/bin/codesign', '--force', '--deep',
-                    '--preserve-metadata=entitlements', '--sign', '-', '--timestamp=none',
-                    str(app)], check=True, capture_output=True, text=True)
+                    '--preserve-metadata=entitlements', '--sign', identity or '-',
+                    *sign_flags, str(app)], check=True, capture_output=True, text=True)
     _verify_signature(app)
     if not has_virtualization_entitlement(vm):
         raise RuntimeError('VM entitlements missing after packaging; refusing broken release')
