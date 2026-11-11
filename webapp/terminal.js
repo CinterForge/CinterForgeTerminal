@@ -1018,8 +1018,9 @@
   const titleMenus=Array.from(document.querySelectorAll('.terminal-menu'));
   const setWindowsApplicationMenus=()=>{
     const isWindows=platform==='win';
+    const showMenus=isWindows || platform==='mac';
     for(const id of ['windows-file-menu','windows-edit-menu']){
-      const menu=$(id);if(menu){menu.hidden=!isWindows;if(!isWindows)menu.open=false;}
+      const menu=$(id);if(menu){menu.hidden=!showMenus;if(!showMenus)menu.open=false;}
     }
     // The File menu mirrors the macOS entries, but unavailable guest-native
     // shells on Windows must not masquerade as runnable native Bash sessions.
