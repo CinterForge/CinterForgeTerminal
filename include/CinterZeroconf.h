@@ -1,7 +1,7 @@
 #ifndef CINTER_ZEROCONF_H
 #define CINTER_ZEROCONF_H
 
-/* Optional DNS-SD / mDNS service discovery API for CinterForge Python Host.
+/* Optional DNS-SD / mDNS service discovery API v2 for CinterForge Python Host.
  *
  * Include this header alongside CinterPythonHost.h or CinterPythonHostC.h.
  * This API is independent of Python, has a stable C ABI, and requires no
@@ -53,6 +53,7 @@ extern "C"
         const char *host;    /* Local network host name. */
         const char *address; /* Resolved IPv4 address; do not trust without a connection. */
         uint16_t port;       /* Host byte order. */
+        const char *txt;     /* Newline-separated DNS-SD TXT key=value entries. */
     } CZC_Service;
 
     typedef void (*CZC_ServiceCallback)(CZC_Event event, const CZC_Service *service,
@@ -71,6 +72,11 @@ extern "C"
      */
     CZC_API int czc_publish(CZC_Context *context, const char *name,
                             const char *type, uint16_t port);
+    /* Like czc_publish, with DNS-SD TXT attributes separated by newlines.
+     * Each entry must be an ASCII key=value pair of at most 255 bytes.
+     * This is backward-compatible: callers without TXT use czc_publish(). */
+    CZC_API int czc_publish_txt(CZC_Context *context, const char *name,
+                                const char *type, uint16_t port, const char *txt);
     /* Listen for one service type; service callbacks are delivered in poll(). */
     CZC_API int czc_browse(CZC_Context *context, const char *type,
                            CZC_ServiceCallback callback, void *user_data);
@@ -121,6 +127,11 @@ namespace cinterforge
         void publish(const std::string &name, const std::string &type, uint16_t port)
         {
             check(czc_publish(context_, name.c_str(), type.c_str(), port));
+        }
+        void publishWithTxt(const std::string &name, const std::string &type,
+                            uint16_t port, const std::string &txt)
+        {
+            check(czc_publish_txt(context_, name.c_str(), type.c_str(), port, txt.c_str()));
         }
         void browse(const std::string &type, Callback callback)
         {

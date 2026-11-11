@@ -89,6 +89,108 @@ class ShellServerRuntimeTests(unittest.TestCase):
             server.stop()
             worker.join(timeout=3)
 
+    def test_setpass_enforces_browser_login_including_localhost(self):
+        """Once setpass succeeds, even localhost needs a login cookie.
+
+        Exercise HTTP requests rather than inspecting the login source text:
+        a user can access the open-by-default UI, configure credentials, log
+        in, and then lose access with a stale cookie after a password change.
+        """
+        from http.client import HTTPConnection
+        from urllib.parse import urlencode
+
+        builds = self.workspace / 'Builds'
+        builds.mkdir()
+        with mock.patch.object(terminal, '_load_bedrock_manager',
+                               side_effect=RuntimeError('Bedrock not needed')), \
+             mock.patch.object(terminal, 'CinterForgeDiscovery'), \
+             mock.patch.object(terminal, 'LAN_HTTP_PORT', 0):
+            server = terminal.CinterShellServer(builds, lan=True)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        connection = HTTPConnection('127.0.0.1', server.server_port, timeout=6)
+
+        def request(method, path, body=None, *, cookie=None, token=False):
+            headers = {'Host': 'localhost:' + str(server.server_port)}
+            if cookie:
+                headers['Cookie'] = cookie
+            if token:
+                headers['X-CPH-Token'] = server.token
+            if isinstance(body, dict):
+                headers['Content-Type'] = 'application/json'
+                body = json.dumps(body).encode('utf-8')
+            elif isinstance(body, str):
+                headers['Content-Type'] = 'application/x-www-form-urlencoded'
+                body = body.encode('utf-8')
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), response.read()
+
+        class FakeShell:
+            def close(self):
+                pass
+
+        try:
+            server.sessions['live-shell'] = FakeShell()
+            status, _, body = request('GET', '/')
+            self.assertEqual(status, 200)
+            self.assertIn(server.token.encode('ascii'), body)
+            status, _, _ = request('GET', '/api/status', token=True)
+            self.assertEqual(status, 200)
+
+            password = 'fixture-password-not-for-logs'
+            status, _, body = request('POST', '/api/lan/setpass', {
+                'session_id': 'live-shell', 'username': 'developer', 'password': password
+            }, token=True)
+            self.assertEqual(status, 200, body)
+            self.assertNotIn(password.encode(), body)
+            self.assertTrue((builds / terminal.LAN_LOGIN_FILENAME).is_file())
+
+            status, _, body = request('GET', '/')
+            self.assertEqual(status, 200)
+            self.assertIn(b'name="username"', body)
+            self.assertNotIn(server.token.encode('ascii'), body)
+            status, _, body = request('GET', '/terminal.js')
+            self.assertEqual(status, 401)
+            self.assertNotIn(server.token.encode('ascii'), body)
+            status, _, body = request('GET', '/api/status', token=True)
+            self.assertEqual(status, 401)
+            self.assertIn(b'LAN login required', body)
+            status, _, body = request('GET', '/healthz')
+            self.assertEqual(status, 200)
+            self.assertIn(b'"ready":true', body)
+
+            status, _, _ = request('POST', '/login', urlencode({
+                'username': 'developer', 'password': 'incorrect'}))
+            self.assertEqual(status, 401)
+            status, headers, body = request('POST', '/login', urlencode({
+                'username': 'developer', 'password': password}))
+            self.assertEqual(status, 303, body)
+            cookie = headers['Set-Cookie'].split(';', 1)[0]
+            status, _, body = request('GET', '/', cookie=cookie)
+            self.assertEqual(status, 200)
+            self.assertIn(server.token.encode('ascii'), body)
+            status, _, body = request('GET', '/api/status', cookie=cookie, token=True)
+            self.assertEqual(status, 200, body)
+
+            # Shell commands are native child processes, not browser clients.
+            # Their private credential must keep CLI commands functional without
+            # granting cookie-free access to pages on the same machine.
+            with mock.patch.dict('os.environ', {
+                    'CINTER_TERMINAL_URL': server.origin,
+                    'CINTER_TERMINAL_TOKEN': server.token,
+                    'CINTER_TERMINAL_CLI_TOKEN': server.cli_token}):
+                self.assertEqual(terminal._api('/api/status')['platform'], server.system)
+                self.assertTrue(terminal._api('/api/lan/setpass', body={
+                    'session_id': 'live-shell', 'username': 'developer',
+                    'password': 'replacement'})['updated'])
+            status, _, _ = request('GET', '/api/status', cookie=cookie, token=True)
+            self.assertEqual(status, 401, 'old login cookies must be invalidated')
+        finally:
+            connection.close()
+            server.stop()
+            worker.join(timeout=3)
+
     def test_downloaded_app_outside_steam_discovers_real_external_library(self):
         steam_default = self.workspace / 'Home/Library/Application Support/Steam/steamapps'
         external = self.workspace / 'External Steam/steamapps'

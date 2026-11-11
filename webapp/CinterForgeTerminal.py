@@ -35,6 +35,7 @@ import json
 from urllib.parse import unquote, urlsplit, parse_qs
 import importlib.util
 import ipaddress
+import ctypes
 import socket
 import mimetypes
 import os
@@ -405,7 +406,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     python = str(Path(sys.executable).resolve())
     functions = '\n'.join(
         f'{name}() {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in ('help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'discord'))
+        for name in ('help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'discord', 'setpass'))
     # These exact source filenames are the shell commands. Load the bundled
     # Terminal manifest; no sibling WebApp source or story package is required.
     catalog = json.loads((ASSETS / 'if_titles.json').read_text(encoding='utf-8'))
@@ -438,6 +439,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     # Our explicit --rcfile requires no machine-wide profile or pacman setup.
     preamble = ("# Native CinterForge Terminal session (preconfigured UCRT64 environment)\n"
                 + ("PS1='$ '\n" if system == 'win' else '')
+                + "HISTIGNORE='setpass *'\n"  # Do not retain credentials in Bash history.
                 + "printf 'Welcome to CinterForge. Type help for instructions.\\n'\n")
 
     (directory / 'terminal-init.sh').write_text(preamble + functions + '\n', encoding='utf-8')
@@ -517,7 +519,7 @@ def _session_environment(builds: Path, system: str) -> dict[str, str]:
 class TerminalSession:
     def __init__(self, builds: Path, system: str, cols: int, rows: int, *, url: str, token: str,
                  command: list[str] | None = None, working_directory: Path | None = None,
-                 output_log: Path | None = None):
+                 output_log: Path | None = None, internal_token: str | None = None):
         self.id = uuid.uuid4().hex
         self.system = system
         self.cols, self.rows = _bounded_size(cols, rows)
@@ -529,6 +531,11 @@ class TerminalSession:
         env = _session_environment(builds, system)
         env['CINTER_TERMINAL_URL'] = url
         env['CINTER_TERMINAL_TOKEN'] = token
+        # The local command helper can call the host API after setpass without
+        # a browser cookie. This secret is never embedded in served HTML/JS.
+        env.pop('CINTER_TERMINAL_CLI_TOKEN', None)
+        if internal_token:
+            env['CINTER_TERMINAL_CLI_TOKEN'] = internal_token
         env['CINTER_TERMINAL_SESSION_ID'] = self.id
         self.root = builds / 'Run' / 'CinterForgeTerminal' / system
         env['CINTER_TARGET_PLATFORM'] = system
@@ -1003,47 +1010,240 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
 
 
 LAN_HTTP_PORT = 20300
-LAN_DISCOVERY_PORT = 20301
-LAN_DISCOVERY_QUERY = b'CINTERFORGE_TERMINAL_DISCOVER_V1'
+LAN_LOGIN_FILENAME = 'CinterForgeTerminal/Config/lan-login.json'
+LAN_LOGIN_ITERATIONS = 200_000
+LAN_LOGIN_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')
 
 
-def _private_ipv4(value: str) -> bool:
+def _lan_login_path(writable_root: Path) -> Path:
+    """Store login state only under developer Builds or installed Steam state."""
+    return writable_root / LAN_LOGIN_FILENAME
+
+
+def _load_lan_login(writable_root: Path) -> dict | None:
+    """Read configured credentials; never generate or reveal a password."""
+    path = _lan_login_path(writable_root)
+    if path.parent.is_symlink() or path.parent.parent.is_symlink():
+        raise RuntimeError('Unsafe Terminal LAN login directory')
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 4096:
+        raise RuntimeError('Unsafe Terminal LAN login state')
     try:
-        addr = ipaddress.IPv4Address(value)
-    except ipaddress.AddressValueError:
+        record = json.loads(path.read_text(encoding='utf-8'))
+        if (record.get('schema') != 'cinterforge.terminal.lan-login.v1' or
+                not LAN_LOGIN_NAME.fullmatch(record['username']) or
+                not re.fullmatch(r'[0-9a-f]{32}', record['salt']) or
+                not re.fullmatch(r'[0-9a-f]{64}', record['digest']) or
+                record['iterations'] != LAN_LOGIN_ITERATIONS):
+            raise ValueError('invalid state')
+    except (ValueError, KeyError, TypeError) as error:
+        raise RuntimeError('Invalid Terminal LAN login state; use setpass to replace it') from error
+    return record
+
+
+def _save_lan_login(writable_root: Path, username: str, password: str) -> dict:
+    """Atomically replace the credential record; keep password out of files and logs."""
+    if not isinstance(username, str) or not LAN_LOGIN_NAME.fullmatch(username):
+        raise ValueError('Username must be 1-64 letters, digits, dots, dashes or underscores')
+    if not isinstance(password, str) or not 1 <= len(password) <= 256 or '\x00' in password:
+        raise ValueError('Password must contain 1-256 characters')
+    directory = _lan_login_path(writable_root).parent
+    parent = directory.parent
+    for part in (parent, directory):
+        if part.is_symlink() or (part.exists() and not part.is_dir()):
+            raise RuntimeError('Unsafe Terminal LAN login directory')
+        part.mkdir(exist_ok=True)
+    path = _lan_login_path(writable_root)
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise RuntimeError('Unsafe Terminal LAN login state file')
+    salt = secrets.token_bytes(16)
+    record = {'schema': 'cinterforge.terminal.lan-login.v1', 'username': username,
+              'salt': salt.hex(), 'iterations': LAN_LOGIN_ITERATIONS,
+              'digest': hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt,
+                                            LAN_LOGIN_ITERATIONS).hex()}
+    temporary = directory / ('lan-login-' + uuid.uuid4().hex + '.tmp')
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as file:
+            json.dump(record, file, separators=(',', ':'))
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+        if os.name != 'nt':
+            path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return record
+
+
+def _check_lan_login(record: dict | None, username: str, password: str) -> bool:
+    """Compare username and salted password hash without echoing credentials."""
+    if not record or not isinstance(username, str) or not isinstance(password, str):
         return False
-    return (addr.is_loopback or addr.is_link_local or
-            addr in ipaddress.IPv4Network('10.0.0.0/8') or
-            addr in ipaddress.IPv4Network('172.16.0.0/12') or
-            addr in ipaddress.IPv4Network('192.168.0.0/16'))
+    if len(username) > 64 or len(password) > 256:
+        return False
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'),
+                                bytes.fromhex(record['salt']), record['iterations'])
+    return (secrets.compare_digest(username, record['username']) and
+            secrets.compare_digest(digest, bytes.fromhex(record['digest'])))
 
 
-def _lan_peers(own_id: str, timeout: float = 0.55) -> list[dict]:
-    """Discover actual LAN hosts, with a bounded UDP request/reply."""
-    peers = {}
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.settimeout(timeout)
-        sock.bind(('0.0.0.0', 0))
-        sock.sendto(LAN_DISCOVERY_QUERY, ('255.255.255.255', LAN_DISCOVERY_PORT))
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                data, remote = sock.recvfrom(1024)
-                item = json.loads(data)
-                if (item.get('schema') != 'cinterforge.lan.v1' or
-                        item.get('id') == own_id or not _private_ipv4(remote[0]) or
-                        item.get('port') != LAN_HTTP_PORT):
-                    continue
-                peers[remote[0]] = {'id': str(item.get('id', ''))[:64],
-                                    'name': str(item.get('name', 'Terminal'))[:100],
-                                    'platform': str(item.get('platform', ''))[:20],
-                                    'url': f'http://{remote[0]}:{LAN_HTTP_PORT}/'}
-            except socket.timeout:
-                break
-            except (OSError, ValueError, TypeError):
-                continue
-    return sorted(peers.values(), key=lambda item: (item['name'], item['url']))
+CINTERFORGE_PORT_FIRST = 20300
+CINTERFORGE_PORT_LAST = 20399
+DISCOVERY_TYPE = b'_http._tcp.local.'
+# An app's port is its product identity. A discovered service additionally
+# advertises suite/app/path in standard DNS-SD TXT records.
+CINTERFORGE_SERVICE_PORTS = {20300: 'terminal', 20310: 'converter',
+                             20320: 'os', 20380: 'webapp'}
+
+
+class _DNSService(ctypes.Structure):
+    """Exact CinterZeroconf.h callback ABI; callback strings expire on return."""
+    _fields_ = [('name', ctypes.c_char_p), ('type', ctypes.c_char_p),
+                ('host', ctypes.c_char_p), ('address', ctypes.c_char_p),
+                ('port', ctypes.c_uint16), ('txt', ctypes.c_char_p)]
+
+
+# The native Host already ships this C API alongside its Python worker. Reuse
+# it instead of implementing or packaging a second Bonjour/mDNS responder.
+_DNSCallback = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.POINTER(_DNSService), ctypes.c_void_p)
+
+
+class CinterForgeDiscovery:
+    """Advertise Terminal and browse *all* CinterForge HTTP services via DNS-SD.
+
+    The CinterForge shared Host library owns UDP 5353, PTR/SRV/TXT/A messages,
+    TTLs and goodbye announcements. Python owns the live HTTP service catalog.
+    No additional discovery port or external daemon is involved.
+    """
+
+    def __init__(self, root: Path, server_name: str, port: int, log):
+        self.log = log
+        self.port = port
+        self.local_name = 'CinterForge Terminal (' + server_name.split('.')[0][:24] + ')'
+        self.entries = {}
+        self.lock = threading.Lock()
+        self.stopped = threading.Event()
+        self.thread = None
+        self.handle = None
+        self.library = None
+        self.callback = None
+        filename = ('CinterForgePythonHost.dll' if os.name == 'nt' else
+                    'libCinterForgePythonHost.dylib' if sys.platform == 'darwin' else
+                    'libCinterForgePythonHost.so')
+        library_path = root / ('bin' if os.name == 'nt' else 'lib') / filename
+        if not library_path.is_file():
+            raise RuntimeError('Staged Zeroconf library missing: ' + str(library_path))
+        lib = ctypes.CDLL(str(library_path))
+        lib.czc_api_version.argtypes = []
+        lib.czc_api_version.restype = ctypes.c_uint32
+        if lib.czc_api_version() != 2:
+            raise RuntimeError('Staged Zeroconf API v2 required; rebuild Host')
+        lib.czc_create.argtypes = []
+        lib.czc_create.restype = ctypes.c_void_p
+        lib.czc_destroy.argtypes = [ctypes.c_void_p]
+        lib.czc_publish_txt.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p,
+                                        ctypes.c_uint16, ctypes.c_char_p]
+        lib.czc_publish_txt.restype = ctypes.c_int
+        lib.czc_browse.argtypes = [ctypes.c_void_p, ctypes.c_char_p, _DNSCallback,
+                                   ctypes.c_void_p]
+        lib.czc_browse.restype = ctypes.c_int
+        lib.czc_poll.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        lib.czc_poll.restype = ctypes.c_int
+        lib.czc_last_error.argtypes = [ctypes.c_void_p]
+        lib.czc_last_error.restype = ctypes.c_char_p
+        lib.czc_last_create_error.argtypes = []
+        lib.czc_last_create_error.restype = ctypes.c_char_p
+        ctx = lib.czc_create()
+        if not ctx:
+            raise RuntimeError('Zeroconf initialization failed: ' +
+                               (lib.czc_last_create_error() or b'unknown').decode('utf-8', 'replace'))
+        self.library, self.handle = lib, ctx
+        try:
+            self.callback = _DNSCallback(self._on_service)
+            name = self.local_name.encode('utf-8')
+            metadata = b'suite=cinterforge\napp=terminal\npath=/'
+            self._require(lib.czc_publish_txt(ctx, name, DISCOVERY_TYPE, port, metadata))
+            self._require(lib.czc_browse(ctx, DISCOVERY_TYPE, self.callback, None))
+            self.thread = threading.Thread(target=self._run, name='cinter-zeroconf', daemon=True)
+            self.thread.start()
+        except Exception:
+            lib.czc_destroy(ctx)
+            self.handle = None
+            raise
+
+    def _require(self, result):
+        if result != 0:
+            raise RuntimeError((self.library.czc_last_error(self.handle) or
+                                b'Zeroconf operation failed').decode('utf-8', 'replace'))
+
+    def _on_service(self, event, pointer, _data):
+        if not pointer:
+            return
+        item = pointer.contents
+        def decoded(value):
+            return (value or b'').decode('utf-8', 'replace')
+        name, address = decoded(item.name), decoded(item.address)
+        port = int(item.port)
+        # Ignore unrelated HTTP advertisements. A CinterForge app can be
+        # recognized via TXT suite=cinterforge or its public instance prefix.
+        properties = {}
+        for line in decoded(item.txt).split('\n'):
+            key, separator, value = line.partition('=')
+            if separator:
+                properties[key.casefold()] = value
+        if not (properties.get('suite', '').casefold() == 'cinterforge' or
+                name.casefold().startswith('cinterforge ')):
+            return
+        if not (CINTERFORGE_PORT_FIRST <= port <= CINTERFORGE_PORT_LAST):
+            return
+        try:
+            ipaddress.IPv4Address(address)
+        except ipaddress.AddressValueError:
+            return
+        if properties.get('path', '/') != '/':
+            # Services may supply a public URL path, but never scripts or query.
+            path = properties['path']
+            if not re.fullmatch(r'/[a-zA-Z0-9/_-]{0,200}', path):
+                return
+        else:
+            path = '/'
+        app = properties.get('app', CINTERFORGE_SERVICE_PORTS.get(port, 'web'))
+        key = (name.casefold(), address, port)
+        with self.lock:
+            if event == 3:  # CZC_REMOVED (goodbye / TTL expired)
+                self.entries.pop(key, None)
+            elif event in (1, 2):
+                self.entries[key] = {'name': name[:100], 'app': app[:30],
+                                     'platform': decoded(item.host)[:100],
+                                     'host': decoded(item.host)[:100],
+                                     'port': port, 'url': f'http://{address}:{port}{path}'}
+
+    def _run(self):
+        try:
+            while not self.stopped.is_set():
+                if self.library.czc_poll(self.handle, 200) < 0:
+                    self.log('Zeroconf polling failed: ' +
+                             (self.library.czc_last_error(self.handle) or b'unknown').decode('utf-8', 'replace'))
+                    return
+        except Exception as error:
+            self.log('Zeroconf stopped: ' + str(error))
+
+    def peers(self):
+        with self.lock:
+            return sorted((dict(peer) for peer in self.entries.values()
+                           if not (peer['port'] == self.port and
+                                   peer['name'] == self.local_name)),
+                          key=lambda peer: (peer['app'], peer['name'], peer['url']))
+
+    def close(self):
+        self.stopped.set()
+        if self.thread is not None:
+            self.thread.join()  # Poll is bounded to 200 ms; never free a live context.
+        if self.handle:
+            self.library.czc_destroy(self.handle)
+            self.handle = None
 
 
 def _discord_provider() -> str:
@@ -1136,12 +1336,13 @@ class CinterShellServer(ThreadingHTTPServer):
     def __init__(self, builds: Path, *, lan: bool = False):
         self.lan = lan
         self.lan_id = uuid.uuid4().hex
-        self.lan_password = os.environ.get('CINTER_TERMINAL_LAN_PASSWORD') or secrets.token_urlsafe(18)
-        self.lan_cookie = secrets.token_urlsafe(36)
-        self.lan_shutdown = threading.Event()
-        self.lan_thread = None
+        self.discovery = None
         self.builds = builds
         self.mutable_builds = _terminal_mutable_root(builds)
+        self.lan_login_lock = threading.Lock()
+        self.lan_login = _load_lan_login(self.mutable_builds)
+        self.lan_cookie = secrets.token_urlsafe(36)
+        self.cli_token = secrets.token_urlsafe(36)
         self.system = target_platform()
         self.log = ServerRuntimeLog(_runtime_logs_root(self.mutable_builds))
         self.token = secrets.token_urlsafe(36)
@@ -1175,40 +1376,20 @@ class CinterShellServer(ThreadingHTTPServer):
                   file=sys.stderr, flush=True)
         super().__init__((('0.0.0.0', LAN_HTTP_PORT) if lan else ('127.0.0.1', 0)), Handler)
         if lan:
-            self.lan_thread = threading.Thread(target=self._lan_announce, name='cinter-lan-discovery', daemon=True)
-            self.lan_thread.start()
+            try:
+                self.discovery = CinterForgeDiscovery(ASSETS.parent, socket.gethostname(),
+                                                       self.server_port, self.log_event)
+            except (OSError, RuntimeError, AttributeError) as error:
+                self.log_event('Bonjour unavailable (rebuild staged Host library): ' + str(error))
         self.origin = f'http://127.0.0.1:{self.server_port}'
         self.log_event('backend ready; platform=' + self.system + ' port=' + str(self.server_port))
-
-    def _lan_announce(self) -> None:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
-                udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                udp.bind(('0.0.0.0', LAN_DISCOVERY_PORT))
-                udp.settimeout(0.5)
-                reply = json.dumps({'schema': 'cinterforge.lan.v1', 'id': self.lan_id,
-                                    'name': socket.gethostname(), 'platform': self.system,
-                                    'port': LAN_HTTP_PORT}).encode('utf-8')
-                while not self.lan_shutdown.is_set():
-                    try:
-                        value, remote = udp.recvfrom(128)
-                        if value == LAN_DISCOVERY_QUERY and _private_ipv4(remote[0]):
-                            udp.sendto(reply, remote)
-                    except socket.timeout:
-                        pass
-                    except OSError:
-                        if not self.lan_shutdown.is_set():
-                            raise
-        except OSError as error:
-            self.log_event('LAN discovery unavailable: ' + str(error))
 
     def log_event(self, message: str) -> None:
         self.log.append(message)
 
     def stop(self) -> None:
-        self.lan_shutdown.set()
-        if self.lan_thread is not None:
-            self.lan_thread.join(timeout=1)
+        if self.discovery is not None:
+            self.discovery.close()
         for item in list(self.sessions.values()):
             item.close()
         self.sessions.clear()
@@ -1230,21 +1411,31 @@ class Handler(BaseHTTPRequestHandler):
     server: CinterShellServer
 
     def _local(self) -> bool:
-        """Admit only the exact loopback origin or private IPv4 on port 20300."""
-        host = self.headers.get('Host', '')
-        if host == f'127.0.0.1:{self.server.server_port}':
-            return getattr(self, 'client_address', ('127.0.0.1', 0))[0] in ('127.0.0.1', '::1')
-        if not self.server.lan or not _private_ipv4(self.client_address[0]):
-            return False
-        name, sep, port = host.rpartition(':')
-        return sep == ':' and port == str(LAN_HTTP_PORT) and _private_ipv4(name)
+        """The listener accepts its actual IP, mDNS hostname, and Host aliases.
 
-    def _remote(self) -> bool:
-        return self.headers.get('Host', '') != f'127.0.0.1:{self.server.server_port}'
+        Do not use Host-header spelling as an authentication boundary. The
+        existing remote login and API authorization are handled separately.
+        """
+        return getattr(self.server, 'lan', False) or \
+            getattr(self, 'client_address', ('127.0.0.1', 0))[0] in ('127.0.0.1', '::1')
 
     def _lan_logged_in(self) -> bool:
-        if not self._remote():
+        """Require a login for every LAN HTTP client after ``setpass``.
+
+        A browser connecting through localhost is still a browser. Its peer IP
+        is not proof that it is the native WebView, so loopback must not bypass
+        a user-configured login. The standalone loopback-only service retains
+        its existing native token authentication.
+        """
+        if not getattr(self.server, 'lan', False) or getattr(self.server, 'lan_login', None) is None:
             return True
+        # A native shell helper is a local process, not a browser page. It
+        # needs a separate, non-HTML credential for commands such as bedrock
+        # and setpass when browser access is password-protected.
+        if self.client_address[0] in ('127.0.0.1', '::1'):
+            internal = self.headers.get('X-Cinter-CLI-Token', '')
+            if internal and secrets.compare_digest(internal, self.server.cli_token):
+                return True
         import http.cookies
         try:
             cookie = http.cookies.SimpleCookie(self.headers.get('Cookie', ''))
@@ -1260,7 +1451,9 @@ class Handler(BaseHTTPRequestHandler):
                 'display:grid;place-content:center;min-height:85vh}form{display:grid;gap:1rem;'
                 'min-width:280px}input,button{font:inherit;padding:.5rem}</style>'
                 '<h2>CinterForge Terminal</h2><p>Log into the remote development host.</p>' +
-                ('<p>Incorrect login.</p>' if failed else '') +
+                ('<p>Incorrect login.</p>' if failed else
+                 '<p>Login not configured. Run setpass &lt;username&gt; &lt;password&gt; on the host Terminal.</p>'
+                 if not self.server.lan_login else '') +
                 '<form method="post" action="/login">'
                 '<label>Username<input name="username" autocomplete="username" required></label>'
                 '<label>Access code<input name="password" type="password" autocomplete="current-password" required></label>'
@@ -1445,16 +1638,18 @@ class Handler(BaseHTTPRequestHandler):
         if not self._local():
             self._json(403, {'error': 'invalid host'})
             return
-        if self._remote() and not self._lan_logged_in():
+        # Host readiness is not a session and must remain available after
+        # setpass; the native launcher probes this route before opening a view.
+        if path == '/healthz':
+            self._json(200, {'ready': True})
+            return
+        if not self._lan_logged_in():
             if path in ('/', '/index.html', '/login'):
                 self._login_page()
             else:
                 self._json(401, {'error': 'LAN login required'})
             return
         if self._serve_artifact(path):
-            return
-        if path == '/healthz':
-            self._json(200, {'ready': True})
             return
         if path == '/api/discord/messages':
             if not self._authorized():
@@ -1488,14 +1683,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(403, {'error': 'not authorized'})
                 return
             self._json(200, {'enabled': self.server.lan, 'port': LAN_HTTP_PORT,
-                             'name': socket.gethostname(), 'username': 'cinterforge',
-                             'password': self.server.lan_password if not self._remote() else None})
+                             'name': socket.gethostname(),
+                             'username': self.server.lan_login['username'] if self.server.lan_login else None,
+                             'configured': self.server.lan_login is not None})
             return
         if path == '/api/lan/peers':
             if not self._authorized():
                 self._json(403, {'error': 'not authorized'})
                 return
-            self._json(200, {'peers': _lan_peers(self.server.lan_id) if self.server.lan else []})
+            self._json(200, {'peers': self.server.discovery.peers() if self.server.discovery else []})
             return
         if path == '/api/server/log':
             if not self._authorized():
@@ -1746,20 +1942,18 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, data, ctype)
 
     def do_POST(self) -> None:
-        if self.path == '/login' and self.server.lan and self._local() and self._remote():
-            # LAN-only login; secure tunnels are recommended on untrusted networks.
-            origin = self.headers.get('Origin')
-            if origin not in (None, 'http://' + self.headers.get('Host', '')):
-                self._json(403, {'error': 'invalid login origin'})
-                return
+        if self.path == '/login' and self.server.lan and self._local() and self.server.lan_login is not None:
+            # The only requirement for login is the user-configured credential.
+            # A normal HTML form may be submitted from localhost, .local or a LAN IP.
             try:
                 n = int(self.headers.get('Content-Length', '0'))
                 if n < 1 or n > 2048:
                     raise ValueError('invalid login length')
                 fields = parse_qs(self.rfile.read(n).decode('utf-8'), keep_blank_values=True)
-                valid = (fields.get('username') == ['cinterforge'] and
+                valid = (len(fields.get('username', [])) == 1 and
                          len(fields.get('password', [])) == 1 and
-                         secrets.compare_digest(fields['password'][0], self.server.lan_password))
+                         _check_lan_login(self.server.lan_login,
+                                          fields['username'][0], fields['password'][0]))
             except (ValueError, UnicodeDecodeError):
                 valid = False
             if not valid:
@@ -1785,6 +1979,23 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n))
             if not isinstance(body, dict):
                 raise ValueError('Expected a JSON object')
+            if route == '/api/lan/setpass':
+                # The command must originate inside a live, authenticated Terminal
+                # session. Do not expose credentials through LAN info or logs.
+                source = str(body.get('session_id', ''))
+                with self.server.sessions_lock:
+                    if source not in self.server.sessions:
+                        raise ValueError('setpass requires an active Terminal shell')
+                username = body.get('username')
+                password = body.get('password')
+                with self.server.lan_login_lock:
+                    self.server.lan_login = _save_lan_login(
+                        self.server.mutable_builds, username, password)
+                    # Force already logged-in browsers to use the new credentials.
+                    self.server.lan_cookie = secrets.token_urlsafe(36)
+                self.server.log_event('LAN login updated through Terminal command')
+                self._json(200, {'updated': True})
+                return
             if route == '/api/discord/open':
                 name = str(body.get('username', '')).strip()
                 guild = str(body.get('guild', '')).strip()
@@ -1919,7 +2130,7 @@ class Handler(BaseHTTPRequestHandler):
                     terminal = TerminalSession(self.server.mutable_builds, self.server.system,
                                                body.get('cols', 80), body.get('rows', 24),
                                                url=self.server.origin, token=self.server.token,
-                                               command=command)
+                                               command=command, internal_token=self.server.cli_token)
                     self.server.sessions[terminal.id] = terminal
                 self.server.log_event('terminal opened: id=' + terminal.id[:10] +
                     ' command=' + Path(terminal.shell[0]).name + ' output=' + str(terminal.output_log.name if terminal.output_log else 'none'))
@@ -3505,6 +3716,7 @@ HELP = '''CinterForgeTerminal custom commands
   wargames                      Launch original JOSHUA as its own Session tab
   stories                       List 16 IF titles (interactive fiction)
   discord <user> <server> <channel>  Open a Discord bot-connected Session tab
+  setpass <username> <password>      Set this host's LAN login credentials
   infinite-mac                  List 67 classic Macintosh games (help infinite-mac)
   <game-name>                   Launch the named game in its existing player
   Infinite Mac: https://infinitemac.org/
@@ -4092,10 +4304,13 @@ def _api(path: str, *, body: dict | None = None) -> dict:
     parsed = urlparse(origin)
     if parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or not parsed.port or parsed.path not in ('', '/') or not token:
         raise RuntimeError('Not attached to a trusted CinterForgeTerminal session')
+    headers = {'X-CPH-Token': token, 'Content-Type': 'application/json'}
+    cli_token = os.environ.get('CINTER_TERMINAL_CLI_TOKEN', '')
+    if cli_token:
+        headers['X-Cinter-CLI-Token'] = cli_token
     request = Request(origin.rstrip('/') + path,
                       data=json.dumps(body).encode('utf-8') if body is not None else None,
-                      headers={'X-CPH-Token': token, 'Content-Type': 'application/json'},
-                      method='POST' if body is not None else 'GET')
+                      headers=headers, method='POST' if body is not None else 'GET')
     try:
         with urlopen(request, timeout=120 if path in ('/api/bedrock/install', '/api/bedrock/run') else 90 if path in ('/api/bedrock/stop', '/api/bedrock/restart') else 10) as response:
             return json.loads(response.read(65536).decode('utf-8'))
@@ -4146,8 +4361,11 @@ def _download_lagomorph_manual() -> str:
     parsed = urlparse(origin)
     if parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or not parsed.port or not token:
         raise RuntimeError('Lagomorph manual requires the trusted Terminal session')
-    request = Request(origin.rstrip('/') + '/api/lagomorph/manual',
-                      headers={'X-CPH-Token': token})
+    headers = {'X-CPH-Token': token}
+    cli_token = os.environ.get('CINTER_TERMINAL_CLI_TOKEN', '')
+    if cli_token:
+        headers['X-Cinter-CLI-Token'] = cli_token
+    request = Request(origin.rstrip('/') + '/api/lagomorph/manual', headers=headers)
     with urlopen(request, timeout=30) as response:
         if response.status != 200:
             raise RuntimeError('Staged Lagomorph manual unavailable')
@@ -4300,6 +4518,15 @@ def execute(args: list[str]) -> int:
         else:
             print('Usage: help [infinite-mac|debugger|bedrock|devtools]', file=sys.stderr)
             return 2
+        return 0
+    if args[0] == 'setpass':
+        if len(args) != 3:
+            print('Usage: setpass <username> <password>', file=sys.stderr)
+            return 2
+        _api('/api/lan/setpass', body={
+            'username': args[1], 'password': args[2],
+            'session_id': os.environ.get('CINTER_TERMINAL_SESSION_ID', '')})
+        print('LAN login updated. Existing remote sessions must log in again.', flush=True)
         return 0
     if args[0] == 'discord':
         # Bash strips quotes and leaves optional trailing commas from the

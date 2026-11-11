@@ -68,9 +68,11 @@ namespace
     {
         const std::string action(argv[1]);
         std::string serviceName = "CinterForge Python Host";
-        std::string type = "_Cinter._tcp.";
+        std::string type = "_http._tcp.local.";
         int port = 20300;
         int seconds = 10;
+        std::string app;
+        std::string path = "/";
         for (int i = 2; i < argc; ++i)
         {
             const std::string flag(argv[i]);
@@ -83,6 +85,10 @@ namespace
                 type = value;
             else if (flag == "--port")
                 port = std::stoi(value);
+            else if (flag == "--app")
+                app = value;
+            else if (flag == "--path")
+                path = value;
             else if (flag == "--seconds")
                 seconds = std::stoi(value);
             else
@@ -93,7 +99,20 @@ namespace
         cinterforge::Zeroconf zeroconf;
         if (action == "--publish")
         {
-            zeroconf.publish(serviceName, type, static_cast<uint16_t>(port));
+            if (!app.empty())
+            {
+                // Publish a CinterForge HTTP app using the shared discovery
+                // contract; non-CinterForge users retain the original publish API.
+                if (port < 20300 || port > 20399 ||
+                    app.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-") != std::string::npos ||
+                    path.empty() || path.front() != '/' ||
+                    path.find_first_not_of("/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos)
+                    throw std::invalid_argument("Invalid CinterForge app, HTTP port or path");
+                zeroconf.publishWithTxt(serviceName, "_http._tcp.local.",
+                    static_cast<uint16_t>(port), "suite=cinterforge\napp=" + app + "\npath=" + path);
+            }
+            else
+                zeroconf.publish(serviceName, type, static_cast<uint16_t>(port));
             std::signal(SIGINT, onSignal);
             std::signal(SIGTERM, onSignal);
             std::cout << "[CPH Zeroconf] Advertising '" << serviceName << "' as "
@@ -136,12 +155,16 @@ int main(int argc, char **argv)
         cinterforge::Zeroconf browser;
         bool arrived = false;
         bool departed = false;
-        browser.browse("_cphsmoke._tcp.", [&](CZC_Event event, const CZC_Service &svc)
+        browser.browse("_http._tcp.", [&](CZC_Event event, const CZC_Service &svc)
                        {
-            if (std::string(svc.name) != "CPH-Zeroconf-Test") return;
-            if (event == CZC_ADDED && svc.port == 20380 && svc.address[0]) arrived = true;
+            if (std::string(svc.name) != "CinterForge WebApp Test") return;
+            if (event == CZC_ADDED && svc.port == 20380 && svc.address[0] &&
+                std::string(svc.txt).find("suite=cinterforge") != std::string::npos &&
+                std::string(svc.txt).find("app=webapp") != std::string::npos)
+                arrived = true;
             if (event == CZC_REMOVED) departed = true; });
-        publisher.publish("CPH-Zeroconf-Test", "_cphsmoke._tcp.", 20380);
+        publisher.publishWithTxt("CinterForge WebApp Test", "_http._tcp.", 20380,
+                                 "suite=cinterforge\napp=webapp\npath=/");
         for (int i = 0; i < 100 && !arrived; ++i)
         {
             publisher.poll(std::chrono::milliseconds(15));

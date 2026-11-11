@@ -208,6 +208,7 @@ namespace
         uint32_t ttl = 0;
         std::string domain;
         std::string address;
+        std::string txt;
         uint16_t port = 0;
     };
 
@@ -257,6 +258,23 @@ namespace
                 if (!readName(bytes, size, offset, record.domain) || offset != end)
                     return false;
             }
+            else if (record.type == 16 && length > 0)
+            {
+                size_t pos = offset;
+                while (pos < end)
+                {
+                    const size_t n = bytes[pos++];
+                    if (pos + n > end)
+                        return false;
+                    if (n)
+                    {
+                        if (!record.txt.empty())
+                            record.txt += '\n';
+                        record.txt.append(reinterpret_cast<const char *>(bytes + pos), n);
+                    }
+                    pos += n;
+                }
+            }
             else if (record.type == 1 && length == 4)
             {
                 char ip[INET_ADDRSTRLEN] = {};
@@ -289,11 +307,13 @@ namespace
         std::string host;
         std::string address;
         uint16_t port = 0;
+        std::string txt;
         bool seenPtr = false;
         bool delivered = false;
         std::string priorHost;
         std::string priorAddress;
         uint16_t priorPort = 0;
+        std::string priorTxt;
         Clock::time_point expires = Clock::now();
     };
 
@@ -309,6 +329,7 @@ struct CZC_Context
     std::string localHost;
     std::string localAddress;
     uint16_t publishedPort = 0;
+    std::string publishedTxt;
     std::string browseType;
     CZC_ServiceCallback callback = nullptr;
     void *callbackData = nullptr;
@@ -337,7 +358,24 @@ struct CZC_Context
         std::vector<uint8_t> p(12, 0);
         p[2] = 0x84; // Response + authoritative answer.
         p[7] = 4;    // PTR, SRV, TXT, A.
-        std::vector<uint8_t> ptr, srv, txt{0}, a(4);
+        std::vector<uint8_t> ptr, srv, txt, a(4);
+        if (publishedTxt.empty())
+            txt.push_back(0); // Empty TXT record, as required by DNS-SD.
+        else
+        {
+            size_t start = 0;
+            while (start < publishedTxt.size())
+            {
+                const size_t end = publishedTxt.find('\n', start);
+                const size_t count = (end == std::string::npos ? publishedTxt.size() : end) - start;
+                txt.push_back(static_cast<uint8_t>(count));
+                txt.insert(txt.end(), publishedTxt.begin() + static_cast<std::ptrdiff_t>(start),
+                           publishedTxt.begin() + static_cast<std::ptrdiff_t>(start + count));
+                if (end == std::string::npos)
+                    break;
+                start = end + 1;
+            }
+        }
         if (!writeName(ptr, fullName))
             return fail("Invalid DNS-SD instance name");
         write16(srv, 0);
@@ -372,7 +410,7 @@ struct CZC_Context
         if (!callback)
             return 0;
         const CZC_Service value{service.name.c_str(), browseType.c_str(), service.host.c_str(),
-                                service.address.c_str(), service.port};
+                                service.address.c_str(), service.port, service.txt.c_str()};
         callback(event, &value, callbackData);
         return 1;
     }
@@ -437,6 +475,12 @@ struct CZC_Context
         }
         for (const auto &record : records)
         {
+            if (record.type == 16)
+            {
+                auto found = services.find(lower(record.name));
+                if (found != services.end() && record.ttl > 0)
+                    found->second.txt = record.txt;
+            }
             if (record.type != 33)
                 continue;
             auto found = services.find(lower(record.name));
@@ -462,13 +506,15 @@ struct CZC_Context
             if (!service.seenPtr || !service.port || service.address.empty())
                 continue;
             if (!service.delivered || service.priorAddress != service.address ||
-                service.priorHost != service.host || service.priorPort != service.port)
+                service.priorHost != service.host || service.priorPort != service.port ||
+                service.priorTxt != service.txt)
             {
                 callbacks += emit(service.delivered ? CZC_UPDATED : CZC_ADDED, service);
                 service.delivered = true;
                 service.priorAddress = service.address;
                 service.priorHost = service.host;
                 service.priorPort = service.port;
+                service.priorTxt = service.txt;
             }
         }
         return callbacks;
@@ -624,6 +670,7 @@ extern "C"
         context->publishedName.clear();
         context->publishedType.clear();
         context->publishedPort = 0;
+        context->publishedTxt.clear();
     }
 
     void czc_stop_browse(CZC_Context *context)
@@ -657,6 +704,12 @@ extern "C"
 
     int czc_publish(CZC_Context *context, const char *name, const char *type, uint16_t port)
     {
+        return czc_publish_txt(context, name, type, port, nullptr);
+    }
+
+    int czc_publish_txt(CZC_Context *context, const char *name, const char *type,
+                        uint16_t port, const char *txt)
+    {
         if (!context)
             return -1;
         context->lastError.clear();
@@ -665,6 +718,34 @@ extern "C"
         {
             context->fail("Publish requires a valid instance, DNS-SD type and nonzero port");
             return -1;
+        }
+        std::string attributes = txt ? txt : "";
+        if (!attributes.empty())
+        {
+            if (attributes.size() > 1000 || attributes.back() == '\n')
+            {
+                context->fail("Invalid DNS-SD TXT record");
+                return -1;
+            }
+            size_t start = 0;
+            while (start < attributes.size())
+            {
+                const size_t end = attributes.find('\n', start);
+                const std::string entry = attributes.substr(start,
+                    (end == std::string::npos ? attributes.size() : end) - start);
+                const size_t equals = entry.find('=');
+                if (entry.size() > 255 || equals == std::string::npos || !equals ||
+                    equals > 63 || entry.find('=', equals + 1) != std::string::npos ||
+                    !std::all_of(entry.begin(), entry.begin() + static_cast<std::ptrdiff_t>(equals),
+                        [](unsigned char c) { return std::isalnum(c) || c == '-'; }))
+                {
+                    context->fail("DNS-SD TXT requires key=value entries (max 255 bytes)");
+                    return -1;
+                }
+                if (end == std::string::npos)
+                    break;
+                start = end + 1;
+            }
         }
         if (context->localAddress.empty() || context->localAddress == "0.0.0.0")
         {
@@ -676,6 +757,7 @@ extern "C"
         context->publishedName = name;
         context->publishedType = normalized;
         context->publishedPort = port;
+        context->publishedTxt = std::move(attributes);
         if (!context->announce(kRecordTtl))
             return -1;
         context->nextAnnouncement = Clock::now() + std::chrono::seconds(kRecordTtl / 2);
@@ -773,6 +855,6 @@ extern "C"
 
     const char *czc_last_create_error(void) { return creationError.c_str(); }
 
-    uint32_t czc_api_version(void) { return 1; }
+    uint32_t czc_api_version(void) { return 2; }
 
 } // extern "C"

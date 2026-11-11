@@ -95,6 +95,17 @@ class CommandHelpTests(unittest.TestCase):
             result=self.cli._monitor_bedrock_install()
         return result,output.getvalue()
 
+    def test_setpass_routes_credentials_without_echoing_them(self):
+        password = 'test-only-credential-please-do-not-print'
+        with mock.patch.object(self.cli, '_api', return_value={'updated': True}) as api, \
+             mock.patch.dict(os.environ, {'CINTER_TERMINAL_SESSION_ID': 'test-shell'}):
+            result, message = self.capture('setpass', 'buildhost', password)
+        self.assertEqual(result, 0)
+        api.assert_called_once_with('/api/lan/setpass', body={
+            'username': 'buildhost', 'password': password, 'session_id': 'test-shell'})
+        self.assertNotIn(password, message)
+        self.assertEqual(self.capture('setpass', 'buildhost')[0], 2)
+
     def test_nonlocal_endpoints_rejected(self):
         with mock.patch.dict(os.environ, {'CINTER_TERMINAL_URL': 'http://evil.example:5000',
                                                    'CINTER_TERMINAL_TOKEN': 'secrettoken'}):

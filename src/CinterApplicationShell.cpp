@@ -119,24 +119,35 @@ namespace cinterforge
             return result;
         }
 
-        // Remote windows accept literal private IPv4 addresses only; no arbitrary
-        // URL can be used to load a privileged native-bridge WebView.
+        // A CinterForge Bonjour service advertises its own HTTP port.
+        // Connect only to literal LAN addresses in the reserved 20300-20399 range.
         bool validLanUrl(const std::string &url)
         {
-            const std::regex re(R"(^http://(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}):20300/?$)");
-            if (!std::regex_match(url, re)) return false;
-            const std::string ip = url.substr(7, url.find(":20300") - 7);
-            std::size_t at = 0;
-            int octets = 0;
-            while (at < ip.size()) {
-                const std::size_t dot = ip.find('.', at);
-                const std::string part = ip.substr(at, dot == std::string::npos ? dot : dot - at);
-                if (part.empty() || std::stoi(part) > 255) return false;
-                ++octets;
-                if (dot == std::string::npos) break;
-                at = dot + 1;
+            const std::regex urlPattern(R"(^http://(([0-9]{1,3}\.){3}[0-9]{1,3}):(203[0-9]{2})(/[A-Za-z0-9/_-]*)?$)");
+            std::smatch match;
+            if (!std::regex_match(url, match, urlPattern))
+                return false;
+            const std::string ip = match[1].str();
+            std::vector<int> octets;
+            std::size_t start = 0;
+            for (int i = 0; i < 4; ++i)
+            {
+                const std::size_t dot = ip.find('.', start);
+                const std::string part = ip.substr(start, dot == std::string::npos ? dot : dot - start);
+                if (part.empty() || part.size() > 3)
+                    return false;
+                const int value = std::stoi(part);
+                if (value > 255)
+                    return false;
+                octets.push_back(value);
+                if (dot == std::string::npos && i != 3)
+                    return false;
+                start = dot == std::string::npos ? ip.size() : dot + 1;
             }
-            return octets == 4;
+            return octets[0] == 10 || octets[0] == 127 ||
+                (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) ||
+                (octets[0] == 192 && octets[1] == 168) ||
+                (octets[0] == 169 && octets[1] == 254);
         }
 
         void validateStaged(const ApplicationShellConfig &config)
@@ -395,8 +406,8 @@ namespace cinterforge
                 }
             }
             [fileMenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *lanItem = [fileMenu addItemWithTitle:@"Visible LAN Terminals" action:nil keyEquivalent:@""];
-            [lanItem setSubmenu:[[NSMenu alloc] initWithTitle:@"Visible LAN Terminals"]];
+            NSMenuItem *lanItem = [fileMenu addItemWithTitle:@"CinterForge LAN Services" action:nil keyEquivalent:@""];
+            [lanItem setSubmenu:[[NSMenu alloc] initWithTitle:@"CinterForge LAN Services"]];
             NSMenuItem *connectItem = [[lanItem submenu] addItemWithTitle:@"Connect / Refresh…" action:@selector(newTerminal:) keyEquivalent:@""];
             [connectItem setRepresentedObject:@"lan-popup"];
             [connectItem setTarget:target];
@@ -663,7 +674,7 @@ namespace cinterforge
             throw std::runtime_error("Cannot enable native Terminal debugger");
 #endif
         if (!config.connect_url.empty() && !validLanUrl(config.connect_url))
-            throw std::invalid_argument("LAN Terminal connection requires a private IPv4 address on port 20300");
+            throw std::invalid_argument("CinterForge LAN service requires a private IPv4 address on HTTP port 20300-20399");
         PythonHost host;
         bool started = false;
         bool hostRunning = false;
@@ -710,8 +721,8 @@ namespace cinterforge
             if (iconError)
                 g_error_free(iconError);
 #endif
-            // Visible LAN Terminal entries open a separate native application
-            // window/process, connected to that host's existing HTTP service.
+            // Bonjour-discovered CinterForge services open a new native window
+            // at the advertised IP and HTTP port, without replacing the current one.
             window.bind("cinterConnect", [&](const std::string &args) -> std::string
                         {
                 std::smatch match;
@@ -781,7 +792,7 @@ namespace cinterforge
                     NSDictionary *detail = [parsed isKindOfClass:[NSArray class]] && [parsed count] ? [parsed firstObject] : parsed;
                     NSArray *peers = [detail isKindOfClass:[NSDictionary class]] ? detail[@"peers"] : nil;
                     NSMenu *file = [[[NSApp mainMenu] itemWithTitle:@"File"] submenu];
-                    NSMenu *list = [[file itemWithTitle:@"Visible LAN Terminals"] submenu];
+                    NSMenu *list = [[file itemWithTitle:@"CinterForge LAN Services"] submenu];
                     if (!list) return;
                     while ([list numberOfItems] > 1) [list removeItemAtIndex:1];
                     CinterFileMenuTarget *target = (CinterFileMenuTarget *)[[list itemAtIndex:0] target];

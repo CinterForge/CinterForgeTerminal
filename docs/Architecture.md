@@ -52,13 +52,31 @@ PTY/ConPTY/Host RPC on private LAN port **20300**, with session login before
 remote content or APIs are served. Its local native WebView uses loopback and
 the existing per-process token; remote browsers have an additional session
 cookie and the same per-origin API token. There is no separate remote-only UI,
-backend, proxy, or fake shell. UDP port **20301** answers bounded LAN discovery
-requests; the native system menu and existing HTML dropdown show those peers.
-Selecting a peer spawns a separate native WebView process/window pointed at
-that host, without starting a duplicate local Python server. Shell, debug and
-build execution occurs on the host and is limited by its OS account. HTTP is
-not SSH/TLS: only trusted private LAN or a separately secured tunnel is in
-scope, not public-internet exposure.
+backend, proxy, or fake shell.
+
+**Bonjour/DNS-SD** over multicast UDP 5353 advertises the existing Terminal
+HTTP server on **20300**, as `_http._tcp.local.`. The shared Host implementation
+`CinterZeroconf` publishes PTR, SRV, TXT and A records (actual LAN IP and port),
+with TXT `suite=cinterforge`, `app=terminal`, `path=/`. Every CinterForge
+consumer browses `_http._tcp.local.` and lists qualifying service records,
+not just other Terminals. The common CinterForge HTTP port namespace is
+**20300–20399**: Terminal **20300**, Converter **20310**, OS **20320**, and
+WebApp **20380**. Other apps advertise their **actual listener** using the
+same DNS-SD type and TXT keys; only services that publish these records can
+appear. No custom 20301 discovery listener or central registry is needed.
+Other products can use the exported Host `czc_publish_txt` C ABI or the existing
+`cinter-zeroconf --publish --app converter --name "CinterForge Converter" --port 20310`
+command, running for the lifetime of their actual HTTP listener.
+
+The Terminal native File menu and HTML LAN dropdown show the discovered
+CinterForge services and open their advertised HTTP URLs in independent native
+windows (or ordinary browser tabs), preserving the active local Terminal.
+Connecting to a Terminal provides its existing remote development login and
+host PTY/ConPTY sessions. The HTTP listener accepts LAN Host headers and mDNS
+aliases; it does not use the Host header as authentication. The existing remote
+login still applies to non-loopback requests. HTTP is **not** SSH/TLS; use on
+a trusted development LAN or through a separately secured tunnel, not a
+public Internet port forward.
 
 The `discord` shell command asks the authenticated host backend to resolve the
 configured `discord_dev` bot, guild and text channel through Discord's HTTPS

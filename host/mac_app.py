@@ -341,6 +341,8 @@ def stage(builds: Path) -> Path:
         'CFBundleVersion': HOST_RELEASE,
         'CFBundleShortVersionString': HOST_RELEASE,
         'LSMinimumSystemVersion': '12.0',
+        'NSLocalNetworkUsageDescription': 'Discover and connect to CinterForge web services on your local network.',
+        'NSBonjourServices': ['_http._tcp'],
     }
     # The app icon derives only from the already-authored Terminal asset.
     icon = _icon_source()
