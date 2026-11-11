@@ -32,9 +32,10 @@ import hashlib
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, parse_qs
 import importlib.util
 import ipaddress
+import socket
 import mimetypes
 import os
 import shlex
@@ -404,7 +405,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     python = str(Path(sys.executable).resolve())
     functions = '\n'.join(
         f'{name}() {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in ('help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames'))
+        for name in ('help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'discord'))
     # These exact source filenames are the shell commands. Load the bundled
     # Terminal manifest; no sibling WebApp source or story package is required.
     catalog = json.loads((ASSETS / 'if_titles.json').read_text(encoding='utf-8'))
@@ -1001,11 +1002,144 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
                 'console_available': True, 'terminal_session': terminal.id}
 
 
+LAN_HTTP_PORT = 20300
+LAN_DISCOVERY_PORT = 20301
+LAN_DISCOVERY_QUERY = b'CINTERFORGE_TERMINAL_DISCOVER_V1'
+
+
+def _private_ipv4(value: str) -> bool:
+    try:
+        addr = ipaddress.IPv4Address(value)
+    except ipaddress.AddressValueError:
+        return False
+    return (addr.is_loopback or addr.is_link_local or
+            addr in ipaddress.IPv4Network('10.0.0.0/8') or
+            addr in ipaddress.IPv4Network('172.16.0.0/12') or
+            addr in ipaddress.IPv4Network('192.168.0.0/16'))
+
+
+def _lan_peers(own_id: str, timeout: float = 0.55) -> list[dict]:
+    """Discover actual LAN hosts, with a bounded UDP request/reply."""
+    peers = {}
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(timeout)
+        sock.bind(('0.0.0.0', 0))
+        sock.sendto(LAN_DISCOVERY_QUERY, ('255.255.255.255', LAN_DISCOVERY_PORT))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                data, remote = sock.recvfrom(1024)
+                item = json.loads(data)
+                if (item.get('schema') != 'cinterforge.lan.v1' or
+                        item.get('id') == own_id or not _private_ipv4(remote[0]) or
+                        item.get('port') != LAN_HTTP_PORT):
+                    continue
+                peers[remote[0]] = {'id': str(item.get('id', ''))[:64],
+                                    'name': str(item.get('name', 'Terminal'))[:100],
+                                    'platform': str(item.get('platform', ''))[:20],
+                                    'url': f'http://{remote[0]}:{LAN_HTTP_PORT}/'}
+            except socket.timeout:
+                break
+            except (OSError, ValueError, TypeError):
+                continue
+    return sorted(peers.values(), key=lambda item: (item['name'], item['url']))
+
+
+def _discord_provider() -> str:
+    """Read the existing external discord_dev provider; never ship credentials."""
+    explicit = os.environ.get('CINTERFORGE_CONFIG', '').strip()
+    if explicit:
+        candidates = [Path(explicit).expanduser()]
+    else:
+        try:
+            import pwd
+            home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (ImportError, KeyError):
+            home = Path(os.environ.get('USERPROFILE') or Path.home())
+        candidates = [home / 'cfdev/config.json', home / 'dev/config.json']
+    for path in candidates:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
+            continue
+        try:
+            config = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        provider = config.get('discord_dev')
+        if not isinstance(provider, dict):
+            provider = config.get('providers', {}).get('discord_dev')
+        if not isinstance(provider, dict):
+            continue
+        env = provider.get('env', {})
+        if not isinstance(env, dict):
+            env = {}
+        enabled = os.environ.get('CINTERFORGE_DISCORD_DEV_ENABLED',
+                  env.get('CINTERFORGE_DISCORD_DEV_ENABLED', '1' if provider.get('enabled') else '0'))
+        if str(enabled).lower() not in ('1', 'true', 'yes'):
+            raise RuntimeError('Discord Dev is disabled in the existing external config.json')
+        token = os.environ.get('CINTERFORGE_DISCORD_DEV_BOT_TOKEN') or env.get('CINTERFORGE_DISCORD_DEV_BOT_TOKEN')
+        if not isinstance(token, str) or not token.strip():
+            raise RuntimeError('Discord Dev Bot token is missing from the external provider')
+        return token.strip()
+    raise RuntimeError('Discord Dev provider not found in the existing external config.json')
+
+
+def _discord_api(path: str, method: str = 'GET', payload: dict | None = None):
+    """Discord REST runs only in the trusted Python service, never in the page."""
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError, URLError
+    token = _discord_provider()
+    data = json.dumps(payload).encode('utf-8') if payload is not None else None
+    request = Request('https://discord.com/api/v10' + path, method=method, data=data,
+                      headers={'Authorization': 'Bot ' + token,
+                               'User-Agent': 'CinterForgeTerminal (development tool)',
+                               'Content-Type': 'application/json'})
+    try:
+        with urlopen(request, timeout=12) as response:
+            raw = response.read(512 * 1024 + 1)
+            if len(raw) > 512 * 1024:
+                raise RuntimeError('Discord response too large')
+            return json.loads(raw) if raw else {}
+    except HTTPError as error:
+        # Never echo Authorization; Discord's status is sufficient to diagnose.
+        raise RuntimeError('Discord API HTTP ' + str(error.code) + ' (verify bot membership, scopes and channel permissions)') from None
+    except (URLError, TimeoutError) as error:
+        raise RuntimeError('Discord connection failed: ' + type(error).__name__) from None
+
+
+def _discord_resolve(guild_name: str, channel_name: str) -> dict:
+    if not (0 < len(guild_name) <= 120 and 0 < len(channel_name) <= 120):
+        raise ValueError('Discord guild and channel names required')
+    identity = _discord_api('/users/@me')
+    guilds = _discord_api('/users/@me/guilds')
+    if not isinstance(guilds, list):
+        raise RuntimeError('Discord did not return bot guilds')
+    guild = next((g for g in guilds if g.get('name', '').casefold() == guild_name.casefold()), None)
+    if not guild or not str(guild.get('id', '')).isdigit():
+        raise RuntimeError('Discord bot is not a member of server: ' + guild_name)
+    channels = _discord_api('/guilds/' + guild['id'] + '/channels')
+    if not isinstance(channels, list):
+        raise RuntimeError('Discord did not return channels')
+    channel = next((c for c in channels if c.get('name', '').casefold() == channel_name.casefold()
+                    and c.get('type') in (0, 5)), None)
+    if not channel or not str(channel.get('id', '')).isdigit():
+        raise RuntimeError('Discord bot cannot see text channel: ' + channel_name)
+    return {'guild': guild.get('name', guild_name), 'channel': channel.get('name', channel_name),
+            'channel_id': channel['id'],
+            'bot': identity.get('global_name') or identity.get('username') or 'Discord bot'}
+
+
 class CinterShellServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
 
-    def __init__(self, builds: Path):
+    def __init__(self, builds: Path, *, lan: bool = False):
+        self.lan = lan
+        self.lan_id = uuid.uuid4().hex
+        self.lan_password = os.environ.get('CINTER_TERMINAL_LAN_PASSWORD') or secrets.token_urlsafe(18)
+        self.lan_cookie = secrets.token_urlsafe(36)
+        self.lan_shutdown = threading.Event()
+        self.lan_thread = None
         self.builds = builds
         self.mutable_builds = _terminal_mutable_root(builds)
         self.system = target_platform()
@@ -1024,6 +1158,8 @@ class CinterShellServer(ThreadingHTTPServer):
         # Each title has one live interpreter tab and one launch generation.
         self.if_actions = deque()
         self.if_active: dict[str, str] = {}
+        self.discord_actions = deque()
+        self.discord_channels = {}
         self.debug_lock = threading.Lock()
         self.eula_lock = threading.Lock()
         self.eula_requested = False
@@ -1037,14 +1173,42 @@ class CinterShellServer(ThreadingHTTPServer):
             self.bedrock_error = str(exc)
             print('[CinterForgeTerminal] Bedrock unavailable: ' + self.bedrock_error,
                   file=sys.stderr, flush=True)
-        super().__init__(('127.0.0.1', 0), Handler)
+        super().__init__((('0.0.0.0', LAN_HTTP_PORT) if lan else ('127.0.0.1', 0)), Handler)
+        if lan:
+            self.lan_thread = threading.Thread(target=self._lan_announce, name='cinter-lan-discovery', daemon=True)
+            self.lan_thread.start()
         self.origin = f'http://127.0.0.1:{self.server_port}'
         self.log_event('backend ready; platform=' + self.system + ' port=' + str(self.server_port))
+
+    def _lan_announce(self) -> None:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                udp.bind(('0.0.0.0', LAN_DISCOVERY_PORT))
+                udp.settimeout(0.5)
+                reply = json.dumps({'schema': 'cinterforge.lan.v1', 'id': self.lan_id,
+                                    'name': socket.gethostname(), 'platform': self.system,
+                                    'port': LAN_HTTP_PORT}).encode('utf-8')
+                while not self.lan_shutdown.is_set():
+                    try:
+                        value, remote = udp.recvfrom(128)
+                        if value == LAN_DISCOVERY_QUERY and _private_ipv4(remote[0]):
+                            udp.sendto(reply, remote)
+                    except socket.timeout:
+                        pass
+                    except OSError:
+                        if not self.lan_shutdown.is_set():
+                            raise
+        except OSError as error:
+            self.log_event('LAN discovery unavailable: ' + str(error))
 
     def log_event(self, message: str) -> None:
         self.log.append(message)
 
     def stop(self) -> None:
+        self.lan_shutdown.set()
+        if self.lan_thread is not None:
+            self.lan_thread.join(timeout=1)
         for item in list(self.sessions.values()):
             item.close()
         self.sessions.clear()
@@ -1066,28 +1230,53 @@ class Handler(BaseHTTPRequestHandler):
     server: CinterShellServer
 
     def _local(self) -> bool:
-        # DNS rebinding protection even though the listener is loopback-only.
-        return self.headers.get('Host') == f'127.0.0.1:{self.server.server_port}'
+        """Admit only the exact loopback origin or private IPv4 on port 20300."""
+        host = self.headers.get('Host', '')
+        if host == f'127.0.0.1:{self.server.server_port}':
+            return getattr(self, 'client_address', ('127.0.0.1', 0))[0] in ('127.0.0.1', '::1')
+        if not self.server.lan or not _private_ipv4(self.client_address[0]):
+            return False
+        name, sep, port = host.rpartition(':')
+        return sep == ':' and port == str(LAN_HTTP_PORT) and _private_ipv4(name)
+
+    def _remote(self) -> bool:
+        return self.headers.get('Host', '') != f'127.0.0.1:{self.server.server_port}'
+
+    def _lan_logged_in(self) -> bool:
+        if not self._remote():
+            return True
+        import http.cookies
+        try:
+            cookie = http.cookies.SimpleCookie(self.headers.get('Cookie', ''))
+            value = cookie['cinter_lan'].value if 'cinter_lan' in cookie else ''
+        except (KeyError, http.cookies.CookieError):
+            return False
+        return secrets.compare_digest(value, self.server.lan_cookie)
+
+    def _login_page(self, failed=False) -> None:
+        page = ('<!doctype html><html><meta charset="utf-8"><meta name="viewport" '
+                'content="width=device-width,initial-scale=1"><title>CinterForge Terminal - LAN login</title>'
+                '<style>body{font:18px system-ui;background:#101911;color:#d8eddb;'
+                'display:grid;place-content:center;min-height:85vh}form{display:grid;gap:1rem;'
+                'min-width:280px}input,button{font:inherit;padding:.5rem}</style>'
+                '<h2>CinterForge Terminal</h2><p>Log into the remote development host.</p>' +
+                ('<p>Incorrect login.</p>' if failed else '') +
+                '<form method="post" action="/login">'
+                '<label>Username<input name="username" autocomplete="username" required></label>'
+                '<label>Access code<input name="password" type="password" autocomplete="current-password" required></label>'
+                '<button type="submit">Connect</button></form></html>')
+        self._send(401 if failed else 200, page.encode('utf-8'), 'text/html; charset=utf-8')
 
     def _authorized(self) -> bool:
-        # WebKit may classify an in-app loopback request as `same-site` rather
-        # than `same-origin`. Classification alone is not an auth decision:
-        # require the unguessable session token, exact Host, and exact Origin
-        # whenever the browser supplies one; reject genuinely cross-site calls.
         origin = self.headers.get('Origin')
+        expected = 'http://' + self.headers.get('Host', '')
         host_ok = self._local()
         token_ok = secrets.compare_digest(self.headers.get('X-CPH-Token', ''), self.server.token)
-        origin_ok = origin is None or origin == self.server.origin
+        origin_ok = origin is None or origin == expected
         site = self.headers.get('Sec-Fetch-Site', 'same-origin')
-        allowed = host_ok and token_ok and origin_ok and site != 'cross-site'
-        if not allowed:
-            # No token, URL, or session identifier in logs. Keep a precise
-            # rejection reason for diagnosing native WebView initialization.
-            message = (f'rejected local API request: host={host_ok} token={token_ok} '
-                       f'origin={origin_ok} fetch_site={site!r}')
-            if hasattr(self.server, 'log_event'):
-                self.server.log_event(message)
-            sys.stderr.write('[CinterForgeTerminal] ' + message + '\n')
+        allowed = host_ok and self._lan_logged_in() and token_ok and origin_ok and site != 'cross-site'
+        if not allowed and hasattr(self.server, 'log_event'):
+            self.server.log_event('rejected Terminal API request (host/auth/origin)')
         return allowed
 
     def _send(self, code: int, body: bytes, ctype='application/json; charset=utf-8', *, same_origin_frame: bool = False) -> None:
@@ -1256,16 +1445,62 @@ class Handler(BaseHTTPRequestHandler):
         if not self._local():
             self._json(403, {'error': 'invalid host'})
             return
+        if self._remote() and not self._lan_logged_in():
+            if path in ('/', '/index.html', '/login'):
+                self._login_page()
+            else:
+                self._json(401, {'error': 'LAN login required'})
+            return
         if self._serve_artifact(path):
             return
         if path == '/healthz':
             self._json(200, {'ready': True})
             return
+        if path == '/api/discord/messages':
+            if not self._authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            params = parse_qs(urlsplit(self.path).query)
+            channel_id = params.get('channel', [''])[0]
+            if channel_id not in self.server.discord_channels:
+                self._json(403, {'error': 'Discord channel not opened in this Terminal'})
+                return
+            before, after = params.get('before', [''])[0], params.get('after', [''])[0]
+            if ((before and after) or any(not re.fullmatch(r'[0-9]{1,22}', value)
+                                             for value in (before, after) if value)):
+                self._json(400, {'error': 'Invalid Discord history cursor'})
+                return
+            try:
+                query = '?limit=100' + ('&before=' + before if before else '') + ('&after=' + after if after else '')
+                messages = _discord_api('/channels/' + channel_id + '/messages' + query)
+                if not isinstance(messages, list):
+                    raise RuntimeError('Discord messages response invalid')
+                self._json(200, {'messages': [{'id': str(m.get('id', '')),
+                  'author': str(m.get('author', {}).get('global_name') or m.get('author', {}).get('username') or '?')[:80],
+                  'content': str(m.get('content') or '')[:2000],
+                  'timestamp': str(m.get('timestamp') or '')[:40]} for m in sorted(messages, key=lambda m: int(m.get('id') or 0))],
+                  'has_more': len(messages) == 100})
+            except (RuntimeError, ValueError) as error:
+                self._json(400, {'error': str(error)})
+            return
+        if path == '/api/lan/info':
+            if not self._authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            self._json(200, {'enabled': self.server.lan, 'port': LAN_HTTP_PORT,
+                             'name': socket.gethostname(), 'username': 'cinterforge',
+                             'password': self.server.lan_password if not self._remote() else None})
+            return
+        if path == '/api/lan/peers':
+            if not self._authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            self._json(200, {'peers': _lan_peers(self.server.lan_id) if self.server.lan else []})
+            return
         if path == '/api/server/log':
             if not self._authorized():
                 self._json(403, {'error': 'not authorized'})
                 return
-            from urllib.parse import parse_qs
             raw = parse_qs(urlsplit(self.path).query).get('cursor', ['0'])[0]
             try:
                 self._json(200, self.server.log.since(int(raw)))
@@ -1436,7 +1671,6 @@ class Handler(BaseHTTPRequestHandler):
             if self.server.bedrock is None:
                 self._json(503, {'error': self.server.bedrock_error or 'Bedrock unavailable'})
                 return
-            from urllib.parse import parse_qs
             raw = parse_qs(urlsplit(self.path).query).get('offset', ['-1'])[0]
             try:
                 offset = int(raw)
@@ -1512,6 +1746,33 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, data, ctype)
 
     def do_POST(self) -> None:
+        if self.path == '/login' and self.server.lan and self._local() and self._remote():
+            # LAN-only login; secure tunnels are recommended on untrusted networks.
+            origin = self.headers.get('Origin')
+            if origin not in (None, 'http://' + self.headers.get('Host', '')):
+                self._json(403, {'error': 'invalid login origin'})
+                return
+            try:
+                n = int(self.headers.get('Content-Length', '0'))
+                if n < 1 or n > 2048:
+                    raise ValueError('invalid login length')
+                fields = parse_qs(self.rfile.read(n).decode('utf-8'), keep_blank_values=True)
+                valid = (fields.get('username') == ['cinterforge'] and
+                         len(fields.get('password', [])) == 1 and
+                         secrets.compare_digest(fields['password'][0], self.server.lan_password))
+            except (ValueError, UnicodeDecodeError):
+                valid = False
+            if not valid:
+                self._login_page(failed=True)
+                return
+            self.send_response(303)
+            self.send_header('Location', '/')
+            self.send_header('Set-Cookie', 'cinter_lan=' + self.server.lan_cookie +
+                             '; HttpOnly; SameSite=Strict; Path=/')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         if not self._authorized():
             self._json(403, {'error': 'not authorized'})
             return
@@ -1524,6 +1785,44 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n))
             if not isinstance(body, dict):
                 raise ValueError('Expected a JSON object')
+            if route == '/api/discord/open':
+                name = str(body.get('username', '')).strip()
+                guild = str(body.get('guild', '')).strip()
+                channel = str(body.get('channel', '')).strip()
+                source_id = str(body.get('session_id', ''))
+                with self.server.sessions_lock:
+                    if source_id not in self.server.sessions:
+                        raise ValueError('Discord request must come from an active terminal Session')
+                resolved = _discord_resolve(guild, channel)
+                with self.server.debug_lock:
+                    if len(self.server.discord_actions) >= 16:
+                        raise RuntimeError('Discord tab queue full; retry after opening a Terminal')
+                    self.server.discord_channels[resolved['channel_id']] = resolved
+                    self.server.discord_actions.append({**resolved, 'requested_username': name,
+                                                        'session_id': source_id})
+                self._json(200, {'opening': True, 'bot': resolved['bot'],
+                                 'guild': resolved['guild'], 'channel': resolved['channel']})
+                return
+            if route == '/api/discord/next':
+                active = body.get('session_ids', [])
+                if not isinstance(active, list) or len(active) > MAX_SESSIONS:
+                    raise ValueError('Invalid Discord session list')
+                with self.server.debug_lock:
+                    found = next((item for item in self.server.discord_actions
+                                 if item['session_id'] in active), None)
+                    if found is not None:
+                        self.server.discord_actions.remove(found)
+                self._json(200, found or {})
+                return
+            if route == '/api/discord/send':
+                channel_id = str(body.get('channel_id', ''))
+                message = body.get('content', '')
+                if (channel_id not in self.server.discord_channels or
+                        not isinstance(message, str) or not message.strip() or len(message) > 2000):
+                    raise ValueError('Invalid Discord channel or message')
+                _discord_api('/channels/' + channel_id + '/messages', 'POST', {'content': message, 'allowed_mentions': {'parse': []}})
+                self._json(200, {'sent': True})
+                return
             if route.startswith('/api/if/save/'):
                 _if_store_save(self.server, unquote(route[len('/api/if/save/'):]), body)
                 self._json(200, {'saved':True})
@@ -1544,7 +1843,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Only the trusted displayed WebView can accept the license.
                 # Native terminal commands may request the dialog but cannot
                 # silently record consent on the user's behalf.
-                if self.headers.get('Origin') != self.server.origin:
+                if self.headers.get('Origin') != 'http://' + self.headers.get('Host', ''):
                     self._json(403, {'error': 'EULA acceptance requires the application WebView'})
                     return
                 with self.server.eula_lock:
@@ -1758,7 +2057,7 @@ def handle(method: str, params: dict) -> dict:
         builds = Path(params['builds']).resolve(strict=True)
         if builds.name != 'Builds' or not ASSETS.is_relative_to(builds):
             raise ValueError('Shell resources must be staged inside the shared Builds directory')
-        _server = CinterShellServer(builds)
+        _server = CinterShellServer(builds, lan=True)
         _server_thread = threading.Thread(target=_server.serve_forever, name='cinter-http', daemon=True)
         _server_thread.start()
         return {'url': _server.origin + '/', 'port': _server.server_port,
@@ -3205,6 +3504,7 @@ HELP = '''CinterForgeTerminal custom commands
   games                         List all 68 games (WarGames first, then 67 classic Macs)
   wargames                      Launch original JOSHUA as its own Session tab
   stories                       List 16 IF titles (interactive fiction)
+  discord <user> <server> <channel>  Open a Discord bot-connected Session tab
   infinite-mac                  List 67 classic Macintosh games (help infinite-mac)
   <game-name>                   Launch the named game in its existing player
   Infinite Mac: https://infinitemac.org/
@@ -4000,6 +4300,19 @@ def execute(args: list[str]) -> int:
         else:
             print('Usage: help [infinite-mac|debugger|bedrock|devtools]', file=sys.stderr)
             return 2
+        return 0
+    if args[0] == 'discord':
+        # Bash strips quotes and leaves optional trailing commas from the
+        # human-friendly: discord "user", "server", "channel" syntax.
+        fields = [part.strip().strip(',').strip() for part in args[1:]]
+        if len(fields) != 3 or not all(fields):
+            print('Usage: discord "Hope AI Dev" "CinterForge Internal" "builds"', file=sys.stderr)
+            return 2
+        result = _api('/api/discord/open', body={
+            'username': fields[0], 'guild': fields[1], 'channel': fields[2],
+            'session_id': os.environ.get('CINTER_TERMINAL_SESSION_ID', '')})
+        print('Discord tab opening: ' + result['guild'] + ' / #' + result['channel'] +
+              ' (connected as bot ' + result['bot'] + ')', flush=True)
         return 0
     if args[0] == 'minecraft':
         if len(args) != 1:

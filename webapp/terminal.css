@@ -573,3 +573,8 @@ a {
       animation: none
    }
 }
+/* LAN selector reuses the same compact titlebar popover/menu elements. */
+#lan-menu-list { max-height: 360px; overflow: auto; min-width: 280px; }
+#lan-menu-list .museum-entry { overflow-wrap: anywhere; }
+#lan-menu-list .lan-manual { display: flex; gap: .35rem; padding: .5rem; }
+#lan-menu-list .lan-manual input { min-width: 0; flex: 1; }

@@ -31,6 +31,55 @@ opening/closing sessions still uses the same commands and controls.
 
 The three lightweight native applications are separate downloads. A fourth, **optional unified DevTools** archive is only needed for certain development and additional platform environments, not simply to play a game.
 
+### Connect to a Terminal on your LAN
+
+CinterForge Terminal runs its **existing** Python HTTP service on port **20300**
+for browsers on the same private LAN. Open `http://<host-LAN-IP>:20300/` in a
+browser; the login page asks for the username `cinterforge` and that running
+host's access code. The host's local Terminal displays its current code in the
+**LAN** dropdown. The code is generated per app launch unless
+`CINTER_TERMINAL_LAN_PASSWORD` is set in the launching environment. It is not
+stored in or published with the application.
+
+The **LAN** dropdown lists other discovered CinterForge Terminal instances and
+also accepts a private IP address. In the native application, selecting a
+listed host opens a **new independent native window** with its WebView pointed
+at that host. On macOS, the same discovered hosts appear under **File → Visible
+LAN Terminals**; Connect / Refresh opens the LAN selector. The original local
+Terminal remains open.
+
+After login, you get the **host's real terminal**: shell commands, PTY/ConPTY
+sessions, Code-OSS, builds, logs and debugger requests execute on that host
+under its running OS account. This is remote development access, not a
+read-only screen share. Running `./Cinter` still requires the appropriate
+source checkout and build prerequisites on the **remote host**. Closing the
+connected window does not shut down the host's Terminal server.
+
+**Network boundary:** Port 20300 serves HTTP on private LAN addresses, not an
+encrypted SSH transport. Use it only on a trusted LAN or through a secure
+tunnel; do not port-forward it to the public internet. Discovery uses UDP
+port 20301 and may require local firewall permission. Unauthenticated requests
+cannot load the Terminal UI or invoke host shell operations.
+
+### Discord tab
+
+From any Terminal shell, type:
+
+```text
+discord "Hope AI Dev", "CinterForge Internal", "builds"
+```
+
+The command uses the existing **`discord_dev`** provider from the private
+`cfdev/config.json` or `dev/config.json` (or `CINTERFORGE_CONFIG`). It must be
+enabled and contain a valid bot token. The host resolves the named server and
+text channel, then opens a new Discord tab in the same Terminal UI; existing
+shells and games stay open. Enter sends a message; the tab displays messages
+from the channel. The connector sends **as the configured Discord bot**, not
+as an impersonated human account; the first argument is the requested
+user/context label. Discord permissions and bot membership must allow reading
+and posting in the named channel. Bot tokens never enter browser HTML/JS or
+native output logs.
+
 ## 2. At a glance
 
 | Feature | What it does | Start with |

@@ -236,7 +236,7 @@ int main(int argc, char **argv)
             if (flag == "--help" || flag == "-h")
             {
                 std::cout << "CinterForgeTerminal --python <runtime> --worker <worker.py> "
-                             "--service <server.py> --builds <Builds> [--title name] [--developer] [--smoke-js] [--accept-ui]\n";
+                             "--service <server.py> --builds <Builds> [--title name] [--developer] [--smoke-js] [--accept-ui] [--connect http://LAN-IP:20300/]\n";
                 return 0;
             }
             if (flag == "--developer")
@@ -275,6 +275,8 @@ int main(int argc, char **argv)
                 cfg.builds = value;
             else if (flag == "--title")
                 cfg.title = value;
+            else if (flag == "--connect")
+                cfg.connect_url = value;
             else
                 throw std::invalid_argument("Unknown option: " + flag);
         }

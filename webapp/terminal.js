@@ -169,18 +169,40 @@
       if (this.lines.length>2500) this.history.push(...this.lines.splice(0,this.lines.length-2500));
       this.render();
     }
-    render(){
+    prepend(text) {
+      // Older Discord messages belong above the visible history, not below
+      // the live input. Preserve the exact line currently being read.
+      const earlier=String(text).split('\n');
+      if(earlier[earlier.length-1]==='')earlier.pop();
+      if(!earlier.length)return;
+      this.lines.unshift(...earlier);
+      this.render({insertedAbove:true});
+    }
+    render({insertedAbove=false}={}){
       // Put the insertion marker at the real VT cursor, without adding any
       // character to the copied transcript or the live shell input.
+      const parent=this.target.parentElement;
+      const previousTop=parent?.scrollTop||0,previousHeight=parent?.scrollHeight||0;
+      const visibleDiscord=this.target===$('terminal-output') && activeTab?.kind==='discord';
+      const followTail=!visibleDiscord || activeTab.followTail;
       const line=this.lines[this.lines.length-1] || '';
       const before=this.lines.slice(0,-1).join('\n');
       const prefix=(this.lines.length>1?before+'\n':'')+line.slice(0,this.current);
       const suffix=line.slice(this.current);
       const caret=document.createElement('span');caret.className='terminal-cursor';
       caret.setAttribute('aria-hidden','true');
-      this.target.replaceChildren(document.createTextNode(prefix),caret,document.createTextNode(suffix));
-      const parent=this.target.parentElement;
-      if(parent)parent.scrollTop=parent.scrollHeight;
+      // Discord's editable draft is a real DOM node. Never let the VT cursor
+      // compete with the draft caret, or leave a CSS-only echo behind on redraw.
+      this.target.replaceChildren(...(visibleDiscord
+        ? [document.createTextNode(prefix+suffix)]
+        : [document.createTextNode(prefix),caret,document.createTextNode(suffix)]));
+      if(visibleDiscord){activeTab.visibleDraft=null;paintDiscordDraft(activeTab);}
+      if(parent){
+        if(insertedAbove && visibleDiscord)
+          parent.scrollTop=previousTop+Math.max(0,parent.scrollHeight-previousHeight);
+        else if(followTail)parent.scrollTop=parent.scrollHeight;
+        else parent.scrollTop=previousTop;
+      }
     }
     reset(){this.lines=[''];this.history=[];this.current=0;this.render();}
   }
@@ -195,7 +217,7 @@
   // Display icons identify the same real terminal/emulator category on menu
   // buttons and tabs. No categories or launch behavior are changed here.
   function iconCategoryForProfile(profile, backend = 'native') {
-    if (backend === 'server') return 'server';
+    if (backend === 'server' || backend === 'discord') return 'server';
     if (backend === 'minecraft') return 'minecraft';
     if (backend === 'win') return 'windows';
     if (backend === 'linux') return 'linux';
@@ -475,6 +497,7 @@
     if(!tab || !tabs.includes(tab) || activeTab===tab)return;
     // The shell, each IF interpreter and each emulator own separate tabs.
     if(activeTab?.kind==='if' && activeTab.game)activeTab.game.draft=$('terminal-input').value;
+    if(activeTab?.kind==='discord')activeTab.draft=$('terminal-input').value;
     if(activeTab && activeTab.kind!=='if'){
       activeTab.display.target=activeTab.buffer;activeTab.display.render();
     }
@@ -492,7 +515,17 @@
     $('terminal-output').removeAttribute('data-if-echo');
     display.target=$('terminal-output');display.render();
     const profile=profiles.find(p=>p.id===tab.profileId)||profiles[0];
-    if(tab.kind==='server'){
+    if(tab.kind==='discord'){
+      showTerminal();applyProfile(profile);
+      $('terminal-input').disabled=false;
+      $('terminal-input').value=tab.draft||'';
+      $('terminal-input').setSelectionRange?.(tab.draft.length,tab.draft.length);
+      $('terminal-keys').hidden=true;
+      $('terminal-shell').textContent=`Discord · ${tab.guild} / #${tab.channel} · ${tab.bot}`;
+      notice('Connected through the configured Discord bot · type a message, Enter to send');
+      syncGameInput();
+      $('terminal-input').focus();
+    }else if(tab.kind==='server'){
       showTerminal();applyProfile(profile);
       $('terminal-input').disabled=true;
       $('terminal-keys').hidden=true;
@@ -500,6 +533,8 @@
       notice(tab.logPath ? 'Server log: '+tab.logPath : 'Connecting to live Server log…');
     }else if(museumKind(profile)==='terminal'){
       showTerminal();applyProfile(profile);
+      $('terminal-input').disabled=false;
+      $('terminal-keys').hidden=false;
       $('terminal-shell').textContent=tab.session?(tab.kind==='bedrock'?'Bedrock · live server console':`${platform} · ${tab.label}`):'Disconnected';
       focusTerminal();
       if(tab.session){const size=terminalSize();void api('/api/terminal/resize',{id:tab.session.id,...size}).catch(e=>notice(e.message));}
@@ -564,6 +599,85 @@
     void pollServerTab(tab);
     return tab;
   }
+  const discordMessageText=message=>{
+    // Discord text is untrusted. Never feed ANSI/control sequences to the VT.
+    const content=String(message.content||'').replace(/[\x00-\x08\x0B-\x1F\x7F-\x9F]/g,'');
+    const date=message.timestamp && !Number.isNaN(Date.parse(message.timestamp))
+      ? new Date(message.timestamp).toLocaleString()+' · ' : '';
+    return `${date}${message.author}: ${content}\n`;
+  };
+  function showDiscordMessages(tab,messages,older=false){
+    const fresh=[];
+    for(const message of messages){
+      if(!message?.id || tab.received.has(message.id))continue;
+      tab.received.add(message.id);fresh.push(message);
+    }
+    if(!fresh.length)return;
+    if(older){
+      tab.oldestId=fresh[0].id;
+      tab.display.prepend(fresh.map(discordMessageText).join(''));
+    }else{
+      if(!tab.oldestId)tab.oldestId=fresh[0].id;
+      tab.newestId=fresh[fresh.length-1].id;
+      tab.display.push(fresh.map(discordMessageText).join(''));
+    }
+  }
+  async function loadOlderDiscordMessages(tab){
+    if(tab.closed || !tab.historyReady || !tab.hasOlder || !tab.oldestId || tab.loadingOlder)return;
+    tab.loadingOlder=true;
+    tab.followTail=false;
+    const generation=tab.pollGeneration;
+    try{
+      const result=await api('/api/discord/messages?channel='+encodeURIComponent(tab.channelId)+
+        '&before='+encodeURIComponent(tab.oldestId));
+      if(tab.closed || tab.pollGeneration!==generation)return;
+      showDiscordMessages(tab,result.messages||[],true);
+      tab.hasOlder=!!result.has_more && (result.messages||[]).length>0;
+    }catch(error){if(activeTab===tab)notice('Discord history: '+error.message);}
+    finally{tab.loadingOlder=false;}
+  }
+  async function pollDiscordTab(tab){
+    const generation=++tab.pollGeneration;
+    while(!tab.closed && tab.pollGeneration===generation){
+      try{
+        const cursor=tab.historyReady && tab.newestId ? '&after='+encodeURIComponent(tab.newestId) : '';
+        const result=await api('/api/discord/messages?channel='+encodeURIComponent(tab.channelId)+cursor);
+        if(tab.closed || tab.pollGeneration!==generation)return;
+        if(!tab.historyReady){
+          tab.historyReady=true;
+          tab.hasOlder=!!result.has_more;
+          tab.display.reset();
+          if(!(result.messages||[]).length)tab.display.push(`No messages yet in #${tab.channel}\n`);
+        }
+        showDiscordMessages(tab,result.messages||[]);
+      }catch(error){if(activeTab===tab)notice('Discord history: '+error.message);}
+      await new Promise(resolve=>setTimeout(resolve,3000));
+    }
+  }
+  async function openDiscordTab(action){
+    const existing=tabs.find(tab=>!tab.closed && tab.kind==='discord' && tab.channelId===action.channel_id);
+    if(existing){await activateTab(existing);return;}
+    const buffer=makeBuffer();
+    const tab={key:++tabSerial,label:'#'+action.channel,profileId:'modern',backend:'discord',
+      kind:'discord',guild:action.guild,channel:action.channel,channelId:action.channel_id,
+      bot:action.bot,session:null,closed:false,pollGeneration:0,received:new Set(),draft:'',
+      oldestId:null,newestId:null,historyReady:false,hasOlder:false,loadingOlder:false,followTail:true,
+      display:new VTOutput(buffer),buffer};
+    tab.display.target=tab.buffer;
+    tabs.push(tab);
+    await activateTab(tab);
+    tab.display.push(`Loading recent history from ${tab.guild} / #${tab.channel}…\n`);
+    void pollDiscordTab(tab);
+  }
+  setInterval(async()=>{
+    if(document.visibilityState==='hidden')return;
+    try{
+      const ids=tabs.filter(tab=>tab.session?.id && !tab.closed).map(tab=>tab.session.id);
+      if(!ids.length)return;
+      const action=await api('/api/discord/next',{session_ids:ids});
+      if(action.channel_id)await openDiscordTab(action);
+    }catch(error){/* Discord is optional; keep normal shell and games available. */}
+  },1100);
   window.CinterTerminalNewTab=async(kind='mac')=>{
     if(typeof kind==='string' && kind.startsWith('profile:')){
       const id=kind.slice(8);
@@ -578,22 +692,105 @@
     if(kind==='minecraft')return openSession('modern','minecraft');
     notice('Unknown Terminal mode: '+String(kind));
   };
+  // Full development access to another Terminal host uses its existing HTTP
+  // UI, PTY and native bridge. A native connection opens a separate app window.
+  const connectToLAN = async url => {
+    try {
+      const parsed = new URL(url);
+      if(parsed.protocol!=='http:' || parsed.port!=='20300' || parsed.username || parsed.password ||
+         !/^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)\d{1,3}(\.\d{1,3}){2}$/.test(parsed.hostname))
+        throw new Error('Use a private LAN IP address on port 20300');
+      if(typeof window.cinterConnect==='function'){
+        const result=await window.cinterConnect({url:parsed.origin+'/'});
+        if(result==='invalid LAN URL')throw new Error(result);
+      }else window.open(parsed.origin+'/', '_blank', 'noopener');
+      $('lan-menu').open=false;
+    }catch(error){notice('LAN connection: '+error.message);}
+  };
+  const refreshLAN = async () => {
+    const container=$('lan-menu-list');
+    if(!container)return;
+    const [info, found]=await Promise.all([api('/api/lan/info'),api('/api/lan/peers')]);
+    container.replaceChildren();
+    const line=text=>{
+      const item=document.createElement('div');item.className='museum-entry';
+      item.textContent=text;container.append(item);
+    };
+    line(info.enabled ? `${info.name} · port ${info.port}` : 'LAN server unavailable');
+    if(info.password)line(`Login: ${info.username} · Code: ${info.password}`);
+    const peers=found.peers||[];
+    if(!peers.length)line('No other Terminals discovered');
+    for(const peer of peers){
+      const button=document.createElement('button');button.type='button';
+      button.className='museum-entry';button.textContent=`${peer.name} (${peer.platform}) · ${peer.url}`;
+      button.addEventListener('click',()=>{void connectToLAN(peer.url);});container.append(button);
+    }
+    const manual=document.createElement('form');manual.className='lan-manual';
+    const field=document.createElement('input');field.placeholder='LAN IP (e.g. 192.168.1.20)';
+    field.setAttribute('aria-label','Connect to LAN IP address');
+    const button=document.createElement('button');button.type='submit';button.textContent='Connect';
+    manual.append(field,button);container.append(manual);
+    manual.addEventListener('submit',event=>{
+      event.preventDefault();void connectToLAN('http://'+field.value.trim()+':20300/');
+    });
+    void nativeEvent('lan-peers',{peers});
+  };
+  window.CinterShowLAN=()=>{
+    const menu=$('lan-menu');
+    if(menu){if(menu.open)void refreshLAN().catch(error=>notice('LAN: '+error.message));else menu.open=true;}
+  };
+  $('lan-menu')?.addEventListener('toggle',event=>{
+    if(event.target.open)void refreshLAN().catch(error=>notice('LAN: '+error.message));
+  });
   // Each IF story is a separate Session tab. The interpreter writes only to
   // its own detached output, and receives input only through its own private
   // textarea. The visible Terminal output and textarea are a presentation of
   // the ACTIVE tab, never a global owner of a Z-machine process.
   const terminalScreen=$('terminal-screen');
   const scrollToLatest=()=>{terminalScreen.scrollTop=terminalScreen.scrollHeight;};
-  const outputObserver=new MutationObserver(()=>scrollToLatest());
+  const outputObserver=new MutationObserver(()=>{
+    if(activeTab?.kind!=='discord' || (activeTab.followTail && !activeTab.loadingOlder))scrollToLatest();
+  });
   outputObserver.observe($('terminal-output'),{subtree:true,childList:true,characterData:true});
+  terminalScreen.addEventListener('scroll',()=>{
+    const tab=activeTab;
+    if(tab?.kind!=='discord' || tab.loadingOlder)return;
+    tab.followTail=terminalScreen.scrollHeight-terminalScreen.scrollTop-terminalScreen.clientHeight<40;
+    if(tab.historyReady && tab.hasOlder && tab.oldestId && terminalScreen.scrollTop<80 &&
+       terminalScreen.scrollHeight>terminalScreen.clientHeight)
+      void loadOlderDiscordMessages(tab);
+  });
   const activeGame=()=>activeTab?.game||null;
+  function paintDiscordDraft(tab){
+    if(!tab || tab.closed || activeTab!==tab)return;
+    const output=$('terminal-output'),input=$('terminal-input');
+    // The textarea remains the only source of truth for editing and sending.
+    // Drawing actual text nodes (not CSS attr()) keeps the display in sync
+    // when history refreshes or a native WebView repaints during Backspace.
+    if(!tab.visibleDraft){
+      tab.visibleDraft=document.createElement('span');
+      tab.visibleDraft.className='discord-input-draft';
+      output.append(tab.visibleDraft);
+    }
+    const value=input.value;
+    const caret=Math.max(0,Math.min(input.selectionStart??value.length,value.length));
+    tab.visibleDraft.replaceChildren(document.createTextNode(value.slice(0,caret)),
+      document.createTextNode('▌'),document.createTextNode(value.slice(caret)));
+  }
   function syncGameInput(){
     const output=$('terminal-output'),input=$('terminal-input'),current=activeGame();
-    if(!current?.io?.lineResolver){output.removeAttribute('data-if-echo');return;}
-    current.draft=input.value;
-    const value=current.draft;
-    const caret=Math.max(0,Math.min(input.selectionStart??value.length,value.length));
-    output.setAttribute('data-if-echo',value.slice(0,caret)+'▌'+value.slice(caret));
+    const discord=activeTab?.kind==='discord';
+    if(!discord && !current?.io?.lineResolver){output.removeAttribute('data-if-echo');return;}
+    if(discord){
+      activeTab.draft=input.value;
+      output.removeAttribute('data-if-echo');
+      paintDiscordDraft(activeTab);
+    }else{
+      current.draft=input.value;
+      const value=input.value;
+      const caret=Math.max(0,Math.min(input.selectionStart??value.length,value.length));
+      output.setAttribute('data-if-echo',value.slice(0,caret)+'▌'+value.slice(caret));
+    }
     scrollToLatest();
   }
   function paintIFTab(tab){
@@ -866,6 +1063,7 @@
     tab.display.target=tab.buffer;
     tabs.push(tab);
     if(activeTab?.kind==='if' && activeTab.game)activeTab.game.draft=$('terminal-input').value;
+    if(activeTab?.kind==='discord')activeTab.draft=$('terminal-input').value;
     if(activeTab && activeTab.kind!=='if'){
       activeTab.display.target=activeTab.buffer;activeTab.display.render();
     }
@@ -967,14 +1165,14 @@
       notice('Connected');void pollTab(tab);focusTerminal();
     }catch(error){notice(error.message);}
   }
-  async function send(data){if(activeTab?.kind==='if')return;if(session)try{await api('/api/terminal/input',{id:session.id,data});}catch(e){notice(e.message);}}
+  async function send(data){if(activeTab?.kind==='if' || activeTab?.kind==='discord')return;if(session)try{await api('/api/terminal/input',{id:session.id,data});}catch(e){notice(e.message);}}
   async function debuggerRequest(){
     try{await api('/api/debugger',{});notice('Inspector requested; available when the native Host enables it.');}
     catch(e){notice(e.message);}
   }
   const overlay=$('terminal-overlay');
   const input=$('terminal-input');
-  const focusTerminal=()=>{if((session||activeGame()) && !overlay.hidden && !input.disabled)input.focus();};
+  const focusTerminal=()=>{if((session||activeGame()||activeTab?.kind==='discord') && !overlay.hidden && !input.disabled)input.focus();};
   // Native Edit uses the existing session transcript and input bridge.
   // Copy uses the entire committed session
   // transcript, never the hidden input textarea or an emulator's document.
@@ -1005,9 +1203,9 @@
     return transcript;
   };
   const pasteIntoSession=text=>{
-    if((!session && !activeGame()) || computerView.hidden===false)return false;
+    if((!session && !activeGame() && activeTab?.kind!=='discord') || computerView.hidden===false)return false;
     text=String(text ?? '');if(!text)return false;
-    if(activeGame()){
+    if(activeGame() || activeTab?.kind==='discord'){
       input.focus();
       input.setRangeText(text,input.selectionStart,input.selectionEnd,'end');
       input.dispatchEvent(new Event('input',{bubbles:true}));
@@ -1094,7 +1292,10 @@
   const titleMenus=Array.from(document.querySelectorAll('.terminal-menu'));
   const setWindowsApplicationMenus=()=>{
     const isWindows=platform==='win';
-    const showMenus=isWindows || platform==='mac';
+    // Remote WebViews retain the TARGET host platform for shell selection;
+    // File/Edit visibility also follows the viewer's actual native OS.
+    const viewer=String(navigator.userAgentData?.platform || navigator.platform || '');
+    const showMenus=isWindows || platform==='mac' || /Win|Mac/i.test(viewer);
     for(const id of ['windows-file-menu','windows-edit-menu']){
       const menu=$(id);if(menu){menu.hidden=!showMenus;if(!showMenus)menu.open=false;}
     }
@@ -1151,23 +1352,35 @@
   // Input events carry printable text; keydown handles control sequences.
   // Do not dispatch incomplete IME compositions as shell commands.
   input.addEventListener('input',e=>{
+    // Composing text is still part of the Discord draft; just defer Enter.
+    if(e.isComposing && activeTab?.kind==='discord'){syncGameInput();return;}
     if(e.isComposing)return;
-    if(activeGame()){syncGameInput();return;}
+    if(activeTab?.kind==='discord' || activeGame()){syncGameInput();return;}
     if(input.value){const value=input.value;input.value='';send(value);}
   });
   input.addEventListener('compositionend',()=>{
-    if(activeGame()){syncGameInput();return;}
+    if(activeTab?.kind==='discord' || activeGame()){syncGameInput();return;}
     if(input.value){const value=input.value;input.value='';send(value);}
   });
   // Cursor positioning is also visible when navigating/editing within a line.
-  input.addEventListener('keyup',()=>{if(activeGame())syncGameInput();});
-  input.addEventListener('click',()=>{if(activeGame())syncGameInput();});
-  input.addEventListener('select',()=>{if(activeGame())syncGameInput();});
-  // Capture IF editing keys before the interpreter's input listener. The
-  // transparent textarea can be select-all after focus/restore; native
-  // Backspace would erase the entire draft instead of one character.
+  input.addEventListener('keyup',()=>{if(activeGame() || activeTab?.kind==='discord')syncGameInput();});
+  input.addEventListener('click',()=>{if(activeGame() || activeTab?.kind==='discord')syncGameInput();});
+  input.addEventListener('select',()=>{if(activeGame() || activeTab?.kind==='discord')syncGameInput();});
+  // The transparent full-screen textarea's native mouse coordinates don't
+  // correspond to visible Discord text. Clicking the Terminal focuses the
+  // draft at its end rather than silently moving the insertion point.
+  input.addEventListener('pointerdown',e=>{
+    if(activeTab?.kind!=='discord')return;
+    e.preventDefault();input.focus();
+    input.setSelectionRange?.(input.value.length,input.value.length);
+    syncGameInput();
+  });
+  // Capture IF/Discord editing keys before either input listener. In native
+  // WebViews a restored textarea can be select-all without user intent;
+  // Backspace/Delete must erase exactly one character, not the whole draft.
   input.addEventListener('keydown',e=>{
-    if(!activeGame()?.io?.lineResolver || e.isComposing || e.key==='Process')return;
+    if(!(activeGame()?.io?.lineResolver || activeTab?.kind==='discord') ||
+       e.isComposing || e.key==='Process')return;
     if(e.key!=='Backspace' && e.key!=='Delete')return;
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -1188,6 +1401,17 @@
   },true);
   input.addEventListener('keydown',e=>{
     if(e.isComposing || e.key==='Process')return;
+    if(activeTab?.kind==='discord'){
+      if(e.key==='Enter' && !e.shiftKey){
+        e.preventDefault();e.stopImmediatePropagation();
+        const message=input.value.trim();input.value='';
+        activeTab.draft='';syncGameInput();
+        if(message)void api('/api/discord/send',{
+          channel_id:activeTab.channelId,content:message
+        }).catch(error=>notice('Discord send: '+error.message));
+      }
+      return;
+    }
     // File accelerators must not leak Ctrl+N/Ctrl+Q to the shell PTY.
     if(e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
        ['n','q'].includes(e.key.toLowerCase()))return;
@@ -1383,6 +1607,7 @@
         addMuseumEntry(menuLists[groupOf(profile)],profile);
       }
       await nativeEvent('ready',{menu:(data.museum||[]).length,profile:initialId});
+      if(!acceptUI)void refreshLAN().catch(()=>{});
       if(acceptUI){
         // Exercise two real Sessions sequentially, using a public museum Mac
         // rather than the private Lagomorph Quadra.  No background default
@@ -1400,6 +1625,7 @@
       }
     }catch(e){notice(e.message);await nativeEvent('error',{message:e.message});}
   })();
+  setInterval(()=>{if(document.visibilityState==='visible' && !acceptUI && !$('lan-menu')?.open)void refreshLAN().catch(()=>{});},12000);
   window.addEventListener('resize',()=>{if(session){const size=terminalSize();api('/api/terminal/resize',{id:session.id,...size}).catch(e=>notice(e.message));}});
   window.addEventListener('beforeunload',()=>{if(tabs.length)navigator.sendBeacon?.('/__noop');});
 })();

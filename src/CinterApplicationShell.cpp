@@ -119,6 +119,26 @@ namespace cinterforge
             return result;
         }
 
+        // Remote windows accept literal private IPv4 addresses only; no arbitrary
+        // URL can be used to load a privileged native-bridge WebView.
+        bool validLanUrl(const std::string &url)
+        {
+            const std::regex re(R"(^http://(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}):20300/?$)");
+            if (!std::regex_match(url, re)) return false;
+            const std::string ip = url.substr(7, url.find(":20300") - 7);
+            std::size_t at = 0;
+            int octets = 0;
+            while (at < ip.size()) {
+                const std::size_t dot = ip.find('.', at);
+                const std::string part = ip.substr(at, dot == std::string::npos ? dot : dot - at);
+                if (part.empty() || std::stoi(part) > 255) return false;
+                ++octets;
+                if (dot == std::string::npos) break;
+                at = dot + 1;
+            }
+            return octets == 4;
+        }
+
         void validateStaged(const ApplicationShellConfig &config)
         {
             if (config.builds.empty())
@@ -154,6 +174,7 @@ namespace cinterforge
                                              "--builds", cfg.builds, "--title", cfg.title};
             if (cfg.developer)
                 args.push_back("--developer");
+            if (!cfg.connect_url.empty()) { args.push_back("--connect"); args.push_back(cfg.connect_url); }
             return args;
         }
 
@@ -287,8 +308,21 @@ namespace cinterforge
             static CinterFileMenuTarget *target = nil;
             if (!target)
                 target = [[CinterFileMenuTarget alloc] init];
-            target->newTerminalAction = [&window](const std::string &kind)
+            target->newTerminalAction = [&window, cfg](const std::string &kind)
             {
+                if (kind.rfind("lan:", 0) == 0) {
+                    const std::string url = kind.substr(4);
+                    if (validLanUrl(url)) {
+                        auto remote = cfg; remote.connect_url = url;
+                        remote.title = "CinterForge Terminal — " + url;
+                        spawnNewTerminal(remote);
+                    }
+                    return;
+                }
+                if (kind == "lan-popup") {
+                    window.dispatch([&window] { window.eval("window.CinterShowLAN && window.CinterShowLAN()"); });
+                    return;
+                }
                 window.dispatch([&window, kind]
                                 { window.eval("window.CinterTerminalNewTab && window.CinterTerminalNewTab(\"" + jsonEscape(kind) + "\")"); });
             };
@@ -360,6 +394,12 @@ namespace cinterforge
                     [item setEnabled:NO]; // Enabled only after confirmed Bedrock status.
                 }
             }
+            [fileMenu addItem:[NSMenuItem separatorItem]];
+            NSMenuItem *lanItem = [fileMenu addItemWithTitle:@"Visible LAN Terminals" action:nil keyEquivalent:@""];
+            [lanItem setSubmenu:[[NSMenu alloc] initWithTitle:@"Visible LAN Terminals"]];
+            NSMenuItem *connectItem = [[lanItem submenu] addItemWithTitle:@"Connect / Refresh…" action:@selector(newTerminal:) keyEquivalent:@""];
+            [connectItem setRepresentedObject:@"lan-popup"];
+            [connectItem setTarget:target];
             [fileMenu addItem:[NSMenuItem separatorItem]];
             NSMenuItem *debugItem = [fileMenu addItemWithTitle:@"Open Debugger" action:@selector(openDebugger:) keyEquivalent:@"d"];
             [debugItem setTarget:target];
@@ -622,15 +662,22 @@ namespace cinterforge
         if (setenv("CPH_ENABLE_DEBUGGER", "1", 1))
             throw std::runtime_error("Cannot enable native Terminal debugger");
 #endif
+        if (!config.connect_url.empty() && !validLanUrl(config.connect_url))
+            throw std::invalid_argument("LAN Terminal connection requires a private IPv4 address on port 20300");
         PythonHost host;
-        host.start(config.python, config.worker, config.service, std::chrono::seconds(10));
         bool started = false;
+        bool hostRunning = false;
         try
         {
-            const std::string reply = host.call("start", "{\"builds\":\"" + jsonEscape(config.builds) + "\"}",
-                                                std::chrono::seconds(15));
-            const std::string url = readyUrl(reply);
-            started = true;
+            std::string url = config.connect_url;
+            if (url.empty()) {
+                host.start(config.python, config.worker, config.service, std::chrono::seconds(10));
+                hostRunning = true;
+                const std::string reply = host.call("start", "{\"builds\":\"" + jsonEscape(config.builds) + "\"}",
+                                                    std::chrono::seconds(15));
+                url = readyUrl(reply);
+                started = true;
+            }
             std::cerr << "[CinterForgeTerminal] managed HTTP service ready: " << url << '\n';
             // One cross-platform webview/webview implementation; platform browser
             // engines are provided by the OS rather than bundled with the product.
@@ -663,6 +710,21 @@ namespace cinterforge
             if (iconError)
                 g_error_free(iconError);
 #endif
+            // Visible LAN Terminal entries open a separate native application
+            // window/process, connected to that host's existing HTTP service.
+            window.bind("cinterConnect", [&](const std::string &args) -> std::string
+                        {
+                std::smatch match;
+                if (!std::regex_search(args, match, std::regex(R"re("url"\s*:\s*"(http://[^"\\]+)")re")))
+                    return R"("invalid LAN URL")";
+                const std::string remoteUrl = match[1].str();
+                if (!validLanUrl(remoteUrl)) return R"("invalid LAN URL")";
+                auto remote = config;
+                remote.connect_url = remoteUrl;
+                remote.title = "CinterForge Terminal — " + remoteUrl;
+                spawnNewTerminal(remote);
+                return R"("window-opened")";
+            });
             // Real File commands create a complete independent native Terminal or
             // shut down this WebView. Invalid actions receive no privilege.
             window.bind("cinterWindow", [&](const std::string &args) -> std::string
@@ -708,6 +770,34 @@ namespace cinterforge
                 });
             }
 #endif
+#ifdef __APPLE__
+            if (args.find("\"event\":\"lan-peers\"") != std::string::npos) {
+                // Parse only after dispatch: no autoreleased Foundation object
+                // crosses the native WebView thread boundary.
+                const std::string payload = args;
+                window.dispatch([payload] {
+                    NSData *encoded = [NSData dataWithBytes:payload.data() length:payload.size()];
+                    id parsed = [NSJSONSerialization JSONObjectWithData:encoded options:0 error:nil];
+                    NSDictionary *detail = [parsed isKindOfClass:[NSArray class]] && [parsed count] ? [parsed firstObject] : parsed;
+                    NSArray *peers = [detail isKindOfClass:[NSDictionary class]] ? detail[@"peers"] : nil;
+                    NSMenu *file = [[[NSApp mainMenu] itemWithTitle:@"File"] submenu];
+                    NSMenu *list = [[file itemWithTitle:@"Visible LAN Terminals"] submenu];
+                    if (!list) return;
+                    while ([list numberOfItems] > 1) [list removeItemAtIndex:1];
+                    CinterFileMenuTarget *target = (CinterFileMenuTarget *)[[list itemAtIndex:0] target];
+                    for (id peer in peers) {
+                        if (![peer isKindOfClass:[NSDictionary class]]) continue;
+                        NSString *url = peer[@"url"];
+                        NSString *name = peer[@"name"];
+                        if (![url isKindOfClass:[NSString class]] || !validLanUrl([url UTF8String])) continue;
+                        NSMenuItem *item = [list addItemWithTitle:[NSString stringWithFormat:@"%@ — %@", name ?: @"Terminal", url]
+                                                         action:@selector(newTerminal:) keyEquivalent:@""];
+                        [item setRepresentedObject:[@"lan:" stringByAppendingString:url]];
+                        [item setTarget:target];
+                    }
+                });
+            }
+#endif
             const bool isReady = args.find("\"event\":\"ready\"") != std::string::npos;
             const bool isMuseum = args.find("\"event\":\"machine\"") != std::string::npos &&
                 args.find("\"id\":\"mac-plus\"") != std::string::npos &&
@@ -738,7 +828,8 @@ namespace cinterforge
             }
 
             std::atomic<bool> checking{true};
-            std::thread inspector([&]
+            std::thread inspector;
+            if (started) inspector = std::thread([&]
                                   {
             while (checking.load()) {
                 try {
@@ -763,14 +854,14 @@ namespace cinterforge
                 if (watchdog.joinable())
                     watchdog.join();
                 checking = false;
-                inspector.join();
+                if (inspector.joinable()) inspector.join();
                 throw;
             }
             finished.store(true);
             if (watchdog.joinable())
                 watchdog.join();
             checking = false;
-            inspector.join();
+            if (inspector.joinable()) inspector.join();
             if (config.accept_ui)
             {
                 if (!ready.load() || !museum.load() || !returned.load() || failed.load())
@@ -783,9 +874,8 @@ namespace cinterforge
                 }
                 std::cout << "TERMINAL_UI_PASS ready=1 museum=mac-plus terminal=vt100-terminal callback=native" << std::endl;
             }
-            host.call("stop", "{}", std::chrono::seconds(5));
-            started = false;
-            host.stop();
+            if (started) { host.call("stop", "{}", std::chrono::seconds(5)); started = false; }
+            if (hostRunning) host.stop();
             return 0;
         }
         catch (...)
@@ -800,7 +890,7 @@ namespace cinterforge
                 {
                 }
             }
-            host.stop();
+            if (hostRunning) host.stop();
             throw;
         }
     }

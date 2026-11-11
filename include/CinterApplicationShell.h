@@ -14,6 +14,7 @@ namespace cinterforge
         std::string service; // The staged application's HTTP service module.
         std::string builds;  // Absolute shared sibling Builds root.
         std::string title = "CinterForge Terminal";
+        std::string connect_url; // Remote LAN WebView (no second local server).
         int width = 1080;
         int height = 720;
         bool developer = false;

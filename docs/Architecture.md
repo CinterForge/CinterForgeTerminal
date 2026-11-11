@@ -45,6 +45,27 @@ flowchart TB
 
 The default Code-OSS terminal layout is **Mac + Win + Linux on macOS** and **one native terminal on Windows or Linux**. A missing platform environment is reported and can be provisioned through the documented toolchain flow; it is never simulated or silently labeled "installed." Terminal requests create separate Sessions in the **existing app window**, not new application windows. Typing a game name opens the relevant existing game/player in a new Session rather than a separate app window. **Mac Bash uses the native PTY directly and never requires DevTools.** Selecting Win/Linux Bash on macOS checks the separately installed unified DevTools receipt, offers explicit opt-in download with actual size, installation destination and progress only if absent, and connects a real guest shell from that SDK; it never uses a relabeled Mac Bash. The terminal-owned runtime VM is separate from the managed Setup VMs.
 
+## LAN remote development and Discord
+
+One Terminal-owned Python HTTP server serves the existing full UI and its
+PTY/ConPTY/Host RPC on private LAN port **20300**, with session login before
+remote content or APIs are served. Its local native WebView uses loopback and
+the existing per-process token; remote browsers have an additional session
+cookie and the same per-origin API token. There is no separate remote-only UI,
+backend, proxy, or fake shell. UDP port **20301** answers bounded LAN discovery
+requests; the native system menu and existing HTML dropdown show those peers.
+Selecting a peer spawns a separate native WebView process/window pointed at
+that host, without starting a duplicate local Python server. Shell, debug and
+build execution occurs on the host and is limited by its OS account. HTTP is
+not SSH/TLS: only trusted private LAN or a separately secured tunnel is in
+scope, not public-internet exposure.
+
+The `discord` shell command asks the authenticated host backend to resolve the
+configured `discord_dev` bot, guild and text channel through Discord's HTTPS
+API. The browser receives only sanitized channel metadata and messages; token
+and secret values stay server-side. A Discord tab is a distinct Session view
+and cannot overwrite the command's shell or another IF/game interpreter.
+
 ## Native system menus, not HTML menus
 
 The operating-system menu bar owns **File**, **Edit**, and the **New … Terminal** commands. Native **New Minecraft / Mac / Win / Linux Terminal** entries are driven from the application's verified installed terminal capabilities. The set remains stable across page transitions, embedded game views, focus changes, and Code-OSS launches. A requested but unavailable platform receives an actionable installation explanation rather than a temporary menu entry that later disappears.
