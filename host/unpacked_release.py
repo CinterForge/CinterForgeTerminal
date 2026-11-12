@@ -372,7 +372,8 @@ def status_four(builds: Path, *, release: str | None = None, steamapps: Path | N
 
 
 def prepare_publish_packages(builds: Path, *, release: str | None = None,
-                             notarize: bool = True) -> dict:
+                             notarize: bool = True,
+                             reuse_remote_devtools: dict | None = None) -> dict:
     """Only Publish calls this. No Stage and no Setup dependency."""
     up = _up()
     release = release or up.HOST_RELEASE
@@ -392,12 +393,32 @@ def prepare_publish_packages(builds: Path, *, release: str | None = None,
                 (target != 'mac' or (old.get('format') == 'dmg' and
                  (not notarize or not os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip() or
                   old.get('notarized') is True))) and
-                path.is_file()
-                and not path.is_symlink() and path.stat().st_size == old.get('bytes')
-                and _sha(path) == old.get('sha256')):
-            artifacts[target] = old
+                path.is_file() and not path.is_symlink() and
+                path.stat().st_size == old.get('bytes') and
+                # A matching previously SHA-verified archive can be reused
+                # without reading/recompressing a multi-GB SDK on every Publish.
+                (target == 'devtools' and old.get('archive_identity') ==
+                 up._release_archive_identity(path) or _sha(path) == old.get('sha256'))):
+            artifacts[target] = old.copy()
+            if target == 'devtools':
+                artifacts[target]['archive_identity'] = up._release_archive_identity(path)
             print(f'[TERMINAL PUBLISH] {target} clean; reusing verified distribution package', flush=True)
             continue
+        if target == 'devtools' and reuse_remote_devtools:
+            candidate = reuse_remote_devtools
+            if (candidate.get('build_fingerprint') == info['fingerprint'] and
+                    candidate.get('target') == 'devtools' and
+                    candidate.get('filename') == name and
+                    isinstance(candidate.get('sha256'), str) and
+                    len(candidate['sha256']) == 64 and
+                    isinstance(candidate.get('bytes'), int) and candidate['bytes'] > 0):
+                # R2 verified this exact Build content already. No local SDK
+                # ZIP is needed on a new BUILDER; only the small release
+                # manifest is rebuilt and uploaded after changed applications.
+                artifacts[target] = {**candidate, 'remote_only': True}
+                print('[TERMINAL PUBLISH] devtools unchanged on R2; '
+                      'skipping local ZIP (0 bytes compressed)', flush=True)
+                continue
         inputs = {n: _source(builds, n, d, target, verify=True) for n,d in info['files'].items()}
         if target == 'mac':
             # Build supplied a sealed, signed .app; Publish alone builds DMG.
@@ -427,6 +448,8 @@ def prepare_publish_packages(builds: Path, *, release: str | None = None,
             artifact = up._write_release_zip(path, inputs, target=target, release=release,
                                              root=up.APP_ROOTS[target])
         artifact['build_fingerprint'] = info['fingerprint']
+        if target == 'devtools':
+            artifact['archive_identity'] = up._release_archive_identity(path)
         artifacts[target] = artifact
     receipt = {'schema': up.FOUR_SCHEMA, 'release': release, 'artifacts': artifacts,
                'bedrock': 'excluded-until-app-eula-acceptance',

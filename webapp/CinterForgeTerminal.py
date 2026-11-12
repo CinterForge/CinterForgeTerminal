@@ -3203,6 +3203,13 @@ def handle(method: str, params: dict) -> dict:
         return {'url': _server.origin + '/', 'port': _server.server_port,
                 'native_grant': _server.native_grant,
                 'platform': _server.system, 'server_log': str(_server.log.path)}
+    if method == 'service_health':
+        # The native app must not remain alive with a dead HTTP listener while
+        # its Colima watchdog sees the native PID and keeps the guests running.
+        alive = (_server is not None and _server_thread is not None and
+                 _server_thread.is_alive() and _server._http_serving.is_set() and
+                 not _server._stopping)
+        return {'alive': alive}
     if method == 'next_lifecycle_reboot_request':
         if _server is None:
             return {'requested': False}
@@ -6034,48 +6041,84 @@ def _mac_mounted_volumes() -> list[Path]:
 
 
 def _mac_host_mounts() -> list[tuple[Path, str]]:
-    """Expose macOS files under /host without replacing Linux's / or /usr.
+    """Share the entire Mac filesystem once, subject to macOS permissions.
 
-    There is no application-level folder allowlist. Colima's virtiofs driver
-    and the macOS user's filesystem permissions determine which files can be
-    read or written. Mounts use distinct destinations to satisfy Colima's
-    no-overlapping-guest-mounts rule.
+    Lima/virtiofs does not support overlapping host mounts. Sharing both `/`
+    and `/Volumes` (or individual `/Volumes/*` disks) creates overlapping
+    locations, even when the guest destinations are distinct. One writable
+    root share includes the host's mounted-volume namespace and preserves
+    paths containing spaces without any app-defined drive or folder allowlist.
+    This does not bypass macOS privacy permissions or Virtualization.framework
+    limitations on nested host mounts.
     """
-    mounts: list[tuple[Path, str]] = [(Path('/'), '/host/mac')]
-    if Path('/Volumes').is_dir():
-        mounts.append((Path('/Volumes'), '/host/volumes'))
-    for location in _mac_mounted_volumes():
-        # The root share mirrors internal/system volumes. Extra shares of
-        # external disks help when virtiofs does not traverse nested mounts.
-        if location == Path('/Volumes') or not str(location).startswith('/Volumes/'):
+    return [(Path('/'), '/host/mac')]
+
+
+def _colima_mount_entries(yaml: str) -> list[tuple[str, str, bool]] | None:
+    """Read only the narrow mount schema that our Colima profile uses.
+
+    Colima may serialize unquoted scalars when saving its configuration. Treat
+    semantically equivalent settings as equal instead of restarting a running
+    VM merely because YAML formatting changed. Unknown mount syntax is never
+    assumed equivalent to the requested full-root share.
+    """
+    match = re.search(r'(?ms)^mounts:[^\n]*\n(.*?)(?=^[a-zA-Z][a-zA-Z0-9_-]*:|\Z)', yaml)
+    if match is None:
+        return None
+
+    def scalar(raw: str) -> str:
+        raw = raw.strip()
+        if raw.startswith('"'):
+            try:
+                result = json.loads(raw)
+                return result if isinstance(result, str) else raw
+            except ValueError:
+                return raw
+        if len(raw) >= 2 and raw[0] == raw[-1] == "'":
+            return raw[1:-1].replace("''", "'")
+        return raw
+
+    records: list[dict[str, str]] = []
+    for line in match.group(1).splitlines():
+        item = re.match(r'^\s*-\s+location:\s*(.*?)\s*$', line)
+        if item:
+            records.append({'location': scalar(item.group(1))})
             continue
-        if ' ' in str(location):
-            # Upstream Colima rejects such paths; /host/volumes is the
-            # supported parent-directory mount for these names.
-            continue
-        key = hashlib.sha256(os.fsencode(str(location))).hexdigest()[:12]
-        mounts.append((location, '/host/drives/' + key))
-    return mounts
+        attribute = re.match(r'^\s+(mountPoint|writable):\s*(.*?)\s*$', line)
+        if attribute and records:
+            records[-1][attribute.group(1)] = scalar(attribute.group(2))
+        elif line.strip() and not line.lstrip().startswith('#'):
+            return None
+    if not records or any(set(item) != {'location', 'mountPoint', 'writable'} for item in records):
+        return None
+    if any(item['writable'] not in ('true', 'false') for item in records):
+        return None
+    return [(item['location'], item['mountPoint'], item['writable'] == 'true')
+            for item in records]
 
 
-def _configure_colima_host_mounts(env: dict[str, str], mounts: list[tuple[Path, str]]) -> None:
-    """Update only the app-owned t-profile mount list; keep other VM settings.
+def _configure_colima_host_mounts(env: dict[str, str], mounts: list[tuple[Path, str]],
+                                  *, dry_run: bool = False) -> bool:
+    """Change only the owned t-profile's mount list, never another profile.
 
-    Colima's CLI --mount has no destination-path argument. The profile YAML
-    accepts mountPoint, allowing a complete Mac root at /host/mac without
-    accidentally replacing the Linux VM's root filesystem.
+    Returns whether the mount topology changed. A live VM must be restarted
+    *only after* its running containers have been checked for foreign owners.
     """
     profile = Path(env['COLIMA_HOME']) / PROFILE
     config = profile / 'colima.yaml'
     if profile.is_symlink() or config.is_symlink():
         raise RuntimeError('Managed Terminal VM configuration must not be a symlink')
-    profile.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        profile.mkdir(parents=True, exist_ok=True)
+    original = config.read_text('utf-8') if config.is_file() else ''
+    desired = [(str(host), guest, True) for host, guest in mounts]
+    if _colima_mount_entries(original) == desired:
+        return False
     block = 'mounts:\n' + ''.join(
         '  - location: ' + json.dumps(str(host)) + '\n'
         '    mountPoint: ' + json.dumps(guest) + '\n'
         '    writable: true\n'
         for host, guest in mounts)
-    original = config.read_text('utf-8') if config.is_file() else ''
     keys = list(re.finditer(r'(?m)^[a-zA-Z][a-zA-Z0-9_-]*:[^\n]*$', original))
     entry = next((idx for idx, item in enumerate(keys)
                   if item.group().split(':', 1)[0] == 'mounts'), None)
@@ -6085,12 +6128,14 @@ def _configure_colima_host_mounts(env: dict[str, str], mounts: list[tuple[Path, 
         beginning = keys[entry].start()
         ending = keys[entry + 1].start() if entry + 1 < len(keys) else len(original)
         updated = original[:beginning] + block + original[ending:]
-    if updated != original:
-        temporary = config.with_name('colima.yaml.pending')
-        if temporary.is_symlink():
-            raise RuntimeError('Unsafe managed Terminal VM pending configuration')
-        temporary.write_text(updated, encoding='utf-8')
-        os.replace(temporary, config)
+    if dry_run:
+        return True
+    temporary = config.with_name('colima.yaml.pending')
+    if temporary.is_symlink():
+        raise RuntimeError('Unsafe managed Terminal VM pending configuration')
+    temporary.write_text(updated, encoding='utf-8')
+    os.replace(temporary, config)
+    return True
 
 
 def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None) -> str:
@@ -6133,22 +6178,24 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
                                ', '.join(foreign))
         _stop_owned_guests_locked(docker, env)
 
-    # Colima's actual shared root is /host/mac, not /. Docker daemon bind
-    # sources must use the paths in the VM rather than the host's original
-    # path, otherwise a missing source is reported as a Docker mount error.
+    # Check the app-owned profile's *saved* topology as well as live paths.
+    # A legacy t-profile may still be running with the old overlapping mount
+    # config. A healthy Docker socket alone cannot prove that all host drives
+    # will survive the next Colima start.
     required = ['/host/mac', '/host/mac' + str(sdk)]
     if workspace is not None:
         required.append('/host/mac' + str(workspace))
-    required.extend(destination for _, destination in mounts[1:])
+    config_changed = _configure_colima_host_mounts(env, mounts, dry_run=True)
     ping = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=20)
     if ping.returncode == 0:
         missing = [path for path in required if not guest_directory(path)]
-        if not missing:
-            return docker
+        if not missing and not config_changed:
+            return docker  # One already-ready VM; every tab uses docker exec.
         if active_containers(via_guest=False):
-            recover_stale_owned_guests()
-        print('[DEVTOOLS] Reconfiguring owned Terminal VM host volumes: ' +
-              ', '.join(missing), flush=True)
+            recover_stale_owned_guests()  # Verifies labels before stopping.
+        reason = ('outdated overlapping host mount configuration' if config_changed
+                  else 'inaccessible host paths: ' + ', '.join(missing))
+        print('[DEVTOOLS] Reconfiguring owned Terminal VM: ' + reason, flush=True)
         _run_checked([colima, 'stop', PROFILE], env,
                      title='Stopping idle guest VM for corrected host mounts', timeout=120)
     else:
@@ -6210,10 +6257,10 @@ def _schedule_guest_boot(server: CinterShellServer) -> dict:
         server.guest_start_state = 'starting'
         server.guest_start_error = ''
     try:
-        # This watchdog is independent of the Python worker and survives an
-        # Xcode Stop; it owns only the dedicated Terminal guest environment.
-        _start_runtime_watchdog(server.native_parent_pid,
-                                _runtime_logs_root(server.mutable_builds))
+        # Startup runs off the HTTP/UI thread. The guest boot thread waits
+        # until any previous native owner's crash watchdog releases the VM;
+        # otherwise a fast relaunch can start new guests while old cleanup is
+        # still stopping the same t profile.
         threading.Thread(target=_boot_guests_logged, args=(server,),
                          daemon=True, name='cinter-runtime-guests').start()
     except (OSError, RuntimeError, ValueError) as error:
@@ -6227,7 +6274,16 @@ def _schedule_guest_boot(server: CinterShellServer) -> dict:
 
 
 def _boot_guests_logged(server: CinterShellServer) -> None:
+    watchdog_ready = False
     try:
+        # A separate process watches the native PID, surviving both a Python
+        # worker crash and Xcode Stop. It acknowledges exclusive lifetime
+        # ownership BEFORE the boot thread is allowed to start Colima.
+        _start_runtime_watchdog(server.native_parent_pid,
+                                _runtime_logs_root(server.mutable_builds))
+        watchdog_ready = True
+        if server._stopping:
+            raise RuntimeError('Native Terminal shut down before guest startup completed')
         result = boot_runtime_guests()
         if not result.get('installed'):
             raise RuntimeError('DevTools disappeared during managed guest startup')
@@ -6236,8 +6292,14 @@ def _boot_guests_logged(server: CinterShellServer) -> None:
             server.guest_start_error = ''
         server.log_event('Managed reusable guests ready: ' + json.dumps(result, sort_keys=True))
     except Exception as error:
-        # The background startup must NEVER die silently and leave tabs
-        # waiting forever. Report unexpected failures through Server log.
+        # Do not leave a half-booted Colima profile alive after a failed image
+        # load / Bash verification. The guardian is already responsible for
+        # abnormal native exits; cleanup here handles failure while it lives.
+        if watchdog_ready and not server._stopping:
+            try:
+                stop_runtime_vm()
+            except Exception as cleanup_error:
+                server.log_event('Managed reusable guests cleanup FAILED: ' + str(cleanup_error))
         with server.guest_start_lock:
             server.guest_start_state = 'failed'
             server.guest_start_error = str(error)
@@ -6271,42 +6333,107 @@ def _wait_for_app_guests(kind: str, *, timeout_seconds: float = 1800) -> None:
         time.sleep(1)
 
 
+def _runtime_watchdog_owner(env: dict[str, str]) -> Path:
+    return Path(env['COLIMA_HOME']) / 'CinterForgeTerminalLifetime.owner.json'
+
+
+def _live_runtime_watchdog(native_pid: int, env: dict[str, str]) -> bool:
+    """The same native owner keeps its watcher across `reboot server`."""
+    receipt = _runtime_watchdog_owner(env)
+    if receipt.is_symlink() or not receipt.is_file():
+        return False
+    try:
+        record = json.loads(receipt.read_text(encoding='utf-8'))
+        watcher_pid = record.get('watchdog_pid')
+        if record.get('native_pid') != native_pid or not isinstance(watcher_pid, int) or watcher_pid <= 1:
+            return False
+        os.kill(watcher_pid, 0)
+        return True
+    except (OSError, ValueError, TypeError, PermissionError):
+        return False
+
+
 def _start_runtime_watchdog(native_pid: int, logs: Path) -> None:
+    """Acquire the single t-profile lifetime before starting either guest.
+
+    Crash recovery from an earlier app might still be stopping its Colima VM
+    when the user relaunches. A pipe acknowledgment makes the new boot wait
+    for that older watcher, rather than racing and having its new guests
+    stopped by the old watchdog. This runs only in the boot worker thread.
+    """
     if native_pid <= 1:
+        raise RuntimeError('A native Terminal owner is required for managed guests')
+    # `reboot server` replaces only Python/HTTP while keeping the SAME native
+    # PID and already-running Colima. Its original independent watcher remains
+    # responsible; starting another would deadlock on the lifetime lock.
+    sdk = sdk_root()
+    if sdk is None:
+        raise RuntimeError('Unified DevTools disappeared before guest startup')
+    if _live_runtime_watchdog(native_pid, _env(sdk)):
         return
     script = Path(__file__).resolve(strict=True)
     logs.mkdir(parents=True, exist_ok=True)
-    stream = (logs / 'guest-lifetime-watchdog.log').open('a', encoding='utf-8')
+    read_fd, write_fd = os.pipe()
+    watcher = None
     try:
-        subprocess.Popen([sys.executable, '-B', str(script), '--runtime-watchdog', str(native_pid)],
-                         stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT,
-                         start_new_session=True, close_fds=True,
-                         env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+        with (logs / 'guest-lifetime-watchdog.log').open('a', encoding='utf-8') as stream:
+            watcher = subprocess.Popen(
+                [sys.executable, '-B', str(script), '--runtime-watchdog',
+                 str(native_pid), str(write_fd)],
+                stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT,
+                start_new_session=True, close_fds=True, pass_fds=(write_fd,),
+                env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+        os.close(write_fd)
+        write_fd = -1
+        # The old watchdog can still be completing a bounded Colima shutdown.
+        # Keep this wait out of the HTTP thread so Server Log remains usable.
+        ready, _, _ = select.select([read_fd], [], [], 300)
+        if not ready or os.read(read_fd, 1) != b'1':
+            raise RuntimeError('Managed guest watchdog did not acquire exclusive '
+                               'Colima lifetime; see guest-lifetime-watchdog.log')
     finally:
-        stream.close()
+        os.close(read_fd)
+        if write_fd != -1:
+            os.close(write_fd)
 
 
 def _runtime_watchdog_main(argv: list[str]) -> int:
-    """Detached app lifetime owner survives Python worker and Xcode Stop.
+    """Detached app lifetime owner; serializes sequential native owners.
 
-    The lock ensures server reboot never starts two competing cleanup agents.
-    Only the dedicated Terminal Colima profile can be stopped, and only once
-    the native PID disappears. Does not touch Setup or unrelated Docker VMs.
+    The exclusive lifetime lock is held while the native PID exists and until
+    its Colima cleanup completes. A new owner cannot start Colima before this
+    lock is released; the pipe signals that takeover is complete. The lock
+    protects only the dedicated t profile, never Setup's w/c or other VMs.
     """
-    if len(argv) != 1 or not argv[0].isdigit() or int(argv[0]) <= 1:
+    if (len(argv) not in (1, 2) or not argv[0].isdigit() or
+            int(argv[0]) <= 1 or (len(argv) == 2 and not argv[1].isdigit())):
         raise ValueError('Invalid native Terminal owner')
     native_pid = int(argv[0])
+    ready_fd = int(argv[1]) if len(argv) == 2 else None
     import fcntl as local_fcntl
     if sdk_root() is None or platform.system() != 'Darwin':
-        return 0
+        return 1 if ready_fd is not None else 0
     env = _env(sdk_root())
     lock_path = Path(env['COLIMA_HOME']) / 'CinterForgeTerminalLifetime.lock'
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     try:
+        # Blocking is deliberate. A previous crashing owner's cleanup *must*
+        # finish before the next owner starts this same profile.
+        local_fcntl.flock(fd, local_fcntl.LOCK_EX)
+        owner = _runtime_watchdog_owner(env)
+        pending = owner.with_name(owner.name + '.pending.' + str(os.getpid()))
+        if owner.is_symlink() or pending.is_symlink():
+            raise RuntimeError('Unsafe managed Terminal lifetime receipt')
         try:
-            local_fcntl.flock(fd, local_fcntl.LOCK_EX | local_fcntl.LOCK_NB)
-        except BlockingIOError:
-            return 0  # Previous owner watchdog remains responsible.
+            pending.write_text(json.dumps({'native_pid': native_pid,
+                                           'watchdog_pid': os.getpid()}), encoding='utf-8')
+            os.chmod(pending, 0o600)
+            os.replace(pending, owner)
+        finally:
+            pending.unlink(missing_ok=True)
+        if ready_fd is not None:
+            os.write(ready_fd, b'1')
+            os.close(ready_fd)
         while True:
             try:
                 os.kill(native_pid, 0)
@@ -6322,6 +6449,15 @@ def _runtime_watchdog_main(argv: list[str]) -> int:
             return 1
         return 0
     finally:
+        # Only our own acknowledged guardian may remove its receipt. Another
+        # app might already be launching once the lock is released.
+        owner = _runtime_watchdog_owner(env)
+        try:
+            record = json.loads(owner.read_text(encoding='utf-8'))
+            if record.get('watchdog_pid') == os.getpid() and record.get('native_pid') == native_pid:
+                owner.unlink(missing_ok=True)
+        except (OSError, ValueError, TypeError):
+            pass
         local_fcntl.flock(fd, local_fcntl.LOCK_UN)
         os.close(fd)
 
@@ -6456,7 +6592,12 @@ def boot_runtime_guests() -> dict:
 
 
 def stop_runtime_vm() -> None:
-    """App-owned cleanup, including Xcode Stop watchdog recovery."""
+    """Stop the app-owned VM on normal quit or watchdog-detected native exit.
+
+    If the host Docker context has broken, inspect the same t profile through
+    Colima SSH before deciding it is safe to stop. Never take down an unrelated
+    container just because the host socket failed during application exit.
+    """
     if platform.system() != 'Darwin':
         return
     sdk = sdk_root()
@@ -6466,18 +6607,43 @@ def stop_runtime_vm() -> None:
     colima = str(sdk / 'mac/env/bin/colima')
     docker = str(sdk / 'mac/env/bin/docker')
     with _managed_vm_lock(env):
+        status = subprocess.run([colima, 'status', PROFILE], env=env,
+                                check=False, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=25)
+        if status.returncode != 0:
+            return
         engine = _docker_call(docker, env, 'info', '--format', '{{.ServerVersion}}', timeout=20)
         if engine.returncode == 0:
             _stop_owned_guests_locked(docker, env)
             foreign = _docker_call(docker, env, 'ps', '--quiet', timeout=25)
             if foreign.returncode or foreign.stdout.strip():
                 raise RuntimeError('Leaving VM running: unowned Docker containers may be active')
-        status = subprocess.run([colima, 'status', PROFILE], env=env,
-                                check=False, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, timeout=25)
-        if status.returncode == 0:
-            _run_checked([colima, 'stop', PROFILE], env,
-                         title='Stopping app-owned guest VM', timeout=120)
+        else:
+            # A stale Docker context can coexist with a healthy daemon *inside*
+            # Colima. Use the named VM's SSH connection; never guess from an
+            # unavailable host socket that the VM has no running workloads.
+            listing = subprocess.run(
+                [colima, 'ssh', '--profile', PROFILE, '--', 'docker', 'ps',
+                 '--format', '{{.Names}}|{{.Label "io.cinterforge.terminal"}}'],
+                env=env, check=False, text=True, capture_output=True, timeout=35)
+            if listing.returncode:
+                raise RuntimeError('Cannot inspect the owned Colima Docker engine during shutdown; '
+                                   'refusing to stop potentially unrelated containers: ' +
+                                   (listing.stderr or listing.stdout).strip()[:240])
+            for row in listing.stdout.splitlines():
+                name, sep, owner = row.partition('|')
+                if not sep or name not in (_guest_name('linux'), _guest_name('win')) or owner != PROFILE:
+                    raise RuntimeError('Leaving VM running: unowned Docker container ' + name)
+            for row in listing.stdout.splitlines():
+                name = row.partition('|')[0]
+                removed = subprocess.run([colima, 'ssh', '--profile', PROFILE, '--',
+                                          'docker', 'rm', '-f', name], env=env, check=False,
+                                         text=True, capture_output=True, timeout=45)
+                if removed.returncode:
+                    raise RuntimeError('Cannot stop owned container ' + name +
+                                       ': ' + (removed.stderr or removed.stdout).strip()[:240])
+        _run_checked([colima, 'stop', PROFILE], env,
+                     title='Stopping app-owned guest VM', timeout=120)
 
 
 def reboot_runtime_guests(component: str) -> dict:

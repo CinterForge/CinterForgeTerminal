@@ -999,6 +999,22 @@ namespace cinterforge
                         response.find("\"requested\":true") != std::string::npos) {
                         window.dispatch([&window] { openNativeInspector(window); });
                     }
+                    // The HTTP server and Colima share this native owner's
+                    // lifetime. If the Python listener dies while the WebView
+                    // stays open, quit the app so normal cleanup and the
+                    // independent crash watchdog can release the VM as well.
+                    if (runtimeOwner) {
+                        // An attached second native window has no HTTP server
+                        // in *its* Python worker; only the owning window can
+                        // query this service's local health and shut it down.
+                        const auto health = host->call("service_health", "{}", std::chrono::seconds(3));
+                        if (health.find("\"alive\": true") == std::string::npos &&
+                            health.find("\"alive\":true") == std::string::npos) {
+                            std::cerr << "[CinterForgeTerminal] HTTP listener exited; terminating its native owner\n";
+                            window.dispatch([&window] { window.terminate(); });
+                            break;
+                        }
+                    }
                     // Reboot is a strictly atomic runtime lifecycle request:
                     // no build, Setup, Stage, Publish, ZIP or UnZIP. Prepare
                     // the replacement Python worker BEFORE dropping the live
@@ -1051,6 +1067,13 @@ namespace cinterforge
                     }
                 } catch (const std::exception& e) {
                     if (checking.load()) std::cerr << "[CinterForgeTerminal] inspector check: " << e.what() << '\n';
+                    if (checking.load() && !host->running()) {
+                        // A crashed service worker cannot accept a normal
+                        // shutdown RPC. Exit so the independent VM watchdog
+                        // handles the app-owned Colima profile.
+                        window.dispatch([&window] { window.terminate(); });
+                        break;
+                    }
                 }
                 for (int i = 0; i < 10 && checking.load(); ++i)
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));

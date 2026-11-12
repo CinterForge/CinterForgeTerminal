@@ -9,6 +9,8 @@ from contextlib import redirect_stdout
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from io import StringIO
+import hashlib
+import json
 from pathlib import Path
 import os
 import tempfile
@@ -177,7 +179,11 @@ class PublishChannelTests(unittest.TestCase):
             path.write_bytes(('fixture ' + name).encode('ascii'))
             self.files[name] = path
         self.report = {'schema': release.FOUR_SCHEMA, 'release': HOST_RELEASE,
-                       'artifacts': {target: {'filename': release.artifact_filename(target)}
+                       'artifacts': {target: {
+                           'filename': release.artifact_filename(target),
+                           'bytes': self.files[release.artifact_filename(target)].stat().st_size,
+                           'sha256': hashlib.sha256(
+                               self.files[release.artifact_filename(target)].read_bytes()).hexdigest()}
                                      for target in release.FOUR_TARGETS}}
 
     def test_canonical_channels_target_separate_buckets_and_prefixes(self):
@@ -236,6 +242,94 @@ class PublishChannelTests(unittest.TestCase):
         self.assertNotIn('Lagomorph-Quadra650.iso', result['files'])
         self.assertIn('/Distribution/beta/CinterForgeTerminal-mac.dmg', result['public_urls']['mac'])
 
+    def test_changed_linux_upload_does_not_reupload_or_download_unchanged_devtools(self):
+        from host.publishing import cloudflare_r2_sync as r2
+        previous = json.loads(json.dumps(self.report))
+        previous['artifacts']['linux']['sha256'] = '0' * 64
+        old_bytes = json.dumps(previous).encode('utf-8')
+        remote = {'four-artifacts.json': {'size': len(old_bytes), 'etag': 'old-manifest',
+                                         'last_modified': '2026-11-12T13:00:00Z'}}
+        for target in release.FOUR_TARGETS:
+            name = release.artifact_filename(target)
+            remote[name] = {'size': self.files[name].stat().st_size,
+                            'etag': 'old-multipart-etag-2',
+                            'last_modified': '2026-11-12T12:00:00Z'}
+        uploaded = []
+        downloads = []
+        def download(builds, version, cfg, dest, *, prefix, reuse_verified=None):
+            downloads.append(reuse_verified or {})
+            return self.report
+        with (mock.patch.object(release, '_distribution_files', return_value=(self.distribution, self.report, self.files)),
+              mock.patch.object(release, '_cloudflare_config', return_value={'bucket': 'cinterforge'}),
+              mock.patch.object(release, '_require_notarized_mac_release'),
+              mock.patch.object(r2, '_list_remote', return_value=remote),
+              mock.patch.object(r2, '_request', return_value=(200, {}, old_bytes)),
+              mock.patch.object(r2, '_put_file', side_effect=lambda cfg, key, file, **kw: uploaded.append(key)),
+              mock.patch.object(release, '_download_four_to', side_effect=download),
+              mock.patch.object(release, '_finalize_public_receipt', side_effect=lambda path, receipt, report, files: receipt)):
+            result = release._publish_four_archives(self.builds, release=HOST_RELEASE, channel='beta')
+        self.assertEqual([key.rsplit('/', 1)[-1] for key in uploaded],
+                         ['CinterForgeTerminal-linux.zip', 'four-artifacts.json'])
+        self.assertEqual(len(downloads), 1)
+        self.assertIn('CinterForgeTerminal-devtools.zip', downloads[0])
+        self.assertEqual(result['files']['CinterForgeTerminal-devtools.zip'],
+                         self.report['artifacts']['devtools']['sha256'])
+
+    def test_builder_fetches_tiny_manifest_to_skip_remote_devtools_zip(self):
+        from host.publishing import cloudflare_r2_sync as r2
+        entry = {'target': 'devtools', 'filename': 'CinterForgeTerminal-devtools.zip',
+                 'sha256': 'a' * 64, 'bytes': 123456, 'build_fingerprint': 'b' * 64}
+        with (mock.patch.object(release, '_cloudflare_config', return_value={'bucket': 'cinterforge'}),
+              mock.patch.object(r2, '_list_remote', return_value={}),
+              mock.patch.object(release, '_remote_manifest_reusable', return_value={entry['filename']: entry}),
+              mock.patch('host.unpacked_release._load', return_value={
+                  'targets': {'devtools': {'fingerprint': 'b' * 64}}}),
+              mock.patch.object(release, 'prepare_publish_packages') as packaging,
+              mock.patch.object(release, '_publish_four_archives', return_value={'channel': 'beta'})):
+            release.publish_four(self.builds, release=HOST_RELEASE, channel='beta')
+        packaging.assert_called_once_with(self.builds, release=HOST_RELEASE,
+                                          notarize=True, reuse_remote_devtools=entry)
+
+    def test_remote_sdk_modified_after_manifest_is_not_reused(self):
+        from host.publishing import cloudflare_r2_sync as r2
+        prior = json.dumps(self.report).encode('utf-8')
+        remote = {'four-artifacts.json': {'size': len(prior),
+                                         'last_modified': '2026-11-12T12:00:00Z'}}
+        for target in release.FOUR_TARGETS:
+            name = release.artifact_filename(target)
+            remote[name] = {'size': self.files[name].stat().st_size,
+                            'last_modified': '2026-11-12T11:00:00Z'}
+        remote['CinterForgeTerminal-devtools.zip']['last_modified'] = '2026-11-12T13:00:00Z'
+        with mock.patch.object(r2, '_request', return_value=(200, {}, prior)):
+            verified = release._remote_manifest_reusable({'bucket': 'cinterforge'},
+                     'CinterForgeTerminal/Distribution/beta', remote, HOST_RELEASE)
+        self.assertNotIn('CinterForgeTerminal-devtools.zip', verified)
+
+    def test_download_skips_previously_verified_sdk_archive(self):
+        from host.publishing import cloudflare_r2_sync as r2
+        manifest = json.dumps(self.report).encode('utf-8')
+        remote = {'four-artifacts.json': {'size': len(manifest)}}
+        remote.update({name: {'size': path.stat().st_size} for name, path in self.files.items()
+                       if name != 'four-artifacts.json'})
+        downloads = []
+        def fetch(config, key, dest, *, expected_size):
+            name = key.rsplit('/', 1)[-1]
+            downloads.append(name)
+            dest.write_bytes(manifest if name == 'four-artifacts.json' else self.files[name].read_bytes())
+        sdk = release.artifact_filename('devtools')
+        with (mock.patch.object(r2, '_list_remote', return_value=remote),
+              mock.patch.object(r2, '_get_file', side_effect=fetch),
+              mock.patch.object(release, '_verify_release_zip'),
+              mock.patch.object(release, '_replace_generated_output', side_effect=lambda src,dst,builds: src.replace(dst))):
+            result = release._download_four_to(
+                self.builds, HOST_RELEASE, {'bucket': 'cinterforge'},
+                self.builds / 'CinterForgeTerminal/Publish/TestDestination',
+                prefix='CinterForgeTerminal/Distribution/beta',
+                reuse_verified={sdk: self.report['artifacts']['devtools']['sha256']})
+        self.assertEqual(result, self.report)
+        self.assertNotIn(sdk, downloads)
+        self.assertIn(release.artifact_filename('linux'), downloads)
+
     def test_publish_command_defaults_to_dryrun_and_updates_readme_only_for_release(self):
         cli = load_cinter()
         root = self.builds.parent
@@ -256,7 +350,7 @@ class PublishChannelTests(unittest.TestCase):
         with (mock.patch.object(release, 'prepare_publish_packages') as packaging,
               mock.patch.object(release, '_publish_four_archives', return_value={'channel': 'dryrun'}) as upload):
             self.assertEqual(release.publish_four(self.builds, channel='dryrun')['channel'], 'dryrun')
-        packaging.assert_called_once_with(self.builds, release=HOST_RELEASE, notarize=False)
+        packaging.assert_called_once_with(self.builds, release=HOST_RELEASE, notarize=False, reuse_remote_devtools=None)
         upload.assert_called_once_with(self.builds, release=HOST_RELEASE, config=None, channel='dryrun')
 
     def test_combined_lifecycle_never_uploads_without_named_channel(self):

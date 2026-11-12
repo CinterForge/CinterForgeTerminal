@@ -503,13 +503,15 @@ def _list_remote(cfg: dict, prefix: str) -> dict[str, dict]:
             key_el = contents.find(f"{ns}Key")
             size_el = contents.find(f"{ns}Size")
             etag_el = contents.find(f"{ns}ETag")
+            modified_el = contents.find(f"{ns}LastModified")
             if key_el is None or not key_el.text:
                 continue
             key = key_el.text
             if key.endswith("/"):
                 continue
             rel = key[len(prefix):] if key.startswith(prefix) else key
-            out[rel] = {"key": key, "size": int(size_el.text or "0") if size_el is not None else 0, "etag": (etag_el.text or "").strip('"') if etag_el is not None else ""}
+            out[rel] = {"key": key, "size": int(size_el.text or "0") if size_el is not None else 0, "etag": (etag_el.text or "").strip('"') if etag_el is not None else "",
+                        "last_modified": (modified_el.text or "") if modified_el is not None else ""}
         trunc_el = root.find(f"{ns}IsTruncated")
         if trunc_el is None or (trunc_el.text or "").lower() != "true":
             break

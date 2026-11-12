@@ -601,6 +601,82 @@ class FourArtifactSteamReleaseTests(unittest.TestCase):
             second = universal.prepare_publish_packages(self.builds, release=self.release)
         self.assertEqual(first, second)
 
+    def test_unchanged_devtools_package_skips_rehash_and_recompression(self):
+        self.built()
+        from host import unpacked_release
+        first = universal.prepare_publish_packages(self.builds, release=self.release)
+        devtools_path = self.builds / 'CinterForgeTerminal/Distribution/CinterForgeTerminal-devtools.zip'
+        real_sha = unpacked_release._sha
+        def fail_sdk_hash(path):
+            if Path(path) == devtools_path:
+                raise AssertionError('Rehashed multi-GB SDK')
+            return real_sha(path)
+        with (mock.patch.object(unpacked_release, '_sha', side_effect=fail_sdk_hash),
+              mock.patch.object(universal, '_write_release_zip', side_effect=AssertionError('recompressed'))):
+            second = universal.prepare_publish_packages(self.builds, release=self.release)
+        self.assertEqual(first, second)
+        real_archive_hash = universal._hash
+        def fail_archive_hash(path, *args, **kwargs):
+            if Path(path) == devtools_path:
+                raise AssertionError('Rehashed multi-GB SDK during manifest validation')
+            return real_archive_hash(path, *args, **kwargs)
+        with mock.patch.object(universal, '_hash', side_effect=fail_archive_hash):
+            universal._distribution_files(self.builds, self.release)
+
+    def test_new_builder_reuses_remote_sdk_without_creating_zip(self):
+        self.built()
+        first = universal.prepare_publish_packages(self.builds, release=self.release)
+        devtools = first['artifacts']['devtools']
+        path = self.builds / 'CinterForgeTerminal/Distribution/CinterForgeTerminal-devtools.zip'
+        path.unlink()  # A fresh BUILDER has only its canonical unpacked inputs.
+        from host import unpacked_release
+        real_writer = universal._write_release_zip
+        def no_sdk_zip(output, inputs, **kwargs):
+            if kwargs.get('target') == 'devtools':
+                raise AssertionError('Recompressed unchanged remotely published DevTools')
+            return real_writer(output, inputs, **kwargs)
+        with mock.patch.object(universal, '_write_release_zip', side_effect=no_sdk_zip):
+            result = universal.prepare_publish_packages(
+                self.builds, release=self.release, reuse_remote_devtools=devtools)
+        self.assertTrue(result['artifacts']['devtools']['remote_only'])
+        self.assertFalse(path.exists())
+        _, report, files = universal._distribution_files(self.builds, self.release)
+        self.assertIn('devtools', report['artifacts'])
+        self.assertNotIn('CinterForgeTerminal-devtools.zip', files)
+
+    def test_publish_remote_only_devtools_end_to_end_without_sdk_transfer(self):
+        self.built()
+        original = universal.prepare_publish_packages(self.builds, release=self.release)
+        old_manifest = (self.builds / 'CinterForgeTerminal/Distribution/four-artifacts.json').read_bytes()
+        sdk = 'CinterForgeTerminal-devtools.zip'
+        (self.builds / 'CinterForgeTerminal/Distribution' / sdk).unlink()
+        remote = {'four-artifacts.json': {'size': len(old_manifest), 'etag': 'manifest-old',
+                                         'last_modified': '2026-11-12T13:00:00Z'}}
+        for target in universal.FOUR_TARGETS:
+            item = original['artifacts'][target]
+            remote[item['filename']] = {'size': item['bytes'], 'etag': 'multipart-etag-5',
+                                         'last_modified': '2026-11-12T12:00:00Z'}
+        sent = []
+        downloads = []
+        from host.publishing import cloudflare_r2_sync as r2
+        def download(builds, release, cfg, dest, *, prefix, reuse_verified=None):
+            downloads.append(dict(reuse_verified or {}))
+            return json.loads((self.builds / 'CinterForgeTerminal/Distribution/four-artifacts.json').read_text())
+        with (mock.patch.object(universal, '_cloudflare_config', return_value={'bucket': 'cinterforge'}),
+              mock.patch.object(universal, '_require_notarized_mac_release'),
+              mock.patch.object(universal, '_finalize_public_receipt', side_effect=lambda *args: args[1]),
+              mock.patch.object(universal, '_download_four_to', side_effect=download),
+              mock.patch.object(r2, '_list_remote', return_value=remote),
+              mock.patch.object(r2, '_request', return_value=(200, {}, old_manifest)),
+              mock.patch.object(r2, '_put_file', side_effect=lambda cfg,key,path,**kw: sent.append(key)),
+              mock.patch.object(universal, '_write_release_zip', side_effect=AssertionError('SDK or other ZIP recompressed'))):
+            receipt = universal.publish_four(self.builds, release=self.release, channel='beta')
+        self.assertEqual([key.rsplit('/', 1)[-1] for key in sent], ['four-artifacts.json'])
+        self.assertFalse((self.builds / 'CinterForgeTerminal/Distribution' / sdk).exists())
+        self.assertEqual(len(downloads), 1)
+        self.assertIn(sdk, downloads[0])
+        self.assertEqual(receipt['files'][sdk], original['artifacts']['devtools']['sha256'])
+
     def test_public_dmg_repackages_unnotarized_dev_dmg(self):
         self.built()
         original = universal.prepare_publish_packages(self.builds, release=self.release)

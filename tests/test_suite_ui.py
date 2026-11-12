@@ -675,7 +675,7 @@ class AppOwnedGuestWarmupTests(unittest.TestCase):
         server=SimpleNamespace(guest_start_lock=threading.Lock(),
                                guest_start_state='not-installed', guest_start_error='',
                                native_parent_pid=1234, mutable_builds=Path('/test/Builds'),
-                               log_event=logs.append)
+                               _stopping=False, log_event=logs.append)
         return server, logs
 
     def test_launch_boot_scheduled_once_and_both_guests_mark_ready(self):
@@ -688,7 +688,9 @@ class AppOwnedGuestWarmupTests(unittest.TestCase):
             self.assertEqual(self.app._schedule_guest_boot(server)['state'],'starting')
             thread.assert_called_once()
             thread.return_value.start.assert_called_once()
-        with mock.patch.object(self.app,'boot_runtime_guests',return_value={
+        with mock.patch.object(self.app,'_start_runtime_watchdog'), \
+             mock.patch.object(self.app,'_runtime_logs_root',return_value=Path('/logs')), \
+             mock.patch.object(self.app,'boot_runtime_guests',return_value={
                 'installed':True,'guests':['linux','win']}) as boot:
             self.app._boot_guests_logged(server)
         boot.assert_called_once()
@@ -707,7 +709,9 @@ class AppOwnedGuestWarmupTests(unittest.TestCase):
     def test_failed_warmup_is_reported_not_retried_by_opening_tab(self):
         server,_=self.server()
         server.guest_start_state='starting'
-        with mock.patch.object(self.app,'boot_runtime_guests',side_effect=RuntimeError('Colima mount failed')) as boot:
+        with mock.patch.object(self.app,'_start_runtime_watchdog'), \
+             mock.patch.object(self.app,'_runtime_logs_root',return_value=Path('/logs')), \
+             mock.patch.object(self.app,'boot_runtime_guests',side_effect=RuntimeError('Colima mount failed')) as boot:
             self.app._boot_guests_logged(server)
         boot.assert_called_once()
         self.assertEqual(self.app._guest_boot_snapshot(server)['state'],'failed')

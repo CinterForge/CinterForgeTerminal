@@ -1782,13 +1782,30 @@ def _distribution_files(builds: Path, release: str) -> tuple[Path, dict, dict[st
         if not isinstance(name, str) or name != artifact_filename(target):
             raise RuntimeError('Unsafe release package name for ' + target)
         path = root / name
+        if target == 'devtools' and entry.get('remote_only') is True:
+            # This artifact was already verified against the authenticated R2
+            # manifest and the Build inventory. Local ZIP is deliberately absent.
+            if (not isinstance(entry.get('sha256'), str) or
+                    len(entry['sha256']) != 64 or
+                    not isinstance(entry.get('bytes'), int) or entry['bytes'] <= 0):
+                raise RuntimeError('Invalid remote-reused DevTools archive receipt')
+            continue
         if path.is_symlink() or not path.is_file() or path.stat().st_size != entry.get('bytes'):
             raise RuntimeError('Missing or changed release package: ' + str(path))
-        if _hash(path) != entry.get('sha256'):
+        # DevTools was SHA-verified when Publish built it. The same content
+        # Build fingerprint plus the exact archive stat identity lets repeat
+        # publishes avoid another 3+ GiB hash pass. A changed stat falls back
+        # to the full SHA check and refuses changed bytes.
+        cached_sdk = (target == 'devtools' and
+                      entry.get('archive_identity') == _release_archive_identity(path))
+        if not cached_sdk and _hash(path) != entry.get('sha256'):
             raise RuntimeError('Release package checksum mismatch: ' + str(path))
-        if target == 'mac' and __import__('sys').platform == 'darwin':
-            from host.mac_dmg import verify_dmg
-            verify_dmg(path, builds, app_name=APP_ROOTS['mac'])
+        if target == 'mac':
+            # DMGs are never ZIP files. Non-mac hosts verify SHA/size here;
+            # native macOS additionally mounts and validates the disk image.
+            if __import__('sys').platform == 'darwin':
+                from host.mac_dmg import verify_dmg
+                verify_dmg(path, builds, app_name=APP_ROOTS['mac'])
         else:
             _verify_release_zip(path, target=target, release=release, hash_files=False)
         files[name] = path
@@ -1796,7 +1813,8 @@ def _distribution_files(builds: Path, release: str) -> tuple[Path, dict, dict[st
 
 
 def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path,
-                      *, prefix: str = CLOUDFLARE_OBJECT_ROOT) -> dict:
+                      *, prefix: str = CLOUDFLARE_OBJECT_ROOT,
+                      reuse_verified: dict[str, str] | None = None) -> dict:
     """R2 -> Builds with SHA checks and no partial/invalid live distribution."""
     from host.publishing import cloudflare_r2_sync as r2
     parent = builds.resolve() / 'Intermediates/CinterForgeTerminal/CloudflareDownloads'
@@ -1822,6 +1840,10 @@ def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path,
         name = artifact_filename(target)
         if entry.get('filename') != name or int(entry.get('bytes', -1)) != int(remote[name]['size']):
             raise RuntimeError('Cloudflare package manifest/object size mismatch: ' + target)
+        if reuse_verified and reuse_verified.get(name) == entry.get('sha256'):
+            print(f'[TERMINAL PUBLISH] {target} unchanged; reusing prior '
+                  'R2 SHA-256 verification (0 bytes downloaded)', flush=True)
+            continue
         print(f'[TERMINAL PUBLISH] download {target} ({index}/4) '
               f'{entry["bytes"] / 1048576:.1f} MiB', flush=True)
         result = staged / name
@@ -1831,9 +1853,10 @@ def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path,
         r2._get_file(cfg, f'{prefix}/{name}', result, expected_size=entry['bytes'])
         if _hash(result, progress_label=f'Cloudflare verify {target}') != entry.get('sha256'):
             raise RuntimeError('Cloudflare package round-trip checksum mismatch: ' + name)
-        if target == 'mac' and __import__('sys').platform == 'darwin':
-            from host.mac_dmg import verify_dmg
-            verify_dmg(result, builds, app_name=APP_ROOTS['mac'])
+        if target == 'mac':
+            if __import__('sys').platform == 'darwin':
+                from host.mac_dmg import verify_dmg
+                verify_dmg(result, builds, app_name=APP_ROOTS['mac'])
         else:
             _verify_release_zip(result, target=target, release=release, hash_files=False)
         print(f'[TERMINAL PUBLISH] verified {target} round-trip SHA-256', flush=True)
@@ -1842,6 +1865,8 @@ def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path,
     destination.mkdir(parents=True, exist_ok=True)
     # Update managed distribution files, keep unrelated artifacts untouched.
     for name in sorted(expected_names):
+        if reuse_verified and name in reuse_verified and name != 'four-artifacts.json':
+            continue
         _replace_generated_output(staged / name, destination / name, builds)
     return record
 
@@ -2126,7 +2151,8 @@ def _verify_public_urls(urls: dict[str, str], report: dict, files: dict[str, Pat
     for label, url in urls.items():
         name = ('four-artifacts.json' if label == 'manifest' else
                 LAGOMORPH_PUBLIC_NAME if label == 'lagomorph' else report['artifacts'][label]['filename'])
-        expected_size = files[name].stat().st_size
+        expected_size = (files[name].stat().st_size if name in files else
+                         int(report['artifacts'][label]['bytes']))
         for attempt in range(len(retry_delays) + 1):
             try:
                 _public_http_attempt(label, url, expected_size,
@@ -2154,30 +2180,82 @@ def _write_publish_receipt(path: Path, receipt: dict) -> None:
     temporary.replace(path)
 
 
-def _verified_r2_cache(previous: dict, files: dict[str, Path],
-                       remote: dict, cfg: dict, prefix: str, downloaded: Path) -> bool:
-    """Reuse prior fully SHA-checked R2 round-trip, including pre-fix cache.
-
-    A retry after an HTTP 403 must not re-upload (or re-download) a 3.6 GiB
-    archive. A previous receipt or a complete, matching round-trip download
-    establishes the bytes. R2 must still list every expected object at its
-    unchanged size. Never reuse a cache for changed source bytes.
-    """
-    if any(name not in remote or int(remote[name].get('size', -1)) != source.stat().st_size
-           for name, source in files.items()):
+def _unchanged_r2_object(remote: dict, previous_etag: str,
+                         verified_receipt_mtime: float) -> bool:
+    """Reject an overwritten remote object even when its size is unchanged."""
+    if previous_etag:
+        return previous_etag == remote.get('etag')
+    # Migration from publisher receipts that predate ETag tracking: the R2
+    # object's timestamp must precede the completed SHA-verified receipt.
+    from datetime import datetime
+    try:
+        modified = datetime.fromisoformat(remote['last_modified'].replace('Z', '+00:00'))
+        return verified_receipt_mtime > 0 and modified.timestamp() < verified_receipt_mtime
+    except (KeyError, TypeError, ValueError):
         return False
-    if (previous.get('bucket') == cfg['bucket'] and previous.get('prefix') == prefix and
-            previous.get('roundtrip') == 'sha256-verified' and
-            previous.get('files') == {name: _hash(path) for name, path in files.items()}):
-        return True
-    # Older publisher versions verified the R2 downloads but lost their receipt
-    # when the final public GET failed. They left their verified downloads here.
+
+
+def _verified_r2_cache(previous: dict, files: dict[str, Path],
+                       remote: dict, cfg: dict, prefix: str,
+                       expected_sha: dict[str, str],
+                       verified_receipt_mtime: float) -> bool:
+    """Fast complete-release cache check using the SHA-verified receipt.
+
+    Never rehash or download a multi-gigabyte ZIP just to decide if Publish
+    needs to run. The archive digest comes from the validated local package
+    manifest and the prior authenticated round-trip receipt.
+    """
+    if (previous.get('bucket') != cfg['bucket'] or previous.get('prefix') != prefix or
+            previous.get('roundtrip') != 'sha256-verified' or
+            previous.get('files') != expected_sha):
+        return False
     for name, source in files.items():
-        cached = downloaded / name
-        if (not cached.is_file() or cached.is_symlink() or
-                cached.stat().st_size != source.stat().st_size or _hash(cached) != _hash(source)):
+        item = remote.get(name, {})
+        if int(item.get('size', -1)) != source.stat().st_size:
+            return False
+        prior_etag = previous.get('remote_etags', {}).get(name, '')
+        if not _unchanged_r2_object(item, prior_etag, verified_receipt_mtime):
             return False
     return True
+
+
+def _remote_manifest_reusable(cfg: dict, prefix: str, remote: dict,
+                              release: str) -> dict:
+    """Read the tiny authenticated manifest instead of downloading SDK ZIPs.
+
+    Our publisher uploads the manifest LAST. An unchanged existing object is
+    reusable only if its size matches the manifest and its R2 LastModified is
+    no later than the manifest's. This also works on a new BUILDER without a
+    local channel receipt. Missing/ambiguous metadata is never a cache hit.
+    """
+    from datetime import datetime
+    from host.publishing import cloudflare_r2_sync as r2
+
+    descriptor = remote.get('four-artifacts.json', {})
+    if not (0 < int(descriptor.get('size', -1)) <= 1024 * 1024):
+        return {}
+    try:
+        timestamp = datetime.fromisoformat(descriptor['last_modified'].replace('Z', '+00:00'))
+        _, _, payload = r2._request(cfg, 'GET', key=f'{prefix}/four-artifacts.json')
+        if len(payload) != int(descriptor['size']):
+            return {}
+        record = json.loads(payload)
+        if (record.get('schema') != FOUR_SCHEMA or record.get('release') != release or
+                set(record.get('artifacts', {})) != set(FOUR_TARGETS)):
+            return {}
+        reusable = {}
+        for target, item in record['artifacts'].items():
+            name = artifact_filename(target)
+            entry = remote.get(name, {})
+            modified = datetime.fromisoformat(entry['last_modified'].replace('Z', '+00:00'))
+            if (item.get('filename') == name and
+                    int(item.get('bytes', -1)) == int(entry.get('size', -2)) and
+                    isinstance(item.get('sha256'), str) and len(item['sha256']) == 64 and
+                    modified < timestamp):
+                reusable[name] = item.copy()
+        return reusable
+    except (OSError, KeyError, TypeError, ValueError, RuntimeError):
+        return {}
 
 
 def _finalize_public_receipt(receipt_path: Path, receipt: dict, report: dict,
@@ -2236,9 +2314,16 @@ def verify_public_four(builds: Path, *, release: str = HOST_RELEASE,
     for target, item in entries.items():
         name = artifact_filename(target)
         path = root / name
-        if (item.get('filename') != name or not path.is_file() or path.is_symlink() or
-                path.stat().st_size != item.get('bytes') or
+        if (item.get('filename') != name or
                 receipt.get('files', {}).get(name) != item.get('sha256')):
+            raise RuntimeError('Release package does not match verified R2 receipt: ' + name)
+        if target == 'devtools' and item.get('remote_only') is True:
+            # The authenticated R2 receipt already verified this package;
+            # retry public HTTP without downloading or rebuilding the SDK.
+            if not isinstance(item.get('bytes'), int) or item['bytes'] <= 0:
+                raise RuntimeError('Invalid DevTools remote reuse receipt')
+            continue
+        if not path.is_file() or path.is_symlink() or path.stat().st_size != item.get('bytes'):
             raise RuntimeError('Local package does not match verified R2 receipt: ' + name)
         files[name] = path
     if channel == 'public':
@@ -2324,11 +2409,50 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
         previous = json.loads(previous_receipt.read_text())
     except (OSError, ValueError):
         previous = {}
+    previous_receipt_mtime = (previous_receipt.stat().st_mtime
+                              if previous_receipt.is_file() else 0.0)
     downloaded = builds / 'CinterForgeTerminal/Publish/Downloaded' / channel / release
     remote_sources = dict(remote)
     if channel in ('public', 'release'):
         remote_sources[LAGOMORPH_PUBLIC_NAME] = media_remote.get(LAGOMORPH_PUBLIC_NAME, {})
-    reusable = _verified_r2_cache(previous, files, remote_sources, cfg, prefix, downloaded)
+    expected_sha = {'four-artifacts.json': _hash(files['four-artifacts.json'])}
+    expected_sha.update({item['filename']: item['sha256']
+                         for item in report['artifacts'].values()})
+    if LAGOMORPH_PUBLIC_NAME in files:
+        expected_sha[LAGOMORPH_PUBLIC_NAME] = _hash(files[LAGOMORPH_PUBLIC_NAME])
+    # Authenticate the prior small manifest; even a fresh BUILDER can then
+    # reuse large published objects when content and R2 timestamps agree.
+    remote_manifest_sha = _remote_manifest_reusable(cfg, prefix, remote, release)
+    reuse_verified = {}
+    for name, source_file in files.items():
+        size = source_file.stat().st_size
+        item = remote_sources.get(name, {})
+        if int(item.get('size', -1)) != size:
+            continue
+        receipt_matches = (previous.get('bucket') == cfg['bucket'] and
+                           previous.get('prefix') == prefix and
+                           previous.get('roundtrip') == 'sha256-verified' and
+                           previous.get('files', {}).get(name) == expected_sha[name] and
+                           _unchanged_r2_object(
+                               item, previous.get('remote_etags', {}).get(name, ''),
+                               previous_receipt_mtime))
+        manifest_matches = (name != LAGOMORPH_PUBLIC_NAME and
+                            remote_manifest_sha.get(name, {}).get('sha256') == expected_sha[name])
+        if receipt_matches or manifest_matches:
+            reuse_verified[name] = expected_sha[name]
+    devtools_info = report['artifacts']['devtools']
+    devtools_name = artifact_filename('devtools')
+    if devtools_info.get('remote_only') is True:
+        obj = remote.get(devtools_name, {})
+        if (remote_manifest_sha.get(devtools_name, {}).get('sha256') !=
+                devtools_info['sha256'] or
+                int(obj.get('size', -1)) != devtools_info['bytes']):
+            raise RuntimeError('Previously published DevTools changed in R2; '
+                               'cannot safely reuse the remote ZIP')
+        reuse_verified[devtools_name] = devtools_info['sha256']
+    reusable = (devtools_name in files and
+                _verified_r2_cache(previous, files, remote_sources, cfg, prefix,
+                                   expected_sha, previous_receipt_mtime))
     if reusable:
         print('[TERMINAL PUBLISH] unchanged release has an authenticated SHA-256 R2 '
               'round-trip; skipping all uploads/downloads', flush=True)
@@ -2346,12 +2470,13 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
                              else remote)
             size = source_file.stat().st_size
             md5 = str(object_remote.get(name, {}).get('etag', '')).strip('"').lower()
-            prior_sha = previous.get('files', {}).get(name)
-            same_verified = (previous.get('bucket') == cfg['bucket'] and
-                             previous.get('prefix') == prefix and prior_sha == _hash(source_file) and
-                             int(object_remote.get(name, {}).get('size', -1)) == size)
-            same_md5 = (len(md5) == 32 and all(ch in '0123456789abcdef' for ch in md5)
-                        and r2._md5_file(source_file) == md5)
+            same_verified = name in reuse_verified
+            # A 32-character ETag is the single-PUT object MD5; multipart
+            # DevTools ETags are NOT an MD5 and must never trigger a 3+ GiB
+            # local MD5 pass or an unnecessary replacement upload.
+            same_md5 = (not same_verified and len(md5) == 32 and
+                        all(ch in '0123456789abcdef' for ch in md5) and
+                        r2._md5_file(source_file) == md5)
             if not same_verified and not same_md5:
                 print(f'[TERMINAL PUBLISH] upload {index}/{len(files)} {name} '
                       f'{size / 1048576:.1f} MiB', flush=True)
@@ -2362,15 +2487,28 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
             uploaded += size
             _progress('Cloudflare upload accounted', uploaded, total_bytes)
         # R2 round-trip SHA-256 must complete before recording a reusable receipt.
-        verified = _download_four_to(builds, release, cfg, downloaded, prefix=prefix)
+        if reuse_verified:
+            verified = _download_four_to(builds, release, cfg, downloaded,
+                                         prefix=prefix, reuse_verified=reuse_verified)
+        else:
+            verified = _download_four_to(builds, release, cfg, downloaded, prefix=prefix)
         if verified != report:
             raise RuntimeError('Cloudflare round-trip release manifest differs')
         if channel in ('public', 'release'):
             _download_lagomorph_public(cfg, legacy_media_prefix, files[LAGOMORPH_PUBLIC_NAME], downloaded)
     public_urls = (_release_public_urls(release, include_lagomorph=channel in ('public', 'release'),
                                         prefix=prefix) if provider == 'public' else {})
+    # Remote ETags allow later runs to reject same-size overwrites without
+    # re-downloading unchanged SDK archives.
+    final_remote = r2._list_remote(cfg, prefix)
+    final_etags = {name: final_remote.get(name, {}).get('etag', '')
+                   for name in expected_sha if name != LAGOMORPH_PUBLIC_NAME}
+    if LAGOMORPH_PUBLIC_NAME in files:
+        final_etags[LAGOMORPH_PUBLIC_NAME] = r2._list_remote(cfg, legacy_media_prefix).get(
+            LAGOMORPH_PUBLIC_NAME, {}).get('etag', '')
     receipt = {'schema': FOUR_SCHEMA, 'release': release, 'channel': channel, 'bucket': cfg['bucket'],
-               'prefix': prefix, 'files': {name: _hash(path) for name, path in files.items()},
+               'prefix': prefix, 'files': expected_sha,
+               'remote_etags': final_etags,
                'roundtrip': 'sha256-verified', 'downloaded': str(downloaded),
                'public_urls': public_urls,
                'public_http': 'pending' if provider == 'public' else 'not-applicable'}
@@ -2496,9 +2634,27 @@ _publish_four_archives = publish_four
 
 def publish_four(builds: Path, *, release: str = HOST_RELEASE,
                  config: Path | None = None, channel: str = 'dryrun') -> dict:
-    """Publish alone packages the Mac DMG and three ZIPs from Build inventories."""
+    """Publish only changed packages, reusing R2 DevTools on fresh builders."""
+    remote_devtools = None
+    if channel not in ('dryrun',) and os.environ.get('CINTERFORGE_SETUP_DISABLE_UPLOADS') != '1':
+        from host.publishing import cloudflare_r2_sync as r2
+        _, prefix = _publish_destination(channel)
+        cfg = _cloudflare_config(config, channel=channel)
+        listing = r2._list_remote(cfg, prefix)
+        remote_entries = _remote_manifest_reusable(cfg, prefix, listing, release)
+        candidate = remote_entries.get(artifact_filename('devtools'), {})
+        if candidate:
+            # Content-based build fingerprint survives changing build machines,
+            # paths and mtimes. The remote object must also predate the manifest.
+            from host.unpacked_release import _load
+            devtools = _load(builds.resolve(), release)['targets']['devtools']
+            if (candidate.get('build_fingerprint') == devtools['fingerprint'] and
+                    candidate.get('target') == 'devtools' and
+                    candidate.get('filename') == artifact_filename('devtools')):
+                remote_devtools = candidate
     prepare_publish_packages(builds, release=release,
-                             notarize=channel not in ('dryrun', 'dev', 'internal'))
+                             notarize=channel not in ('dryrun', 'dev', 'internal'),
+                             reuse_remote_devtools=remote_devtools)
     return _publish_four_archives(builds, release=release, config=config, channel=channel)
 
 

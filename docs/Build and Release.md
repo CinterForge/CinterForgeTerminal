@@ -69,6 +69,18 @@ R2 content by SHA-256 after upload, and public channels additionally verify
 unsigned HTTP delivery. Use `./Cinter verify beta` or `./Cinter verify public`
 if public CDN propagation is delayed; these checks do not re-upload packages.
 
+For repeated publication, the verified local DevTools ZIP is reused using its
+Build content fingerprint and archive identity, without another multi-GB hash
+or recompression pass. When publishing from a different BUILDER without the
+local DevTools ZIP, explicit channels consult only the existing small R2
+manifest: a matching Build fingerprint, object size and R2 modification-order
+check allow the already published ZIP to be referenced directly, with **no
+local ZIP creation, SDK upload or SDK download**. When a Mac/Linux/Windows
+package changes, only changed packages are transferred and SHA-checked; the
+previously verified DevTools object remains untouched. Any SDK input change or
+insufficient remote verification makes Publish create and verify a new ZIP.
+Dryrun still prepares/verifies all four local artifacts and never uploads.
+
 The commands remain atomic: no implicit Build, Stage or Setup during Publish.
 For combined runs, `./Cinter all all publish` is **still dryrun**;
 `./Cinter all all publish beta` and `./Cinter all all publish release` are
@@ -184,6 +196,10 @@ Unchanged DevTools files are not copied again. Stage preserves unrelated files a
 The native app checks for installed DevTools on launch (and after installation). If available, it starts one dedicated managed Colima `t` profile and Docker engine, with exactly one persistent Linux guest and one persistent Windows Wine/MSYS2 guest. Every Terminal and Code-OSS session uses `docker exec` into the applicable guest with a separate PTY; tabs never create a new VM/container. The host filesystem and mounted volumes are made available inside guests, with macOS enforcing host permissions.
 
 The native owner cleans up its two guest containers, Colima and Python services when quitting. An independent process watches the native app to recover ownership after Xcode Stop or a crash. Unrelated containers and Setup's `w`/`c` VMs are never terminated. `reboot docker` restarts Docker and guests, `reboot colima` restarts Colima/Docker/guests, `reboot server` swaps the Python service and reloads the WebView, and `reboot app` relaunches already-built native binaries. Development `reboot server` reloads Python and authored web assets directly from the current repository without recompilation. Reboot never invokes Setup, Build, Stage, Test, Publish, ZIP or UnZIP.
+
+The `t` profile has **one writable macOS host-root virtiofs share**, mapped to `/host/mac` in the VM and both existing guest containers. This is not a folder allowlist: host paths, including `/Volumes/<disk name>` and paths containing spaces, retain their normal directory hierarchy. Do **not** add nested `/Volumes` or individual-drive shares on top of `/`: Lima rejects overlapping mount locations. Access continues to depend on the host's real filesystem permissions and on which mounted volumes Apple's virtualization layer actually exposes; Terminal never attempts to override those OS decisions. An old `t` profile with overlapping shares is migrated at next startup, after checking that no unrelated containers are active. If the host virtualization layer refuses an external volume, that limitation cannot be solved by changing a Terminal-side folder permission.
+
+A new native owner waits for the previous crash guardian to complete Colima cleanup before starting its guests. **`reboot server` keeps the same native app PID and reuses its existing guardian**, so a Python service reload cannot lock itself out or create another VM. If the native worker or HTTP listener dies unexpectedly, the native window closes and the guardian finishes cleanup. During shutdown, if the host Docker socket is unavailable, cleanup inspects the dedicated Colima profile over SSH before stopping it; uncertain or unrelated workloads produce an explicit failure rather than being killed blindly. No app-level restart triggers provisioning or any repository lifecycle phase.
 
 ## Test: observable application acceptance
 
