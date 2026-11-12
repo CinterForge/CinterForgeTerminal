@@ -74,7 +74,7 @@ class PublicReadmeDownloadTests(unittest.TestCase):
             self.path, verified_receipt(next_version)))
         updated = self.path.read_text()
         self.assertIn('Current public application archives (release `2026.12.1`)', updated)
-        self.assertIn('/Distribution/CinterForgeTerminal-mac.zip', updated)
+        self.assertIn('/Distribution/CinterForgeTerminal-mac.dmg', updated)
         self.assertIn('/Distribution/CinterForgeTerminal-devtools.zip', updated)
         self.assertEqual(updated.split(release.README_DOWNLOADS_END)[1],
                          prior.split(release.README_DOWNLOADS_END)[1])
@@ -158,6 +158,135 @@ class CinterPublicationReadmeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'HTTP 403'):
                 self.cli.main(['publish', 'public'])
         self.assertEqual((self.root / 'README.md').read_bytes(), original)
+
+
+class PublishChannelTests(unittest.TestCase):
+    """Read-only dryrun, isolated CDN routes, and explicit CLI publication."""
+
+    def setUp(self):
+        TEST_SCRATCH.mkdir(parents=True, exist_ok=True)
+        temp = tempfile.TemporaryDirectory(prefix='publish-channels-', dir=TEST_SCRATCH)
+        self.addCleanup(temp.cleanup)
+        self.builds = Path(temp.name) / 'Builds'
+        self.builds.mkdir()
+        self.distribution = self.builds / release.CLOUDFLARE_OBJECT_ROOT
+        self.distribution.mkdir(parents=True)
+        self.files = {}
+        for name in ('four-artifacts.json',) + tuple(release.artifact_filename(t) for t in release.FOUR_TARGETS):
+            path = self.distribution / name
+            path.write_bytes(('fixture ' + name).encode('ascii'))
+            self.files[name] = path
+        self.report = {'schema': release.FOUR_SCHEMA, 'release': HOST_RELEASE,
+                       'artifacts': {target: {'filename': release.artifact_filename(target)}
+                                     for target in release.FOUR_TARGETS}}
+
+    def test_canonical_channels_target_separate_buckets_and_prefixes(self):
+        self.assertEqual(release._publish_destination('internal'),
+                         ('dev', 'CinterForgeTerminal/Distribution'))
+        self.assertEqual(release._publish_destination('beta'),
+                         ('public', 'CinterForgeTerminal/Distribution/beta'))
+        self.assertEqual(release._publish_destination('release'),
+                         ('public', 'CinterForgeTerminal/Distribution'))
+        with self.assertRaisesRegex(ValueError, 'Unknown publishing channel'):
+            release._publish_destination('unknown')
+
+    def test_dryrun_checks_both_buckets_without_upload_or_download(self):
+        from host.publishing import cloudflare_r2_sync as r2
+        seen = []
+        def cfg(_config=None, *, channel='dev'):
+            return {'bucket': 'cdn-assets-dev' if channel == 'internal' else 'cinterforge'}
+        def inspect(config, prefix):
+            seen.append((config['bucket'], prefix))
+            return {}
+        with (mock.patch.object(release, '_distribution_files', return_value=(self.distribution, self.report, self.files)),
+              mock.patch.object(release, '_cloudflare_config', side_effect=cfg),
+              mock.patch.object(r2, '_list_remote', side_effect=inspect),
+              mock.patch.object(r2, '_put_file', side_effect=AssertionError('dryrun uploaded')),
+              mock.patch.object(r2, '_get_file', side_effect=AssertionError('dryrun downloaded')),
+              mock.patch.object(release, '_require_notarized_mac_release', side_effect=AssertionError('dryrun gated'))):
+            receipt = release._publish_four_archives(self.builds, release=HOST_RELEASE, channel='dryrun')
+        self.assertFalse(receipt['uploaded'])
+        self.assertEqual(seen, [('cdn-assets-dev', 'CinterForgeTerminal/Distribution'),
+                                ('cinterforge', 'CinterForgeTerminal/Distribution')])
+        self.assertFalse((self.builds / 'CinterForgeTerminal/Publish/Receipts').exists())
+
+    def test_beta_publishes_only_to_beta_prefix_and_never_adds_lagomorph(self):
+        from host.publishing import cloudflare_r2_sync as r2
+        keys = []
+        downloads = []
+        def listing(cfg, prefix):
+            return {}
+        def download(builds, version, cfg, dest, *, prefix):
+            downloads.append(prefix)
+            return self.report
+        with (mock.patch.object(release, '_distribution_files', return_value=(self.distribution, self.report, self.files)),
+              mock.patch.object(release, '_cloudflare_config', return_value={'bucket': 'cinterforge'}),
+              mock.patch.object(release, '_require_notarized_mac_release'),
+              mock.patch.object(release, '_lagomorph_public_disk', side_effect=AssertionError('beta touched media')),
+              mock.patch.object(r2, '_list_remote', side_effect=listing),
+              mock.patch.object(r2, '_put_file', side_effect=lambda cfg, key, file, **kw: keys.append(key)),
+              mock.patch.object(release, '_download_four_to', side_effect=download),
+              mock.patch.object(release, '_finalize_public_receipt', side_effect=lambda path, receipt, report, files: receipt)):
+            result = release._publish_four_archives(self.builds, release=HOST_RELEASE, channel='beta')
+        self.assertEqual(downloads, ['CinterForgeTerminal/Distribution/beta'])
+        self.assertEqual(result['channel'], 'beta')
+        self.assertEqual(result['prefix'], 'CinterForgeTerminal/Distribution/beta')
+        self.assertTrue(all(x.startswith('CinterForgeTerminal/Distribution/beta/') for x in keys))
+        self.assertEqual(keys[-1], 'CinterForgeTerminal/Distribution/beta/four-artifacts.json')
+        self.assertNotIn('Lagomorph-Quadra650.iso', result['files'])
+        self.assertIn('/Distribution/beta/CinterForgeTerminal-mac.dmg', result['public_urls']['mac'])
+
+    def test_publish_command_defaults_to_dryrun_and_updates_readme_only_for_release(self):
+        cli = load_cinter()
+        root = self.builds.parent
+        (root / 'README.md').write_text('# Temporary README\n')
+        with (mock.patch.object(cli, 'REPO', root),
+              mock.patch.object(cli, 'BUILDS', self.builds),
+              mock.patch.object(release, 'publish_four', return_value={
+                  'channel': 'dryrun', 'bucket': 'n/a', 'prefix': 'n/a', 'release': HOST_RELEASE,
+                  'connections': {}, 'uploaded': False}) as publish,
+              redirect_stdout(StringIO())):
+            self.assertEqual(cli.main(['publish']), 0)
+            self.assertEqual(cli.main(['publish', 'cfterminal']), 0)
+        self.assertEqual(publish.call_count, 2)
+        self.assertTrue(all(call.kwargs == {'channel': 'dryrun'} for call in publish.call_args_list))
+        self.assertEqual((root / 'README.md').read_text(), '# Temporary README\n')
+
+    def test_publish_wrapper_dryrun_never_requests_apple_notarization(self):
+        with (mock.patch.object(release, 'prepare_publish_packages') as packaging,
+              mock.patch.object(release, '_publish_four_archives', return_value={'channel': 'dryrun'}) as upload):
+            self.assertEqual(release.publish_four(self.builds, channel='dryrun')['channel'], 'dryrun')
+        packaging.assert_called_once_with(self.builds, release=HOST_RELEASE, notarize=False)
+        upload.assert_called_once_with(self.builds, release=HOST_RELEASE, config=None, channel='dryrun')
+
+    def test_combined_lifecycle_never_uploads_without_named_channel(self):
+        cli = load_cinter()
+        with (mock.patch.object(cli, 'invoke') as invoke,
+              redirect_stdout(StringIO())):
+            self.assertEqual(cli.main(['all', 'all', 'publish']), 0)
+        self.assertEqual(invoke.call_count, 5)
+        self.assertEqual(invoke.call_args_list[-1].args[-3:], ('publish', 'cfterminal', 'dryrun'))
+        with (mock.patch.object(cli, 'invoke') as invoke,
+              redirect_stdout(StringIO())):
+            self.assertEqual(cli.main(['all', 'all', 'publish', 'beta']), 0)
+        self.assertEqual(invoke.call_args_list[-1].args[-3:], ('publish', 'cfterminal', 'beta'))
+
+    def test_cli_beta_and_internal_never_update_production_readme(self):
+        cli = load_cinter()
+        root = self.builds.parent
+        (root / 'README.md').write_text('# Temporary README\n')
+        with (mock.patch.object(cli, 'REPO', root),
+              mock.patch.object(cli, 'BUILDS', self.builds),
+              mock.patch.object(release, 'publish_four', return_value={
+                  'channel': 'beta', 'bucket': 'cinterforge', 'prefix': 'CinterForgeTerminal/Distribution/beta'}) as publish,
+              redirect_stdout(StringIO())):
+            self.assertEqual(cli.main(['publish', 'cfterminal', 'beta']), 0)
+            self.assertEqual(cli.main(['publish', 'cfterminal', 'internal']), 0)
+            with self.assertRaisesRegex(ValueError, 'Usage'):
+                cli.main(['publish', 'cfterminal', 'unknown'])
+        self.assertEqual([call.kwargs['channel'] for call in publish.call_args_list], ['beta', 'dev'])
+        self.assertEqual((root / 'README.md').read_text(), '# Temporary README\n')
+
 
 
 if __name__ == '__main__':

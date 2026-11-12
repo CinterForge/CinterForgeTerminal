@@ -13,8 +13,8 @@ PUBLIC INTERFACES
 
 BUILD SAFETY
     Setup prepares pinned dependencies and runs real Bedrock acceptance.
-    Build produces the three native apps and unified optional DevTools ZIP.
-    Stage installs and checks archives; ``all all`` never publishes unless
+    Build produces three unpacked apps and unified optional DevTools inputs.
+    Stage installs and checks unpacked Build outputs; ``all all`` never publishes unless
     the user explicitly requests ``all all publish``.
     Child build tools, not this CLI, own their detailed platform implementations.
     Only the lifecycle that started managed VMs may stop them.
@@ -65,7 +65,7 @@ SOURCE_WORKSPACE_ROOT = REPO.parent
 LIFECYCLE_LOG_DIRECTORY = BUILDS / 'Logs' / 'CinterForgeTerminal' / 'Lifecycle'
 # Status is deliberately omitted: ./Cinter status all remains read-only.
 LOGGED_LIFECYCLE_ACTIONS = frozenset({
-    'setup', 'build', 'stage', 'test', 'all', 'publish', 'verify',
+    'setup', 'build', 'stage', 'test', 'all', 'publish', 'verify', 'reboot',
     'fetch', 'pull', 'toolchain', 'host', 'windows', 'install',
 })
 # The worker marker prevents a second wrapper for the exact same command.
@@ -310,6 +310,55 @@ def _temporary_build_services(argv: list[str]):
                         watcher.stdin.close()
                 watcher.wait(timeout=10)
 
+
+def _reboot_running_terminal(component: str) -> int:
+    """Private local command; native app owns the restart, never the CLI.
+
+    Reboot is not Build/Stage/Publish. It requires a proven running native
+    Terminal, not an arbitrary HTTP service claiming port 20300.
+    """
+    import time
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError, URLError
+    from webapp.CinterForgeTerminal import _existing_lan_owner, LAN_HTTP_PORT
+    if component not in ('server', 'docker', 'colima', 'app'):
+        raise ValueError('Usage: ./Cinter reboot server|docker|colima|app')
+    owner = _existing_lan_owner(BUILDS)
+    if owner is None:
+        raise RuntimeError('No verified running CinterForge Terminal native app to reboot')
+    origin = f'http://127.0.0.1:{LAN_HTTP_PORT}'
+    data = json.dumps({'component': component}).encode()
+    req = Request(origin + '/api/lifecycle/reboot', data=data, method='POST',
+                  headers={'X-Cinter-Owner': owner['native_grant'],
+                           'Content-Type': 'application/json'})
+    try:
+        with urlopen(req, timeout=1200 if component in ('docker', 'colima') else 15) as response:
+            result = json.loads(response.read(4096))
+    except HTTPError as error:
+        try:
+            message = json.loads(error.read(4096)).get('error', error.reason)
+        except (ValueError, TypeError):
+            message = error.reason
+        raise RuntimeError('Reboot rejected: ' + str(message)) from error
+    except URLError as error:
+        raise RuntimeError('Native Terminal reboot service unavailable: ' + str(error.reason)) from error
+    if component in ('docker', 'colima'):
+        if not result.get('ready'):
+            raise RuntimeError('Managed ' + component + ' reboot did not confirm guest readiness')
+        print('[Cinter reboot] ' + component + ' ready; Linux and Windows guests reused', flush=True)
+        return 0
+    if result.get('accepted') != component:
+        raise RuntimeError('Native Terminal rejected ' + component + ' reboot')
+    print('[Cinter reboot] ' + component + ' restart accepted; awaiting native readiness', flush=True)
+    for _ in range(120):
+        time.sleep(1)
+        next_owner = _existing_lan_owner(BUILDS)
+        if next_owner is not None and next_owner.get('instance') != owner.get('instance'):
+            print('[Cinter reboot] ' + component + ' PASS: new Terminal listener ready', flush=True)
+            return 0
+    raise RuntimeError('Native ' + component + ' restart was requested but readiness not confirmed')
+
+
 def main(argv: list[str]) -> int:
     """Dispatch the supported developer/user commands; returns a process exit code.
 
@@ -317,6 +366,10 @@ def main(argv: list[str]) -> int:
     its application/channel rather than inferring targets or publishing in
     response to a general Setup/Build/Stage action.
     """
+    if argv and argv[0] == 'reboot':
+        if len(argv) != 2:
+            raise ValueError('Usage: ./Cinter reboot server|docker|colima|app')
+        return _reboot_running_terminal(argv[1])
     if argv and argv[0] in ('clone', 'fork'):
         return _source_repository_main(argv)
     # Legacy native Host lifecycle was formerly exposed as ./CPH.
@@ -332,11 +385,16 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) == 3 and argv[:2] == ['linuxkit', 'build']:
         raise ValueError('Use ./Cinter setup all (no per-platform lifecycle stages)')
-    if argv == ['setup', 'all']:
+    if argv in (['setup', 'all'], ['setup', 'cfterminal', 'all']):
         # Setup owns preflight diagnostics: prepare its one permitted output root
         # and run the native sign-of-life before any build or download.
         BUILDS.mkdir(parents=True, exist_ok=True)
         _preflight_source_layout()
+        # Setup is the only lifecycle phase allowed to download or extract
+        # verified published release ZIPs/DMGs. Existing valid Builds toolchains
+        # are reused; Build, Stage and Test never call this path.
+        from host.unpacked_release import setup_restore_if_needed
+        setup_restore_if_needed(BUILDS)
         if platform.system() == 'Darwin':
             # Xcode alone must be sufficient to ENTER Setup. Stage all other
             # tools (and the container backend) before probing their versions.
@@ -387,10 +445,10 @@ def main(argv: list[str]) -> int:
         invoke(sys.executable, '-B', '-m', 'host.lagomorph_setup', '--builds', str(BUILDS))
         print('[CinterForgeTerminal] Setup complete: dependencies, LinuxKit, guest runtime and real Bedrock acceptance verified', flush=True)
         return 0
-    # Four separate release ZIPs: Mac, Linux, Windows and one unified DevTools.
+    # Four unpacked Build outputs; ZIP files are exclusively Publish outputs.
     # Mac orchestrates real Linux OCI/Windows cross builds, without presenting
     # Wine or Xvfb execution as native Windows/Linux GUI certification.
-    if argv == ['build', 'all']:
+    if argv in (['build', 'all'], ['build', 'cfterminal', 'all']):
         if platform.system() != 'Darwin':
             raise RuntimeError('The four-target release orchestrator currently requires macOS/Xcode; '
                                'run target-native acceptance separately before production publish')
@@ -406,7 +464,7 @@ def main(argv: list[str]) -> int:
         os.environ.update(managed_environment(BUILDS))
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'build', 'mac')
         # Setup-produced runtime prerequisites are immutable here. Build
-        # recompiles the apps, assembles and signs them, and emits four ZIPs.
+        # recompiles the apps, assembles and signs unpacked files; Publish alone emits a Mac DMG and three ZIPs.
         invoke(sys.executable, '-B', str(REPO / 'linuxos/lifecycle.py'), 'verify')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'stage')
         invoke(sys.executable, '-B', '-m', 'host.mac_app', 'stage', '--builds', str(BUILDS))
@@ -417,7 +475,7 @@ def main(argv: list[str]) -> int:
         from host.universal_package import build_four
         report = build_four(BUILDS)
         if set(report['artifacts']) != {'mac', 'linux', 'win', 'devtools'}:
-            raise RuntimeError('Build did not create exactly four release archives')
+            raise RuntimeError('Build did not capture exactly four unpacked outputs')
         return 0
     if argv == ['status', 'all']:
         # Read-only: useful even when a previous Build/Stage stopped midway.
@@ -425,26 +483,28 @@ def main(argv: list[str]) -> int:
         from host.universal_package import status_four
         print(json.dumps(status_four(BUILDS), indent=2, sort_keys=True), flush=True)
         return 0
-    if argv == ['stage', 'all']:
+    if argv in (['stage', 'all'], ['stage', 'cfterminal', 'all']):
         if not BUILDS.is_dir():
             raise RuntimeError('No Setup/Build outputs to stage; run ./Cinter all all')
         from host.universal_package import stage_four
         stage_four(BUILDS)
         return 0
-    if argv in (['all', 'all'], ['all', 'mac'], ['all', 'all', 'publish']):
-        # Publication is opt-in with the exact third argument 'publish'.
-        # Reuse the existing public publisher only AFTER Test succeeds; invoke
-        # uses check=True, so any failed phase prevents later phases/uploads.
-        publish_public = argv == ['all', 'all', 'publish']
+    if (argv in (['all', 'all'], ['all', 'mac'], ['all', 'all', 'publish']) or
+            (len(argv) == 4 and argv[:3] == ['all', 'all', 'publish'] and
+             argv[3] in ('dryrun', 'internal', 'beta', 'release'))):
+        # A channel-less combined lifecycle may only dry run. Explicit channels
+        # permit publication, and only after Setup/Build/Stage/Test all pass.
+        publish_mode = (argv[3] if len(argv) == 4 else
+                        'dryrun' if argv == ['all', 'all', 'publish'] else None)
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'setup', 'all')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'build', 'all')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'stage', 'all')
         # Test verifies staged Mac resources/signatures and offline regressions;
         # interactive native Windows/Linux acceptance remains a separate gate.
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'all')
-        if publish_public:
-            print('[CinterForgeTerminal] Test PASS; beginning explicit public Publish', flush=True)
-            invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'publish', 'public')
+        if publish_mode is not None:
+            print('[CinterForgeTerminal] Test PASS; beginning Publish ' + publish_mode, flush=True)
+            invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'publish', 'cfterminal', publish_mode)
         return 0
     if len(argv) == 2 and argv[0] in ('stage', 'test', 'launch') and argv[1] == 'mac':
         if platform.system() != 'Darwin':
@@ -499,14 +559,18 @@ def main(argv: list[str]) -> int:
         # ONLY after showing size/path and receiving explicit confirmation.
         from webapp.CinterForgeTerminal import install_devtools
         return install_devtools()
-    if argv == ['verify', 'public']:
+    if argv in (['verify', 'public'], ['verify', 'release'], ['verify', 'beta']):
         from host.universal_package import verify_public_four, update_readme_public_downloads
-        receipt = verify_public_four(BUILDS)
-        # Never update links if the public CDN has not passed real HTTP checks.
-        changed = update_readme_public_downloads(REPO / 'README.md', receipt)
-        print('[CinterForgeTerminal] Public HTTP VERIFIED for ' + receipt['release'], flush=True)
-        print('[CinterForgeTerminal] README download links ' +
-              ('updated' if changed else 'already current'), flush=True)
+        selected = 'beta' if argv[1] == 'beta' else 'public'
+        receipt = (verify_public_four(BUILDS, channel='beta') if selected == 'beta'
+                   else verify_public_four(BUILDS))
+        if selected == 'public':
+            # Only verified production publishes update the customer README.
+            changed = update_readme_public_downloads(REPO / 'README.md', receipt)
+            print('[CinterForgeTerminal] README download links ' +
+                  ('updated' if changed else 'already current'), flush=True)
+        print('[CinterForgeTerminal] ' + argv[1] + ' HTTP VERIFIED for ' +
+              receipt['release'], flush=True)
         return 0
     if argv in (['publish', 'lagomorph'], ['publish', 'lagomorph', 'public']):
         # Public HFS images AND complete private original source (internal CDN).
@@ -521,23 +585,46 @@ def main(argv: list[str]) -> int:
         from host.lagomorph_cloudflare import pull_lagomorph
         pull_lagomorph(BUILDS)
         return 0
-    if argv in (['publish', 'all'], ['publish', 'public']):
+    if argv and argv[0] == 'publish':
+        # No destination is a safe dry run, never a public upload. The app
+        # argument is the canonical lifecycle syntax; legacy aliases remain
+        # accepted for existing scripts but are not advertised.
+        options = argv[1:]
+        if options and options[0] == 'cfterminal':
+            options = options[1:]
+        if len(options) > 1:
+            raise ValueError('Usage: ./Cinter publish cfterminal [dryrun|internal|beta|release]')
+        requested = options[0] if options else 'dryrun'
+        selected = {'all': 'internal', 'public': 'release'}.get(requested, requested)
+        if selected not in ('dryrun', 'internal', 'beta', 'release'):
+            raise ValueError('Usage: ./Cinter publish cfterminal [dryrun|internal|beta|release]')
         from host.universal_package import publish_four
-        channel = 'public' if argv[1] == 'public' else 'dev'
+        # The release publisher retains its original receipt schema ('public')
+        # and stable URL/README verification contract.
+        channel = {'internal': 'dev', 'release': 'public'}.get(selected, selected)
+        if selected in ('release', 'beta') and platform.system() == 'Darwin':
+            from host.xcode_signing import release_signing_environment
+            for name, value in release_signing_environment().items():
+                if value and not os.environ.get(name):
+                    os.environ[name] = value
         report = publish_four(BUILDS, channel=channel)
-        if channel == 'public':
+        if selected == 'release':
             from host.universal_package import update_readme_public_downloads
             changed = update_readme_public_downloads(REPO / 'README.md', report)
             print('[CinterForgeTerminal] README download links ' +
                   ('updated' if changed else 'already current'), flush=True)
-        print('[CinterForgeTerminal] Cloudflare ' + channel + ' R2 round-trip VERIFIED: '
+        elif selected == 'dryrun':
+            print('[CinterForgeTerminal] DRY RUN complete: packaged locally; '
+                  'internal and public connections verified, no upload', flush=True)
+            return 0
+        print('[CinterForgeTerminal] Cloudflare ' + selected + ' R2 round-trip VERIFIED: '
               + report['bucket'] + '/' + report['prefix'], flush=True)
         return 0
     if argv in (['fetch', 'all'], ['fetch', 'public']):
         from host.universal_package import fetch_four
         channel = 'public' if argv[1] == 'public' else 'dev'
         report = fetch_four(BUILDS, channel=channel)
-        print('[CinterForgeTerminal] Downloaded ' + channel + ' four verified ZIPs into Builds for '
+        print('[CinterForgeTerminal] Downloaded ' + channel + ' four verified packages into Builds for '
               + report['release'], flush=True)
         return 0
     if argv == ['test', 'all']:
@@ -552,31 +639,31 @@ def main(argv: list[str]) -> int:
             raise RuntimeError('Automated Test requires four built and staged verified releases; '
                                'run ./Cinter all all. Stage state: ' +
                                str(result['steam_destination']))
-        if not all(item['archive_present'] and item['size_matches_receipt']
+        if not all(item['build_present'] and item['steam_app_root_present']
                    for item in result['targets'].values()):
-            raise RuntimeError('Four-artifact automated Test found missing/mismatched release archives')
-        print('[Cinter test] PASS four staged release receipts, archive sizes and Mac '
+            raise RuntimeError('Four-artifact automated Test found missing unpacked builds or staged apps')
+        print('[Cinter test] PASS four unpacked Build/Stage receipts and Mac '
               'signature/resources (interactive native GUI acceptance deferred)', flush=True)
         return 0
     raise ValueError('Usage: ./Cinter host <legacy-host-action> [options]\n'
                      '       ./Cinter setup all\n'
                      '       ./Cinter toolchain check\n'
-                     '       ./Cinter build all  # 3 native app ZIPs + 1 unified DevTools ZIP\n'
-                     '       ./Cinter stage all  # verify and install all four to Steam steamapps\n'
-                     '       ./Cinter status all # show four ZIPs and Steam receipt (read-only)\n'
+                     '       ./Cinter build cfterminal all # 3 native apps + DevTools, unpacked\n'
+                     '       ./Cinter reboot server|docker|colima|app # restart only, no build\n'
+                     '       ./Cinter stage all  # copy unpacked Builds into Steam steamapps\n'
+                     '       ./Cinter status all # unpacked Build/Stage receipts (read-only)\n'
                      '       ./Cinter all mac    # setup, build four, stage, native Mac test; no publish\n'
                      '       ./Cinter all all    # setup, build, stage, native Mac test; no publish\n'
-                     '       ./Cinter all all publish  # same phases, then public Publish only after Test PASS\n'
+                     '       ./Cinter all all publish [internal|beta|release] # omitted mode = dryrun\n'
                      '       ./Cinter build mac|linux|win\n'
                      '       ./Cinter stage|test|launch|all mac\n'
                      '       ./Cinter windows cross-test\n'
-                     '       ./Cinter publish all     # private dev R2 upload+download\n'
-                     '       ./Cinter publish public  # verify public HTTP, then update README downloads\n'
-                     '       ./Cinter verify public   # retry public HTTP and README links; no ZIP upload/download\n'
+                     '       ./Cinter publish cfterminal [dryrun|internal|beta|release] # default dryrun\n'
+                     '       ./Cinter verify beta|public # retry unsigned HTTP; no archive re-upload\n'
                      '       ./Cinter publish lagomorph public # public HFS media + private Builds/Lagomorph to internal CDN\n'
                      '       ./Cinter pull lagomorph source # required internal folder pull (also in setup/all)\n'
                      '       ./Cinter pull lagomorph    # private source + public HFS media into Builds\n'
-                     '       ./Cinter fetch all       # private dev R2 -> Builds Distribution\n'
+                     '       ./Cinter fetch all       # fetch published ZIPs into Builds (Setup only)\n'
                      '       ./Cinter fetch public    # production R2 -> Builds Distribution\n'
                      '       ./Cinter install devtools # confirm optional public SDK install to Steam\n'
                      '       ./Cinter launch cinterforge-os linuxkit Release --server <directory>')

@@ -8,7 +8,7 @@
 #### Current Release Status: Public Alpha
 Builds Working, Missing Features, Known Blockers
 
-- [macOS — Apple silicon](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/CinterForgeTerminal-mac.zip)
+- [macOS — Apple silicon](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/CinterForgeTerminal-mac.dmg)
 - [Windows — x64](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/CinterForgeTerminal-win.zip)
 - [Linux — x64](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/CinterForgeTerminal-linux.zip)
 

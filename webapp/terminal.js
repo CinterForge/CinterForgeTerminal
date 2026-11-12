@@ -2099,6 +2099,12 @@ method: 'POST', headers: {
       }
     };
     try {
+      if (platform === 'mac' && typeof window.cinterClipboard === 'function') {
+        if (await window.cinterClipboard({action: 'copy', text: transcript}) !== true)
+          throw new Error('Native pasteboard rejected Copy');
+        notice('Copied terminal transcript');
+        return transcript;
+      }
       if (platform === 'win' && legacyCopy()) {
         notice('Copied terminal transcript');
         return transcript;
@@ -2141,7 +2147,8 @@ method: 'POST', headers: {
       // WebView2 does not consistently grant navigator.clipboard.readText
       // to the application's loopback page. The native Windows clipboard
       // bridge is read-only and remains local to the user's installed app.
-      if (platform === 'win' && typeof window.cinterClipboard === 'function')
+      if ((platform === 'win' || platform === 'mac') &&
+          typeof window.cinterClipboard === 'function')
         return pasteIntoSession(await window.cinterClipboard({ action: 'paste' }));
       if (navigator.clipboard?.readText)
         return pasteIntoSession(await navigator.clipboard.readText());
@@ -2159,6 +2166,21 @@ method: 'POST', headers: {
     insert: pasteIntoSession,
     transcript: currentTranscript
   });
+
+  // macOS's native menu handles Command-C/V when WebKit gives AppKit the
+  // accelerators. This capture path also handles WKWebView input focus states
+  // that consume the keys before AppKit can dispatch a menu action. Do not
+  // intercept Code-OSS: its editor iframe owns its own clipboard shortcuts.
+  document.addEventListener('keydown', event => {
+    if (platform !== 'mac' || !event.metaKey || event.ctrlKey || event.altKey ||
+        event.shiftKey || event.isComposing || !computerView.hidden) return;
+    const key = event.key.toLowerCase();
+    if (key !== 'c' && key !== 'v') return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (key === 'c') void copyTranscript();
+    else void pasteClipboard();
+  }, true);
 
   // Windows keeps Ctrl+C for interrupting the running Bash process. Use
   // Ctrl+Shift+C for Copy, and Ctrl+V / Ctrl+Shift+V for Paste. Capture before

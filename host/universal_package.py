@@ -1,7 +1,7 @@
-"""Build and Steam-stage the four Terminal distribution ZIPs.
+"""Build and Steam-stage unpacked Terminal release inputs.
 
-Three native app bundles (macOS, Linux, Windows) and one shared optional
-DevTools bundle are independently checksummed. The historical universal ZIP
+Publish alone packages a macOS DMG and three ZIPs. All four artifacts
+are independently checksummed. The historical universal ZIP
 reader remains for older archives, but is not the active release lifecycle.
 Bedrock server bytes are never included before app-side EULA acceptance.
 """
@@ -660,8 +660,9 @@ def _release_file_mode(name: str, value: Path | bytes) -> int:
     return 0o755 if source_executable or launcher or python_entrypoint else 0o644
 
 
-def _signed_mac_zip_assets(source: dict[str, Path | bytes], staging: Path) -> dict[str, Path]:
-    """Sign the exact bytecode-free, symlink-free tree the ZIP will contain.
+def _signed_mac_zip_assets(source: dict[str, Path | bytes], staging: Path,
+                           *, notarize: bool = True) -> dict[str, Path]:
+    """Sign the filtered release copy; optional notarization belongs to Publish.
 
     The staged macOS .app is an immutable developer build. Never remove its
     Python caches or modify its existing signature to prepare a distribution.
@@ -684,7 +685,7 @@ def _signed_mac_zip_assets(source: dict[str, Path | bytes], staging: Path) -> di
         output.chmod(_release_file_mode(name, value))
     from host.mac_app import _sign_and_verify
     _sign_and_verify(app)
-    if os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip():
+    if notarize and os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip():
         _notarize_mac_app(app, staging)
     return _files_under(app, app_name)
 
@@ -727,7 +728,7 @@ def _notarize_mac_app(app: Path, staging: Path) -> None:
         subprocess.run(['xcrun', 'stapler', 'validate', str(app)], check=True)
         from host.mac_app import _verify_signature
         _verify_signature(app)
-        print('[TERMINAL BUILD] macOS Developer ID notarization ACCEPTED; '
+        print('[TERMINAL PUBLISH] macOS Developer ID notarization ACCEPTED; '
               'ticket stapled and signature verified', flush=True)
     finally:
         submission.unlink(missing_ok=True)
@@ -1010,7 +1011,7 @@ def _adopt_legacy_release_zips(builds: Path, release: str, destination: Path) ->
         changed = dict(record)
         changed['artifacts'] = {name: dict(detail) for name, detail in record['artifacts'].items()}
         for target, archive in candidates.items():
-            filename = f'CinterForgeTerminal-{target}.zip'
+            filename = artifact_filename(target)
             target_path = destination / filename
             # Same filesystem: this creates no second multi-gigabyte copy.
             os.link(archive, target_path)
@@ -1088,7 +1089,7 @@ def build_four(builds: Path, *, release: str = HOST_RELEASE) -> dict:
         input_fingerprints[target] = fingerprint
         old = previous.get('artifacts', {}).get(target, {})
         try:
-            name = f'CinterForgeTerminal-{target}.zip'
+            name = artifact_filename(target)
             if old.get('filename') != name:
                 raise ValueError('Missing or outdated target receipt')
             archive = out / name
@@ -1130,7 +1131,7 @@ def build_four(builds: Path, *, release: str = HOST_RELEASE) -> dict:
         staging = Path(temporary)
         for target in dirty:
             root = APP_ROOTS[target]
-            name = f'CinterForgeTerminal-{target}.zip'
+            name = artifact_filename(target)
             archive = staging / name
             assets = files_by_target[target]
             if target == 'mac' and all(isinstance(value, Path) for value in assets.values()):
@@ -1536,7 +1537,7 @@ def stage_four(builds: Path, *, release: str = HOST_RELEASE,
         if not path.is_file() or path.is_symlink() or path.stat().st_size != entry['bytes']:
             raise RuntimeError('Release ZIP size mismatch or missing: ' + str(path))
         if _hash(path, progress_label=f'Hash {target} ZIP') != entry['sha256']:
-            raise RuntimeError('Release ZIP checksum mismatch: ' + str(path))
+            raise RuntimeError('Release package checksum mismatch: ' + str(path))
         manifests[target] = _verify_release_zip(path, target=target, release=release,
                                                 progress_label=f'Verify {target}')
     total_updated = 0
@@ -1674,7 +1675,7 @@ def stage_four(builds: Path, *, release: str = HOST_RELEASE,
 
 def status_four(builds: Path, *, release: str = HOST_RELEASE,
                 steamapps: Path | None = None) -> dict:
-    """Read-only four-ZIP and platform-correct Steam installation audit."""
+    """Read-only four-artifact and platform-correct Steam installation audit."""
     directory = builds.resolve() / 'CinterForgeTerminal/Distribution'
     receipt = directory / 'four-artifacts.json'
     entries = {}
@@ -1728,50 +1729,80 @@ LAGOMORPH_FLOPPIES = ('Lagomorph-Application-1440K.img', 'Lagomorph-Battles-1440
 LAGOMORPH_STAGE = Path('Applications/CinterForgeCode/Emulators/Quadra650/Lagomorph')
 
 
+def _publish_destination(channel: str) -> tuple[str, str]:
+    """One distribution tree, three explicit routes; aliases retain old receipts.
+
+    internal/dev  -> private developer CDN
+    beta          -> public CDN /beta subtree
+    release/public-> existing public release URLs
+    """
+    routes = {
+        'internal': ('dev', CLOUDFLARE_OBJECT_ROOT),
+        'dev': ('dev', CLOUDFLARE_OBJECT_ROOT),
+        'beta': ('public', CLOUDFLARE_OBJECT_ROOT + '/beta'),
+        'release': ('public', CLOUDFLARE_OBJECT_ROOT),
+        'public': ('public', CLOUDFLARE_OBJECT_ROOT),
+    }
+    try:
+        return routes[channel]
+    except KeyError as error:
+        raise ValueError('Unknown publishing channel: ' + str(channel)) from error
+
+
 def _cloudflare_config(config: Path | None = None, *, channel: str = 'dev') -> dict:
-    """Companion-compatible private R2 default; public is an explicit choice."""
-    if channel not in ('dev', 'public'):
-        raise ValueError('Unknown publishing channel: ' + str(channel))
+    """Use only the existing internal or public R2 provider configuration."""
+    provider, _ = _publish_destination(channel)
     from host.publishing import cloudflare_r2_sync as r2
     selected = (config or Path(os.environ.get('CINTERFORGE_CLOUDFLARE_CONFIG') or
                                os.environ.get('CINTER_CLOUDFLARE_CONFIG') or
                                str(Path.home() / 'cfdev/config.json'))).expanduser()
-    bucket = 'cdn-assets-dev' if channel == 'dev' else 'cinterforge'
+    bucket = 'cdn-assets-dev' if provider == 'dev' else 'cinterforge'
     return r2._load_config(selected, 'auto', required_bucket=bucket)
+
+
+def artifact_filename(target: str) -> str:
+    """Canonical stable public filename: Mac DMG; other targets ZIP."""
+    if target not in FOUR_TARGETS:
+        raise ValueError('Unknown distribution target: ' + str(target))
+    return f'CinterForgeTerminal-{target}' + ('.dmg' if target == 'mac' else '.zip')
 
 
 def _distribution_files(builds: Path, release: str) -> tuple[Path, dict, dict[str, Path]]:
     root = builds.resolve() / CLOUDFLARE_OBJECT_ROOT
     receipt_path = root / 'four-artifacts.json'
     if not receipt_path.is_file() or receipt_path.is_symlink():
-        raise FileNotFoundError('Four-ZIP distribution must be built before publish: ' + str(receipt_path))
+        raise FileNotFoundError('Four-artifact distribution must be prepared by Publish: ' + str(receipt_path))
     report = json.loads(receipt_path.read_text())
     entries = report.get('artifacts', {})
     if report.get('schema') != FOUR_SCHEMA or report.get('release') != release or set(entries) != set(FOUR_TARGETS):
-        raise RuntimeError('Publish requires exactly 3 native ZIPs and 1 unified DevTools ZIP')
+        raise RuntimeError('Publish requires exactly one Mac DMG and three ZIPs')
     files = {'four-artifacts.json': receipt_path}
     for target, entry in entries.items():
         name = entry.get('filename')
-        if not isinstance(name, str) or name != f'CinterForgeTerminal-{target}.zip':
-            raise RuntimeError('Unsafe release ZIP name for ' + target)
+        if not isinstance(name, str) or name != artifact_filename(target):
+            raise RuntimeError('Unsafe release package name for ' + target)
         path = root / name
         if path.is_symlink() or not path.is_file() or path.stat().st_size != entry.get('bytes'):
-            raise RuntimeError('Missing or changed release ZIP: ' + str(path))
+            raise RuntimeError('Missing or changed release package: ' + str(path))
         if _hash(path) != entry.get('sha256'):
-            raise RuntimeError('Release ZIP checksum mismatch: ' + str(path))
-        _verify_release_zip(path, target=target, release=release, hash_files=False)
+            raise RuntimeError('Release package checksum mismatch: ' + str(path))
+        if target == 'mac' and __import__('sys').platform == 'darwin':
+            from host.mac_dmg import verify_dmg
+            verify_dmg(path, builds, app_name=APP_ROOTS['mac'])
+        else:
+            _verify_release_zip(path, target=target, release=release, hash_files=False)
         files[name] = path
     return root, report, files
 
 
-def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path) -> dict:
+def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path,
+                      *, prefix: str = CLOUDFLARE_OBJECT_ROOT) -> dict:
     """R2 -> Builds with SHA checks and no partial/invalid live distribution."""
     from host.publishing import cloudflare_r2_sync as r2
-    prefix = CLOUDFLARE_OBJECT_ROOT
     parent = builds.resolve() / 'Intermediates/CinterForgeTerminal/CloudflareDownloads'
     parent.mkdir(parents=True, exist_ok=True)
     remote = r2._list_remote(cfg, prefix)
-    expected_names = {'four-artifacts.json'} | {f'CinterForgeTerminal-{t}.zip' for t in FOUR_TARGETS}
+    expected_names = {'four-artifacts.json'} | {artifact_filename(t) for t in FOUR_TARGETS}
     if not expected_names <= set(remote):
         raise RuntimeError('Cloudflare release incomplete: ' + ', '.join(sorted(expected_names - set(remote))))
     staged = parent / release
@@ -1788,9 +1819,9 @@ def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path) 
         raise RuntimeError('Cloudflare four-artifact manifest invalid')
     for index, target in enumerate(FOUR_TARGETS, 1):
         entry = entries[target]
-        name = f'CinterForgeTerminal-{target}.zip'
+        name = artifact_filename(target)
         if entry.get('filename') != name or int(entry.get('bytes', -1)) != int(remote[name]['size']):
-            raise RuntimeError('Cloudflare ZIP manifest/object size mismatch: ' + target)
+            raise RuntimeError('Cloudflare package manifest/object size mismatch: ' + target)
         print(f'[TERMINAL PUBLISH] download {target} ({index}/4) '
               f'{entry["bytes"] / 1048576:.1f} MiB', flush=True)
         result = staged / name
@@ -1799,8 +1830,12 @@ def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path) 
             result.unlink()
         r2._get_file(cfg, f'{prefix}/{name}', result, expected_size=entry['bytes'])
         if _hash(result, progress_label=f'Cloudflare verify {target}') != entry.get('sha256'):
-            raise RuntimeError('Cloudflare round-trip ZIP checksum mismatch: ' + name)
-        _verify_release_zip(result, target=target, release=release, hash_files=False)
+            raise RuntimeError('Cloudflare package round-trip checksum mismatch: ' + name)
+        if target == 'mac' and __import__('sys').platform == 'darwin':
+            from host.mac_dmg import verify_dmg
+            verify_dmg(result, builds, app_name=APP_ROOTS['mac'])
+        else:
+            _verify_release_zip(result, target=target, release=release, hash_files=False)
         print(f'[TERMINAL PUBLISH] verified {target} round-trip SHA-256', flush=True)
     if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
         raise RuntimeError('Unsafe Cloudflare download destination: ' + str(destination))
@@ -1915,13 +1950,13 @@ def _verify_public_lagomorph_range(url: str, expected_size: int) -> None:
     print(f'[TERMINAL PUBLISH] public Lagomorph range/CORS verified: {url}', flush=True)
 
 
-def _release_public_urls(release: str, *, include_lagomorph: bool = False) -> dict[str, str]:
+def _release_public_urls(release: str, *, include_lagomorph: bool = False,
+                         prefix: str = CLOUDFLARE_OBJECT_ROOT) -> dict[str, str]:
     """Use the published production origin already defined by the R2 publisher."""
     from host.publishing.release import PUBLIC_URLS
     base = PUBLIC_URLS['production'].rstrip('/')
-    prefix = CLOUDFLARE_OBJECT_ROOT
     urls = {'manifest': f'{base}/{prefix}/four-artifacts.json'}
-    urls.update({target: f'{base}/{prefix}/CinterForgeTerminal-{target}.zip'
+    urls.update({target: f'{base}/{prefix}/{artifact_filename(target)}'
                  for target in FOUR_TARGETS})
     if include_lagomorph:
         # Classic-Mac media keeps the existing versioned URL and is not one of the four ZIPs.
@@ -1930,7 +1965,7 @@ def _release_public_urls(release: str, *, include_lagomorph: bool = False) -> di
 
 
 def update_readme_public_downloads(readme_path: Path, receipt: dict) -> bool:
-    """Synchronize all four stable public ZIP links after verified publication.
+    """Synchronize the stable Mac DMG and three ZIP URLs after verified publication.
 
     Called only by the public ./Cinter publishing commands. Dev/private R2
     uploads, pending CDN propagation, failed publishes, and a mere local Build
@@ -2032,7 +2067,7 @@ def _public_http_attempt(label: str, url: str, expected_size: int,
     """GET the manifest or perform a one-byte GET of an artifact.
 
     HEAD is insufficient: Cloudflare can allow HEAD while denying GET (or vice
-    versa). Never download a whole release ZIP just to check its public URL.
+    versa). Never download a whole release package just to check its public URL.
     """
     import urllib.error
     import urllib.request
@@ -2058,17 +2093,17 @@ def _public_http_attempt(label: str, url: str, expected_size: int,
         if status == 206:
             expected_range = f'bytes 0-0/{expected_size}'
             if response.headers.get('Content-Range') != expected_range:
-                raise RuntimeError(f'Public ZIP range/length mismatch ({label}): {url}')
+                raise RuntimeError(f'Public artifact range/length mismatch ({label}): {url}')
         elif status == 200:
             # Servers that ignore Range may still be valid download endpoints.
             # We read at most 2 bytes and require a matching full length.
             if response.headers.get('Content-Length') != str(expected_size):
-                raise RuntimeError(f'Public ZIP full length missing/incorrect ({label}): {url}')
+                raise RuntimeError(f'Public artifact full length missing/incorrect ({label}): {url}')
         else:
-            raise RuntimeError(f'Public ZIP HTTP {status} ({label}): {url}')
+            raise RuntimeError(f'Public artifact HTTP {status} ({label}): {url}')
         first = response.read(2)
-        if not first or first[0:1] != b'P':
-            raise RuntimeError(f'Public ZIP returned non-ZIP content ({label}): {url}')
+        if not first or (label != 'mac' and first[0:1] != b'P'):
+            raise RuntimeError(f'Public artifact returned unexpected content ({label}): {url}')
 
 
 def _verify_public_urls(urls: dict[str, str], report: dict, files: dict[str, Path],
@@ -2156,126 +2191,132 @@ def _finalize_public_receipt(receipt_path: Path, receipt: dict, report: dict,
         _write_publish_receipt(receipt_path, receipt)
         print('[TERMINAL PUBLISH] R2 upload and SHA-256 round-trip VERIFIED. '
               'Public HTTP is pending; no re-upload is needed.', flush=True)
+        retry = 'beta' if receipt.get('channel') == 'beta' else 'public'
         raise RuntimeError(f'Public verification pending: {error}. '
-                           'Retry without uploading with ./Cinter verify public') from error
+                           f'Retry without uploading with ./Cinter verify {retry}') from error
     receipt['public_http'] = 'verified'
     receipt.pop('public_error', None)
     _write_publish_receipt(receipt_path, receipt)
     return receipt
 
 
-def verify_public_four(builds: Path, *, release: str = HOST_RELEASE) -> dict:
-    """Repeat only public HTTP checks for an already SHA-verified R2 release.
+def verify_public_four(builds: Path, *, release: str = HOST_RELEASE,
+                       channel: str = 'public') -> dict:
+    """Retry only public HTTP checks for an already R2-verified release or beta.
 
-    This operation performs no R2 API calls, uploads, or large downloads.
-    It requires the existing local verified release and publisher receipt.
+    No R2 API calls, uploads, or large downloads. The stable production README
+    is updated only for the release channel, never the beta channel.
     """
+    if channel not in ('public', 'beta'):
+        raise ValueError('Only public release/beta HTTP verification is supported')
     builds = builds.resolve()
-    receipt_path = builds / 'CinterForgeTerminal/Publish/Receipts/public' / release / 'cloudflare.json'
+    receipt_path = (builds / 'CinterForgeTerminal/Publish/Receipts' /
+                    channel / release / 'cloudflare.json')
     try:
         receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
     except (OSError, ValueError) as error:
-        raise RuntimeError('Missing SHA-verified public R2 receipt; publish first') from error
-    if (receipt.get('schema') != FOUR_SCHEMA or receipt.get('channel') != 'public' or
-            receipt.get('bucket') != 'cinterforge' or receipt.get('roundtrip') != 'sha256-verified' or
+        raise RuntimeError('Missing SHA-verified R2 receipt; publish first') from error
+    _, expected_prefix = _publish_destination(channel)
+    if (receipt.get('schema') != FOUR_SCHEMA or receipt.get('channel') != channel or
+            receipt.get('bucket') != 'cinterforge' or
+            receipt.get('prefix') != expected_prefix or
+            receipt.get('roundtrip') != 'sha256-verified' or
             receipt.get('release') != release):
-        raise RuntimeError('Public R2 receipt does not represent a verified release')
+        raise RuntimeError('Public R2 receipt does not represent a verified ' + channel + ' release')
     root = builds / CLOUDFLARE_OBJECT_ROOT
     manifest = root / 'four-artifacts.json'
-    if not manifest.is_file() or manifest.is_symlink() or _hash(manifest) != receipt.get('files', {}).get(manifest.name):
+    if (not manifest.is_file() or manifest.is_symlink() or
+            _hash(manifest) != receipt.get('files', {}).get(manifest.name)):
         raise RuntimeError('Local release manifest does not match verified R2 receipt')
     report = json.loads(manifest.read_text())
     entries = report.get('artifacts', {})
     if report.get('schema') != FOUR_SCHEMA or report.get('release') != release or set(entries) != set(FOUR_TARGETS):
-        raise RuntimeError('Invalid local four-ZIP release manifest')
+        raise RuntimeError('Invalid local four-artifact release manifest')
     files = {manifest.name: manifest}
     for target, item in entries.items():
-        name = f'CinterForgeTerminal-{target}.zip'
+        name = artifact_filename(target)
         path = root / name
         if (item.get('filename') != name or not path.is_file() or path.is_symlink() or
                 path.stat().st_size != item.get('bytes') or
                 receipt.get('files', {}).get(name) != item.get('sha256')):
-            raise RuntimeError('Local ZIP does not match verified R2 receipt: ' + name)
+            raise RuntimeError('Local package does not match verified R2 receipt: ' + name)
         files[name] = path
-    iso = builds / LAGOMORPH_STAGE / LAGOMORPH_PUBLIC_NAME
-    if (not iso.is_file() or iso.is_symlink() or
-            _hash(iso) != receipt.get('files', {}).get(iso.name)):
-        raise RuntimeError('Lagomorph ISO does not match verified R2 receipt')
-    files[iso.name] = iso
-    receipt['public_urls'] = _release_public_urls(release, include_lagomorph=True)
+    if channel == 'public':
+        iso = builds / LAGOMORPH_STAGE / LAGOMORPH_PUBLIC_NAME
+        if (not iso.is_file() or iso.is_symlink() or
+                _hash(iso) != receipt.get('files', {}).get(iso.name)):
+            raise RuntimeError('Lagomorph ISO does not match verified R2 receipt')
+        files[iso.name] = iso
+    receipt['public_urls'] = _release_public_urls(
+        release, include_lagomorph=channel == 'public', prefix=expected_prefix)
     return _finalize_public_receipt(receipt_path, receipt, report, files)
 
 
 
-def _require_notarized_mac_release(archive: Path, builds: Path) -> None:
-    """Public only: downloaded macOS .app must pass local Gatekeeper checks.
-
-    Inspect the exact immutable release ZIP, not the separately staged
-    developer .app. Prevent uploading an ad-hoc-only Mac release as public.
-    """
+def _require_notarized_mac_release(dmg: Path, builds: Path) -> None:
+    """Public-only gate: verify the final DMG and the Developer ID app inside."""
     import platform
-    import subprocess
     if platform.system() != 'Darwin':
-        raise RuntimeError('Public macOS application release requires Gatekeeper '
-                           'verification on the macOS builder')
-    with tempfile.TemporaryDirectory(prefix='MacPublicVerify-',
-                                     dir=builds / 'Intermediates') as temporary:
-        root = Path(temporary)
-        with zipfile.ZipFile(archive) as z:
-            manifest = json.loads(z.read('release-manifest.json'))
-            for name, entry in manifest['files'].items():
-                relative = Path(name)
-                if relative.parts[0] != APP_ROOTS['mac'] or '..' in relative.parts:
-                    raise RuntimeError('Unsafe public macOS release path')
-                path = root / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with z.open(name) as src, path.open('wb') as dst:
-                    shutil.copyfileobj(src, dst)
-                path.chmod(entry['mode'])
-        app = root / APP_ROOTS['mac']
-        from host.mac_app import _verify_signature
-        _verify_signature(app)
+        raise RuntimeError('Public Mac DMG requires native Gatekeeper verification on macOS')
+    import subprocess
+    from host.mac_dmg import mounted_dmg, verify_dmg
+    verify_dmg(dmg, builds, app_name=APP_ROOTS['mac'], public=True)
+    with mounted_dmg(dmg, builds) as volume:
+        app = volume / APP_ROOTS['mac']
         authority = subprocess.run(['/usr/bin/codesign', '-dv', '--verbose=4', str(app)],
                                    capture_output=True, text=True, check=True)
         if 'Authority=Developer ID Application:' not in authority.stderr:
-            raise RuntimeError('Refusing public Mac ZIP without Developer ID Application signature')
-        subprocess.run(['xcrun', 'stapler', 'validate', str(app)], check=True)
-        subprocess.run(['/usr/sbin/spctl', '--assess', '--type', 'execute',
-                        '--verbose=4', str(app)], check=True)
-        print('[TERMINAL PUBLISH] macOS final ZIP: Developer ID, notarization '
-              'ticket and Gatekeeper verified', flush=True)
+            raise RuntimeError('Refusing public Mac DMG without Developer ID Application signature')
+    print('[TERMINAL PUBLISH] macOS DMG: Developer ID Application, notarization '
+          'and Gatekeeper verified', flush=True)
 
 
 def publish_four(builds: Path, *, release: str = HOST_RELEASE,
-                 config: Path | None = None, channel: str = 'dev') -> dict:
-    """Explicit channel: private dev by default, public only by command choice.
+                 config: Path | None = None, channel: str = 'dryrun') -> dict:
+    """Publish the verified four-package distribution only for explicit channels.
 
-    The public command uploads the same four archives including DevTools;
-    the release operator is responsible for redistribution rights and native
-    acceptance before publishing to the production bucket.
+    dryrun packages and checks connectivity to both R2 buckets read-only;
+    it never uploads, downloads distribution payloads, or modifies README.
     """
     from host.publishing import cloudflare_r2_sync as r2
     builds = builds.resolve()
+    channel = {'internal': 'dev', 'release': 'public'}.get(channel, channel)
     source, report, files = _distribution_files(builds, release)
-    if channel == 'public':
-        _require_notarized_mac_release(files['CinterForgeTerminal-mac.zip'], builds)
-        # Explicit user-authorized publication of only the staged content disk.
-        # Keep four-artifacts.json exactly four ZIPs; the ISO is a sidecar.
+    if channel == 'dryrun':
+        # Check BOTH possible destinations without uploading even a manifest.
+        # This runs after the local DMG/ZIP builder has verified its outputs.
+        connections = {}
+        for destination in ('internal', 'release'):
+            cfg = _cloudflare_config(config, channel=destination)
+            _, target_prefix = _publish_destination(destination)
+            r2._list_remote(cfg, target_prefix)  # read-only authenticated LIST
+            connections[destination] = {'bucket': cfg['bucket'], 'prefix': target_prefix,
+                                        'status': 'connected-read-only'}
+        print('[TERMINAL PUBLISH] DRY RUN: Mac DMG + three ZIPs verified locally; '
+              'both R2 connections verified read-only; 0 uploads', flush=True)
+        return {'schema': FOUR_SCHEMA, 'channel': 'dryrun', 'release': release,
+                'uploaded': False, 'files': {name: _hash(path) for name, path in files.items()},
+                'connections': connections, 'distribution': str(source)}
+    provider, prefix = _publish_destination(channel)
+    if channel in ('public', 'release', 'beta'):
+        _require_notarized_mac_release(files[artifact_filename('mac')], builds)
+    if channel in ('public', 'release'):
+        # Only production includes Lagomorph media; beta is an isolated build
+        # channel and must not overwrite live public game assets.
         files[LAGOMORPH_PUBLIC_NAME] = _lagomorph_public_disk(builds)
     if os.environ.get('CINTERFORGE_SETUP_DISABLE_UPLOADS') == '1':
         raise RuntimeError('Publishing disabled on this setup/test machine')
     cfg = _cloudflare_config(config, channel=channel)
-    prefix = CLOUDFLARE_OBJECT_ROOT
     remote = r2._list_remote(cfg, prefix)
-    if channel == 'public':
+    if channel in ('public', 'release'):
         # The Lagomorph ISO is a separate versioned sidecar, not a stable app ZIP.
         legacy_media_prefix = f'{prefix}/{release}'
         media_remote = r2._list_remote(cfg, legacy_media_prefix)
     else:
         legacy_media_prefix = None
         media_remote = {}
-    print(f'[TERMINAL PUBLISH] upload 4 ZIPs + manifest'
-          f'{" + Lagomorph ISO" if channel == "public" else ""} -> {cfg["bucket"]}/{prefix}', flush=True)
+    print(f'[TERMINAL PUBLISH] upload Mac DMG + 3 ZIPs + manifest'
+          f'{" + Lagomorph ISO" if channel in ("public", "release") else ""} -> {cfg["bucket"]}/{prefix}', flush=True)
     total_bytes = sum(x.stat().st_size for x in files.values())
     uploaded = 0
     previous_receipt = builds / 'CinterForgeTerminal/Publish/Receipts' / channel / release / 'cloudflare.json'
@@ -2285,7 +2326,7 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
         previous = {}
     downloaded = builds / 'CinterForgeTerminal/Publish/Downloaded' / channel / release
     remote_sources = dict(remote)
-    if channel == 'public':
+    if channel in ('public', 'release'):
         remote_sources[LAGOMORPH_PUBLIC_NAME] = media_remote.get(LAGOMORPH_PUBLIC_NAME, {})
     reusable = _verified_r2_cache(previous, files, remote_sources, cfg, prefix, downloaded)
     if reusable:
@@ -2321,25 +2362,26 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
             uploaded += size
             _progress('Cloudflare upload accounted', uploaded, total_bytes)
         # R2 round-trip SHA-256 must complete before recording a reusable receipt.
-        verified = _download_four_to(builds, release, cfg, downloaded)
+        verified = _download_four_to(builds, release, cfg, downloaded, prefix=prefix)
         if verified != report:
             raise RuntimeError('Cloudflare round-trip release manifest differs')
-        if channel == 'public':
+        if channel in ('public', 'release'):
             _download_lagomorph_public(cfg, legacy_media_prefix, files[LAGOMORPH_PUBLIC_NAME], downloaded)
-    public_urls = _release_public_urls(release, include_lagomorph=True) if channel == 'public' else {}
+    public_urls = (_release_public_urls(release, include_lagomorph=channel in ('public', 'release'),
+                                        prefix=prefix) if provider == 'public' else {})
     receipt = {'schema': FOUR_SCHEMA, 'release': release, 'channel': channel, 'bucket': cfg['bucket'],
                'prefix': prefix, 'files': {name: _hash(path) for name, path in files.items()},
                'roundtrip': 'sha256-verified', 'downloaded': str(downloaded),
                'public_urls': public_urls,
-               'public_http': 'pending' if channel == 'public' else 'not-applicable'}
+               'public_http': 'pending' if provider == 'public' else 'not-applicable'}
     # Commit R2 success BEFORE the public custom-domain probe. On an HTTP 403
     # the operator must be able to retry without another 3.6 GiB transfer.
     _write_publish_receipt(previous_receipt, receipt)
-    if channel == 'public':
+    if provider == 'public':
         receipt = _finalize_public_receipt(previous_receipt, receipt, report, files)
-    print(f'[TERMINAL PUBLISH] VERIFIED 4 ZIPs + manifest'
-          f'{" + Lagomorph ISO" if channel == "public" else ""} in {cfg["bucket"]}/{prefix}', flush=True)
-    if channel == 'public':
+    print(f'[TERMINAL PUBLISH] VERIFIED Mac DMG + 3 ZIPs + manifest'
+          f'{" + Lagomorph ISO" if channel in ("public", "release") else ""} in {cfg["bucket"]}/{prefix}', flush=True)
+    if provider == 'public':
         print('[TERMINAL PUBLISH] PUBLIC TEST URLS (verified unsigned HTTP):', flush=True)
         for target, url in public_urls.items():
             print(f'  {target}: {url}', flush=True)
@@ -2442,10 +2484,28 @@ def fetch_four(builds: Path, *, release: str = HOST_RELEASE,
     return _download_four_to(builds, release, cfg, downloaded)
 
 
+
+# November 12 lifecycle: Build/Stage use unpacked files, never release ZIPs.
+# The historical ZIP helpers above remain available to Publish and to read
+# older distributions; these public lifecycle entry points now use the
+# canonical unpacked receipt under sibling Builds.
+from host.unpacked_release import (build_four, stage_four, status_four,
+                                    prepare_publish_packages, setup_unpack_published)
+
+_publish_four_archives = publish_four
+
+def publish_four(builds: Path, *, release: str = HOST_RELEASE,
+                 config: Path | None = None, channel: str = 'dryrun') -> dict:
+    """Publish alone packages the Mac DMG and three ZIPs from Build inventories."""
+    prepare_publish_packages(builds, release=release,
+                             notarize=channel not in ('dryrun', 'dev', 'internal'))
+    return _publish_four_archives(builds, release=release, config=config, channel=channel)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--builds", type=Path, required=True)
-    parser.add_argument("--stage", action="store_true", help="verify and install the four ZIPs into Steam")
+    parser.add_argument("--stage", action="store_true", help="verify and install unpacked Build outputs into Steam")
     parser.add_argument("--steamapps", type=Path, help="existing Steam steamapps root")
     args = parser.parse_args()
     result = (stage_four(args.builds, steamapps=args.steamapps) if args.stage

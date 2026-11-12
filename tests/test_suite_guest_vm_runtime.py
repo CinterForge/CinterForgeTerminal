@@ -113,7 +113,7 @@ class SharedGuestVMTests(unittest.TestCase):
         with (mock.patch.object(terminal, '_mac_host_mounts', return_value=[(Path('/'), '/host/mac')]),
               mock.patch.object(terminal.subprocess, 'run', side_effect=run),
               mock.patch.object(terminal, '_run_checked') as checked):
-            with self.assertRaisesRegex(RuntimeError, 'live guest containers'):
+            with self.assertRaisesRegex(RuntimeError, 'unrelated containers run'):
                 terminal._ensure_docker(self.sdk, self.env, self.workspace)
         checked.assert_not_called()
 
@@ -153,7 +153,8 @@ class SharedGuestVMTests(unittest.TestCase):
             if 'ssh' in argv:
                 return subprocess.CompletedProcess(argv, 1, '', 'cannot inspect daemon')
             raise AssertionError(argv)
-        with (mock.patch.object(terminal.subprocess, 'run', side_effect=run),
+        with (mock.patch.object(terminal, '_mac_mounted_volumes', return_value=[]),
+              mock.patch.object(terminal.subprocess, 'run', side_effect=run),
               mock.patch.object(terminal, '_run_checked') as checked):
             with self.assertRaisesRegex(RuntimeError, 'cannot be verified'):
                 terminal._ensure_docker(self.sdk, self.env, self.workspace)
@@ -162,9 +163,10 @@ class SharedGuestVMTests(unittest.TestCase):
     def test_windows_shell_keeps_real_wine_msys2_and_writable_tmp(self):
         code = (ROOT / 'webapp/CinterForgeTerminal.py').read_text()
         self.assertIn("'--tmpfs', '/msys2/tmp:rw,nosuid,nodev,size=64m'", code)
-        self.assertIn("guest_executable = r'Z:\\msys2\\usr\\bin\\bash.exe'", code)
-        self.assertIn("image, 'wine', guest_executable", code)
-        self.assertIn("'--workdir', '/workspace'", code)
+        self.assertIn(r'Z:\msys2\usr\bin\bash.exe', code)
+        self.assertIn("docker, 'exec'", code)  # tabs attach, not start containers
+        self.assertIn("docker, 'run', '-d'", code)  # one persistent guest only
+        self.assertIn("'--workdir', '/workspace' if workspace else '/'", code)
         self.assertIn('type=bind,src=/host/mac', code)
 
 

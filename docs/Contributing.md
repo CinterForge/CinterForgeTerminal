@@ -33,7 +33,7 @@ Tests should verify actual observable behavior, not merely that a function was i
 - Real Code-OSS local folder open, file edit/save, last-workspace persistence, integrated platform shells, and complete repository lifecycle from the workbench.
 - `devtools` size/confirmation, manifest integrity, version reporting and safe uninstall; no startup SDK download.
 - Bedrock license gate, signed LinuxKit server with the LAN relay, console attachment and command/reconnect, client LAN connectivity and cleanup of exactly owned processes.
-- Empty-state Setup; no Build provisioning or Stage mutations; four ZIPs; installed target-native startup. Wine and headless container tests are supporting evidence, never a substitute for Windows WebView2 or Linux desktop execution.
+- Empty-state Setup; no Build provisioning or Stage mutations; Mac DMG and three ZIPs; installed target-native startup. Wine and headless container tests are supporting evidence, never a substitute for Windows WebView2 or Linux desktop execution.
 
 ## Licensing and security
 

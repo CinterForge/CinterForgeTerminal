@@ -257,7 +257,7 @@ The [README download section](../README.md#download-cinterforgeterminal) has a p
 For maintainers, release publishing is explicit:
 
 ```sh
-./Cinter publish public
+./Cinter publish cfterminal release
 ./Cinter verify public
 ```
 

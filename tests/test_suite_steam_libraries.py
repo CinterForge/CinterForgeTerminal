@@ -99,15 +99,17 @@ class SteamLibraryDiscoveryTests(unittest.TestCase):
         output = builds / 'CinterForgeTerminal/Distribution'
         output.mkdir(parents=True)
         fixture_release = '2026.11.fixture'
-        zip_path = output / 'CinterForgeTerminal-linux.zip'
-        entry = release._write_release_zip(zip_path,
-                 {'CinterForge Terminal/readme-user.txt': b'Linux release fixture'},
-                 target='linux', release=fixture_release, root='CinterForge Terminal')
-        artifacts = {name: dict(entry, target=name) for name in release.FOUR_TARGETS}
-        artifacts['linux'] = entry
-        (output / 'four-artifacts.json').write_text(json.dumps({
-            'schema': release.FOUR_SCHEMA, 'release': fixture_release,
-            'artifacts': artifacts}))
+        # Stage discovers external Steam from a four-target unpacked Build
+        # receipt. ZIPs are never needed for local Stage.
+        assets = {name: {release.APP_ROOTS[name] + '/readme-user.txt':
+                         b'Linux release fixture' if name == 'linux' else b'fixture'}
+                  for name in release.FOUR_TARGETS}
+        with mock.patch.object(release, '_app_assets',
+                               side_effect=lambda root, target, version: assets[target]), \
+             mock.patch.object(release, '_devtools_assets',
+                               return_value=assets['devtools']):
+            release.build_four(builds, release=fixture_release)
+        self.assertFalse(list(output.glob('*.zip')))
         release.stage_four(builds, release=fixture_release, targets=('linux',))
         installed = release._steam_release_path(self.external, 'linux', fixture_release)
         self.assertTrue((installed / 'CinterForge Terminal/readme-user.txt').is_file())

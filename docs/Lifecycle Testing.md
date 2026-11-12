@@ -141,10 +141,14 @@ Builds tree, **never under the source repository**.
 ## Public release (only after acceptance)
 
 ```sh
-./Cinter publish public
+./Cinter publish cfterminal release
 ```
 
-Publish verifies uploads and public downloads, then updates the managed
+Only `release` uploads to the production destination. Omitting the destination
+runs a local dryrun and checks both CDN connections without uploading.
+`internal` uploads privately; `beta` uploads under the public `/beta/` folder.
+
+Release Publish verifies uploads and public downloads, then updates the managed
 macOS/Windows/Linux links at the top of README. Failed publication cannot
 advance the README. If CDN propagation is delayed and a valid upload receipt
 already exists, the supported lifecycle retry is:

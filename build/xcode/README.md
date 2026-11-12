@@ -1,29 +1,122 @@
-# CinterForge Terminal — Xcode integration
+# CinterForge Terminal
 
-Open `CinterForgeTerminal.xcodeproj` in Xcode. The shared **CinterForge Terminal** scheme creates and launches a real native `.app` using the repository's existing C++/CMake Host, Python HTTP service, resources and Application Shell. This is an **Xcode front-end to the existing producer**, not another application implementation.
+![CinterForge Terminal — games, classic computers, real terminals, Code-OSS, Minecraft Bedrock and development tools](CinterForgeTerminal.png)
 
-## First-time setup and everyday development
+<!-- CINTERFORGE:DOWNLOADS:START -->
+## Download CinterForge Terminal
 
-1. Run `./Cinter setup all` once in a real Mac producer checkout to provision dependencies into sibling `Builds`. Xcode never downloads/provisions dependencies or silently runs Setup. In **Xcode Settings → Locations**, configure Derived Data and Archives under sibling `Builds/Xcode` to avoid Xcode's default home-directory caches.
-2. Open the project and select the **CinterForge Terminal** scheme and **My Mac**. Use **Run** for the application's LLDB console, debugging and process inspection. Source files are visible in the project navigator. The native C++ binary is compiled by the existing CMake producer with `RelWithDebInfo` when Xcode runs Debug, enabling source-level LLDB breakpoints. The normal `./Cinter build all` automatically returns to the existing Release configuration. Do not run an Xcode Debug build and a CLI Release build concurrently against the same managed `Builds` tree.
-3. Choose **Signing & Capabilities**, select your Apple Developer **Team**. Debug initially uses local ad-hoc signing and can be changed to Apple Development if required; Release is configured for **Developer ID Application** direct distribution. Keychain holds the private key. No certificate or credentials are committed to Git.
-4. For direct-download CLI builds, under the target's **Build Settings → User-Defined**, set `CINTER_MAC_NOTARY_PROFILE` to the name of an existing `xcrun notarytool store-credentials` Keychain profile. This field is a name, not the password or API key.
-5. **Product → Archive** creates an Xcode Organizer archive of the existing Terminal runtime, using Xcode's Release settings. Organizer can export/notarize a Developer ID build. This Xcode archive is an *additional manual distribution/testing route*; it is **not** the four-ZIP Cloudflare release and does not implicitly publish anything.
+#### Current Release Status: Public Alpha
+Builds Working, Missing Features, Known Blockers
 
-## Command-line release remains authoritative
+- [macOS — Apple silicon](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/CinterForgeTerminal-mac.dmg)
+- [Windows — x64](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/CinterForgeTerminal-win.zip)
+- [Linux — x64](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/CinterForgeTerminal-linux.zip)
 
-`./Cinter all all` still performs Setup → Build → Stage → Test, creates the three platform ZIPs and one shared DevTools ZIP, and never publishes. During `build all` on a Mac, `host.xcode_signing` reads the **same Xcode project's Release Team and certificate kind**, resolves the installed Developer ID Application certificate in the macOS Keychain, and passes its name and the configured notarization profile to the existing Mac release code. Set no Team to retain local ad-hoc development signing. Never provide private signing keys in the repository.
+The [release manifest](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/2026.11.23/four-artifacts.json) contains checksums and includes the separate, optional DevTools archive. `./Cinter publish public` updates these links after public download verification; if CDN propagation is delayed, `./Cinter verify public` completes the update once verification succeeds.
 
-**Important:** The Developer ID/notarization implementation is in the separately supplied November 11 **3-Blockers** delta. Apply/reconcile that accepted signing implementation against your actual checkout before relying on downloadable public macOS release ZIPs. This Xcode addition does not duplicate or replace it. A public release is accepted only after the full Build/Stage/Test, Developer ID signing, notarization/stapling, and downloaded-app Gatekeeper verification succeed on a Mac.
+Build Status Details can be found here:
+[CinterForgeTerminal Beta Checklist](docs/CinterForgeTerminal%20Beta%20Checklist.md)
 
-## TestFlight is a separate future distribution gate
+<!-- CINTERFORGE:DOWNLOADS:END -->
 
-Xcode supports uploading macOS archives to App Store Connect/TestFlight, but **Developer ID direct distribution and Mac App Store/TestFlight are different signing/distribution targets**. Mac App Store validation may require app sandboxing and entitlement/runtime architecture changes for Terminal's Python, local services, shell execution, guests and virtualization. This project does **not** claim TestFlight eligibility and does not enable an App Store signing profile prematurely. Keep the existing direct distribution functional first; introduce a separately reviewed App Store configuration only after those restrictions have been tested.
+**Play the classics. Explore computer history. Run real terminals. Build something new.**
 
-## Boundaries and outputs
+CinterForge Terminal brings games, historical computers, Minecraft server management, development tools and a reusable native application platform into one tabbed desktop experience. The app runs on **macOS, Windows and Linux**. It offers simple typed commands for play and exploration, with **Code-OSS** and platform shells when you're ready to create.
 
-- Xcode project, plist and scripts: authored source in this repository.
-- Xcode Build products, archives and intermediate outputs: sibling `Builds/Xcode` as directed by build settings. For Xcode's default Organizer Archive path, choose `Builds/Xcode/Archives` when prompted or use `xcodebuild -archivePath`.
-- Existing CMake/native products, Python service, Code-OSS, Bedrock and Lagomorph: only existing `Builds` outputs, never a duplicate implementation.
-- Installed product: existing Steam `steamapps` policy, unchanged by Xcode Build.
-- Explicit Cloudflare publication: only the existing `./Cinter publish ...` commands.
+| Explore | Play | Create | Run | Deliver |
+|---|---|---|---|---|
+| **48** classic-Mac emulator configurations + **19** terminal styles | **68** game commands + **16** interactive-fiction titles | Code-OSS, local files and real shells | Minecraft Bedrock Dedicated Server with a live command console | Cross-platform builds and Cloudflare publishing |
+
+*Catalog counts describe configured entries, not a promise that every third-party operating-system image or game is bundled or licensed for redistribution. Some experiences require external media, a network connection, or optional tooling.*
+
+## What can you do with it?
+
+### Play 68 games
+
+Type `games` to explore the catalog. `wargames` opens **JOSHUA**, the WarGames-inspired experience; the other 67 game entries point to classic Macintosh titles such as **SimCity**, **Loom**, **Marathon** and **Prince of Persia**, using their appropriate player or emulator. Type `stories` to discover **16** separate interactive-fiction titles. And `lagomorph` opens the dedicated classic-Mac easter egg.
+
+### Explore classic computers
+
+Browse **48 classic Macintosh emulator configurations** and **19 visual terminal styles** in the configured history collection. Discover the look and feel of systems such as **Apple II**, **VT100**, **IBM PC**, **BeOS**, **NeXTSTEP** and classic Macintosh models. Terminal styles recreate a visual experience; a bootable emulator uses its actual machine runtime and available media. They are not interchangeable.
+
+### Run a Minecraft Bedrock server—and control it live
+
+Manage the official **Minecraft Bedrock Dedicated Server**, including world selection, start/stop and server status. The interactive Bedrock Session streams actual server output and accepts console commands. Run `minecraft` to attach an additional console to a server that is **already running**. On macOS, the managed LinuxKit/Rosetta environment hosts the server and the LAN relay exposes supported game traffic; other platforms use their supported runtime paths. The official server is obtained separately after license acceptance.
+
+### Open Code-OSS and work on local projects
+
+Type `code` to open the Code-OSS development workbench. Work with local folders and workspaces, edit and save source files, and use integrated **real** Mac, Windows or Linux shells when their execution environments are available. The editor and game experiences share one native application, without turning a terminal theme into a simulated operating system.
+
+### Build and distribute across platforms
+
+For developers, `./Cinter` manages **Setup → Build → Stage → Test** for the macOS, Windows and Linux applications and the separate optional DevTools package. Setup provisions required tools and performs preflight checks; lifecycle results are written to persistent logs. Publishing is a **separate explicit command** and can use Cloudflare R2/CDN to distribute versioned application releases and selected content.
+
+### Reuse the application foundation
+
+The same foundation can host other interactive applications: a **native cross-platform WebView shell**, an **authenticated local HTTP service**, a **customizable Python backend**, native menus and process/terminal services, and a JavaScript-to-native bridge. The C++ Host library and stable `cph_*` ABI are available to integrators; `./Cinter` is the public lifecycle CLI. This is infrastructure for builders, not a claim that arbitrary web pages receive unrestricted local-machine access.
+
+## Get started
+
+Download the application for your platform above and extract it. Open the native launcher appropriate to your operating system. The core Terminal and its game/history interface do not require the separate full DevTools package.
+
+Try these commands inside a regular Terminal Session:
+
+```text
+help             Show supported commands
+games            List the 68 game commands
+wargames         Open JOSHUA
+stories          Explore interactive fiction
+infinite-mac     List classic Macintosh game commands
+lagomorph        Open the protected classic-Mac experience
+bedrock help     See Minecraft Bedrock management commands
+code             Open Code-OSS
+```
+
+To start a Minecraft world, follow `bedrock eula`, `bedrock install`, and `bedrock run "<world name>"` when prompted and authorized. `minecraft` **attaches to the running server**; it does not start one.
+
+See the **[User Manual](docs/User%20Manual.md)** for installing, finding games, using the museum, working in Code-OSS, managing worlds and understanding optional development tooling.
+
+## How it works
+
+| Component | What it provides |
+|---|---|
+| **Native Terminal app** | One tabbed window using WKWebView (macOS), WebView2 (Windows) or WebKitGTK (Linux) |
+| **Web application** | Shared HTML, CSS and JavaScript interface, game catalog, historical profiles and guest controls |
+| **Python service** | Authenticated loopback HTTP APIs for sessions, services, worlds and supported app actions |
+| **Native Host** | Process and terminal I/O, platform menus, WebView bridge, supervision and reusable C/C++ integration |
+| **Code-OSS** | Source editing, local workspaces and development-oriented terminal integration |
+| **Cinter lifecycle** | Repeatable Setup, Build, Stage, Test and separately authorized Publish / Verify |
+| **Cloudflare** | Versioned public distribution through R2/CDN; private development content stays separate |
+
+## Build from source
+
+On the supported macOS producer, with Xcode installed:
+
+```sh
+./Cinter all all
+```
+
+This runs **Setup → Build → Stage → Test**. It does **not** publish. Setup owns preflight and dependency provisioning; Test owns automated regressions and the applicable native acceptance checks. Full logs and PASS/FAIL summaries are saved beneath sibling `Builds/Logs/CinterForgeTerminal/Lifecycle/` instead of disappearing from the console. Target-native Windows and Linux GUI acceptance require the actual target environments.
+
+To publish a verified release explicitly:
+
+```sh
+./Cinter publish cfterminal release
+./Cinter verify public
+```
+
+After public verification, the publisher updates the **managed download section at the top of this README** with the new macOS, Windows and Linux links. It does not automatically commit or push the README to Git.
+
+## Documentation
+
+- [User Manual](docs/User%20Manual.md) — product features, first steps and complete command workflows
+- [Games and Experiences](docs/Game%20Catalog.md) — all game commands, 16 stories and Lagomorph
+- [Architecture](docs/Architecture.md) — native Host, WebViews, Python, services and platform boundaries
+- [Build and Release](docs/Build%20and%20Release.md) — lifecycle phases, four release archives and publication
+- [Developer Tooling](docs/Developer%20Tooling.md) — optional toolchain installation and real platform terminals
+- [Integrating the Host](docs/Integrating%20the%20Host.md) — reusable Host library, authenticated bridge and C API
+- [Contributing](docs/Contributing.md) — working on the open-source source tree
+
+## Licenses, content and security
+
+CinterForge Terminal source, external game media, historical operating-system images, JOSHUA and the official Minecraft Bedrock server may have **different licenses and redistribution terms**. Availability of an interface or catalog item does not imply that third-party content is bundled. The local service binds to loopback and authenticates its control API; do not expose it as an unrestricted public service. Build artifacts, caches, worlds and lifecycle logs remain outside the authored source tree in their designated `Builds` or `steamapps` locations.

@@ -378,11 +378,11 @@ class UniversalPackageTests(unittest.TestCase):
                 universal.assemble(self.builds, release=self.release, arches=self.arches)
 
 class FourArtifactSteamReleaseTests(unittest.TestCase):
-    """Four-ZIP Build and Steam install: no Bedrock before EULA acceptance."""
+    """Build/Stage operate on unpacked files; Setup/Publish own archives."""
     def setUp(self):
         base = UNIVERSAL_PACKAGE_BUILDS / 'Intermediates/CinterForgeTerminalTests'
         base.mkdir(parents=True, exist_ok=True)
-        self.scratch = Path(tempfile.mkdtemp(dir=base, prefix='four-steam-'))
+        self.scratch = Path(tempfile.mkdtemp(dir=base, prefix='four-unpacked-'))
         self.builds = self.scratch / 'Builds'
         self.builds.mkdir()
         self.steamapps = self.scratch / 'steamapps'
@@ -394,413 +394,309 @@ class FourArtifactSteamReleaseTests(unittest.TestCase):
             binary = ('Contents/MacOS/CinterForgeTerminal' if target == 'mac'
                       else 'CinterForge Terminal.exe' if target == 'win' else 'CinterForge Terminal')
             magic = {'mac': b'\xcf\xfa\xed\xfe', 'linux': b'\x7fELF', 'win': b'MZ'}[target]
-            self.assets[target] = {f'{root}/{binary}': magic + b'fixture-binary',
-                                   f'{root}/Builds/Python/Host/{target}/x64/{self.release}/webapp/CinterForgeTerminal.py': b'print("ready")',
-                                   f'{root}/Builds/Python/Host/{target}/x64/{self.release}/webapp/CinterForgeTerminal.py': b'# EULA-gated installer only',
-                                   f'{root}/Builds/Run/README.txt': b'No Bedrock server is provisioned here'}
+            self.assets[target] = {
+                f'{root}/{binary}': magic + b'fixture-binary',
+                f'{root}/Builds/Python/Host/{target}/x64/{self.release}/webapp/CinterForgeTerminal.py':
+                    b'print("ready")',
+                f'{root}/Builds/Run/README.txt': b'Bedrock excluded until user EULA'}
         for name in universal.WINDOWS_SHELL_REQUIRED:
-            self.assets['win'][universal.WINDOWS_SHELL_PREFIX + name] = b'MZmock Windows shell fixture'
+            self.assets['win'][universal.WINDOWS_SHELL_PREFIX + name] = b'MZ Windows Bash fixture'
         self.assets['devtools'] = {
             'DevTools/Builds/CinterForgeTerminal/Toolchains/mac/bin/cmake': b'cmake',
             'DevTools/Builds/CinterForgeTerminal/Toolchains/LinuxSample/oci.tar': b'Linux OCI fixture',
             'DevTools/Builds/CinterForgeTerminal/Toolchains/WindowsCross/oci.tar': b'Windows OCI fixture',
-        }
+            'DevTools/README.txt': b'Optional SDK distribution documentation'}
         self.patch_apps = mock.patch.object(universal, '_app_assets',
-                                            side_effect=lambda b, t, r: self.assets[t])
+                                             side_effect=lambda b, t, r: self.assets[t])
         self.patch_tools = mock.patch.object(universal, '_devtools_assets',
-                                             side_effect=lambda b: self.assets['devtools'])
+                                              side_effect=lambda b: self.assets['devtools'])
         self.patch_apps.start(); self.patch_tools.start()
-        # Fixture Mach-O headers do not constitute signed macOS app bundles.
-        # Production Stage still calls the real codesign verifier.
+        # Native hdiutil is macOS-only. Fixture replaces only disk-image I/O;
+        # lifecycle dispatch, checksums, manifest names and Setup routing stay real.
+        def fake_dmg_create(app, output, builds, **kwargs):
+            self.assertTrue(app.is_dir())
+            self.assertEqual(kwargs['volume_name'], 'CinterForge Terminal')
+            output.write_bytes(b'FIXTURE-DMG:'+self.release.encode())
+            return {'filename': output.name, 'sha256': sha(output.read_bytes()),
+                    'bytes': output.stat().st_size, 'target': 'mac',
+                    'format': 'dmg', 'app_name': app.name,
+                    'notarized': bool(kwargs.get('public'))}
+        def fake_dmg_verify(path, builds, **kwargs):
+            self.assertTrue(path.read_bytes().startswith(b'FIXTURE-DMG:'))
+            self.assertEqual(kwargs['app_name'], 'CinterForge Terminal.app')
+        def fake_dmg_restore(path, builds, **kwargs):
+            fake_dmg_verify(path, builds, app_name=kwargs['app_name'])
+            destination = kwargs['destination']
+            signed = (self.builds / 'CinterForgeTerminal/Prepared/MacSigned/MacSignedRelease'
+                      / 'CinterForge Terminal.app')
+            shutil.copytree(signed, destination, dirs_exist_ok=True)
+        self.patch_dmg_create = mock.patch('host.mac_dmg.create_dmg', side_effect=fake_dmg_create)
+        self.patch_dmg_verify = mock.patch('host.mac_dmg.verify_dmg', side_effect=fake_dmg_verify)
+        self.patch_dmg_restore = mock.patch('host.mac_dmg.restore_dmg', side_effect=fake_dmg_restore)
+        self.patch_dmg_create.start(); self.patch_dmg_verify.start(); self.patch_dmg_restore.start()
         self.fixture_signature = mock.patch('host.mac_app._verify_signature')
         self.fixture_signature.start()
+
     def tearDown(self):
+        self.patch_dmg_create.stop(); self.patch_dmg_verify.stop(); self.patch_dmg_restore.stop()
         self.fixture_signature.stop()
         self.patch_apps.stop(); self.patch_tools.stop()
         shutil.rmtree(self.scratch)
+
+    def built(self):
+        result = universal.build_four(self.builds, release=self.release)
+        # Fixture assets are small bytes rather than a real Xcode-signed app.
+        # Materialize Build's signed-app destination for mock hdiutil tests.
+        signed = (self.builds / 'CinterForgeTerminal/Prepared/MacSigned/MacSignedRelease'
+                  / 'CinterForge Terminal.app')
+        from host.unpacked_release import _load
+        mac_files = _load(self.builds, self.release)['targets']['mac']['files']
+        for name, detail in mac_files.items():
+            relative = Path(name).relative_to('CinterForge Terminal.app')
+            dest = signed / relative
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(detail['source'], dest)
+        return result
+
+    def stage(self, targets=None):
+        kw = {'release': self.release, 'steamapps': self.steamapps}
+        if targets: kw['targets'] = targets
+        return universal.stage_four(self.builds, **kw)
+
     def test_release_zip_preserves_runtime_python_and_devtools_executable_modes(self):
         runtime = self.scratch / 'python'
         runtime.write_bytes(b'\xcf\xfa\xed\xfe-mac-python-fixture')
-        runtime.chmod(0o644)  # Upstream unpacker may lose executable metadata.
+        runtime.chmod(0o644)
         app_python = ('CinterForge Terminal.app/Contents/Resources/Builds/Python/'
                       'Environments/mac/arm64/cinterterminalenv/bin/python')
-        app_zip = self.scratch / 'mac-python-fixture.zip'
-        universal._write_release_zip(app_zip, {app_python: runtime}, target='mac',
+        output = self.scratch / 'mac-fixture.zip'
+        universal._write_release_zip(output, {app_python: runtime}, target='mac',
                                      release=self.release, root='CinterForge Terminal.app')
-        with zipfile.ZipFile(app_zip) as archive:
+        with zipfile.ZipFile(output) as archive:
             self.assertEqual((archive.getinfo(app_python).external_attr >> 16) & 0o777, 0o755)
-        tool = self.scratch / 'tool'
-        tool.write_text('#!/bin/sh\necho cmake\n')
+        tool = self.scratch / 'cmake'
+        tool.write_text('#!/bin/sh\nexit 0\n')
         tool.chmod(0o755)
-        tool_name = 'DevTools/Builds/CinterForgeTerminal/Toolchains/mac/env/bin/cmake'
-        data = self.scratch / 'data'
-        data.write_bytes(b'plain data')
-        data.chmod(0o644)
-        data_name = 'DevTools/Builds/Toolchains/WebView/metadata.txt'
-        dev_zip = self.scratch / 'devtool-modes-fixture.zip'
-        universal._write_release_zip(dev_zip, {tool_name: tool, data_name: data},
-                                     target='devtools', release=self.release, root='DevTools')
-        with zipfile.ZipFile(dev_zip) as archive:
-            self.assertEqual((archive.getinfo(tool_name).external_attr >> 16) & 0o777, 0o755)
-            self.assertEqual((archive.getinfo(data_name).external_attr >> 16) & 0o777, 0o644)
-    def test_mac_stage_preserves_existing_app_when_signature_rejected(self):
-        universal.build_four(self.builds, release=self.release)
-        universal.stage_four(self.builds, release=self.release,
-                             steamapps=self.steamapps, targets=('mac',))
-        root = universal._steam_release_path(self.steamapps, 'mac', self.release)
-        executable = root / 'CinterForge Terminal.app/Contents/MacOS/CinterForgeTerminal'
-        old_bytes = executable.read_bytes()
-        with mock.patch('platform.system', return_value='Darwin'), \
-             mock.patch('host.mac_app._verify_signature',
-                        side_effect=RuntimeError('Invalid extracted signature')):
-            with self.assertRaisesRegex(RuntimeError, 'Invalid extracted signature'):
-                universal.stage_four(self.builds, release=self.release,
-                                     steamapps=self.steamapps, targets=('mac',))
-        self.assertEqual(executable.read_bytes(), old_bytes)
-    def test_mac_stage_recovers_backup_when_installed_app_was_moved_aside(self):
-        """A crash between old-app rename and promotion must self-heal."""
-        universal.build_four(self.builds, release=self.release)
-        universal.stage_four(self.builds, release=self.release,
-                             steamapps=self.steamapps, targets=('mac',))
-        root = universal._steam_release_path(self.steamapps, 'mac', self.release)
-        old_app = root / 'CinterForge Terminal.app'
-        backup = root / 'CinterForge Terminal.app.previous-stage'
-        old_app.replace(backup)  # Simulate an interrupted previous Stage.
-        self.assertFalse(old_app.exists())
-        universal.stage_four(self.builds, release=self.release,
-                             steamapps=self.steamapps, targets=('mac',))
-        self.assertTrue((old_app / 'Contents/MacOS/CinterForgeTerminal').is_file())
-        self.assertFalse(backup.exists())
+        name = 'DevTools/Builds/CinterForgeTerminal/Toolchains/mac/env/bin/cmake'
+        output = self.scratch / 'devtools-fixture.zip'
+        universal._write_release_zip(output, {name: tool}, target='devtools',
+                                     release=self.release, root='DevTools')
+        with zipfile.ZipFile(output) as archive:
+            self.assertEqual((archive.getinfo(name).external_attr >> 16) & 0o777, 0o755)
 
-    def test_mac_stage_preserves_stale_backup_if_both_apps_exist(self):
-        """A stale backup never blocks another Stage and is not discarded."""
-        universal.build_four(self.builds, release=self.release)
-        universal.stage_four(self.builds, release=self.release,
-                             steamapps=self.steamapps, targets=('mac',))
-        root = universal._steam_release_path(self.steamapps, 'mac', self.release)
-        old_app = root / 'CinterForge Terminal.app'
-        backup = root / 'CinterForge Terminal.app.previous-stage'
-        backup.mkdir()
-        (backup / 'previous-version.txt').write_text('original prior user data')
-        universal.stage_four(self.builds, release=self.release,
-                             steamapps=self.steamapps, targets=('mac',))
-        self.assertTrue((old_app / 'Contents/MacOS/CinterForgeTerminal').is_file())
-        self.assertFalse(backup.exists())
-        recovered = list((self.builds / 'Intermediates/CinterForgeTerminal/StageRecovery/macOS')
-                         .rglob('previous-version.txt'))
-        self.assertEqual(len(recovered), 1)
-        self.assertEqual(recovered[0].read_text(), 'original prior user data')
+    def test_build_four_unpacked_and_stage_all_without_zip(self):
+        with mock.patch.object(universal, '_write_release_zip', side_effect=AssertionError('ZIP in Build')):
+            result = self.built()
+            self.assertEqual(set(result['artifacts']), set(universal.FOUR_TARGETS))
+            self.assertEqual(list((self.builds / 'CinterForgeTerminal/Distribution').glob('*.zip')), [])
+            self.stage()
+        for target in universal.FOUR_TARGETS:
+            root = universal._steam_release_path(self.steamapps, target, self.release)
+            self.assertTrue((root / universal.APP_ROOTS[target]).is_dir())
+            self.assertTrue((root / 'stage-receipt.json').is_file())
+        self.assertFalse(list(self.steamapps.rglob('bedrock_server*')))
 
-    def test_mac_stage_recovers_stale_backup_across_volumes(self):
-        """Recovery works even when Steam and Builds have different devices."""
-        import errno
-        import os
-        from contextlib import redirect_stdout
-        from io import StringIO
-
-        universal.build_four(self.builds, release=self.release)
-        universal.stage_four(self.builds, release=self.release,
-                             steamapps=self.steamapps, targets=('mac',))
-        root = universal._steam_release_path(self.steamapps, 'mac', self.release)
-        backup = root / 'CinterForge Terminal.app.previous-stage'
-        backup.mkdir()
-        (backup / 'preserve-this.txt').write_text('older app data')
-        native_rename = os.rename
-
-        def simulate_other_volume(source, destination):
-            if str(source) == str(backup):
-                raise OSError(errno.EXDEV, 'Cross-device link')
-            return native_rename(source, destination)
-
-        output = StringIO()
-        with mock.patch('os.rename', side_effect=simulate_other_volume), redirect_stdout(output):
-            universal.stage_four(self.builds, release=self.release,
-                                 steamapps=self.steamapps, targets=('mac',))
-        self.assertIn('macOS recovery protocol: restart-safe-v2', output.getvalue())
-        self.assertIn('RECOVERED stale macOS Stage backup', output.getvalue())
-        self.assertFalse(backup.exists())
-        saved = list((self.builds / 'Intermediates/CinterForgeTerminal/StageRecovery/macOS')
-                     .rglob('preserve-this.txt'))
-        self.assertEqual(len(saved), 1)
-        self.assertEqual(saved[0].read_text(), 'older app data')
-        self.assertTrue((root / 'CinterForge Terminal.app/Contents/MacOS/CinterForgeTerminal').is_file())
-
-    def test_mac_stage_refuses_symlinked_recovery_backup_without_changes(self):
-        universal.build_four(self.builds, release=self.release)
-        universal.stage_four(self.builds, release=self.release,
-                             steamapps=self.steamapps, targets=('mac',))
-        root = universal._steam_release_path(self.steamapps, 'mac', self.release)
-        executable = root / 'CinterForge Terminal.app/Contents/MacOS/CinterForgeTerminal'
-        old_bytes = executable.read_bytes()
-        backup = root / 'CinterForge Terminal.app.previous-stage'
-        backup.symlink_to(self.scratch, target_is_directory=True)
-        with self.assertRaisesRegex(RuntimeError, 'Unsafe macOS Stage recovery backup'):
-            universal.stage_four(self.builds, release=self.release,
-                                 steamapps=self.steamapps, targets=('mac',))
-        self.assertEqual(executable.read_bytes(), old_bytes)
-        self.assertTrue(backup.is_symlink())
-
-    def test_mac_stage_rolls_back_if_installed_signature_fails(self):
-        universal.build_four(self.builds, release=self.release)
-        universal.stage_four(self.builds, release=self.release,
-                             steamapps=self.steamapps, targets=('mac',))
-        root = universal._steam_release_path(self.steamapps, 'mac', self.release)
-        executable = root / 'CinterForge Terminal.app/Contents/MacOS/CinterForgeTerminal'
-        old_bytes = executable.read_bytes()
-        def verify(path):
-            # Candidate may be valid even if installed-path verification fails.
-            if Path(path).parent == root:
-                raise RuntimeError('Installed signature verification failed')
-        with mock.patch('platform.system', return_value='Darwin'), \
-             mock.patch('host.mac_app._verify_signature', side_effect=verify):
-            with self.assertRaisesRegex(RuntimeError, 'Installed signature verification failed'):
-                universal.stage_four(self.builds, release=self.release,
-                                     steamapps=self.steamapps, targets=('mac',))
-        self.assertEqual(executable.read_bytes(), old_bytes)
-        self.assertFalse((root / 'CinterForge Terminal.app.previous-stage').exists())
-
-    def test_build_four_separate_zips_stage_all_into_steamapps_without_bedrock(self):
-        result = universal.build_four(self.builds, release=self.release)
-        self.assertEqual(set(result['artifacts']), {'mac', 'linux', 'win', 'devtools'})
-        output = self.builds / 'CinterForgeTerminal/Distribution'
-        self.assertEqual(len(list(output.glob('*.zip'))), 4)
-        for target, entry in result['artifacts'].items():
-            manifest = universal._verify_release_zip(output / entry['filename'],
-                                                      target=target, release=self.release)
-            self.assertEqual(manifest['target'], target)
-            root = {'mac': 'CinterForge Terminal.app', 'linux': 'CinterForge Terminal',
-                    'win': 'CinterForge Terminal', 'devtools': 'DevTools'}[target]
-            self.assertEqual(manifest['root'], root)
-            self.assertTrue(all(name.startswith(root + '/') for name in manifest['files']))
-            if target == 'linux':
-                self.assertEqual(manifest['files'][root + '/CinterForge Terminal']['mode'], 0o755)
-            if target == 'win':
-                self.assertIn(root + '/CinterForge Terminal.exe', manifest['files'])
-            self.assertNotIn('Servers/Bedrock', ' '.join(manifest['files']))
-        installed = universal.stage_four(self.builds, release=self.release, steamapps=self.steamapps)
-        for target in result['artifacts']:
-            new_root = universal._steam_release_path(self.steamapps, target, self.release)
-            self.assertTrue((new_root / universal.APP_ROOTS[target]).is_dir())
-        self.assertFalse(any(p.name in {'bedrock_server', 'bedrock_server.exe'}
-                             for p in installed.rglob('*')))
-        self.assertFalse((universal._steam_release_path(self.steamapps, 'mac', self.release) /
-                          'CinterForge Terminal.app/Contents/Resources/Builds/Servers/Bedrock').exists())
-        self.assertEqual(universal.stage_four(self.builds, release=self.release,
-                                              steamapps=self.steamapps), installed)
-    def test_four_artifact_status_reports_build_and_steam_separately(self):
-        missing = universal.status_four(self.builds, release=self.release,
-                                        steamapps=self.steamapps)
-        self.assertFalse(missing['complete_build_receipt'])
-        self.assertFalse(missing['complete_stage_receipt'])
-        self.assertEqual(set(missing['targets']), set(universal.FOUR_TARGETS))
-        self.assertTrue(all(not data['archive_present'] for data in missing['targets'].values()))
-        universal.build_four(self.builds, release=self.release)
-        built = universal.status_four(self.builds, release=self.release,
-                                      steamapps=self.steamapps)
-        self.assertTrue(built['complete_build_receipt'])
-        self.assertFalse(built['complete_stage_receipt'])
-        self.assertTrue(all(data['archive_present'] and data['size_matches_receipt']
-                            for data in built['targets'].values()))
-        universal.stage_four(self.builds, release=self.release,
-                             steamapps=self.steamapps)
-        staged = universal.status_four(self.builds, release=self.release,
+    def test_build_status_and_stage_status_are_separate(self):
+        self.assertFalse(universal.status_four(self.builds, release=self.release,
+                           steamapps=self.steamapps)['complete_build_receipt'])
+        self.built()
+        before = universal.status_four(self.builds, release=self.release,
                                        steamapps=self.steamapps)
-        self.assertTrue(staged['complete_stage_receipt'])
-        self.assertTrue(all(data['steam_receipt_matches'] and data['steam_app_root_present']
-                            for data in staged['targets'].values()))
-    def test_public_publish_selects_distinct_bucket_and_roundtrip(self):
-        from host.publishing import cloudflare_r2_sync as r2
-        universal.build_four(self.builds, release=self.release)
-        objects = {}
-        cfg = {'bucket': 'cinterforge'}
-        def put(config, key, path, **kwargs):
-            self.assertEqual(config['bucket'], 'cinterforge')
-            objects[key] = path.read_bytes()
-        def get(config, key, path, expected_size=None):
-            self.assertEqual(config['bucket'], 'cinterforge')
-            self.assertEqual(expected_size, len(objects[key]))
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(objects[key])
-        def listed(config, prefix):
-            self.assertEqual(config['bucket'], 'cinterforge')
-            return {key[len(prefix)+1:]: {'size': len(val), 'etag': hashlib.md5(val).hexdigest()}
-                    for key, val in objects.items() if key.startswith(prefix + '/')}
-        lagomorph_fixture = self.scratch / 'Lagomorph-Quadra650.iso'
-        lagomorph_fixture.write_bytes(b'Classic-HFS-publish-fixture')
-        with mock.patch.object(universal, '_require_notarized_mac_release'), \
-             mock.patch.object(universal, '_lagomorph_public_disk', return_value=lagomorph_fixture), \
-             mock.patch.object(universal, '_cloudflare_config', return_value=cfg) as config, \
-             mock.patch.object(r2, '_list_remote', side_effect=listed), \
-             mock.patch.object(r2, '_put_file', side_effect=put), \
-             mock.patch.object(r2, '_get_file', side_effect=get), \
-             mock.patch.object(universal, '_verify_public_urls') as publicly_reachable:
-            receipt = universal.publish_four(self.builds, release=self.release, channel='public')
-            publicly_reachable.assert_called_once()
-            urls = receipt['public_urls']
-            self.assertEqual(set(urls), {'manifest', 'mac', 'linux', 'win', 'devtools', 'lagomorph'})
-            self.assertTrue(urls['devtools'].startswith('https://cinterforge.ucreg.io/'))
-            self.assertTrue(urls['devtools'].endswith('/CinterForgeTerminal-devtools.zip'))
-            prefix = 'CinterForgeTerminal/Distribution/'
-            for target in universal.FOUR_TARGETS:
-                self.assertIn(prefix + f'CinterForgeTerminal-{target}.zip', objects)
-            self.assertIn(prefix + 'four-artifacts.json', objects)
-            # Keep existing classic Macintosh media URLs and objects versioned.
-            self.assertIn(prefix + self.release + '/Lagomorph-Quadra650.iso', objects)
-            self.assertEqual(receipt['bucket'], 'cinterforge')
-            self.assertEqual(receipt['channel'], 'public')
-            self.assertEqual(len(objects), 6)
-            config.assert_called_with(None, channel='public')
-            downloaded = self.builds / 'CinterForgeTerminal/Publish/Downloaded/public' / self.release
-            self.assertEqual(len(list(downloaded.glob('*.zip'))), 4)
-            self.assertEqual(universal.fetch_four(self.builds, release=self.release, channel='public'),
-                             json.loads((downloaded / 'four-artifacts.json').read_text()))
-    def test_public_403_preserves_verified_receipt_and_skips_reupload(self):
-        """CDN propagation must never restart a completed multi-GB R2 transfer."""
-        from host.publishing import cloudflare_r2_sync as r2
-        universal.build_four(self.builds, release=self.release)
-        objects = {}
-        cfg = {'bucket': 'cinterforge'}
-        uploads = []
-        downloads = []
-        def put(config, key, path, **kwargs):
-            uploads.append(key)
-            objects[key] = path.read_bytes()
-        def get(config, key, path, expected_size=None):
-            downloads.append(key)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(objects[key])
-        def listed(config, prefix):
-            return {key[len(prefix)+1:]: {'size': len(data), 'etag': hashlib.md5(data).hexdigest()}
-                    for key, data in objects.items() if key.startswith(prefix+'/')}
-        disk = self.scratch / 'Lagomorph-Quadra650.iso'
-        disk.write_bytes(b'Classic HFS fixture')
-        receipt_path = (self.builds / 'CinterForgeTerminal/Publish/Receipts/public' /
-                        self.release / 'cloudflare.json')
-        with mock.patch.object(universal, '_require_notarized_mac_release'), \
-             mock.patch.object(universal, '_lagomorph_public_disk', return_value=disk), \
-             mock.patch.object(universal, '_cloudflare_config', return_value=cfg), \
-             mock.patch.object(r2, '_list_remote', side_effect=listed), \
-             mock.patch.object(r2, '_put_file', side_effect=put), \
-             mock.patch.object(r2, '_get_file', side_effect=get), \
-             mock.patch.object(universal, '_verify_public_urls',
-                               side_effect=[RuntimeError('HTTP 403'), None]) as public_check:
-            with self.assertRaisesRegex(RuntimeError, 'Public verification pending'):
-                universal.publish_four(self.builds, release=self.release, channel='public')
-            cached = json.loads(receipt_path.read_text())
-            self.assertEqual(cached['roundtrip'], 'sha256-verified')
-            self.assertEqual(cached['public_http'], 'pending')
-            self.assertEqual(len(uploads), 6)
-            first_downloads = len(downloads)
-            final = universal.publish_four(self.builds, release=self.release, channel='public')
-            self.assertEqual(final['public_http'], 'verified')
-            self.assertEqual(len(uploads), 6)
-            self.assertEqual(len(downloads), first_downloads)
-            self.assertEqual(public_check.call_count, 2)
+        self.assertTrue(before['complete_build_receipt'])
+        self.assertFalse(before['complete_stage_receipt'])
+        self.stage()
+        after = universal.status_four(self.builds, release=self.release,
+                                      steamapps=self.steamapps)
+        self.assertTrue(after['complete_stage_receipt'])
 
-    def test_stage_rejects_tampered_zip_before_creating_install(self):
-        result = universal.build_four(self.builds, release=self.release)
-        path = (self.builds / 'CinterForgeTerminal/Distribution' /
-                result['artifacts']['linux']['filename'])
-        with zipfile.ZipFile(path, 'a') as archive:
-            archive.writestr('CinterForge Terminal/injected.txt', 'not in manifest')
-        with self.assertRaisesRegex(RuntimeError, 'size mismatch|checksum mismatch'):
-            universal.stage_four(self.builds, release=self.release, steamapps=self.steamapps)
-        self.assertFalse(universal._steam_release_path(self.steamapps, 'mac', self.release).exists())
-    def test_build_rejects_server_binary_even_before_consent(self):
-        self.assets['win']['CinterForge Terminal/Builds/Servers/Bedrock/bedrock_server.exe'] = b'MZbad'
-        with self.assertRaisesRegex(RuntimeError, 'Bedrock-server paths'):
-            universal.build_four(self.builds, release=self.release)
-        self.assertFalse((self.builds / 'CinterForgeTerminal/Distribution/four-artifacts.json').exists())
-    def test_old_versioned_zip_names_are_adopted_without_recompression(self):
-        """First stable-name build reuses verified older archives, including DevTools."""
-        first = universal.build_four(self.builds, release=self.release)
+    def test_publish_alone_creates_mac_dmg_and_three_zips(self):
+        self.built(); self.stage()
         directory = self.builds / 'CinterForgeTerminal/Distribution'
-        legacy = directory / self.release
-        legacy.mkdir()
-        historical = dict(first)
-        historical['artifacts'] = {name: dict(item) for name, item in first['artifacts'].items()}
-        for target, item in historical['artifacts'].items():
-            original = directory / item['filename']
-            old_name = f'CinterForgeTerminal-{target}-{self.release}.zip'
-            original.replace(legacy / old_name)
-            item['filename'] = old_name
-        (legacy / 'four-artifacts.json').write_text(json.dumps(historical))
-        (directory / 'four-artifacts.json').unlink()
-        with mock.patch.object(universal, '_write_release_zip',
-                               side_effect=AssertionError('must reuse existing archive')):
-            adopted = universal.build_four(self.builds, release=self.release)
-        self.assertEqual(adopted['release'], self.release)
-        for target, item in adopted['artifacts'].items():
-            self.assertEqual(item['filename'], f'CinterForgeTerminal-{target}.zip')
-            self.assertEqual(item['sha256'], historical['artifacts'][target]['sha256'])
-            self.assertTrue((directory / item['filename']).is_file())
-            self.assertTrue((legacy / historical['artifacts'][target]['filename']).is_file())
+        self.assertEqual(list(directory.glob('*.zip')), [])
+        result = universal.prepare_publish_packages(self.builds, release=self.release)
+        self.assertEqual(set(result['artifacts']), set(universal.FOUR_TARGETS))
+        self.assertEqual({p.name for p in directory.glob('*.zip')},
+                         {universal.artifact_filename(name) for name in ('linux', 'win', 'devtools')})
+        self.assertTrue((directory / 'CinterForgeTerminal-mac.dmg').is_file())
+        for name in ('linux', 'win', 'devtools'):
+            universal._verify_release_zip(directory / universal.artifact_filename(name),
+                                          target=name, release=self.release)
+        self.assertEqual(result['artifacts']['mac']['format'], 'dmg')
 
-    def test_unchanged_devtools_uses_metadata_cache_without_rehashing(self):
-        first = universal.build_four(self.builds, release=self.release)
-        cache = universal._release_cache_file(self.builds, self.release, 'devtools')
-        self.assertTrue(cache.is_file())
-        self.assertTrue(cache.is_relative_to(self.builds))
-        with mock.patch.object(universal, '_verify_release_zip',
-                               side_effect=AssertionError('unexpected ZIP read')), \
-             mock.patch.object(universal, '_hash',
-                               side_effect=AssertionError('unexpected input rehash')):
-            second = universal.build_four(self.builds, release=self.release)
-        self.assertEqual(second['artifacts'], first['artifacts'])
+    def test_setup_only_extracts_published_packages_to_builds(self):
+        from host.unpacked_release import setup_unpack_published
+        self.built()
+        universal.prepare_publish_packages(self.builds, release=self.release)
+        with mock.patch('sys.platform', 'darwin'):
+            restored = setup_unpack_published(self.builds, release=self.release)
+        self.assertEqual(set(restored['restored_files']), set(universal.FOUR_TARGETS))
+        self.assertTrue((self.builds / 'CinterForgeTerminal/Applications/mac/arm64/Release'
+                         / 'CinterForge Terminal.app/Contents/MacOS/CinterForgeTerminal').is_file())
+        self.assertEqual((self.builds / 'CinterForgeTerminal/Prepared/DevTools/README.txt').read_bytes(),
+                         b'Optional SDK distribution documentation')
+        self.assertTrue((self.builds / 'CinterForgeTerminal/Toolchains/mac/bin/cmake').is_file())
 
-    def test_changed_devtools_rebuilds_only_devtools(self):
-        original = universal.build_four(self.builds, release=self.release)
-        original_artifacts = original['artifacts'].copy()
-        key = 'DevTools/Builds/CinterForgeTerminal/Toolchains/mac/bin/cmake'
-        self.assets['devtools'][key] = b'cmake-updated'
-        rebuilt = universal.build_four(self.builds, release=self.release)
-        self.assertNotEqual(original_artifacts['devtools']['sha256'],
-                            rebuilt['artifacts']['devtools']['sha256'])
-        for target in ('mac', 'linux', 'win'):
-            self.assertEqual(original_artifacts[target], rebuilt['artifacts'][target])
+    def test_second_build_reuses_unchanged_unpacked_file_receipt(self):
+        first = self.built()
+        with mock.patch.object(universal, '_write_release_zip', side_effect=AssertionError('Build zipped')):
+            second = self.built()
+        self.assertEqual(first, second)
 
-    def test_same_size_rewrite_with_restored_mtime_invalidates_cache(self):
-        source = self.scratch / 'devtools-binary'
-        source.write_bytes(b'12345678')
+    def test_second_stage_skips_unchanged_devtools_copies(self):
+        self.built(); self.stage()
+        from host import unpacked_release
+        with mock.patch.object(unpacked_release, '_copy_verified',
+                               side_effect=AssertionError('Unchanged 7GB DevTools copied')):
+            self.stage(targets=('devtools',))
+
+    def test_stage_rejects_modified_build_input_before_install(self):
+        self.built()
+        from host import unpacked_release
+        receipt = unpacked_release._load(self.builds, self.release)
+        item = next(iter(receipt['targets']['linux']['files'].values()))
+        Path(item['source']).write_bytes(b'corrupted')
+        with self.assertRaisesRegex(RuntimeError, 'Build input changed'):
+            self.stage(targets=('linux',))
+        root = universal._steam_release_path(self.steamapps, 'linux', self.release)
+        self.assertFalse((root / 'CinterForge Terminal/CinterForge Terminal').exists())
+
+    def test_stage_does_not_delete_unowned_installed_files(self):
+        self.built(); self.stage()
+        root = universal._steam_release_path(self.steamapps, 'linux', self.release)
+        extra = root / 'user-note.txt'
+        extra.write_text('preserve me')
+        self.assets['linux']['CinterForge Terminal/CinterForge Terminal'] = b'\x7fELF-updated'
+        self.built(); self.stage(targets=('linux',))
+        self.assertEqual(extra.read_text(), 'preserve me')
+        self.assertEqual((root / 'CinterForge Terminal/CinterForge Terminal').read_bytes(),
+                         b'\x7fELF-updated')
+
+    def test_devtools_input_change_invalidates_its_manifest_only(self):
+        first = self.built()
+        self.assets['devtools']['DevTools/Builds/CinterForgeTerminal/Toolchains/mac/bin/cmake'] = b'new-cmake'
+        second = self.built()
+        self.assertNotEqual(first['artifacts']['devtools']['fingerprint'],
+                            second['artifacts']['devtools']['fingerprint'])
+        for target in ('mac', 'win', 'linux'):
+            self.assertEqual(first['artifacts'][target], second['artifacts'][target])
+
+    def test_same_size_rewrite_even_if_mtime_restored_invalidates_build(self):
+        executable = self.builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/cmake'
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b'12345678')
         name = 'DevTools/Builds/CinterForgeTerminal/Toolchains/mac/bin/cmake'
-        self.assets['devtools'][name] = source
-        original = universal.build_four(self.builds, release=self.release)
-        old_mtime = source.stat().st_mtime_ns
-        source.write_bytes(b'ABCDEFGH')
-        os.utime(source, ns=(old_mtime, old_mtime))
-        rebuilt = universal.build_four(self.builds, release=self.release)
-        self.assertNotEqual(original['artifacts']['devtools']['sha256'],
-                            rebuilt['artifacts']['devtools']['sha256'])
+        self.assets['devtools'][name] = executable
+        first = self.built()
+        original = executable.stat().st_mtime_ns
+        executable.write_bytes(b'ABCDEFGH')
+        os.utime(executable, ns=(original, original))
+        second = self.built()
+        self.assertNotEqual(first['artifacts']['devtools']['fingerprint'],
+                            second['artifacts']['devtools']['fingerprint'])
 
-    def test_corrupted_devtools_zip_invalidates_cached_archive(self):
-        original = universal.build_four(self.builds, release=self.release)
-        archive = (self.builds / 'CinterForgeTerminal/Distribution' /
-                   original['artifacts']['devtools']['filename'])
-        with archive.open('ab') as handle:
-            handle.write(b'CORRUPT-APPENDED-DATA')
-        rebuilt = universal.build_four(self.builds, release=self.release)
-        self.assertEqual(rebuilt['artifacts']['devtools'],
-                         original['artifacts']['devtools'])
-        self.assertEqual(archive.stat().st_size,
-                         original['artifacts']['devtools']['bytes'])
+    def test_publish_cached_four_packages_unchanged(self):
+        self.built()
+        first = universal.prepare_publish_packages(self.builds, release=self.release)
+        with mock.patch.object(universal, '_write_release_zip', side_effect=AssertionError('recompressed')):
+            second = universal.prepare_publish_packages(self.builds, release=self.release)
+        self.assertEqual(first, second)
 
-    def test_changed_input_rebuilds_same_four_zips_and_reinstalls_to_steam(self):
-        original = universal.build_four(self.builds, release=self.release)
-        installed = universal.stage_four(self.builds, release=self.release,
-                                         steamapps=self.steamapps)
-        note = universal._steam_release_path(self.steamapps, 'linux', self.release) / 'readme-user.txt'
-        note.write_text('keep me')
-        self.assets['linux']['CinterForge Terminal/CinterForge Terminal'] = b'\x7fELFchanged'
-        rebuilt = universal.build_four(self.builds, release=self.release)
-        self.assertEqual(set(rebuilt['artifacts']), set(universal.FOUR_TARGETS))
-        self.assertNotEqual(original['artifacts']['linux']['sha256'],
-                            rebuilt['artifacts']['linux']['sha256'])
-        self.assertEqual(len(list((self.builds / 'CinterForgeTerminal/Distribution').glob('*.zip'))), 4)
-        universal.stage_four(self.builds, release=self.release, steamapps=self.steamapps)
-        self.assertEqual((universal._steam_release_path(self.steamapps, 'linux', self.release) /
-                          'CinterForge Terminal/CinterForge Terminal').read_bytes(),
-                         b'\x7fELFchanged')
-        self.assertEqual(note.read_text(), 'keep me')
+    def test_public_dmg_repackages_unnotarized_dev_dmg(self):
+        self.built()
+        original = universal.prepare_publish_packages(self.builds, release=self.release)
+        self.assertFalse(original['artifacts']['mac']['notarized'])
+        from host import unpacked_release
+        with mock.patch.dict(os.environ, {
+                'CINTER_MAC_SIGN_IDENTITY': 'Developer ID Application: fixture',
+                'CINTER_MAC_NOTARY_PROFILE': 'fixture-notary-profile'}), \
+             mock.patch.object(universal, '_notarize_mac_app') as notarize:
+            result = universal.prepare_publish_packages(self.builds, release=self.release)
+        notarize.assert_called_once()
+        self.assertTrue(result['artifacts']['mac']['notarized'])
+        for target in ('linux', 'win', 'devtools'):
+            self.assertEqual(original['artifacts'][target], result['artifacts'][target])
+
+    def test_manifest_refuses_legacy_mac_zip_filename(self):
+        self.built()
+        universal.prepare_publish_packages(self.builds, release=self.release)
+        receipt = self.builds / 'CinterForgeTerminal/Distribution/four-artifacts.json'
+        content = json.loads(receipt.read_text())
+        content['artifacts']['mac']['filename'] = 'CinterForgeTerminal-mac.zip'
+        receipt.write_text(json.dumps(content))
+        with self.assertRaisesRegex(RuntimeError, 'Unsafe release package name'):
+            universal._distribution_files(self.builds, self.release)
+
+    def test_corrupt_published_zip_repaired_only_by_publish(self):
+        self.built()
+        first = universal.prepare_publish_packages(self.builds, release=self.release)
+        path = self.builds / 'CinterForgeTerminal/Distribution/CinterForgeTerminal-devtools.zip'
+        with path.open('ab') as output:
+            output.write(b'CORRUPTED')
+        self.stage(targets=('devtools',))  # Stage ignores ZIPs completely.
+        universal.prepare_publish_packages(self.builds, release=self.release)
+        self.assertEqual(path.stat().st_size, first['artifacts']['devtools']['bytes'])
+
+    def test_build_rejects_bedrock_server_without_consent(self):
+        self.assets['win']['CinterForge Terminal/Builds/Servers/Bedrock/bedrock_server.exe'] = b'MZbad'
+        with self.assertRaisesRegex(RuntimeError, 'Unsafe unpacked release path'):
+            self.built()
+        self.assertFalse((self.builds / 'CinterForgeTerminal/Distribution/four-built.json').exists())
+
+    def test_mac_stage_recovers_backup_when_app_was_moved_aside(self):
+        self.built(); self.stage(targets=('mac',))
+        root = universal._steam_release_path(self.steamapps, 'mac', self.release)
+        app = root / 'CinterForge Terminal.app'
+        backup = root / 'CinterForge Terminal.app.previous-stage'
+        app.replace(backup)
+        self.stage(targets=('mac',))
+        self.assertTrue((app / 'Contents/MacOS/CinterForgeTerminal').is_file())
+        self.assertFalse(backup.exists())
+
+    def test_mac_stage_preserves_old_app_on_failed_verification(self):
+        self.built(); self.stage(targets=('mac',))
+        root = universal._steam_release_path(self.steamapps, 'mac', self.release)
+        exe = root / 'CinterForge Terminal.app/Contents/MacOS/CinterForgeTerminal'
+        old = exe.read_bytes()
+        self.assets['mac']['CinterForge Terminal.app/Contents/MacOS/CinterForgeTerminal'] = b'\xcf\xfa\xed\xfe-new'
+        self.built()
+        with mock.patch('platform.system', return_value='Darwin'), \
+             mock.patch('host.mac_app._verify_signature', side_effect=RuntimeError('Invalid signature')):
+            with self.assertRaisesRegex(RuntimeError, 'Invalid signature'):
+                self.stage(targets=('mac',))
+        self.assertEqual(exe.read_bytes(), old)
+
+    def test_mac_stage_rejects_symlinked_backup(self):
+        self.built(); self.stage(targets=('mac',))
+        root = universal._steam_release_path(self.steamapps, 'mac', self.release)
+        backup = root / 'CinterForge Terminal.app.previous-stage'
+        backup.symlink_to(self.scratch)
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'Unsafe'):
+                self.stage(targets=('mac',))
+        finally:
+            backup.unlink(missing_ok=True)
+
+    def test_published_zip_archives_contain_no_python_caches(self):
+        self.built(); universal.prepare_publish_packages(self.builds, release=self.release)
+        self.assertTrue((self.builds / 'CinterForgeTerminal/Distribution/CinterForgeTerminal-mac.dmg').is_file())
+        for file in (self.builds / 'CinterForgeTerminal/Distribution').glob('*.zip'):
+            with zipfile.ZipFile(file) as archive:
+                self.assertFalse(any('__pycache__' in name or name.endswith('.pyc')
+                                     for name in archive.namelist()))
+
+    def test_setup_cache_skips_download_when_provisioned(self):
+        from host.unpacked_release import setup_restore_if_needed
+        for relative in ('CinterForgeTerminal/Toolchains/mac/env/bin/colima',
+                         'CinterForgeTerminal/Toolchains/Windows/MSYS2/usr/bin/bash.exe',
+                         'CinterForgeTerminal/Toolchains/LinuxSample'):
+            path = self.builds / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.name == 'LinuxSample': path.mkdir()
+            else: path.write_bytes(b'fixture')
+        with mock.patch('urllib.request.urlopen', side_effect=AssertionError('Setup redownload')):
+            result = setup_restore_if_needed(self.builds, release=self.release)
+        self.assertFalse(result['downloaded'])
+
 
 class PortablePythonSymlinkTests(unittest.TestCase):
     """A pinned CPython archive must flatten safe aliases, not chase loops."""

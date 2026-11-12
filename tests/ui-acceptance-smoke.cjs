@@ -559,3 +559,69 @@ verifyCodeNativeTerminalDeferredResize().catch(error => {
     'logo reflects full Code-OSS mode after host acknowledgement');
   console.log('Code-OSS activity icon: real wrapper toggle, no IFPlayer menu');
 })();
+
+// Regression: WKWebView must not depend on navigator.clipboard permission for
+// Terminal/Session Copy/Paste. Exercise actual menu dispatch and Command keys.
+async function verifyMacTerminalClipboard() {
+  let count=0, opened=0;
+  const requests=[], clipCalls=[];
+  const docListeners={};
+  const els=new Map();
+  const element=id=>{
+    if(els.has(id))return els.get(id);
+    const e={id,hidden:false,disabled:false,src:'',value:'',textContent:'',
+      children:[],dataset:{},style:{setProperty(){}},clientWidth:800,clientHeight:500,
+      parentElement:{scrollTop:0,scrollHeight:0},
+      addEventListener(){},setAttribute(){},removeAttribute(){},focus(){},
+      append(child){this.children.push(child)},replaceChildren(...items){this.children=items}};
+    els.set(id,e);return e;
+  };
+  element('license-dialog').hidden=true;
+  const doc={documentElement:{getAttribute(){return null}},getElementById:element,
+    createElement:name=>element(`${name}:${++count}`),createTextNode:text=>({textContent:text}),
+    querySelectorAll(){return []},visibilityState:'visible',
+    addEventListener(type, fn, capture){(docListeners[type]??=[]).push({fn,capture:!!capture});}};
+  const win={__CPH_TOKEN__:'clipboard-test',addEventListener(){},
+    async cinterClipboard(request){clipCalls.push(request);
+      return request.action==='copy' ? true : 'mac-native-paste-marker';}};
+  const fetchMac=async(url,options={})=>{
+    if(url==='/api/terminal/poll')return new Promise(()=>{});
+    if(url==='/api/terminal/input') requests.push(JSON.parse(options.body));
+    let value={};
+    if(url==='/api/status')value={platform:'mac'};
+    else if(url==='/terminal_styles.json')value=profiles;
+    else if(url==='/mac_games.json')value={games:[]};
+    else if(url==='/api/terminal/open') {opened++;value={id:'clipboard-pty',platform:'mac',shell:'zsh'};}
+    return {ok:true,json:async()=>value};
+  };
+  const env={window:win,document:doc,fetch:fetchMac,URL,URLSearchParams,TextDecoder,
+    Uint8Array,AbortController,
+    location:{href:'http://127.0.0.1:20380/',search:''},console,navigator:{},
+    MutationObserver:class{observe(){}},localStorage:{getItem(){return null},setItem(){}},
+    setInterval(){},setTimeout,atob:()=>''};
+  vm.runInNewContext(fs.readFileSync(path.join(repo,'webapp/terminal.js'),'utf8'),env);
+  await new Promise(resolve=>setTimeout(resolve,60));
+  assert.equal(opened,1,'Mac Session must be active');
+  const key=async letter=>{
+    const event={key:letter,metaKey:true,ctrlKey:false,altKey:false,shiftKey:false,
+      isComposing:false,prevented:false,stopped:false,
+      preventDefault(){this.prevented=true},stopImmediatePropagation(){this.stopped=true}};
+    for(const {fn,capture} of docListeners.keydown||[]) {
+      if(capture)fn(event);
+      if(event.stopped)break;
+    }
+    await new Promise(resolve=>setTimeout(resolve,15));
+    assert.equal(event.prevented,true,`Command-${letter} must not reach shell PTY`);
+    assert.equal(event.stopped,true,`Command-${letter} must not be forwarded as a key`);
+  };
+  await key('c');
+  await key('v');
+  await win.CinterMenuDispatch('edit:copy');
+  await win.CinterMenuDispatch('edit:paste');
+  await new Promise(resolve=>setTimeout(resolve,15));
+  assert.deepEqual(clipCalls.map(x=>x.action),['copy','paste','copy','paste']);
+  assert.equal(requests.length,2,'only two native clipboard Paste actions send PTY input');
+  assert.ok(requests.every(x=>x.id==='clipboard-pty' && x.data==='mac-native-paste-marker'));
+  console.log('Mac clipboard smoke: Command-C/V and native Edit actions use same pasteboard bridge');
+}
+verifyMacTerminalClipboard().catch(error=>{console.error(error);process.exitCode=1});

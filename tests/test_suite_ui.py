@@ -317,97 +317,89 @@ class OptionalGuestBashTests(unittest.TestCase):
 
     def test_missing_sdk_decline_never_starts_a_guest_or_downloads_silently(self):
         with mock.patch.object(self.adapter.platform, 'system', return_value='Darwin'), \
-             mock.patch.object(self.adapter.threading, 'Thread') as thread, \
              mock.patch.object(self.adapter, 'sdk_root', return_value=None), \
              mock.patch.object(self.adapter, 'install_devtools', return_value=1) as installer, \
-             mock.patch.object(self.adapter, '_ensure_docker') as start:
+             mock.patch.object(self.adapter, 'boot_runtime_guests') as start:
             self.assertEqual(self.adapter.guest_shell_main('linux'), 1)
-        thread.return_value.start.assert_called_once()
         installer.assert_called_once_with()
         start.assert_not_called()
 
-    def test_installed_linux_launches_amd64_image_not_host_bash(self):
-        from types import SimpleNamespace
+    def test_installed_linux_attaches_bash_without_creating_second_container(self):
         with mock.patch.object(self.adapter.platform, 'system', return_value='Darwin'), \
-             mock.patch.object(self.adapter.threading, 'Thread'), \
              mock.patch.object(self.adapter, 'sdk_root', return_value=Path('/sdk')), \
              mock.patch.object(self.adapter, '_env', return_value={'PATH':'p'}), \
-             mock.patch.object(self.adapter, '_ensure_docker', return_value='/docker'), \
-             mock.patch.object(self.adapter, '_image_archive', return_value=(Path('/cached-image.tar'), 'cinterforge-terminal-linux-sample:123')) as image, \
+             mock.patch.object(self.adapter, '_guest_workspace', return_value=Path('/Source')), \
+             mock.patch.object(self.adapter, 'boot_runtime_guests', return_value={'installed':True}) as boot, \
+             mock.patch.object(self.adapter, '_image_archive') as image, \
              mock.patch.object(self.adapter, 'install_devtools') as installer, \
-             mock.patch.object(self.adapter.subprocess, 'run', return_value=SimpleNamespace(returncode=0)), \
              mock.patch.object(self.adapter.subprocess, 'Popen') as popen:
             popen.return_value.wait.return_value=0
             self.assertEqual(self.adapter.guest_shell_main('linux'),0)
             args=popen.call_args.args[0]
-        image.assert_called_once()
+        boot.assert_called_once()
+        image.assert_not_called()  # Image lifecycle belongs to app bootstrap
         installer.assert_not_called()
-        self.assertIn('--platform',args)
-        self.assertIn('linux/amd64',args)
-        self.assertEqual(args[-4:],['cinterforge-terminal-linux-sample:123','/bin/bash','--noprofile','-i'])
-        self.assertIn('cinterforge-terminal-linux-sample:123',args)
-        self.assertNotIn('/usr/bin/env',args)
+        self.assertEqual(args[:6], ['/sdk/mac/env/bin/docker', 'exec', '-it',
+                                    '--workdir', '/host/mac/Source', 'cinterforge-terminal-t-linux'])
+        self.assertEqual(args[-3:], ['/bin/bash','--noprofile','-i'])
+        self.assertNotIn('run',args)
 
-    def test_installed_windows_launches_msys2_pe_under_wine_not_host_shell(self):
-        from types import SimpleNamespace
+    def test_installed_windows_attaches_actual_msys2_under_wine(self):
         with mock.patch.object(self.adapter.platform, 'system', return_value='Darwin'), \
-             mock.patch.object(self.adapter.threading, 'Thread'), \
              mock.patch.object(self.adapter, 'sdk_root', return_value=Path('/sdk')), \
              mock.patch.object(self.adapter, '_env', return_value={'PATH':'p'}), \
-             mock.patch.object(self.adapter, '_ensure_docker', return_value='/docker'), \
-             mock.patch.object(self.adapter, '_image_archive', return_value=(Path('/cached-image.tar'), 'cinterforge-terminal-windows-cross:123')), \
-             mock.patch.object(self.adapter.subprocess, 'run', return_value=SimpleNamespace(returncode=0)), \
+             mock.patch.object(self.adapter, '_guest_workspace', return_value=Path('/Source')), \
+             mock.patch.object(self.adapter, 'boot_runtime_guests', return_value={'installed':True}) as boot, \
              mock.patch.object(self.adapter.subprocess, 'Popen') as popen:
             popen.return_value.wait.return_value=0
             self.assertEqual(self.adapter.guest_shell_main('win'),0)
             args=popen.call_args.args[0]
-        self.assertIn('wine',args)
-        self.assertIn('Z:\\msys2\\usr\\bin\\bash.exe',args)
-        self.assertIn('type=bind,src=/host/mac/sdk/Windows/MSYS2,dst=/msys2,readonly',args)
-        self.assertIn('/msys2/tmp:rw,nosuid,nodev,size=64m', args)
-        self.assertIn('TMPDIR=/tmp', args)
-        self.assertIn('TEMP=/tmp', args)
+        boot.assert_called_once()
+        self.assertEqual(args[:6], ['/sdk/mac/env/bin/docker', 'exec', '-it',
+                                    '--workdir', '/host/mac/Source', 'cinterforge-terminal-t-win'])
+        self.assertEqual(args[-4:], ['wine', r'Z:\msys2\usr\bin\bash.exe', '--noprofile', '-i'])
         self.assertNotIn('/bin/bash',args)
+        self.assertNotIn('run',args)
 
-    def test_windows_guest_preflight_checks_actual_tmp_write_not_version_only(self):
+    def test_windows_guest_tmp_write_probe_is_at_persistent_container_boot(self):
         from types import SimpleNamespace
-        commands = []
-        def record_checked(cmd, env, *, title, timeout):
-            commands.append((cmd, title))
-        with mock.patch.object(self.adapter.platform, 'system', return_value='Darwin'), \
-             mock.patch.object(self.adapter.threading, 'Thread'), \
-             mock.patch.object(self.adapter, 'sdk_root', return_value=Path('/sdk')), \
-             mock.patch.object(self.adapter, '_env', return_value={'PATH':'p'}), \
-             mock.patch.object(self.adapter, '_ensure_docker', return_value='/docker'), \
-             mock.patch.object(self.adapter, '_image_archive', return_value=(Path('/image.tar'), 'image:123')), \
-             mock.patch.object(self.adapter, '_run_checked', side_effect=record_checked), \
-             mock.patch.object(self.adapter.subprocess, 'run', return_value=SimpleNamespace(returncode=0)), \
-             mock.patch.object(self.adapter.subprocess, 'Popen') as popen:
-            popen.return_value.wait.return_value = 0
-            self.assertEqual(self.adapter.guest_shell_main('win'), 0)
-        self.assertEqual(len(commands), 1)
-        preflight, title = commands[0]
-        self.assertIn('writable MSYS2 /tmp', title)
-        self.assertIn('--noprofile', preflight)
-        self.assertIn('-c', preflight)
-        self.assertIn('test -w /tmp', preflight[-1])
-        self.assertIn('rm "$f"', preflight[-1])
-        self.assertNotIn('--version', preflight)
+        sdk=Path('/sdk'); calls=[]
+        def docker_call(docker,env,*args,**kwargs):
+            calls.append(args)
+            if args[:2] == ('image','inspect'):
+                return SimpleNamespace(returncode=0,stdout='',stderr='')
+            if args[:2] == ('container','inspect'):
+                return SimpleNamespace(returncode=1,stdout='',stderr='not present')
+            return SimpleNamespace(returncode=0,stdout='',stderr='')
+        with mock.patch.object(self.adapter,'_docker_call',side_effect=docker_call), \
+             mock.patch.object(self.adapter,'_run_checked') as checked, \
+             mock.patch.object(self.adapter,'_guest_host_binds',return_value=[]), \
+             mock.patch.object(self.adapter,'_image_archive',return_value=(Path('/image.tar'),'image:123')):
+            self.adapter._start_guest_locked(sdk,{},'/docker','win',Path('/Source'))
+        self.assertEqual(checked.call_count,2)
+        run=checked.call_args_list[0].args[0]
+        probe=checked.call_args_list[1].args[0]
+        self.assertEqual(run[:3],['/docker','run','-d'])
+        self.assertIn('--restart',run)
+        self.assertIn('no',run)
+        self.assertIn('CHERE_INVOKING=1',run)
+        self.assertIn('TMPDIR=/tmp',run)
+        self.assertEqual(probe[:4],['/docker','exec','cinterforge-terminal-t-win','wine'])
+        self.assertIn('bash.exe', probe[4])
+        self.assertIn('/tmp/cinterforge-bash-',probe[-1])
+        self.assertIn('rm "$f"',probe[-1])
 
-    def test_windows_guest_refuses_to_open_if_tmp_write_probe_fails(self):
+    def test_windows_guest_failing_tmp_probe_prevents_ready(self):
         from types import SimpleNamespace
-        with mock.patch.object(self.adapter.platform, 'system', return_value='Darwin'), \
-             mock.patch.object(self.adapter.threading, 'Thread'), \
-             mock.patch.object(self.adapter, 'sdk_root', return_value=Path('/sdk')), \
-             mock.patch.object(self.adapter, '_env', return_value={'PATH':'p'}), \
-             mock.patch.object(self.adapter, '_ensure_docker', return_value='/docker'), \
-             mock.patch.object(self.adapter, '_image_archive', return_value=(Path('/image.tar'), 'image:123')), \
-             mock.patch.object(self.adapter, '_run_checked', side_effect=RuntimeError('MSYS2 /tmp unavailable')), \
-             mock.patch.object(self.adapter.subprocess, 'run', return_value=SimpleNamespace(returncode=0)), \
-             mock.patch.object(self.adapter.subprocess, 'Popen') as popen:
-            with self.assertRaisesRegex(RuntimeError, 'MSYS2 /tmp unavailable'):
-                self.adapter.guest_shell_main('win')
-        popen.assert_not_called()
+        def docker_call(docker,env,*args,**kwargs):
+            return SimpleNamespace(returncode=0 if args[:2] == ('image','inspect') else 1,
+                                   stdout='',stderr='')
+        with mock.patch.object(self.adapter,'_docker_call',side_effect=docker_call), \
+             mock.patch.object(self.adapter,'_guest_host_binds',return_value=[]), \
+             mock.patch.object(self.adapter,'_image_archive',return_value=(Path('/image.tar'),'image:123')), \
+             mock.patch.object(self.adapter,'_run_checked',side_effect=[None,RuntimeError('MSYS2 /tmp unavailable')]):
+            with self.assertRaisesRegex(RuntimeError,'MSYS2 /tmp unavailable'):
+                self.adapter._start_guest_locked(Path('/sdk'),{},'/docker','win',Path('/Source'))
 
     def test_unified_devtools_preserves_msys2_tmp_mount_point(self):
         with mock.patch.object(universal, '_files_under', return_value={}):
@@ -430,6 +422,12 @@ class WorkspaceGuestAndHtmlMenuTests(unittest.TestCase):
         config_patcher = mock.patch.object(self.app, '_configure_colima_host_mounts')
         config_patcher.start()
         self.addCleanup(config_patcher.stop)
+        # Guest startup tests fake subprocess.run, so real macOS mount discovery
+        # must be provided separately. Actual discovery is tested in the VM
+        # runtime suite; otherwise /sbin/mount is an unexpected subprocess.
+        volumes_patcher = mock.patch.object(self.app, '_mac_mounted_volumes', return_value=[])
+        volumes_patcher.start()
+        self.addCleanup(volumes_patcher.stop)
 
     @classmethod
     def setUpClass(cls):
@@ -534,55 +532,47 @@ class WorkspaceGuestAndHtmlMenuTests(unittest.TestCase):
             raise AssertionError(command)
         with mock.patch.object(self.app.subprocess,'run',side_effect=fake_run), \
              mock.patch.object(self.app,'_run_checked') as checked:
-            with self.assertRaisesRegex(RuntimeError,'live guest containers'):
+            with self.assertRaisesRegex(RuntimeError,'unrelated containers run'):
                 self.app._ensure_docker(Path('/sdk'),{},Path('/code/Source'))
         checked.assert_not_called()
 
-    def test_code_guest_shell_mounts_actual_workspace_in_linux(self):
-        from types import SimpleNamespace
+    def test_code_guest_shell_execs_existing_linux_container_with_workspace(self):
         TOOLCHAIN_SIGN_OF_LIFE_ROOT.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TOOLCHAIN_SIGN_OF_LIFE_ROOT) as temp:
             source=Path(temp)
             with mock.patch.dict(os.environ,{'CINTER_CODE_WORKSPACE':str(source)}), \
                  mock.patch.object(self.app.platform,'system',return_value='Darwin'), \
-                 mock.patch.object(self.app.threading,'Thread'), \
                  mock.patch.object(self.app,'sdk_root',return_value=Path('/sdk')), \
                  mock.patch.object(self.app,'_env',return_value={}), \
-                 mock.patch.object(self.app,'_ensure_docker',return_value='/docker') as engine, \
-                 mock.patch.object(self.app,'_image_archive',return_value=(Path('/image.tar'),'image:123')), \
-                 mock.patch.object(self.app.subprocess,'run',return_value=SimpleNamespace(returncode=0)), \
+                 mock.patch.object(self.app,'boot_runtime_guests',return_value={'installed':True}) as boot, \
                  mock.patch.object(self.app.subprocess,'Popen') as popen:
                 popen.return_value.wait.return_value=0
                 self.assertEqual(self.app.guest_shell_main('linux'),0)
-            engine.assert_called_once_with(Path('/sdk'),{},source)
+            boot.assert_called_once()
             args=popen.call_args.args[0]
-            self.assertIn('type=bind,src=/host/mac'+str(source)+',dst=/workspace',args)
-            self.assertIn('/workspace',args)
-            self.assertEqual(args[-4:],['image:123','/bin/bash','--noprofile','-i'])
+            self.assertIn('--workdir',args)
+            self.assertIn('/host/mac'+str(source),args)
+            self.assertIn('cinterforge-terminal-t-linux',args)
+            self.assertNotIn('run',args)
 
-    def test_code_guest_shell_mounts_workspace_in_windows_and_keeps_tmp(self):
-        from types import SimpleNamespace
+    def test_code_guest_shell_execs_existing_windows_container_with_workspace(self):
         TOOLCHAIN_SIGN_OF_LIFE_ROOT.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TOOLCHAIN_SIGN_OF_LIFE_ROOT) as temp:
-            source=Path(temp);probes=[]
+            source=Path(temp)
             with mock.patch.dict(os.environ,{'CINTER_CODE_WORKSPACE':str(source)}), \
                  mock.patch.object(self.app.platform,'system',return_value='Darwin'), \
-                 mock.patch.object(self.app.threading,'Thread'), \
                  mock.patch.object(self.app,'sdk_root',return_value=Path('/sdk')), \
                  mock.patch.object(self.app,'_env',return_value={}), \
-                 mock.patch.object(self.app,'_ensure_docker',return_value='/docker'), \
-                 mock.patch.object(self.app,'_image_archive',return_value=(Path('/image.tar'),'image:123')), \
-                 mock.patch.object(self.app,'_run_checked',side_effect=lambda cmd,env,**kw:probes.append(cmd)), \
-                 mock.patch.object(self.app.subprocess,'run',return_value=SimpleNamespace(returncode=0)), \
+                 mock.patch.object(self.app,'boot_runtime_guests',return_value={'installed':True}) as boot, \
                  mock.patch.object(self.app.subprocess,'Popen') as popen:
                 popen.return_value.wait.return_value=0
                 self.assertEqual(self.app.guest_shell_main('win'),0)
-            argv=popen.call_args.args[0]
-            self.assertIn('type=bind,src=/host/mac'+str(source)+',dst=/workspace',argv)
-            self.assertIn('CHERE_INVOKING=1',argv)
-            self.assertIn('/msys2/tmp:rw,nosuid,nodev,size=64m',argv)
-            self.assertIn('type=bind,src=/host/mac'+str(source)+',dst=/workspace',probes[0])
-            self.assertIn('test -w /tmp',probes[0][-1])
+            boot.assert_called_once()
+            args=popen.call_args.args[0]
+            self.assertIn('/host/mac'+str(source),args)
+            self.assertIn('cinterforge-terminal-t-win',args)
+            self.assertEqual(args[-4:],['wine',r'Z:\msys2\usr\bin\bash.exe','--noprofile','-i'])
+            self.assertNotIn('run',args)
 
     def test_htmlmenus_command_uses_authenticated_host_request(self):
         with mock.patch.object(self.app,'_api',return_value={'show':True}) as api:
@@ -653,8 +643,18 @@ class MacEditShortcutSourceTests(unittest.TestCase):
         self.assertIn('[copyItem setKeyEquivalent:@"c"]', self.source)
         self.assertIn('[pasteItem setKeyEquivalent:@"v"]', self.source)
 
+    def test_edit_menu_executes_native_clipboard_actions(self):
+        self.assertIn('[copyItem setAction:@selector(copyTerminal:)]', self.source)
+        self.assertIn('[pasteItem setAction:@selector(pasteTerminal:)]', self.source)
+        self.assertIn('if ([action isEqualToString:@"edit:copy"]) { [self copyTerminal:sender]; return; }', self.source)
+        self.assertIn('if ([action isEqualToString:@"edit:paste"]) { [self pasteTerminal:sender]; return; }', self.source)
+        self.assertIn('window.bind("cinterClipboard",', self.source)
+        self.assertIn('NSPasteboard *board = [NSPasteboard generalPasteboard]', self.source)
+
     def test_live_code_oss_edit_menu_preserves_shortcuts_after_refresh(self):
         self.assertIn('[name isEqualToString:@"Edit"] && depth == 0', self.source)
+        self.assertIn('[action isEqualToString:@"edit:copy"]', self.source)
+        self.assertIn('[action isEqualToString:@"edit:paste"]', self.source)
         self.assertIn('[title isEqualToString:@"Copy"]', self.source)
         self.assertIn('[title isEqualToString:@"Paste"]', self.source)
         self.assertIn('[entry setKeyEquivalent:@"c"]', self.source)

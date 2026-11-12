@@ -48,7 +48,7 @@ class LifecycleLogTests(unittest.TestCase):
             log_path = Path(summary['log'])
             self.assertTrue(log_path.is_file())
             log_text = log_path.read_text(errors='replace')
-            self.assertIn('Run ./Cinter build all before stage all', log_text)
+            self.assertIn('Run ./Cinter build cfterminal all before Stage or Publish', log_text)
             self.assertIn('RESULT FAIL', log_text)
             self.assertIn('Full log:', completed.stdout)
             self.assertTrue(list(folder.glob('*.json')))

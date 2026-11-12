@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PublicDocumentationTests(unittest.TestCase):
     def test_poster_is_present_in_exact_named_png(self):
-        image = ROOT / 'CinterForgeterminal.png'
+        image = ROOT / 'CinterForgeTerminal.png'
         self.assertTrue(image.is_file(), str(image))
         with image.open('rb') as stream:
             header = stream.read(24)

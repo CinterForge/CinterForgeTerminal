@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <functional>
+#include <memory>
 #include <system_error>
 #include <vector>
 #ifdef _WIN32
@@ -92,6 +93,10 @@ extern char **environ;
 - (void)dispatchCodeMenu:(id)sender
 {
     NSString *action = [sender representedObject];
+    // Terminal Edit always uses the native pasteboard. Code-OSS owns only its
+    // own code:* actions; they must not replace the Terminal clipboard route.
+    if ([action isEqualToString:@"edit:copy"]) { [self copyTerminal:sender]; return; }
+    if ([action isEqualToString:@"edit:paste"]) { [self pasteTerminal:sender]; return; }
     if (codeMenuAction && [action isKindOfClass:[NSString class]])
         codeMenuAction(std::string([action UTF8String]));
 }
@@ -365,6 +370,11 @@ namespace cinterforge
             static_cast<webview_t>(&window),
             WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER);
         if (!browser) return;
+        // Do not steal standard clipboard commands from a separate Web Inspector.
+        if (NSApp.keyWindow && NSApp.keyWindow != browser.window) {
+            [NSApp sendAction:@selector(copy:) to:nil from:nil];
+            return;
+        }
         [browser evaluateJavaScript:@"window.CinterEdit ? window.CinterEdit.transcript() : ''"
                    completionHandler:^(id value, NSError *error) {
             if (error || ![value isKindOfClass:[NSString class]]) return;
@@ -374,6 +384,13 @@ namespace cinterforge
         }]; }); };
             target->pasteAction = [&window]
             {
+                WKWebView *browser=(WKWebView*)webview_get_native_handle(
+                    static_cast<webview_t>(&window),
+                    WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER);
+                if (browser && NSApp.keyWindow && NSApp.keyWindow != browser.window) {
+                    [NSApp sendAction:@selector(paste:) to:nil from:nil];
+                    return;
+                }
                 NSString *value = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
                 if (!value)
                     return;
@@ -427,6 +444,8 @@ namespace cinterforge
             // Route them to the same working actions used by mouse selection.
             NSMenuItem *copyItem = addAction(@"Edit", @"Copy", @"edit:copy");
             NSMenuItem *pasteItem = addAction(@"Edit", @"Paste", @"edit:paste");
+            [copyItem setAction:@selector(copyTerminal:)];
+            [pasteItem setAction:@selector(pasteTerminal:)];
             [copyItem setKeyEquivalent:@"c"];
             [pasteItem setKeyEquivalent:@"v"];
             NSDictionary *terminalLabels = @{
@@ -691,25 +710,29 @@ namespace cinterforge
 #endif
         if (!config.connect_url.empty() && !validLanUrl(config.connect_url))
             throw std::invalid_argument("CinterForge LAN service requires a private IPv4 address on HTTP port 20300-20399");
-        PythonHost host;
+        auto host = std::make_unique<PythonHost>();
         bool started = false;
         bool hostRunning = false;
+        bool runtimeOwner = false;
         std::atomic<bool> relaunchRequested{false};
         try
         {
             std::string url = config.connect_url;
             std::string navigationUrl = url;
+            std::string activeService = config.service;
             // This machine's own advertised loopback service is still a native
             // launch; use the existing private grant instead of browser login.
             const bool ownLoopback = url == "http://127.0.0.1:20300/" ||
                                      url == "http://127.0.0.1:20300";
             if (url.empty() || ownLoopback) {
-                host.start(config.python, config.worker, config.service, std::chrono::seconds(10));
+                host->start(config.python, config.worker, config.service, std::chrono::seconds(10));
                 hostRunning = true;
-                const std::string reply = host.call("start", "{\"builds\":\"" + jsonEscape(config.builds) + "\"}",
+                const std::string reply = host->call("start", "{\"builds\":\"" + jsonEscape(config.builds) + "\"}",
                                                     std::chrono::seconds(15));
                 url = readyUrl(reply);
                 navigationUrl = nativeBootstrapUrl(reply, url);
+                runtimeOwner = reply.find("\"attached\": true") == std::string::npos &&
+                               reply.find("\"attached\":true") == std::string::npos;
                 started = true;
             }
             std::cerr << "[CinterForgeTerminal] managed HTTP service ready: " << url << '\n';
@@ -779,6 +802,32 @@ namespace cinterforge
                 return R"("closing")";
             }
             return R"("invalid action")"; });
+#ifdef __APPLE__
+            // Browser-origin permissions do not grant navigator.clipboard access
+            // reliably in WKWebView. This bridge stays local to the native app
+            // and uses the same NSPasteboard as the real macOS Edit menu.
+            window.bind("cinterClipboard", [&](const std::string &args) -> std::string
+                        {
+                NSData *bytes = [NSData dataWithBytes:args.data() length:args.size()];
+                id parsed = [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
+                NSDictionary *request = [parsed isKindOfClass:[NSArray class]] && [parsed count]
+                    ? [parsed firstObject] : parsed;
+                if (![request isKindOfClass:[NSDictionary class]]) return "null";
+                NSString *action = request[@"action"];
+                NSPasteboard *board = [NSPasteboard generalPasteboard];
+                if ([action isEqualToString:@"paste"]) {
+                    NSString *value = [board stringForType:NSPasteboardTypeString] ?: @"";
+                    return "\"" + jsonEscape([value UTF8String] ?: "") + "\"";
+                }
+                if ([action isEqualToString:@"copy"]) {
+                    NSString *value = request[@"text"];
+                    if (![value isKindOfClass:[NSString class]]) return "false";
+                    [board clearContents];
+                    return [board setString:value forType:NSPasteboardTypeString] ? "true" : "false";
+                }
+                return "null";
+            });
+#endif
 #ifdef _WIN32
             // The UI's File/Edit and Ctrl+V use the actual Windows clipboard.
             // Read-only, no cross-origin network API and no text in native logs.
@@ -853,13 +902,19 @@ namespace cinterforge
                                 action:@selector(dispatchCodeMenu:) keyEquivalent:@""];
                             [entry setRepresentedObject:action];
                             [entry setTarget:target];
-                            // Code-OSS refresh replaces the whole native Edit menu.
-                            // Keep Command-C/V bound to the live workbench actions.
+                            // The live menu is replaced during tab switches. Route
+                            // Terminal's Edit actions to their actual native handlers;
+                            // Code-OSS's code:* actions continue to use its menu service.
                             if ([name isEqualToString:@"Edit"] && depth == 0) {
-                                if ([title isEqualToString:@"Copy"])
+                                if ([title isEqualToString:@"Copy"]) {
+                                    if ([action isEqualToString:@"edit:copy"])
+                                        [entry setAction:@selector(copyTerminal:)];
                                     [entry setKeyEquivalent:@"c"];
-                                else if ([title isEqualToString:@"Paste"])
+                                } else if ([title isEqualToString:@"Paste"]) {
+                                    if ([action isEqualToString:@"edit:paste"])
+                                        [entry setAction:@selector(pasteTerminal:)];
                                     [entry setKeyEquivalent:@"v"];
+                                }
                             }
                             [entry setEnabled:![item[@"enabled"] respondsToSelector:@selector(boolValue)] ||
                                 [item[@"enabled"] boolValue]];
@@ -939,10 +994,60 @@ namespace cinterforge
                                   {
             while (checking.load()) {
                 try {
-                    const auto response = host.call("next_debugger_request", "{}", std::chrono::seconds(3));
+                    const auto response = host->call("next_debugger_request", "{}", std::chrono::seconds(3));
                     if (response.find("\"requested\": true") != std::string::npos ||
                         response.find("\"requested\":true") != std::string::npos) {
                         window.dispatch([&window] { openNativeInspector(window); });
+                    }
+                    // Reboot is a strictly atomic runtime lifecycle request:
+                    // no build, Setup, Stage, Publish, ZIP or UnZIP. Prepare
+                    // the replacement Python worker BEFORE dropping the live
+                    // HTTP server. Keep the old worker to roll back if the new
+                    // service cannot bind or pass readiness.
+                    const auto reboot = host->call("next_lifecycle_reboot_request", "{}",
+                                                  std::chrono::seconds(3));
+                    if (reboot.find("\"component\": \"app\"") != std::string::npos ||
+                        reboot.find("\"component\":\"app\"") != std::string::npos) {
+                        relaunchRequested.store(true);
+                        window.dispatch([&window] { window.terminate(); });
+                        break;
+                    }
+                    if (reboot.find("\"component\": \"server\"") != std::string::npos ||
+                        reboot.find("\"component\":\"server\"") != std::string::npos) {
+                        // The server may select the authored webapp service
+                        // for developer-only hot reload. The native executable,
+                        // Python runtime and worker remain the already-built
+                        // artifacts. Installed apps never receive this path.
+                        std::smatch liveSource;
+                        if (std::regex_search(reboot, liveSource,
+                                              std::regex(R"re("service"\s*:\s*"([^"\\]+)")re")) &&
+                            !liveSource[1].str().empty())
+                            activeService = liveSource[1].str();
+                        auto replacement = std::make_unique<PythonHost>();
+                        replacement->start(config.python, config.worker, activeService,
+                                           std::chrono::seconds(10));
+                        const std::string startArgs = "{\"builds\":\"" + jsonEscape(config.builds) + "\"}";
+                        host->call("stop", "{}", std::chrono::seconds(12));
+                        try {
+                            const std::string ready = replacement->call("start", startArgs,
+                                                                          std::chrono::seconds(30));
+                            const std::string renewedUrl = readyUrl(ready);
+                            const std::string renewedNavigation = nativeBootstrapUrl(ready, renewedUrl);
+                            host->stop();
+                            host = std::move(replacement);
+                            window.dispatch([&window, renewedNavigation] {
+                                window.navigate(renewedNavigation);
+                            });
+                            std::cerr << "[CinterForgeTerminal] Python HTTP server and WebView reloaded\n";
+                        } catch (...) {
+                            // Replacement failed after old listener was stopped:
+                            // restore the SAME already-imported Python worker.
+                            try { host->call("start", startArgs, std::chrono::seconds(20)); }
+                            catch (const std::exception& e) {
+                                std::cerr << "[CinterForgeTerminal] Server rollback FAILED: " << e.what() << '\n';
+                            }
+                            throw;
+                        }
                     }
                 } catch (const std::exception& e) {
                     if (checking.load()) std::cerr << "[CinterForgeTerminal] inspector check: " << e.what() << '\n';
@@ -980,8 +1085,16 @@ namespace cinterforge
                 }
                 std::cout << "TERMINAL_UI_PASS ready=1 museum=mac-plus terminal=vt100-terminal callback=native" << std::endl;
             }
-            if (started) { host.call("stop", "{}", std::chrono::seconds(5)); started = false; }
-            if (hostRunning) host.stop();
+            if (started) { host->call("stop", "{}", std::chrono::seconds(5)); started = false; }
+            if (hostRunning && runtimeOwner) {
+                try { host->call("shutdown_runtime", "{}", std::chrono::seconds(125)); }
+                catch (const std::exception& e) {
+                    // Detached owner watchdog independently retries when the
+                    // native app exits, including under Xcode Stop.
+                    std::cerr << "[CinterForgeTerminal] Managed guest cleanup: " << e.what() << '\n';
+                }
+            }
+            if (hostRunning) host->stop();
             // Only launch the updated executable AFTER the old HTTP host has
             // released 20300. Never run two live owners during replacement.
             if (relaunchRequested.load() && !config.accept_ui && config.connect_url.empty())
@@ -994,13 +1107,19 @@ namespace cinterforge
             {
                 try
                 {
-                    host.call("stop", "{}", std::chrono::seconds(3));
+                    host->call("stop", "{}", std::chrono::seconds(3));
                 }
                 catch (...)
                 {
                 }
             }
-            if (hostRunning) host.stop();
+            if (hostRunning && runtimeOwner) {
+                try { host->call("shutdown_runtime", "{}", std::chrono::seconds(125)); }
+                catch (const std::exception& e) {
+                    std::cerr << "[CinterForgeTerminal] Guest cleanup after error: " << e.what() << '\n';
+                }
+            }
+            if (hostRunning) host->stop();
             throw;
         }
     }

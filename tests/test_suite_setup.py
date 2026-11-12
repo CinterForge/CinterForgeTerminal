@@ -194,6 +194,15 @@ class MacBootstrapContractTests(unittest.TestCase):
 class SetupPreflightOrderingTests(unittest.TestCase):
     """Users run only ./Cinter setup all; diagnosis must be its first action."""
 
+    def setUp(self):
+        # Setup download/extraction is separately tested with fixture manifests;
+        # these ordering tests must not attempt public network access.
+        from host import unpacked_release
+        patcher = mock.patch.object(unpacked_release, 'setup_restore_if_needed',
+                                    return_value={'source':'fixture-provisioned','downloaded':False})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @staticmethod
     def cli_module():
         import importlib.machinery
@@ -269,7 +278,7 @@ class SetupPreflightOrderingTests(unittest.TestCase):
         stage = next(i for i, command in enumerate(calls) if 'host.lagomorph_setup' in command)
         self.assertLess(pull, stage)
         self.assertEqual(sum('pull lagomorph source' in call for call in calls), 1)
-        self.assertFalse(any('publish' in call for call in calls))
+        self.assertFalse(any(' publish ' in (' ' + call + ' ') for call in calls))
 
         # 'all all' is the standard orchestrator; it MUST transit Setup,
         # not independently acquire/source artwork during Build or Stage.
@@ -284,7 +293,7 @@ class SetupPreflightOrderingTests(unittest.TestCase):
         from host import universal_package
         report = {'complete_build_receipt': True, 'complete_stage_receipt': True,
                   'steam_destination': '/SteamLibrary/steamapps/common/CinterForge/Applications',
-                  'targets': {target: {'archive_present': True, 'size_matches_receipt': True}
+                  'targets': {target: {'build_present': True, 'steam_app_root_present': True}
                               for target in universal_package.FOUR_TARGETS}}
         with mock.patch.object(cli.platform, 'system', return_value='Darwin'), \
              mock.patch.object(cli, 'invoke') as invoke, \
