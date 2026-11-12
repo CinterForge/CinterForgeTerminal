@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-cph-token="__CPH_TOKEN__">
+<html lang="en" data-cph-token="__CPH_TOKEN__" data-cinter-platform="__CPH_PLATFORM__">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -13,40 +13,15 @@
   <main id="app-content">
     <section id="terminal-overlay" class="terminal-overlay" aria-label="Kevin's retro terminal session">
       <div class="terminal-titlebar">
-        <span class="terminal-led" aria-hidden="true"></span>
-        <strong id="terminal-machine-title">TERMINAL SESSION</strong>
-        <span id="terminal-shell" role="status"></span>
-        <nav id="terminal-menus" class="terminal-menus" aria-label="Terminal and Computer History Museum">
-          <!-- File/Edit actions remain available in the existing titlebar on
-               macOS and Windows, alongside any native application menus. -->
-          <details class="terminal-menu terminal-application-menu" id="windows-file-menu" hidden><summary>File ▾</summary>
-            <div class="terminal-menu-list" role="group" aria-label="File commands">
-              <button type="button" data-file-new="mac">New Mac Bash Terminal</button>
-              <button type="button" data-file-new="win">New Windows Bash Terminal</button>
-              <button type="button" data-file-new="linux">New Linux Bash Terminal</button>
-              <button type="button" data-file-new="minecraft" id="windows-new-minecraft" disabled>New Minecraft Console</button>
-              <button type="button" data-file-new="server">New Server Log Terminal</button>
-              <div class="terminal-menu-separator" role="separator"></div>
-              <button type="button" data-file-action="debugger">Open Debugger</button>
-              <div class="terminal-menu-separator" role="separator"></div>
-              <button type="button" data-file-action="quit">Quit</button>
-            </div>
-          </details>
-          <details class="terminal-menu terminal-application-menu" id="windows-edit-menu" hidden><summary>Edit ▾</summary>
-            <div class="terminal-menu-list" role="group" aria-label="Edit commands">
-              <button type="button" disabled>Undo</button><button type="button" disabled>Redo</button>
-              <button type="button" disabled>Cut</button>
-              <div class="terminal-menu-separator" role="separator"></div>
-              <button type="button" data-edit-action="copy">Copy <span class="terminal-shortcut">Ctrl+Shift+C</span></button>
-              <button type="button" data-edit-action="paste">Paste <span class="terminal-shortcut">Ctrl+V</span></button>
-              <div class="terminal-menu-separator" role="separator"></div>
-              <button type="button" disabled>Delete</button><button type="button" disabled>Select All</button>
-            </div>
-          </details>
-          <details class="terminal-menu" id="terminal-menu">
-            <summary><span class="terminal-icon terminal-icon--terminal" aria-hidden="true">&gt;_</span><span class="terminal-menu-name">Terminals</span><span class="terminal-menu-chevron" aria-hidden="true">▾</span></summary>
-            <div id="terminal-menu-list" class="terminal-menu-list"></div>
-          </details>
+        <!-- The Code menu model is shared with the native macOS bar. When Code
+             is inactive only Quit/Copy/Paste and CinterForge menus are usable. -->
+        <nav id="code-menu-zone" aria-label="Code editor menu bar"></nav>
+        <div id="terminal-mode-title" role="status" hidden>
+          <span class="terminal-led" aria-hidden="true"></span>
+          <strong id="terminal-machine-title">TERMINAL SESSION</strong>
+          <span id="terminal-shell"></span>
+        </div>
+        <nav id="terminal-menus" class="terminal-menus" aria-label="CinterForge terminal, LAN and emulator menus">
           <details class="terminal-menu" id="lan-menu">
             <summary><span class="terminal-icon terminal-icon--terminal" aria-hidden="true">◎</span><span class="terminal-menu-name">LAN</span><span class="terminal-menu-chevron" aria-hidden="true">▾</span></summary>
             <div id="lan-menu-list" class="terminal-menu-list" aria-label="CinterForge LAN web services"></div>
@@ -62,6 +37,10 @@
           <details class="terminal-menu" id="nextstep-menu">
             <summary><span class="terminal-icon terminal-icon--nextstep" aria-hidden="true">◆</span><span class="terminal-menu-name">NeXTSTEP</span><span class="terminal-menu-chevron" aria-hidden="true">▾</span></summary>
             <div id="nextstep-menu-list" class="terminal-menu-list"></div>
+          </details>
+          <details class="terminal-menu" id="terminal-menu">
+            <summary><span class="terminal-icon terminal-icon--terminal" aria-hidden="true">&gt;_</span><span class="terminal-menu-name">Machines</span><span class="terminal-menu-chevron" aria-hidden="true">▾</span></summary>
+            <div id="terminal-menu-list" class="terminal-menu-list"></div>
           </details>
         </nav>
       </div>

@@ -54,9 +54,10 @@ const sandbox={window,document,fetch,URL,URLSearchParams,TextDecoder,Uint8Array,
 vm.runInNewContext(fs.readFileSync(path.join(repo,'webapp/terminal.js'),'utf8'),sandbox);
 (async()=>{
   await new Promise(resolve=>setTimeout(resolve,150));
-  assert.deepEqual(events.map(event=>event.event),['minecraft-menu','ready','machine','terminal']);
-  assert.equal(events[2].id,'mac-plus');
-  assert.equal(events[3].id,'vt100-terminal');
+  const lifecycle = events.filter(event=>!event.event.startsWith('code-menu-'));
+  assert.deepEqual(lifecycle.map(event=>event.event),['minecraft-menu','ready','machine','terminal']);
+  assert.equal(lifecycle[2].id,'mac-plus');
+  assert.equal(lifecycle[3].id,'vt100-terminal');
   assert.equal(opens,1,'exactly one PTY must be opened, after the museum Session');
   assert.equal(writes,0,'acceptance must not overwrite a real user profile');
   assert.equal(get('computer-view').hidden,true,'VT100 must be active after museum');
@@ -69,6 +70,13 @@ vm.runInNewContext(fs.readFileSync(path.join(repo,'webapp/terminal.js'),'utf8'),
 async function verifyIFTabOwnership(){
   const nodes=new Map(),intervals=[];
   let number=0,opened=0,stops=[],discordAction=null,sent=[],historyRequests=[];
+  const codeMenuRequests=[];
+  const codeChannels=[];
+  class FakeBroadcastChannel {
+    constructor(name){this.name=name;codeChannels.push(this);}
+    postMessage(message){codeMenuRequests.push({channel:this.name,...message});}
+    close(){}
+  }
   const el=id=>{
     if(nodes.has(id))return nodes.get(id);
     const value={id,hidden:false,disabled:false,src:'',value:'',textContent:'',
@@ -96,6 +104,8 @@ async function verifyIFTabOwnership(){
     if(url==='/api/terminal/open')data={id:(opened++===0?'a'.repeat(32):'b'.repeat(32)),platform:'win',shell:'bash.exe'};
     else if(url==='/api/terminal/poll')return new Promise(()=>{});
     else if(url==='/api/if/next'){data=action||{};action=null;}
+    else if(url==='/host/code-workspace')data={kind:'terminal',platform:'mac',theme:'dark'};
+    else if(url==='/host/code-shell-open')data={ok:true,opened:true};
     else if(url==='/api/if/story/zork1')return new Promise((_resolve,reject)=>{
       options.signal?.addEventListener('abort',()=>reject(Object.assign(new Error('aborted'),{name:'AbortError'})));
     });
@@ -124,9 +134,15 @@ async function verifyIFTabOwnership(){
   const doc={documentElement:{getAttribute(){return null}},getElementById:el,
     createElement:name=>el(name+':'+(++number)),createTextNode:text=>({textContent:text}),
     querySelectorAll(){return []},addEventListener(){},visibilityState:'visible'};
-  const win={__CPH_TOKEN__:'fixture',addEventListener(){}};
+  const outerWindowListeners={};
+  const codeFrameMessages=[];
+  const codeFrame=el('computer-frame');
+  codeFrame.contentWindow={postMessage(message,origin){codeFrameMessages.push({message,origin});}};
+  const win={__CPH_TOKEN__:'fixture',location:{origin:'http://127.0.0.1:20380'},
+    addEventListener(type,callback){(outerWindowListeners[type]??=[]).push(callback);}};
   const sandboxIF={window:win,document:doc,fetch:fetchIF,URL,URLSearchParams,TextDecoder,
-    Uint8Array,AbortController,requestAnimationFrame:callback=>callback(),
+    Uint8Array,AbortController,BroadcastChannel:FakeBroadcastChannel,
+    requestAnimationFrame:callback=>callback(),
     location:{href:'http://127.0.0.1:20380/',search:''},console,
     navigator:{},MutationObserver:class{observe(){}disconnect(){}},
     localStorage:{getItem(){return null},setItem(){}},
@@ -242,5 +258,304 @@ async function verifyIFTabOwnership(){
   assert.equal(visible(),'▌','sent text is no longer displayed as a draft');
   await closes()[1].listeners.click[0](); // Stop the Discord poll loop.
   console.log('Discord UI acceptance smoke: selected channel history, scrollback pagination, drafts, Enter sends once');
+
+  // The very same outer menu must create Code-OSS integrated terminals when
+  // Code is active; no extra host PTY or outer Session is allowed.
+  const countBeforeCode=opened;
+  await win.CinterTerminalNewTab('code');
+  const outerTabs=tabs().length;
+  assert.ok(el('computer-frame').src.includes('/codeoss/'),'Code-OSS workbench is active');
+  await win.CinterTerminalNewTab('linux');
+  await win.CinterTerminalNewTab('win');
+  await win.CinterTerminalNewTab('server');
+  assert.equal(opened,countBeforeCode,'Code Terminal actions must not start outer PTYs');
+  assert.equal(tabs().length,outerTabs,'Code Terminal actions must not create outer tabs');
+  assert.deepEqual(codeMenuRequests.filter(r=>r.type==='new-terminal').map(r=>r.backend),
+    ['linux','win','server'],'the existing Code-OSS extension receives all three backend choices');
+  // Only actions supplied by the real Code-OSS menu service may be run.
+  // An old fabricated command ID must not be sent to the editor.
+  await win.CinterMenuDispatch('code:cmd:workbench.action.showCommands');
+  assert.equal(codeFrameMessages.filter(r=>r.message.type==='cinterforge-codeoss-menu-run').length,0,
+    'unpublished menu commands are never dispatched');
+  // Clicking the CinterForge activity logo requests full Code-OSS area;
+  // only outer Terminal chrome disappears, without reloading the iframe.
+  const codeFrameSrc=codeFrame.src;
+  const toggleWrapper=(source=codeFrame.contentWindow,origin=win.location.origin)=>{
+    for(const callback of outerWindowListeners.message||[]) callback({
+      source,origin,data:{type:'cinterforge-terminal-wrapper-toggle'}
+    });
+  };
+  toggleWrapper({},win.location.origin);
+  toggleWrapper(codeFrame.contentWindow,'http://unrelated.invalid');
+  assert.notEqual(el('terminal-overlay').dataset.codeWrapperHidden,'true',
+    'other windows or origins cannot hide the Terminal wrapper');
+  toggleWrapper();
+  assert.equal(el('terminal-overlay').dataset.codeWrapperHidden,'true');
+  assert.equal(codeFrameMessages.at(-1).message.type,'cinterforge-terminal-wrapper-state');
+  assert.equal(codeFrameMessages.at(-1).message.hidden,true);
+  assert.equal(codeFrame.src,codeFrameSrc,'full workbench must preserve the iframe');
+  assert.equal(tabs().length,outerTabs,'full workbench must preserve outer sessions');
+  toggleWrapper();
+  assert.equal(el('terminal-overlay').dataset.codeWrapperHidden,'false');
+  assert.equal(codeFrameMessages.at(-1).message.hidden,false);
+  assert.ok(fs.readFileSync(path.join(repo,'webapp/terminal.css'),'utf8').includes(
+    '#terminal-overlay[data-code-wrapper-hidden="true"] > #terminal-tabs'),
+    'full workbench CSS must hide outer tabs as well as HTML menu/footer');
+  console.log('Code-OSS full workbench: logo toggles wrapper without reloading PTYs');
+
+  // Simulate the actual Code-OSS model message with its opaque IAction ID.
+  // The outer menu must preserve its title, enabled state and action ID.
+  const menuGroups=[{name:'File',items:[
+    {title:'Save',action:'workbench.action.files.save',enabled:true},
+    {title:'Unavailable',action:'unavailable-workbench-action',enabled:false}
+  ]}];
+  for(const callback of outerWindowListeners.message||[])callback({
+    source:codeFrame.contentWindow,origin:win.location.origin,
+    data:{type:'cinterforge-codeoss-menu-model',groups:menuGroups}
+  });
+  const fileMenu=el('code-menu-zone').children.find(menu=>menu.children[0]?.textContent==='File');
+  assert.ok(fileMenu,'File menu comes from the Code-OSS menu model');
+  assert.equal(fileMenu.cinterList.children[0].textContent,'Save');
+  assert.equal(fileMenu.cinterList.children[1].disabled,true);
+  await win.CinterMenuDispatch('code:workbench.action.files.save');
+  assert.equal(codeFrameMessages.at(-1).message.type,'cinterforge-codeoss-menu-run');
+  assert.equal(codeFrameMessages.at(-1).message.action,'workbench.action.files.save',
+    'the genuine Code-OSS action ID passes to the workbench unchanged');
+  await win.CinterMenuDispatch('code:unavailable-workbench-action');
+  // The workbench, not Terminal, is authoritative for action enablement;
+  // the UI marks disabled items, and the workbench also checks enabled.
+  assert.equal(fileMenu.cinterList.children[1].disabled,true);
+  const goMenu=el('code-menu-zone').children.find(menu=>menu.children[0]?.textContent==='Go');
+  assert.ok(goMenu,'Go menu exists without any invented fallback items');
+  goMenu.open=true;goMenu.listeners.toggle[0]();
+  assert.ok(codeFrameMessages.some(r=>r.message.type==='cinterforge-codeoss-menu-request'),
+    'missing menu snapshot must request the real Code-OSS model');
+  // Code-OSS's worker may use file: even when hosted in this HTTP WebView.
+  // Verify the already-owned outer UI can supply the host handshake and route
+  // the same shell API without handing IFPlayer a Terminal connection.
+  const channel=codeChannels.find(ch=>ch.name==='cinterforge-terminal-code-commands');
+  assert.ok(channel?.onmessage,'Code-OSS has an outer host bridge');
+  await channel.onmessage({data:{type:'host-probe',requestId:'host-123456789012345'}});
+  const probe=codeMenuRequests.find(r=>r.type==='host-probe-response');
+  assert.equal(probe?.payload?.kind,'terminal');
+  await channel.onmessage({data:{type:'host-request',requestId:'host-123456789012346',
+    path:'/host/code-shell-open',method:'POST',body:{id:'test-native'}}});
+  assert.equal(codeMenuRequests.find(r=>r.type==='host-request-response')?.payload?.opened,true);
+  console.log('Code menu acceptance: New Terminal creates integrated Code-OSS tabs only');
 }
 verifyIFTabOwnership().catch(error=>{console.error(error);process.exitCode=1});
+
+// WebKit can evaluate the Code extension from a file: worker even though the
+// surrounding editor uses the Terminal HTTP origin. Validate the REAL split
+// transport and terminal backend selector, not a source-text approximation.
+async function verifyCodeWorkerHostBridge(){
+  class Channel {
+    static all=[];
+    constructor(name){this.name=name;this.onmessage=null;Channel.all.push(this);}
+    postMessage(data){
+      for(const other of Channel.all)if(other!==this && other.name===this.name)
+        queueMicrotask(()=>other.onmessage?.({data}));
+    }
+    close(){Channel.all.splice(Channel.all.indexOf(this),1);}
+  }
+  const parent=new Channel('cinterforge-terminal-code-commands');
+  const requests=[];
+  parent.onmessage=({data})=>{
+    if(data.type!=='host-probe' && data.type!=='host-request')return;
+    requests.push(data);
+    parent.postMessage({type:data.type+'-response',requestId:data.requestId,ok:true,
+      payload:data.type==='host-probe'
+        ? {kind:'terminal',theme:'dark',platform:'mac',cwd:'/Source'}
+        : {ok:true,rows:[]}});
+  };
+  const context={console,BroadcastChannel:Channel,location:{protocol:'file:',origin:'null'},
+    setTimeout,clearTimeout,Math,Date,
+    CinterForgeCode:{vscode:{workspace:{getConfiguration:()=>({get:()=> 'http://other-if-host/'})}},
+      NativeTerminal:class NativeTerminal{},JavaScriptConsoleTerminal:class JavaScriptConsoleTerminal{}}};
+  context.globalThis=context;
+  for(const part of ['runtime/ControlTransport.js','terminals/TerminalManager.js'])
+    vm.runInNewContext(fs.readFileSync(path.join(repo,'webapp/codeoss/extension',part),'utf8'),context);
+  const code=context.CinterForgeCode;
+  assert.equal((await code.detectTerminalHost()).platform,'mac');
+  assert.equal(code.terminalHostEnabled,true);
+  assert.ok(code.createNativeTerminalPty('code-id') instanceof code.NativeTerminal,
+    'file: worker must open a real Mac PTY after verified Terminal handshake');
+  assert.equal((await code.request('/host/code-shell-open',{id:'code-id'})).ok,true);
+  assert.equal((await code.request('/code/command',{operation:'workspace-state'})).ok,true);
+  assert.deepEqual(requests.map(item=>item.type),['host-probe','host-request','host-request']);
+  parent.close();
+  console.log('Code-OSS worker acceptance: verified HTTP host from file: worker; real PTY and workspace transport');
+}
+verifyCodeWorkerHostBridge().catch(error=>{console.error(error);process.exitCode=1});
+
+// Reproduce the Code-OSS extension-host provider validation that prevented
+// all terminal contributions from activating. The Logs scheme is read-only,
+// but VS Code still requires the full FS method interface.
+(function verifyCodeHostFilesystemAndZMachinePty(){
+  class EventEmitter {constructor(){this.event=()=>{};}fire(){} }
+  class Disposable {constructor(dispose){this.dispose=dispose;}}
+  const noPermissions=uri=>Object.assign(new Error('read-only'),{code:'NoPermissions',uri});
+  const calls=[];
+  const channelMessages=[];
+  class Channel {
+    constructor(name){this.name=name;}
+    postMessage(value){channelMessages.push(value);}
+    close(){}
+  }
+  const context={console,BroadcastChannel:Channel,Math,Date,
+    CinterForgeCode:{vscode:{EventEmitter,Disposable,FileType:{File:1,Directory:2},
+      FileChangeType:{Changed:1,Created:2,Deleted:3},FileSystemError:{NoPermissions:noPermissions}},
+      request:async (endpoint,body)=>{calls.push([endpoint,body]);return {data:''};},
+      encodeBase64:()=>'',decodeBase64:()=>new Uint8Array()}};
+  context.globalThis=context;
+  for(const part of ['filesystem/CinterForgeFileSystemProvider.js','terminals/ZMachineTerminal.js'])
+    vm.runInNewContext(fs.readFileSync(path.join(repo,'webapp/codeoss/extension',part),'utf8'),context);
+  const Provider=context.CinterForgeCode.HostFileSystemProvider;
+  const provider=new Provider();
+  for(const method of ['stat','readDirectory','readFile','writeFile','createDirectory','delete','rename','watch'])
+    assert.equal(typeof provider[method],'function','read-only provider missing '+method);
+  for(const method of ['writeFile','createDirectory','delete','rename'])
+    assert.throws(()=>provider[method]({path:'/logs'},new Uint8Array(),{}),error=>error.code==='NoPermissions');
+  assert.equal(calls.length,0,'read-only provider must not submit write calls');
+  // The accepted coordinator constructs the existing ZMachineTerminal,
+  // not the HostedZMachineTerminal from the rejected patch.
+  const Code=context.CinterForgeCode;
+  Code.terminalHostEnabled=true;
+  const ZMachine=Code.ZMachineTerminal;
+  assert.equal(typeof ZMachine,'function','real Z-Machine PTY must be exported');
+  const pty=new ZMachine();
+  pty.open();
+  assert.equal(channelMessages[0].type,'subscribe');
+  assert.equal(channelMessages[0].id,pty.hostSubscriptionId);
+  pty.handleInput('list\r');
+  assert.equal(channelMessages[1].type,'input');
+  assert.equal(channelMessages[1].id,pty.hostSubscriptionId);
+  assert.equal(channelMessages[1].text,'list');
+  pty.close();
+  assert.equal(channelMessages[2].type,'unsubscribe');
+  assert.equal(channelMessages[2].id,pty.hostSubscriptionId);
+  assert.equal(calls.length,0,'hosted Z-Machine PTY must not call missing HTTP endpoints');
+  console.log('Code-OSS activation acceptance: read-only provider and existing Z-Machine PTY transport');
+})();
+
+// Regression: a VS Code PTY can be closed while its HTTP open is pending.
+// The late open must be released instead of silently consuming a host slot.
+async function verifyCodeNativeTerminalCloseDuringOpen() {
+  const pending = {};
+  pending.promise = new Promise(resolve => { pending.finish = resolve; });
+  const calls = [];
+  class EventEmitter { constructor() { this.event = () => {}; } fire() {} }
+  const C = {vscode: {EventEmitter}, request: async (path, body) => {
+    calls.push({path, id: body?.id});
+    if (path === '/host/code-shell-open') return pending.promise;
+    if (path === '/host/code-shell-output') throw new Error('closed terminal must not poll');
+    return {ok: true};
+  }};
+  const sandbox = {CinterForgeCode:C, console, setTimeout, clearTimeout};
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(fs.readFileSync(path.join(repo,
+    'webapp/codeoss/extension/terminals/NativeTerminal.js'), 'utf8'), sandbox);
+  const terminal = new C.NativeTerminal('terminal-win-close-race', 'win');
+  terminal.open();
+  assert.equal(calls.filter(call => call.path === '/host/code-shell-open').length, 1);
+  terminal.close();
+  assert.equal(calls.filter(call => call.path === '/host/code-shell-close').length, 0,
+    'close must not run before the host has allocated its session');
+  pending.finish({opened:true});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.filter(call => call.path === '/host/code-shell-close').length, 1,
+    'late open must release exactly its own session');
+  terminal.close();
+  assert.equal(calls.filter(call => call.path === '/host/code-shell-close').length, 1,
+    'repeated closes must not issue duplicate host requests');
+  assert.equal(calls.some(call => call.path.includes('code-shell-output')), false,
+    'disposed PTY must never start a poll loop');
+  console.log('Code-OSS PTY race: close-before-open releases late host session');
+}
+verifyCodeNativeTerminalCloseDuringOpen().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
+
+// Code-OSS sends terminal geometry before asynchronous host PTY creation.
+// No HTTP resize or input may be sent to a nonexistent session.
+async function verifyCodeNativeTerminalDeferredResize() {
+  const pending = {};
+  pending.promise = new Promise(resolve => { pending.finish = resolve; });
+  const calls = [];
+  class EventEmitter { constructor() { this.event = () => {}; } fire() {} }
+  const C = {vscode: {EventEmitter}, request: async (endpoint, body) => {
+    calls.push({endpoint, body});
+    if (endpoint === '/host/code-shell-open') return pending.promise;
+    if (endpoint.includes('code-shell-output')) return new Promise(() => {});
+    return {ok: true};
+  }};
+  const sandbox = {CinterForgeCode: C, console, setTimeout, clearTimeout};
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(fs.readFileSync(path.join(repo,
+    'webapp/codeoss/extension/terminals/NativeTerminal.js'), 'utf8'), sandbox);
+  const terminal = new C.NativeTerminal('terminal-deferred-geometry', 'linux');
+  terminal.setDimensions({columns: 60, rows: 12});
+  assert.equal(calls.length, 0, 'resize must wait for PTY open');
+  terminal.open();
+  terminal.setDimensions({columns: 110, rows: 35});
+  assert.equal(calls.filter(c => c.endpoint === '/host/code-shell-resize').length, 0);
+  pending.finish({opened: true});
+  await new Promise(resolve => setImmediate(resolve));
+  const resizes = calls.filter(c => c.endpoint === '/host/code-shell-resize');
+  assert.equal(resizes.length, 1, 'pending geometry should be applied exactly once');
+  assert.equal(resizes[0].body.cols, 110);
+  assert.equal(resizes[0].body.rows, 35);
+  terminal.close();
+  terminal.setDimensions({columns: 140, rows: 45});
+  assert.equal(calls.filter(c => c.endpoint === '/host/code-shell-resize').length, 1,
+    'disposed terminal cannot resize a closed session');
+  console.log('Code-OSS deferred PTY resize: no HTTP 400 before host open');
+}
+verifyCodeNativeTerminalDeferredResize().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
+
+// The Code-OSS CinterForge activity icon controls the *outer* Terminal chrome
+// in the embedded workbench; it must not create the old IFPlayer button menu.
+(function verifyCinterActivityToggle() {
+  const posts=[], listeners={}, activity={children:[],querySelector(){return null},
+    insertBefore(node){this.children.unshift(node)}};
+  let logo=null;
+  const createElement=tag=>({tag,children:[],attributes:{},listeners:{},style:{},
+    addEventListener(type,fn){(this.listeners[type]??=[]).push(fn)},
+    setAttribute(key,value){this.attributes[key]=String(value)},
+    appendChild(node){this.children.push(node)},
+    querySelector(){return null},
+    getBoundingClientRect(){return {left:0,right:36,top:0,bottom:36}}});
+  const doc={
+    createElement,
+    getElementById:id=>id==='cinterforge-activity-menu'?logo:null,
+    querySelector:selector=>selector.includes('.part.activitybar')?activity:null,
+    querySelectorAll:()=>[],
+    addEventListener(type,fn){(listeners[type]??=[]).push(fn)},
+    body:{appendChild(){}},
+  };
+  const parent={document:{getElementById:id=>id==='computer-frame'?
+    {contentWindow:child}:null},postMessage(message,origin){posts.push({message,origin})}};
+  const child={parent,location:{origin:'http://127.0.0.1:20380',protocol:'http:'},
+    addEventListener(type,fn){(this.listeners[type]??=[]).push(fn)},listeners:{}};
+  const sandbox={window:child,document:doc,console,setTimeout(){}};
+  vm.runInNewContext(fs.readFileSync(path.join(repo,
+    'webapp/codeoss/extension/workbench_ui.js'),'utf8'),sandbox);
+  listeners.DOMContentLoaded[0]();
+  logo=activity.children[0];
+  assert.equal(logo.id,'cinterforge-activity-menu');
+  logo.listeners.click[0]({preventDefault(){},stopImmediatePropagation(){}});
+  assert.equal(posts.length,1,'logo must send one outer-wrapper request');
+  assert.equal(posts[0].message.type,'cinterforge-terminal-wrapper-toggle');
+  assert.equal(posts[0].origin,child.location.origin);
+  assert.equal(logo.attributes['aria-expanded'],'false',
+    'logo must not open IFPlayer controls in the Terminal host');
+  child.listeners.message[0]({source:parent,origin:child.location.origin,
+    data:{type:'cinterforge-terminal-wrapper-state',hidden:true}});
+  assert.equal(logo.attributes['aria-pressed'],'true',
+    'logo reflects full Code-OSS mode after host acknowledgement');
+  console.log('Code-OSS activity icon: real wrapper toggle, no IFPlayer menu');
+})();

@@ -44,9 +44,30 @@
             this.lastInputPacketAt = -Infinity;
 
             this.submittedCommands = [];
+            this.hostChannel = null;
+            this.hostSubscriptionId = 'zmachine-' + Math.random().toString(36).slice(2);
         }
 
         open() {
+            // Inside the Terminal-hosted workbench, the original interpreter is
+            // owned by terminal.js. Its actual output/input is bridged here;
+            // do not call IFPlayer-only /host/player-session endpoints.
+            if (C.terminalHostEnabled) {
+                if (typeof BroadcastChannel !== 'function') {
+                    this.writeEmitter.fire('ERROR: Z-Machine host channel unavailable\r\n');
+                    return;
+                }
+                this.hostChannel = new BroadcastChannel('cinterforge-terminal-zmachine');
+                this.hostChannel.onmessage = event => {
+                    const message = event.data || {};
+                    if (message.id !== this.hostSubscriptionId) return;
+                    if (message.type === 'output' && typeof message.text === 'string') {
+                        this.writeEmitter.fire(message.text.replace(/\r?\n/g, '\r\n'));
+                    }
+                };
+                this.hostChannel.postMessage({type: 'subscribe', id: this.hostSubscriptionId});
+                return;
+            }
             this.writeEmitter.fire(
                 'Z-Machine Interpreter\r\n> '
             );
@@ -242,6 +263,11 @@
 
         close() {
             this.timer = null;
+            if (this.hostChannel) {
+                this.hostChannel.postMessage({type: 'unsubscribe', id: this.hostSubscriptionId});
+                this.hostChannel.close();
+                this.hostChannel = null;
+            }
         }
 
         async submit() {
@@ -263,6 +289,12 @@
                 return;
             }
 
+            if (this.hostChannel) {
+                this.hostChannel.postMessage({
+                    type: 'input', id: this.hostSubscriptionId, text: command
+                });
+                return;
+            }
             this.busy = true;
 
             try {

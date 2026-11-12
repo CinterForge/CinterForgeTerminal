@@ -671,6 +671,185 @@ class DevToolingReportTests(unittest.TestCase):
 
 
 
+
+class CodeOSSBrowserExtensionBundleTests(unittest.TestCase):
+    """The staged extension must parse as the browser worker actually loads it."""
+
+    def test_real_codeoss_menu_bridge_fails_closed_on_missing_upstream_anchors(self):
+        """Producer must patch actual IAction menus, never fabricate fallback UI."""
+        from webapp.codeoss import producer
+        build_root = BOOTSTRAP_BUNDLE_BUILDS / 'Intermediates/CinterForgeTerminalTests'
+        build_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=build_root, prefix='codeoss-menus-') as tmp:
+            target = (Path(tmp) / 'src/vs/workbench/browser/parts/titlebar/menubarControl.ts')
+            target.parent.mkdir(parents=True)
+            # These are the exact integration anchors in the pinned Code-OSS
+            # MenubarControl: compiled actions, live menu update, method boundary.
+            source = ("		for (const title of Object.keys(this.topLevelTitles)) {\n"
+                      "			if (this.menubar) {\n				if (!firstTime) {\n"
+                      + 2 * ("						this.menubar?.updateMenu({ actions, label: "
+                             "mnemonicMenuLabel(this.topLevelTitles[title]) });\n")
+                      + "\n	}\n\n	private getWebNavigationActions(): IAction[] {\n")
+            target.write_text(source, encoding='utf-8')
+            producer._patch_codeoss_menubar_bridge(Path(tmp))
+            patched = target.read_text(encoding='utf-8')
+            self.assertIn('CINTERFORGE_CODEOSS_MENU_SERVICE_BRIDGE_V1', patched)
+            self.assertIn('cinterforge-codeoss-menu-model', patched)
+            self.assertIn('cinterforge-codeoss-menu-run', patched)
+            self.assertIn('action.run()', patched)
+            producer._patch_codeoss_menubar_bridge(Path(tmp))
+            self.assertEqual(target.read_text(encoding='utf-8'), patched)
+            target.write_text('upstream changed', encoding='utf-8')
+            with self.assertRaisesRegex(RuntimeError, 'MenubarControl loop changed'):
+                producer._patch_codeoss_menubar_bridge(Path(tmp))
+
+    def test_codeoss_worker_uses_only_exported_zmachine_constructor(self):
+        """Regression: the rejected HostedZMachineTerminal did not exist."""
+        root = Path(__file__).resolve().parents[1] / 'webapp/codeoss/extension'
+        coordinator = (root / 'extension.js').read_text(encoding='utf-8')
+        pty = (root / 'terminals/ZMachineTerminal.js').read_text(encoding='utf-8')
+        self.assertIn('C.ZMachineTerminal = ZMachineTerminal;', pty)
+        self.assertIn('new ZMachineTerminal()', coordinator)
+        self.assertNotIn('HostedZMachineTerminal', coordinator)
+
+    def test_codeoss_real_menu_request_replays_source_model(self):
+        """The actual Code-OSS action snapshot can be requested after initial publish."""
+        from webapp.codeoss import producer
+        build_root = BOOTSTRAP_BUNDLE_BUILDS / 'Intermediates/CinterForgeTerminalTests'
+        build_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=build_root, prefix='codeoss-menu-') as temp:
+            path = Path(temp) / 'src/vs/workbench/browser/parts/titlebar'
+            path.mkdir(parents=True)
+            target = path / 'menubarControl.ts'
+            target.write_text(
+                "\t\tfor (const title of Object.keys(this.topLevelTitles)) {\n"
+                "\t\t\tif (this.menubar) {\n\t\t\t\tif (!firstTime) {\n"
+                + 2 * ("\t\t\t\t\t\tthis.menubar?.updateMenu({ actions, label: "
+                       "mnemonicMenuLabel(this.topLevelTitles[title]) });\n")
+                + "\n\t}\n\n\tprivate getWebNavigationActions(): IAction[] {\n",
+                encoding='utf-8')
+            producer._patch_codeoss_menubar_bridge(Path(temp))
+            patched = target.read_text(encoding='utf-8')
+            self.assertIn("event.data?.type === 'cinterforge-codeoss-menu-request'", patched)
+            self.assertIn('runtime.__cinterForgeMenuSnapshot || []', patched)
+            self.assertIn('runtime.__cinterForgeMenuActions?.get(', patched)
+        outer = (Path(__file__).resolve().parents[1] / 'webapp/terminal.js').read_text(encoding='utf-8')
+        self.assertIn("type: 'cinterforge-codeoss-menu-request'", outer)
+        self.assertNotIn('code:menubar:', outer)
+
+    def test_codeoss_host_logs_provider_refuses_all_mutations(self):
+        """Provider must implement every method while retaining read-only logs."""
+        source = (Path(__file__).resolve().parents[1] /
+                  'webapp/codeoss/extension/filesystem/CinterForgeFileSystemProvider.js')
+        body = source.read_text(encoding='utf-8').split('class HostFileSystemProvider {', 1)[1]
+        for method in ('writeFile(uri)', 'createDirectory(uri)', 'delete(uri)', 'rename(oldUri)'):
+            self.assertIn(method + ' { throw vscode.FileSystemError.NoPermissions(', body)
+
+
+    def test_setup_reuses_only_extension_matching_authored_source(self):
+        """A valid but stale Code-OSS Web product must be refreshed by Setup."""
+        from webapp.codeoss import producer, setup as code_setup
+        from webapp.codeoss.extension_bundle import build_extension_bundle
+
+        source = Path(__file__).resolve().parents[1] / 'webapp/codeoss/extension'
+        build_root = BOOTSTRAP_BUNDLE_BUILDS / 'Intermediates/CinterForgeTerminalTests'
+        build_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=build_root, prefix='codeoss-freshness-') as tmp:
+            workspace = Path(tmp)
+            staged = workspace / 'Builds/InteractiveFiction/CodeOSS/Web/extensions/cinterforge-if'
+            staged.parent.mkdir(parents=True)
+            shutil.copytree(source, staged)
+            build_extension_bundle(staged)
+            web = staged.parents[1]
+            self.assertTrue(code_setup._extension_matches_source(web))
+
+            with mock.patch.object(producer, 'validate_codeoss_web'), \
+                 mock.patch.object(producer, 'ensure_codeoss', return_value={'refreshed': True}) as refresh:
+                self.assertTrue(code_setup.setup(workspace)['reused'])
+                refresh.assert_not_called()
+
+                # Compiled worker may be stale even when every authored source
+                # file was copied: normal Setup must not accept that package.
+                (staged / 'extension.bundle.js').write_text('// old bundle\n', encoding='utf-8')
+                self.assertFalse(code_setup._extension_matches_source(web))
+                self.assertFalse(code_setup.setup(workspace)['reused'])
+                refresh.assert_called_once_with(workspace, refresh=True)
+
+            # Source-only fixes must also invalidate an otherwise complete stage.
+            build_extension_bundle(staged)
+            (staged / 'runtime/ControlTransport.js').write_text('// stale worker\n', encoding='utf-8')
+            self.assertFalse(code_setup._extension_matches_source(web))
+
+    def test_bundled_extension_parses_in_javascript_runtime(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node is supplied by Setup; not installed in this test environment')
+        from webapp.codeoss.extension_bundle import build_extension_bundle
+        source = Path(__file__).resolve().parents[1] / 'webapp/codeoss/extension'
+        build_root = BOOTSTRAP_BUNDLE_BUILDS / 'Intermediates/CinterForgeTerminalTests'
+        build_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=build_root, prefix='codeoss-worker-') as tmp:
+            staged = Path(tmp) / 'extension'
+            shutil.copytree(source, staged)
+            bundle = build_extension_bundle(staged)
+            checked = subprocess.run([node, '--check', str(bundle)], capture_output=True,
+                                     text=True, timeout=30, check=False)
+            self.assertEqual(checked.returncode, 0,
+                             'The browser-worker extension must parse: ' + checked.stderr)
+            self.assertEqual(json.loads((staged / 'package.json').read_text())['browser'],
+                             './extension.bundle.js')
+
+    def test_terminal_host_probe_distinguishes_if_from_native_host(self):
+        """Execute the actual browser transport: Terminal 200, IF 404, denied 401."""
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node is supplied by Setup')
+        transport = Path(__file__).resolve().parents[1] /             'webapp/codeoss/extension/runtime/ControlTransport.js'
+        script = r"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const calls = [];
+let current = {ok:true,status:200,kind:'terminal'};
+const context = {
+  URL,
+  location: {protocol:'http:', origin:'http://127.0.0.1:20300',
+    href:'http://127.0.0.1:20300/codeoss/out/vs/workbench/api/worker/extensionHostWorkerMain.js'},
+  console,
+  fetch: async (path, options) => {
+    if (!String(path).startsWith('http://127.0.0.1:20300/'))
+      throw new TypeError('URL is not valid or contains user credentials');
+    calls.push({path, options});
+    return {ok:current.ok,status:current.status,
+      json:async () => ({kind:current.kind,theme:'dark',platform:'mac'})};
+  },
+  CinterForgeCode: {vscode:{workspace:{getConfiguration:()=>({get:()=> 'http://other-if-host/'})}}}
+};
+context.globalThis = context;
+vm.runInNewContext(source, context, {filename:'ControlTransport.js'});
+(async () => {
+  const probe = context.CinterForgeCode.detectTerminalHost;
+  assert.equal((await probe()).platform, 'mac');
+  assert.equal(calls[0].path, 'http://127.0.0.1:20300/host/code-workspace');
+  assert.equal(calls[0].options.credentials, 'same-origin');
+  current = {ok:false,status:404};
+  assert.equal(await probe(), null);
+  current = {ok:false,status:401};
+  await assert.rejects(probe(), /HTTP 401/);
+  current = {ok:true,status:200,kind:'ifplayer'};
+  assert.equal(await probe(), null);
+  context.location.protocol = 'file:';
+  const before = calls.length;
+  assert.equal(await probe(), null);
+  assert.equal(calls.length, before);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+        checked = subprocess.run([node, '-e', script, str(transport)], capture_output=True,
+                                 text=True, timeout=30, check=False)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+
+
 class CodeOSSHostOptionalDependencyTests(unittest.TestCase):
     """Upstream Code-OSS nested npm installs must match the native build host."""
 

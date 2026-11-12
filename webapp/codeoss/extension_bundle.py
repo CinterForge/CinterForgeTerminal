@@ -28,11 +28,23 @@ SCRIPT_PATHS = (
 )
 
 
-def build_extension_bundle(extension_directory: Path) -> Path:
+def render_extension_bundle(extension_directory: Path) -> str:
+    """Return exactly the worker source the producer will stage, without writes.
+
+    Setup compares this against the installed Web product so that a source-only
+    Code-OSS fix cannot be bypassed by a structurally valid, stale build.
+    """
     extension_directory = Path(extension_directory)
     entry = (extension_directory / 'extension.js').read_text(encoding='utf-8')
     begin = entry.index('const classicScriptPaths = [')
-    end = entry.index('function activateCoordinator(context) {', begin)
+    # Preserve the async modifier: the coordinator awaits the host workspace and
+    # applies its theme before creating the initial Code-OSS terminal instances.
+    # Matching only `function ...` starts *inside* `async function ...` and
+    # silently produces an invalid browser extension with `await` in a sync body.
+    coordinator = 'async function activateCoordinator(context) {'
+    if entry.count(coordinator) != 1:
+        raise RuntimeError('Code-OSS asynchronous coordinator entry point changed')
+    end = entry.index(coordinator, begin)
     if entry.count('await loadClassicScripts(context);') != 1:
         raise RuntimeError('Code-OSS extension activation bootstrap changed')
 
@@ -42,13 +54,17 @@ def build_extension_bundle(extension_directory: Path) -> Path:
         source = source_path.read_text(encoding='utf-8')
         sections.append(f'\n// --- {relative_path} ---\n{source}\n')
 
-    bundle = (
+    return (
         entry[:begin]
         + '\n'.join(sections)
         + '\n'
         + entry[end:]
     ).replace('await loadClassicScripts(context);', '// Subsystems are included in this worker entry point.')
 
+
+def build_extension_bundle(extension_directory: Path) -> Path:
+    extension_directory = Path(extension_directory)
+    bundle = render_extension_bundle(extension_directory)
     target = extension_directory / 'extension.bundle.js'
     target.write_text(bundle, encoding='utf-8')
 

@@ -437,6 +437,74 @@
     computerView.append(node);
     return node;
   })();
+  // The Code extension runs in a Web Worker. BroadcastChannel is the existing
+  // same-origin control path; never create an outer PTY while Code is active.
+  const CODE_COMMAND_CHANNEL = 'cinterforge-terminal-code-commands';
+  const CODE_MENU_NAMES = ['File', 'Edit', 'Selection', 'View', 'Go', 'Run', 'Terminal', 'Help'];
+  const codeCommands = typeof BroadcastChannel === 'function'
+    ? new BroadcastChannel(CODE_COMMAND_CHANNEL) : null;
+  let codeCommandSerial = 0;
+  const codeIsActive = () => activeTab?.profileId === 'codeoss' &&
+    !computerView.hidden && frame.src.includes('/codeoss/');
+
+  // The CinterForge activity-bar button controls the existing outer wrapper,
+  // not an IFPlayer game menu. The Code iframe and its PTYs remain mounted.
+  const terminalOverlay = $('terminal-overlay');
+  function setCodeWrapperHidden(hidden) {
+    terminalOverlay.dataset.codeWrapperHidden = hidden ? 'true' : 'false';
+    if (hidden) document.querySelectorAll('.terminal-menu[open]').forEach(menu => { menu.open = false; });
+    frame.contentWindow?.postMessage({type: 'cinterforge-terminal-wrapper-state', hidden},
+      window.location.origin);
+  }
+  window.addEventListener('message', event => {
+    if (event.source !== frame.contentWindow || event.origin !== window.location.origin ||
+        event.data?.type !== 'cinterforge-terminal-wrapper-toggle' || !codeIsActive()) return;
+    setCodeWrapperHidden(terminalOverlay.dataset.codeWrapperHidden !== 'true');
+  });
+
+  /** Send a command to the actual Code-OSS extension, not the outer Terminal. */
+  function sendCodeCommand(type, data = {}) {
+    if (!codeIsActive()) return false;
+    if (!codeCommands) {
+      notice('Code-OSS command channel is unavailable');
+      return false;
+    }
+    codeCommands.postMessage({type, ...data, requestId: ++codeCommandSerial});
+    return true;
+  }
+
+  // Code-OSS runs its extension in a worker. WebKit can give that worker a
+  // file: or blob: location even when the workbench is served over HTTP.
+  // Resolve Terminal capabilities through the already-authenticated outer UI;
+  // the extension must never guess 127.0.0.1 or inherit an IFPlayer control URL.
+  if (codeCommands) codeCommands.onmessage = async event => {
+    const message = event.data || {};
+    if (message.type !== 'host-probe' && message.type !== 'host-request') return;
+    if (typeof message.requestId !== 'string' ||
+        !/^host-[A-Za-z0-9-]{12,100}$/.test(message.requestId) ||
+        !frame.src.includes('/codeoss/')) return;
+
+    const replyType = message.type === 'host-probe' ? 'host-probe-response' : 'host-request-response';
+    try {
+      if (message.type === 'host-probe') {
+        const payload = await api('/host/code-workspace');
+        codeCommands.postMessage({type: replyType, requestId: message.requestId, ok: true, payload});
+        return;
+      }
+      const path = String(message.path || '');
+      // Only the existing Code-OSS filesystem and shell contracts can cross
+      // this UI bridge; it is not an arbitrary privileged HTTP proxy.
+      if (path !== '/code/command' &&
+          !/^\/host\/code-shell-(open|close|write|resize|output)(?:\?[^#]*)?$/.test(path))
+        throw new Error('Unsupported Code-OSS host operation');
+      const payload = message.method === 'GET' ? await api(path) : await api(path, message.body || {});
+      codeCommands.postMessage({type: replyType, requestId: message.requestId, ok: true, payload});
+    } catch (error) {
+      codeCommands.postMessage({type: replyType, requestId: message.requestId,
+        ok: false, error: String(error.message || error)});
+    }
+  };
+
   const codeUrl = '/codeoss/out/vs/code/browser/workbench/workbench.html';
   let codeLoad = 0, codeReady = false, codeLastError = '';
   /**
@@ -460,6 +528,9 @@
     if (data.status === 'ready') {
       codeReady = true;
       codeError.hidden = true;
+      updateCodeMenuMode();
+      requestCodeServiceMenus();
+      for (const name of CODE_MENU_NAMES) void refreshCodeMenu(name);
       notice('VS Code workbench ready');
     } else if (data.status === 'error') {
       codeLastError = String(data.message || 'Workbench error').slice(0, 450);
@@ -686,6 +757,8 @@
    * work.
    */
   const showTerminal = () => {
+    if (terminalOverlay.dataset.codeWrapperHidden === 'true')
+      setCodeWrapperHidden(false);
     lagBootSequence++;
     if (lagWelcomeTimer) {
       clearTimeout(lagWelcomeTimer);
@@ -727,6 +800,9 @@
       // same-origin source, owns its game screen and keyboard in this Session.
       frame.src = '/joshua/index.html';
     } else if (museumKind(profile) === 'codeoss') {
+      // A reloaded workbench starts with its outer wrapper visible again.
+      if (terminalOverlay.dataset.codeWrapperHidden === 'true')
+        setCodeWrapperHidden(false);
       const stamp = codeLoad;
       frame.src = codeUrl;
       void checkCodeAssets(stamp);
@@ -824,7 +900,7 @@
     create.title = 'New terminal session';
     create.setAttribute('aria-label', 'New terminal session');
     create.addEventListener('click', () => {
-      void openSession('modern');
+      void window.CinterTerminalNewTab('mac');
     });
     tabBar.append(create);
   };
@@ -841,6 +917,7 @@
       activeTab.display.render();
     }
     activeTab = tab;
+    updateCodeMenuMode();
     session = tab.session;
     selected = tab.profileId;
     display = tab.display;
@@ -852,6 +929,7 @@
       paintIFTab(tab);
       focusTerminal();
       renderTabs();
+      saveTerminalLayout();
       return;
     }
     $('terminal-input').value = '';
@@ -894,11 +972,13 @@
       }
     } else {
       await showComputer(profile);
+      updateCodeMenuMode();
       $('terminal-overlay').dataset.profile = profile.id;
       $('terminal-machine-title').textContent = profile.name.toUpperCase();
       $('terminal-shell').textContent = `${profile.year} · ${profile.name}`;
     }
     renderTabs();
+    saveTerminalLayout();
   }
 
   /**
@@ -922,6 +1002,7 @@
       if (tabs.length) await activateTab(tabs[Math.max(0, index - 1)]);
       else await openSession('modern');
     } else renderTabs();
+    saveTerminalLayout();
     if (closingSession) try {
       await api('/api/terminal/close', { id: closingSession.id });
     }
@@ -1123,6 +1204,12 @@
    * modes.
    */
   window.CinterTerminalNewTab = async (kind = 'mac') => {
+    // The same menu always has the same label. Its destination depends on mode.
+    // In Code: create a VS Code integrated terminal tab. Else: outer Session tab.
+    if (codeIsActive() && !String(kind).startsWith('profile:')) {
+      return sendCodeCommand('new-terminal', {backend: kind === 'code' ? 'native' : kind});
+    }
+
     if (typeof kind === 'string' && kind.startsWith('profile:')) {
       const id = kind.slice(8);
       if (profiles.some(profile => profile.id === id && !profile.lagomorph))
@@ -1130,6 +1217,7 @@
       notice('Unknown museum machine');
       return;
     }
+    if (kind === 'code') return openSession('codeoss');
     if (kind === 'server') return openServerTab();
     if (kind === 'mac') return openSession('modern');
     if (kind === 'linux') return openSession('vt100-terminal', 'linux');
@@ -1242,6 +1330,71 @@
   // its own detached output, and receives input only through its own private
   // textarea. The visible Terminal output and textarea are a presentation of
   // the ACTIVE tab, never a global owner of a Z-machine process.
+  // Code-OSS's Z-Machine PTY is a view/controller for the SAME browser VM
+  // that owns an ordinary IF Session tab. It does not create an interpreter,
+  // invent game commands or bypass the existing CONV/Quetzal save path.
+  const codeZMachineChannel = typeof BroadcastChannel === 'function'
+    ? new BroadcastChannel('cinterforge-terminal-zmachine') : null;
+  const codeZMachineSubscribers = new Map();
+  function codeZMachineStory() {
+    const running = tabs.filter(tab => !tab.closed && tab.kind === 'if' && tab.game);
+    if (activeTab?.kind === 'if' && activeTab.game) return activeTab;
+    return running.length === 1 ? running[0] : null;
+  }
+  function updateCodeZMachineSubscriber(id, subscriber) {
+    if (!codeZMachineChannel) return;
+    const story = codeZMachineStory();
+    if (!story) {
+      if (!subscriber.noStory) {
+        codeZMachineChannel.postMessage({type: 'output', id,
+          text: '[IF] No uniquely selected running story. Start an installed story using its existing Terminal command.\n'});
+        subscriber.noStory = true;
+      }
+      return;
+    }
+    subscriber.noStory = false;
+    const transcript = String(story.buffer.textContent || '');
+    if (subscriber.storyKey !== story.key) {
+      subscriber.storyKey = story.key;
+      subscriber.transcript = '';
+      codeZMachineChannel.postMessage({type: 'output', id,
+        text: '[IF] ' + story.label + '\n'});
+    }
+    const previous = subscriber.transcript || '';
+    const delta = transcript.startsWith(previous) ? transcript.slice(previous.length) : transcript;
+    subscriber.transcript = transcript;
+    if (delta) codeZMachineChannel.postMessage({type: 'output', id, text: delta});
+  }
+  function updateCodeZMachineSubscribers() {
+    for (const [id, subscriber] of codeZMachineSubscribers)
+      updateCodeZMachineSubscriber(id, subscriber);
+  }
+  if (codeZMachineChannel) codeZMachineChannel.onmessage = event => {
+    const request = event.data || {}, id = String(request.id || '');
+    if (!/^zmachine-[a-z0-9]{4,24}$/.test(id)) return;
+    if (request.type === 'subscribe') {
+      if (!codeZMachineSubscribers.has(id) && codeZMachineSubscribers.size >= 8) return;
+      const subscriber = {storyKey: null, transcript: '', noStory: false};
+      codeZMachineSubscribers.set(id, subscriber);
+      updateCodeZMachineSubscriber(id, subscriber);
+    } else if (request.type === 'unsubscribe') {
+      codeZMachineSubscribers.delete(id);
+    } else if (request.type === 'input') {
+      const subscriber = codeZMachineSubscribers.get(id);
+      if (!subscriber || typeof request.text !== 'string' || request.text.length > 4096) return;
+      const selectedStory = codeZMachineStory();
+      const tab = selectedStory?.key === subscriber.storyKey ? selectedStory : null;
+      const current = tab?.game;
+      if (!current?.io?.lineResolver) {
+        codeZMachineChannel.postMessage({type: 'output', id, text: '[IF] No input requested by the active story.\n'});
+        return;
+      }
+      // Exactly the same WebIOAdapter event used by the normal IF Session.
+      current.inputElement.value = request.text;
+      current.inputElement.dispatchEvent(new KeyboardEvent('keydown',
+        {key: 'Enter', bubbles: false}));
+    }
+  };
   const terminalScreen = $('terminal-screen');
   /**
    * Scroll the currently displayed Terminal view to its bottom.
@@ -1335,6 +1488,7 @@
     requestAnimationFrame(() => {
       tab.paintPending = false;
       paintIFTab(tab);
+      updateCodeZMachineSubscribers();
     });
   }
 
@@ -1354,6 +1508,7 @@
       } catch (_) {/* already exited */ }
     }
     tab.finished = true;
+    updateCodeZMachineSubscribers();
     tab.statusText = tab.label + ' stopped · close this tab to return to the shell';
     tab.buffer.append(document.createTextNode('\n[IF] ' + tab.label + ' stopped\n'));
     if (activeTab === tab) {
@@ -1418,6 +1573,7 @@
     // steal focus when the deferred server event finally arrives.
     const select = !sourceSession || activeTab?.session?.id === sourceSession;
     tabs.push(tab);
+    updateCodeZMachineSubscribers();
     if (select) await activateTab(tab);
     else renderTabs();
     void startGame(tab, current);
@@ -1726,6 +1882,7 @@ method: 'POST', headers: {
       activeTab.display.render();
     }
     activeTab = tab;
+    updateCodeMenuMode();
     session = null;
     selected = profile.id;
     display = tab.display;
@@ -1740,6 +1897,7 @@ method: 'POST', headers: {
       if (tab.kind !== 'terminal') {
         notice('Opening ' + profile.name + ' emulator…');
         await showComputer(profile);
+        updateCodeMenuMode();
         $('terminal-overlay').dataset.profile = profile.id;
         $('terminal-machine-title').textContent = profile.name.toUpperCase();
         $('terminal-shell').textContent = `${profile.year} · ${profile.name}`;
@@ -2099,6 +2257,221 @@ method: 'POST', headers: {
   $('terminal-screen').addEventListener('click', focusTerminal);
 
   // ===========================================================================
+  // SHARED CODE-OSS / NATIVE / HTML MENU MODEL
+  // ===========================================================================
+
+  // VS Code supplies the live item labels, enabled state and command handlers.
+  // Never maintain a duplicate, frozen list of editor commands in Terminal.
+  // The same-origin workbench exposes its own menu model and command handlers.
+  const codeMenuZone = $('code-menu-zone');
+  const codeMenuRoots = new Map();
+  const codeMenuNames = CODE_MENU_NAMES;
+  const cinterTerminalActions = [
+    ['code', 'New CinterForge Code Terminal'],
+    ['mac', 'New Mac Terminal'],
+    ['linux', 'New Linux Terminal'],
+    ['win', 'New Windows Terminal'],
+    ['server', 'New Server Log Terminal'],
+    ['if', 'New Z-Machine Terminal'],
+    ['minecraft', 'New Minecraft Terminal']
+  ];
+
+  // The Code-OSS workbench publishes its *own* IMenuService/IAction model from
+  // the pinned MenubarControl source. No popup DOM scraping, positional command
+  // names, or fabricated editor-command menu is permitted here.
+  const codeServiceMenus = new Map();
+  const codeServiceActions = new Set();
+  // A Code-OSS menu publish can precede activation of the outer Terminal
+  // toolbar. Request the same live model when a menu is opened; never fabricate
+  // editor actions when the actual workbench has not answered yet.
+  function requestCodeServiceMenus() {
+    if (!codeIsActive() || !frame.contentWindow) return;
+    frame.contentWindow.postMessage({
+      type: 'cinterforge-codeoss-menu-request'
+    }, window.location.origin);
+  }
+  function terminalItems() {
+    // The EXISTING CinterForge application commands, used outside Code mode.
+    // Code mode uses the real Code-OSS menu without overriding any of its items.
+    return cinterTerminalActions.map(([kind, title]) => ({
+      title, action: `terminal:${kind}`,
+      enabled: (kind !== 'minecraft' || Boolean(minecraftMenuState)) &&
+        (kind !== 'mac' || platform === 'mac') &&
+        (kind !== 'win' || platform === 'mac' || platform === 'win') &&
+        (kind !== 'linux' || platform === 'mac' || platform === 'linux')
+    }));
+  }
+
+  function codeMenuSnapshot(name) {
+    if (codeIsActive()) return codeServiceMenus.get(name) || [];
+    if (name === 'File') return [
+      {title: 'Relaunch CinterForge Terminal', action: 'app:relaunch', enabled: true},
+      {title: 'Quit CinterForge Terminal', action: 'app:quit', enabled: true}
+    ];
+    if (name === 'Edit') return [
+      {title: 'Copy', action: 'edit:copy', enabled: true},
+      {title: 'Paste', action: 'edit:paste', enabled: true}
+    ];
+    if (name === 'Terminal') return terminalItems();
+    return [];
+  }
+
+  function paintCodeMenuList(container, items) {
+    container.replaceChildren();
+    for (const item of items) {
+      if (item.separator) {
+        const separator = document.createElement('hr');
+        separator.setAttribute('role', 'separator');
+        container.append(separator);
+        continue;
+      }
+      if (Array.isArray(item.children) && item.children.length) {
+        const submenu = document.createElement('details');
+        submenu.className = 'terminal-menu terminal-code-submenu';
+        const label = document.createElement('summary');
+        label.textContent = item.title;
+        label.setAttribute('aria-disabled', String(item.enabled === false));
+        const children = document.createElement('div');
+        children.className = 'terminal-menu-list';
+        paintCodeMenuList(children, item.children);
+        submenu.append(label, children);
+        container.append(submenu);
+        continue;
+      }
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = item.title;
+      button.disabled = item.enabled === false;
+      button.addEventListener('click', () => {
+        for (const menu of codeMenuRoots.values()) menu.open = false;
+        void window.CinterMenuDispatch(item.action);
+      });
+      container.append(button);
+    }
+  }
+
+  function refreshCodeMenu(name) {
+    const entry = codeMenuRoots.get(name);
+    if (!entry) return;
+    const items = codeMenuSnapshot(name);
+    paintCodeMenuList(entry.cinterList, items);
+    void nativeEvent('code-menu-model', {name, items});
+  }
+
+  function updateCodeMenuMode() {
+    const enabled = codeIsActive();
+    for (const [name, entry] of codeMenuRoots) {
+      const disabled = enabled && !codeServiceMenus.has(name);
+      entry.classList?.toggle?.('code-menu-disabled', disabled);
+      entry.querySelector?.('summary')?.setAttribute?.('aria-disabled', String(disabled));
+      if (!enabled) entry.open = false;
+    }
+    void nativeEvent('code-menu-mode', {enabled});
+    for (const name of codeMenuNames) refreshCodeMenu(name);
+  }
+
+  /** Dispatch a native or HTML action back to the original Code-OSS IAction. */
+  window.CinterMenuDispatch = async function(action) {
+    if (action === 'app:quit') {
+      saveTerminalLayout();
+      if (typeof window.cinterWindow === 'function') await window.cinterWindow({action: 'quit'});
+      return;
+    }
+    if (action === 'app:relaunch') {
+      saveTerminalLayout();
+      if (typeof window.cinterWindow === 'function') await window.cinterWindow({action: 'relaunch'});
+      else notice('Relaunch is available in the native application');
+      return;
+    }
+    if (action === 'edit:copy') return copyTranscript();
+    if (action === 'edit:paste') return pasteClipboard();
+    if (action.startsWith('terminal:')) return window.CinterTerminalNewTab(action.slice(9));
+    if (!codeIsActive() || !action.startsWith('code:') || !codeServiceActions.has(action)) return;
+    frame.contentWindow?.postMessage({
+      type: 'cinterforge-codeoss-menu-run', action: action.slice(5)
+    }, window.location.origin);
+  };
+
+  function readCodeServiceItems(items, sourceActions, depth = 0) {
+    if (!Array.isArray(items) || depth > 8 || items.length > 200) return [];
+    const output = [];
+    for (const item of items) {
+      if (item?.separator === true) { output.push({separator: true}); continue; }
+      if (typeof item?.title !== 'string' || typeof item?.action !== 'string' ||
+          item.title.length > 240 || item.action.length > 180) continue;
+      const normalized = {title: item.title, action: 'code:' + item.action,
+        enabled: item.enabled !== false};
+      if (Array.isArray(item.children)) {
+        normalized.children = readCodeServiceItems(item.children, sourceActions, depth + 1);
+      } else {
+        sourceActions.add(normalized.action);
+      }
+      output.push(normalized);
+    }
+    return output;
+  }
+
+  // Message origin AND iframe identity are checked. The workbench service
+  // publishes menu updates; no periodic DOM probing and no positional guesses.
+  window.addEventListener('message', event => {
+    if (event.source !== frame.contentWindow || event.origin !== window.location.origin ||
+        event.data?.type !== 'cinterforge-codeoss-menu-model') return;
+    const groups = event.data.groups;
+    if (!Array.isArray(groups)) return;
+    const updated = new Map();
+    const sourceActions = new Set();
+    for (const group of groups) {
+      if (!codeMenuNames.includes(group?.name) || updated.has(group.name)) continue;
+      updated.set(group.name, readCodeServiceItems(group.items, sourceActions));
+    }
+    if (!updated.size) return;
+    codeServiceMenus.clear();
+    codeServiceActions.clear();
+    for (const [name, items] of updated) codeServiceMenus.set(name, items);
+    for (const action of sourceActions) codeServiceActions.add(action);
+    if (codeIsActive()) updateCodeMenuMode();
+  });
+
+  for (const name of codeMenuNames) {
+    const menu = document.createElement('details');
+    menu.className = 'terminal-menu terminal-application-menu';
+    const summary = document.createElement('summary');
+    summary.textContent = name;
+    const items = document.createElement('div');
+    items.className = 'terminal-menu-list';
+    menu.append(summary, items);
+    menu.cinterList = items;
+    codeMenuZone.append(menu);
+    codeMenuRoots.set(name, menu);
+    menu.addEventListener('toggle', () => {
+      if (!menu.open) return;
+      for (const other of codeMenuRoots.values()) if (other !== menu) other.open = false;
+      if (codeIsActive() && !codeServiceMenus.has(name)) requestCodeServiceMenus();
+      refreshCodeMenu(name);
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reopen the same Code workspace/mode after the native app is rebuilt.
+  // Process state is intentionally not serialized; new PTYs are created safely.
+  // ---------------------------------------------------------------------------
+  const layoutKey = 'cinterterminal.window-layout.v1';
+  function saveTerminalLayout() {
+    if (acceptUI || !activeTab) return;
+    try {
+      const restorable = tabs.filter(tab => !tab.closed &&
+        (tab.profileId === 'codeoss' || (tab.kind === 'terminal' &&
+        !tab.profileId?.startsWith('macgame-')) || tab.kind === 'server' ||
+        tab.kind === 'emulator' && !tab.profileId?.startsWith('quadra-650')));
+      localStorage.setItem(layoutKey, JSON.stringify({
+        active: restorable.indexOf(activeTab),
+        tabs: restorable.map(tab => ({profileId: tab.profileId, backend: tab.backend, kind: tab.kind}))
+      }));
+    } catch (_) { /* Unavailable storage must never block closing the app. */ }
+  }
+  window.addEventListener('pagehide', saveTerminalLayout);
+
+  // ===========================================================================
   // NATIVE / HTML APPLICATION MENUS
   // ===========================================================================
 
@@ -2128,53 +2501,9 @@ method: 'POST', headers: {
   }, 1600);
   // The installed Terminals selector remains in the existing titlebar.
   const titleMenus = Array.from(document.querySelectorAll('.terminal-menu'));
-  /**
-   * Wire the existing Windows File/Edit HTML menus and native-equivalent actions.
-   */
-  const setWindowsApplicationMenus = () => {
-    const isWindows = platform === 'win';
-    // Remote WebViews retain the TARGET host platform for shell selection;
-    // File/Edit visibility also follows the viewer's actual native OS.
-    const viewer = String(navigator.userAgentData?.platform || navigator.platform || '');
-    const showMenus = isWindows || platform === 'mac' || /Win|Mac/i.test(viewer);
-    for (const id of ['windows-file-menu', 'windows-edit-menu']) {
-      const menu = $(id);
-      if (menu) {
-        menu.hidden = !showMenus;
-        if (!showMenus) menu.open = false;
-      }
-    }
-    // The File menu mirrors the macOS entries, but unavailable guest-native
-    // shells on Windows must not masquerade as runnable native Bash sessions.
-    for (const button of document.querySelectorAll('[data-file-new]')) {
-      const kind = button.dataset.fileNew;
-      if (kind === 'mac' || kind === 'linux') button.disabled = isWindows;
-      if (kind === 'minecraft') button.disabled = !minecraftMenuState;
-    }
-  };
-  for (const button of document.querySelectorAll('[data-file-new]')) {
-    button.addEventListener('click', () => {
-      titleMenus.forEach(menu => menu.open = false);
-      void window.CinterTerminalNewTab(button.dataset.fileNew);
-    });
-  }
-  for (const button of document.querySelectorAll('[data-file-action]')) {
-    button.addEventListener('click', () => {
-      titleMenus.forEach(menu => menu.open = false);
-      if (button.dataset.fileAction === 'debugger') void debuggerRequest();
-      else if (button.dataset.fileAction === 'quit') {
-        if (typeof window.cinterWindow === 'function') void window.cinterWindow({ action: 'quit' });
-        else notice('Quit is available in the installed Terminal application');
-      }
-    });
-  }
-  for (const button of document.querySelectorAll('[data-edit-action]')) {
-    button.addEventListener('click', () => {
-      titleMenus.forEach(menu => menu.open = false);
-      if (button.dataset.editAction === 'copy') void copyTranscript();
-      else if (button.dataset.editAction === 'paste') void pasteClipboard();
-    });
-  }
+  // Both bars now use the shared live Code menu model. Legacy Windows-only
+  // File/Edit controls have been removed; callers need no platform toggles.
+  const setWindowsApplicationMenus = () => {};
   titleMenus.forEach(menu => menu.addEventListener('toggle', () => {
     if (menu.open) titleMenus.forEach(other => {
       if (other !== menu) other.open = false;
@@ -2501,6 +2830,35 @@ method: 'POST', headers: {
       notice('Mac game: ' + error.message);
     }
   }, 850);
+  // The documented `code` shell command opens the staged Code-OSS tab.
+  // A second invocation selects the existing workbench instead of replacing
+  // the requesting shell or creating a duplicate editor instance.
+  setInterval(async () => {
+    if (document.visibilityState === 'hidden') return;
+    try {
+      const result = await api('/api/code/next');
+      if (!result.open) return;
+      const existing = tabs.find(tab => !tab.closed && tab.profileId === 'codeoss');
+      if (existing) {
+        if (result.reload && activeTab === existing) {
+          // Theme/workspace changed in a shell: reload the workbench so its
+          // existing IF-derived startup applies the persisted preferences.
+          await showComputer(profiles.find(profile => profile.id === 'codeoss'));
+        } else {
+          await activateTab(existing);
+        }
+      } else await openSession('codeoss');
+    } catch (_) { /* Service may be closing. */ }
+  }, 850);
+  // Development-only HTML menu inspection on macOS. The native menu remains
+  // authoritative; the command only controls visibility of the existing row.
+  setInterval(async () => {
+    if (platform !== 'mac' || document.visibilityState === 'hidden') return;
+    try {
+      const state = await api('/api/ui/html-menus');
+      document.documentElement?.setAttribute?.('data-html-menus', state.show ? 'show' : 'hide');
+    } catch (_) { /* Closing webview or server: keep menus hidden by default. */ }
+  }, 1000);
   // Hidden shell command: never put the private profile into a visible menu.
   setInterval(async () => {
     if (document.visibilityState === 'hidden') return;
@@ -2516,6 +2874,7 @@ method: 'POST', headers: {
     try {
       const status = await api('/api/status');
       platform = status.platform;
+      document.documentElement?.setAttribute?.('data-cinter-platform', platform);
       setWindowsApplicationMenus();
 
       const data = await (await fetch('/terminal_styles.json', { cache: 'no-store' })).json();
@@ -2535,7 +2894,26 @@ method: 'POST', headers: {
       // concurrent PTY: openSession has a single-open guard, and an in-flight
       // Apple II connection previously made its VT100 probe a false failure.
       const initialId = byId.has(initial) ? initial : data.defaults[platform];
-      if (!acceptUI) void openSession(initialId);
+      if (!acceptUI) {
+        let restored = null;
+        try { restored = JSON.parse(localStorage.getItem(layoutKey) || 'null'); }
+        catch (_) { /* Corrupt optional layout is not a startup failure. */ }
+        const previous = Array.isArray(restored?.tabs) ? restored.tabs.filter(tab =>
+          (tab.kind === 'server' || byId.has(tab.profileId) &&
+           !byId.get(tab.profileId)?.lagomorph && !byId.get(tab.profileId)?.macGame) &&
+          ['native', 'mac', 'win', 'linux', 'server'].includes(tab.backend) ||
+          tab.profileId === 'codeoss').slice(0, 12) : [];
+        if (previous.length) {
+          void (async () => {
+            for (const tab of previous) {
+              if (tab.kind === 'server') await openServerTab();
+              else await openSession(tab.profileId, tab.backend || 'native');
+            }
+            if (Number.isInteger(restored.active) && tabs[restored.active])
+              await activateTab(tabs[restored.active]);
+          })().catch(error => notice('Session restore: ' + error.message));
+        } else void openSession(initialId);
+      }
       // Historical categories are four independent menus; don't flatten
       // Macintosh, BeOS and NeXTSTEP into the existing Terminals list.
       const menuLists = {
@@ -2553,7 +2931,7 @@ method: 'POST', headers: {
       appendDecorativeIcon(serverEntry, 'server');
       serverEntry.addEventListener('click', () => {
         titleMenus.forEach(menu => menu.open = false);
-        void openServerTab();
+        void window.CinterTerminalNewTab('server');
       });
       menuLists.terminal.append(serverEntry);
       /**

@@ -10,9 +10,10 @@ assert.equal(profiles.emulators.filter(p=>p.lagomorph).length,1);
 for(const id of ['terminal','macintosh','beos','nextstep'])
   assert.ok(html.includes(`id="${id}-menu-list"`),`missing ${id} menu`);
 assert.doesNotMatch(html,/id="terminal-profile"/);
-// File/Edit are Windows-only HTML controls; they are hidden for Mac.
-for(const id of ['windows-file-menu','windows-edit-menu'])
-  assert.match(html,new RegExp(`id="${id}" hidden`));
+// Code-OSS menus now share the same bar on every platform; there are no
+// parallel Windows-only File/Edit menus to diverge from the native bar.
+assert.match(html,/id="code-menu-zone"/);
+assert.doesNotMatch(html,/id="windows-file-menu"|id="windows-edit-menu"/);
 const listeners={};
 function element(id){return {id,hidden:false,disabled:false,src:'',value:'',checked:false,textContent:'',
   dataset:{},children:[],style:{setProperty(){}},clientWidth:800,clientHeight:500,

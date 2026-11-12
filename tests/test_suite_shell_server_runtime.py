@@ -156,6 +156,29 @@ class ShellServerRuntimeTests(unittest.TestCase):
             status, _, body = request('GET', '/api/status', token=True)
             self.assertEqual(status, 401)
             self.assertIn(b'LAN login required', body)
+
+            # A native WebView receives a one-use startup URL privately from
+            # its Host process. A normal browser still needs setpass credentials.
+            status, _, body = request('GET', '/_native_open?key=wrong')
+            self.assertEqual(status, 403)
+            from urllib.parse import quote
+            status, headers, body = request('GET', '/_native_open?key=' +
+                                            quote(server.native_grant))
+            self.assertEqual(status, 303, body)
+            self.assertEqual(headers['Location'], '/')
+            self.assertNotIn(server.native_grant.encode('ascii'), body)
+            native_cookie = headers['Set-Cookie'].split(';', 1)[0]
+            self.assertIn('HttpOnly', headers['Set-Cookie'])
+            status, _, body = request('GET', '/', cookie=native_cookie)
+            self.assertEqual(status, 200)
+            self.assertIn(server.token.encode('ascii'), body)
+            status, _, body = request('GET', '/api/status', cookie=native_cookie, token=True)
+            self.assertEqual(status, 200)
+            status, _, body = request('GET', '/host/code-workspace')
+            self.assertEqual(status, 401)
+            status, _, body = request('POST', '/code/command', {
+                'operation': 'workspace-state'})
+            self.assertEqual(status, 403)
             status, _, body = request('GET', '/healthz')
             self.assertEqual(status, 200)
             self.assertIn(b'"ready":true', body)
@@ -172,6 +195,9 @@ class ShellServerRuntimeTests(unittest.TestCase):
             self.assertIn(server.token.encode('ascii'), body)
             status, _, body = request('GET', '/api/status', cookie=cookie, token=True)
             self.assertEqual(status, 200, body)
+            status, _, body = request('GET', '/host/code-workspace', cookie=cookie)
+            self.assertEqual(status, 200, body)
+            self.assertEqual(json.loads(body)['kind'], 'terminal')
 
             # Shell commands are native child processes, not browser clients.
             # Their private credential must keep CLI commands functional without
@@ -186,8 +212,215 @@ class ShellServerRuntimeTests(unittest.TestCase):
                     'password': 'replacement'})['updated'])
             status, _, _ = request('GET', '/api/status', cookie=cookie, token=True)
             self.assertEqual(status, 401, 'old login cookies must be invalidated')
+            # Changing the remote password must not lock out the local native app.
+            status, _, body = request('GET', '/', cookie=native_cookie)
+            self.assertEqual(status, 200)
         finally:
             connection.close()
+            server.stop()
+            worker.join(timeout=3)
+
+    def test_native_http_parent_exit_releases_its_own_listener(self):
+        """An abrupt native/Xcode exit must not orphan TCP 20300 in Python."""
+        import socket
+        builds = self.workspace / 'Builds'
+        builds.mkdir()
+        with mock.patch.object(terminal, '_load_bedrock_manager',
+                               side_effect=RuntimeError('Bedrock not needed')):
+            server = terminal.CinterShellServer(builds)
+        port = server.server_port
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with mock.patch.object(terminal, '_server', server), \
+                 mock.patch.object(terminal.os, 'getppid', side_effect=[900, 1]), \
+                 mock.patch.object(terminal.time, 'sleep', return_value=None):
+                terminal._watch_native_http_parent(server, 900)
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive(), 'HTTP server exits with its native owner')
+            with socket.socket() as probe:
+                probe.bind(('127.0.0.1', port))
+        finally:
+            if worker.is_alive():
+                server.stop()
+                worker.join(timeout=3)
+
+    def test_native_launcher_reuses_only_verified_http_owner(self):
+        """A second launch attaches to our live server but never kills port users."""
+        builds = self.workspace / 'Builds'
+        builds.mkdir()
+        with mock.patch.object(terminal, '_load_bedrock_manager',
+                               side_effect=RuntimeError('Bedrock not needed')), \
+             mock.patch.object(terminal, 'CinterForgeDiscovery'), \
+             mock.patch.object(terminal, 'LAN_HTTP_PORT', 0):
+            server = terminal.CinterShellServer(builds, lan=True)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        path = terminal._lan_owner_path(builds)
+        try:
+            with mock.patch.object(terminal, 'LAN_HTTP_PORT', server.server_port):
+                terminal._write_lan_owner(server)
+                self.assertEqual(terminal._existing_lan_owner(builds)['instance'],
+                                 server.lan_id)
+                # The same signed Terminal may be started from an installed
+                # Steam app while another native window runs from Xcode/Builds.
+                # The already-running service must be recognized even when its
+                # owner receipt is in the other legitimate runtime-state root.
+                steam = self.workspace / 'library' / 'steamapps'
+                state = steam / 'common/CinterForge/Applications/TerminalState'
+                state.mkdir(parents=True)
+                alternate = terminal._lan_owner_path(state)
+                receipt = path.read_bytes()
+                alternate.parent.mkdir(parents=True)
+                alternate.write_bytes(receipt)
+                alternate.chmod(0o600)
+                path.unlink()
+                try:
+                    with mock.patch.object(terminal, '_runtime_steam_locations', return_value=[steam]):
+                        self.assertEqual(terminal._existing_lan_owner(builds)['instance'],
+                                         server.lan_id)
+                        # A mismatched receipt must not be accepted, even from
+                        # a recognized Steam library.
+                        invalid = json.loads(receipt)
+                        invalid['instance'] = '0' * 32
+                        alternate.write_text(json.dumps(invalid))
+                        self.assertIsNone(terminal._existing_lan_owner(builds))
+                finally:
+                    path.write_bytes(receipt)
+                    path.chmod(0o600)
+                    alternate.unlink(missing_ok=True)
+                with mock.patch.object(terminal, 'ASSETS', builds / 'webapp'):
+                    (builds / 'webapp').mkdir()
+                    attached = terminal.handle('start', {'builds': str(builds)})
+                    self.assertTrue(attached['attached'])
+                    self.assertEqual(attached['native_grant'], server.native_grant)
+                    self.assertTrue(worker.is_alive(), 'attaching must not stop the owner')
+                    self.assertTrue(terminal.handle('stop', {})['stopped'])
+                    self.assertTrue(worker.is_alive(), 'detaching must not stop the owner')
+                # A stale/mismatched receipt cannot justify hijacking another
+                # process's listening socket, even when /healthz responds.
+                data = json.loads(path.read_text())
+                data['instance'] = '0' * 32
+                path.write_text(json.dumps(data))
+                self.assertIsNone(terminal._existing_lan_owner(builds))
+                terminal._write_lan_owner(server)
+        finally:
+            server.stop()
+            worker.join(timeout=3)
+        self.assertFalse(path.exists(), 'normal shutdown cleans the owner receipt')
+
+    def test_codeoss_local_workspace_persists_and_serves_real_files(self):
+        """Code uses the selected host files and same-origin HTTP, not a mock editor."""
+        import base64
+
+        builds = self.workspace / 'Builds'
+        builds.mkdir()
+        home = self.workspace / 'User'
+        source = home / 'Source'
+        documents = home / 'Documents'
+        source.mkdir(parents=True)
+        documents.mkdir()
+        project = source / 'Project'
+        project.mkdir()
+        (project / 'readme.md').write_text('hello', encoding='utf-8')
+        other = home / 'Another'
+        other.mkdir()
+        (other / 'main.py').write_text('print(1)', encoding='utf-8')
+        workspace_file = home / 'both.code-workspace'
+        workspace_file.write_text(json.dumps({'folders': [
+            {'name': 'Project', 'path': 'Source/Project'},
+            {'name': 'Another', 'path': 'Another'}
+        ]}), encoding='utf-8')
+
+        with mock.patch.dict('os.environ', {'CINTER_USER_HOME': str(home)}), \
+             mock.patch.object(terminal, '_load_bedrock_manager',
+                               side_effect=RuntimeError('No Bedrock needed')):
+            server = terminal.CinterShellServer(builds)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            self.assertEqual(self._request(server, '/host/code-workspace')['cwd'], str(source))
+            selected = self._request(server, '/code/command', {
+                'operation': 'open-workspace', 'path': str(workspace_file)})
+            self.assertEqual(selected['workspace_kind'], 'workspace')
+            names = self._request(server, '/code/command', {
+                'operation': 'read-directory', 'path': '/'})['entries']
+            self.assertEqual([entry['name'] for entry in names], ['Project', 'Another'])
+            content = self._request(server, '/code/command', {
+                'operation': 'read-file', 'path': '/Project/readme.md'})['data']
+            self.assertEqual(base64.b64decode(content), b'hello')
+            for probe in ('stat', 'read-file', 'read-directory'):
+                missing = self._request(server, '/code/command', {
+                    'operation': probe, 'path': '/Project/not-present'})
+                self.assertFalse(missing['ok'], 'missing Code-OSS paths are still missing')
+                self.assertEqual(missing['error_code'], 'not_found',
+                                 'ordinary VS Code optional probes must not return HTTP 400')
+            self._request(server, '/code/command', {
+                'operation': 'write-file', 'path': '/Another/main.py',
+                'data': base64.b64encode(b'print(2)').decode(), 'overwrite': True})
+            self.assertEqual((other / 'main.py').read_text(), 'print(2)')
+            with self.assertRaises(__import__('urllib.error', fromlist=['HTTPError']).HTTPError):
+                self._request(server, '/code/command', {
+                    'operation': 'read-file', 'path': '/Project/../Another/main.py'})
+            self._request(server, '/code/command', {'operation': 'set-theme', 'theme': 'light'})
+            self.assertEqual(terminal.CodeWorkspace(builds).details()['theme'], 'light')
+            self.assertEqual(terminal.CodeWorkspace(builds).details()['workspace_kind'], 'workspace')
+
+            server.log_event('Code-OSS test server entry')
+            opened = self._request(server, '/host/code-shell-open', {
+                'id': 'terminal-code-test-1', 'backend': 'server'})
+            self.assertTrue(opened['opened'])
+            output = self._request(server, '/host/code-shell-output?id=terminal-code-test-1')
+            self.assertTrue(any('Code-OSS test server entry' in row['text'] for row in output['rows']))
+            self.assertTrue(self._request(server, '/host/code-shell-close', {
+                'id': 'terminal-code-test-1'})['closed'])
+            # Terminal log links must load actual bytes, even when the selected
+            # editor workspace does not contain the Builds/Steam Logs tree.
+            import base64
+            log_path = str(server.log.path)
+            stat = self._request(server, '/code/command', {
+                'operation': 'host-stat', 'path': log_path})
+            self.assertEqual(stat['type'], 'file')
+            contents = self._request(server, '/code/command', {
+                'operation': 'host-read-file', 'path': log_path})
+            self.assertIn(b'Code-OSS test server entry', base64.b64decode(contents['data']))
+            entries = self._request(server, '/code/command', {
+                'operation': 'host-read-directory', 'path': str(server.log.path.parent)})
+            self.assertIn(server.log.path.name, [entry['name'] for entry in entries['entries']])
+            with mock.patch.object(terminal.subprocess, 'Popen') as launch:
+                self._request(server, '/code/command', {
+                    'operation': 'reveal-host', 'path': log_path})
+                self._request(server, '/code/command', {
+                    'operation': 'reveal-workspace', 'path': '/Project/readme.md'})
+                self.assertEqual(launch.call_count, 2)
+            # A displayed log path is not an unrestricted filesystem endpoint.
+            outside = home / 'unshared.txt'
+            outside.write_text('private', encoding='utf-8')
+            with self.assertRaises(__import__('urllib.error', fromlist=['HTTPError']).HTTPError):
+                self._request(server, '/code/command', {
+                    'operation': 'host-read-file', 'path': str(outside)})
+            class LiveShell:
+                def close(self):
+                    pass
+            server.sessions['source-shell'] = LiveShell()
+            # The shell commands reuse CodeWorkspace's persisted state.
+            # A new Terminal starts dark; choosing a theme/folder persists and
+            # the UI is notified to reload without inventing another settings store.
+            self.assertTrue(self._request(server, '/api/code/open', {
+                'session_id': 'source-shell', 'operation': 'run'})['requested'])
+            self.assertEqual(self._request(server, '/api/code/next'), {'open': True, 'reload': False})
+            theme = self._request(server, '/api/code/open', {
+                'session_id': 'source-shell', 'operation': 'mode', 'theme': 'dark'})
+            self.assertEqual(theme['theme'], 'dark')
+            self.assertEqual(self._request(server, '/api/code/next'), {'open': True, 'reload': True})
+            chosen = self._request(server, '/api/code/open', {
+                'session_id': 'source-shell', 'operation': 'open', 'path': str(source)})
+            self.assertEqual(chosen['path'], str(source))
+            self.assertEqual(self._request(server, '/api/code/next'), {'open': True, 'reload': True})
+            self.assertEqual(terminal.CodeWorkspace(server.mutable_builds).details()['theme'], 'dark')
+            self.assertEqual(terminal.CodeWorkspace(server.mutable_builds).details()['path'], str(source))
+            self.assertFalse(self._request(server, '/api/code/next')['open'])
+        finally:
             server.stop()
             worker.join(timeout=3)
 
@@ -230,5 +463,70 @@ class ShellServerRuntimeTests(unittest.TestCase):
         finally:
             log.close()
 
+
+
+class CodeTerminalLifetimeTests(unittest.TestCase):
+    """Closed Code-OSS guest sessions cannot exhaust the live session bound."""
+
+    def test_exited_guest_session_reclaimed_without_evicting_live_shells(self):
+        class MockSession(terminal.TerminalSession):
+            def __init__(self, closed):
+                self.closed = closed
+                self.close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+
+            def poll(self, _wait):
+                return b'final line', self.closed
+
+        root = Path(__file__).resolve().parents[2] / 'Builds' / 'Intermediates' / 'CinterForgeTerminalTests'
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='code-session-lifetime-', dir=root) as temp:
+            with mock.patch.object(terminal, '_load_bedrock_manager', side_effect=RuntimeError('no bedrock needed')):
+                server = terminal.CinterShellServer(Path(temp))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                dead = [MockSession(True) for _ in range(terminal.MAX_SESSIONS)]
+                with server.code_sessions_lock:
+                    server.code_sessions.update({f'terminal-dead-{i}': item
+                                                 for i, item in enumerate(dead)})
+                # Opening Server Log must reclaim exited sessions, not increase
+                # the configured cap or kill any still-running PTY.
+                raw = json.dumps({'id': 'terminal-code-reopen', 'backend': 'server'}).encode()
+                request = Request(server.origin + '/host/code-shell-open', data=raw,
+                                  headers={'Content-Type': 'application/json'}, method='POST')
+                with urlopen(request, timeout=6) as response:
+                    self.assertTrue(json.loads(response.read())['opened'])
+                self.assertEqual(len(server.code_sessions), 1)
+                self.assertTrue(all(item.close_calls == 1 for item in dead))
+
+                live = [MockSession(False) for _ in range(terminal.MAX_SESSIONS - 1)]
+                with server.code_sessions_lock:
+                    server.code_sessions.update({f'terminal-live-{i}': item
+                                                 for i, item in enumerate(live)})
+                from urllib.error import HTTPError
+                with self.assertRaises(HTTPError) as captured:
+                    urlopen(Request(server.origin + '/host/code-shell-open',
+                                    data=json.dumps({'id':'terminal-over-cap', 'backend':'server'}).encode(),
+                                    headers={'Content-Type':'application/json'}, method='POST'), timeout=6)
+                self.assertEqual(captured.exception.code, 400)
+                self.assertEqual(len(server.code_sessions), terminal.MAX_SESSIONS)
+                self.assertTrue(all(item.close_calls == 0 for item in live))
+
+                # A final output poll releases the exited PTY after returning its transcript.
+                ended = MockSession(True)
+                with server.code_sessions_lock:
+                    server.code_sessions['terminal-just-exited'] = ended
+                with urlopen(server.origin + '/host/code-shell-output?id=terminal-just-exited',timeout=6) as response:
+                    payload=json.loads(response.read())
+                self.assertEqual(payload['rows'][0]['text'], 'final line')
+                self.assertTrue(payload['closed'])
+                self.assertNotIn('terminal-just-exited', server.code_sessions)
+                self.assertEqual(ended.close_calls, 1)
+            finally:
+                server.stop()
+                thread.join(timeout=3)
 if __name__ == '__main__':
     unittest.main()

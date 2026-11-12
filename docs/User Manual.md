@@ -19,9 +19,11 @@ CinterForge Terminal is a native application for **macOS, Windows and Linux**. Y
 
 The **entire central area is the Terminal Session**: shell output or the selected
 emulator fills that area. There is no permanent Code-OSS panel or navigation
-sidebar. At the top, four icon-labeled dropdowns group the existing choices:
-**Terminals** (screen styles and historic terminals), **Macintosh** (classic
-Mac configurations), **BeOS**, and **NeXTSTEP**. Each dropdown row also has a
+sidebar. The menu bar has Code-OSS **File, Edit, Selection, View, Go, Run,
+Terminal and Help** on the left, the current mode in the center, and
+**LAN, Macintosh, BeOS, NeXTSTEP and Machines** on the right. The Code
+commands are available while Code-OSS is active; outside Code only Quit,
+Copy/Paste and the existing CinterForge terminal/computer choices work. Each dropdown row also has a
 small category icon. Opened sessions appear in the tab strip with a matching
 icon, a tab name, and their own close button. The keyboard shortcuts and
 Reconnect buttons stay on the row directly below the tabs.
@@ -50,15 +52,15 @@ terminal, the command line you type is visible in the shell and may appear in
 the Terminal transcript/session log. The standard Bash shell is configured
 not to save `setpass` commands in its history.
 
-Open `http://<host-LAN-IP>:20300/` in a remote browser and log in with the
-username and password you chose. Before `setpass` is run, remote login is not
-available. `localhost:20300` on the host opens locally without login.
+Open `http://<host-LAN-IP>:20300/` in another browser. Before `setpass` is
+run the HTTP Terminal is open; afterward every ordinary browser (including
+`localhost:20300`) must log in with the configured username and password.
+The native application itself opens without a browser login.
 
 The **LAN** dropdown lists other discovered CinterForge Terminal instances and
 also accepts a private IP address. In the native application, selecting a
 listed host opens a **new independent native window** with its WebView pointed
-at that host. On macOS, the same discovered hosts appear under **File → Visible
-LAN Terminals**; Connect / Refresh opens the LAN selector. The original local
+at that host. The native and HTML bars both show **LAN → Connect / Refresh…**. The original local
 Terminal remains open.
 
 After login, you get the **host's real terminal**: shell commands, PTY/ConPTY
@@ -70,9 +72,10 @@ connected window does not shut down the host's Terminal server.
 
 **Network boundary:** Port 20300 serves HTTP on private LAN addresses, not an
 encrypted SSH transport. Use it only on a trusted LAN or through a secure
-tunnel; do not port-forward it to the public internet. Discovery uses UDP
-port 20301 and may require local firewall permission. Unauthenticated requests
-cannot load the Terminal UI or invoke host shell operations.
+tunnel; do not port-forward it to the public internet. Discovery uses
+standard Bonjour/mDNS UDP 5353; Terminal advertises HTTP port 20300 and other
+CinterForge apps advertise their own 203xx ports. After `setpass`, unauthenticated
+browsers cannot use host shell operations.
 
 ### Discord tab
 
@@ -103,7 +106,7 @@ native output logs.
 | **19 terminal styles** | Explore historical and modern screen aesthetics, distinct from real OS emulation | Museum / terminal styles |
 | **Minecraft Bedrock** | Install/manage an official dedicated server and use its live command console | `bedrock help` |
 | **Cross-platform shells** | Actual Mac, Windows and Linux sessions where supported environments are present | Native Terminal menu / Code-OSS |
-| **Code-OSS** | Edit and save local projects, use integrated terminals and build tools | `code` |
+| **Code-OSS** | Edit and save local projects, use integrated terminals and build tools | `code run`, File → New CinterForge Code Terminal |
 | **Application platform** | Native WebView shell plus a supervised Python/HTTP backend | [Architecture](Architecture.md) |
 
 The counts come from the checked-in catalog: the game commands, separate interactive-fiction titles, emulator configurations and visual profiles are **different lists**. A style is not a bootable emulator, and historical or third-party media may be separate from the app.
@@ -122,7 +125,9 @@ lagomorph            Launch the special Quadra 650 easter egg
 bedrock help         See server operations
 bedrock status       Check Bedrock install/run status
 minecraft            Attach a live console to an already-running server
-code                 Open Code-OSS
+code [run]           Open Code-OSS in a new or existing tab
+code mode light|dark Set and remember the Code-OSS theme
+code open "/path"    Open and remember a folder or .code-workspace
 ```
 
 Type commands in an ordinary Terminal Session, not inside JOSHUA's game dialogue or an emulator's own keyboard buffer. Some commands are routed to separate sessions; they do not destroy or replace the session from which you launched them.
@@ -182,7 +187,10 @@ CinterForge Terminal supports native platform shells and integrated developer se
 | **Linux** | Real Linux shell/PTY on the Linux host |
 | **Windows or Linux on a Mac** | Requires the supported guest environment and optional unified DevTools package; it never substitutes a disguised Mac shell |
 
-The native menu can create supported terminal, Server log or Minecraft console sessions. **Server** is a read-only Terminal tab showing the live local Python/HTTP backend log, not a new shell or a second server process. Choose **Terminals → Server · Live log** or **File → New Server Log Terminal**. Its footer displays the complete log path so you can retrieve it after a failure. It must not silently launch a second Bedrock server. To open the **Code-OSS** workbench, type `code`; platform developer terminals are integrated there as well. Ordinary commands such as `pwd`, `ls`, `cd`, Git or a compiler belong in a real shell, not in a game/emulator text field.
+The shared **Terminal** menu creates an integrated Code-OSS terminal tab while
+Code is active; outside Code it creates a separate outer CinterForge Session.
+This also applies to the plus button. The native menu can create supported terminal,
+Server log or Minecraft console sessions. **Server** is a read-only Terminal tab showing the live local Python/HTTP backend log, not a new shell or a second server process. Choose **Machines → Server · Live log** or **Terminal → New Server Log Terminal**. Its footer displays the complete log path so you can retrieve it after a failure. It must not silently launch a second Bedrock server. To open the **Code-OSS** workbench, type `code`; platform developer terminals are integrated there as well. Ordinary commands such as `pwd`, `ls`, `cd`, Git or a compiler belong in a real shell, not in a game/emulator text field.
 
 ### Runtime files and diagnostic logs
 
@@ -192,13 +200,27 @@ In repository development mode—when using `./Cinter` or an explicit repository
 
 ## 8. Code-OSS: edit, save and build projects
 
-1. Type `code` in a Terminal Session.
-2. Choose **Open Folder** or **Open Workspace** in Code-OSS.
-3. Browse, edit and save files using the normal OS permissions for that folder.
-4. Open a real integrated terminal for your host or installed guest environments.
-5. Return to the saved workspace when you relaunch the workbench.
+1. Type `code` in a Terminal Session. The default folder is the host user's `~/Source`, otherwise `~/Documents`.
+2. In Code-OSS's Command Palette, choose **CinterForge: Open Local Folder…** or **CinterForge: Open Local Workspace…** and enter an absolute host path (folders or `.code-workspace` files). The chosen workspace is restored on relaunch.
+3. Browse, edit and save files with the host account's normal filesystem permissions. Use the Code-OSS status-bar theme control to switch **Dark** (default) / **Light**; your choice is remembered.
+4. The workbench starts its integrated terminal tabs: on macOS **Mac, Server Log, Linux, Windows**; on Windows/Linux **Current Platform, Server Log**. All real shells start in the selected workspace directory. Server Log is read-only; Mac-hosted guest shells require the optional DevTools runtime.
+5. Click the **CinterForge logo** in the Code-OSS activity bar to toggle full-workbench mode. Full mode hides the surrounding Terminal tabs, its bottom status/footer and the HTML menu row on Linux/Windows; clicking the same logo restores them without stopping any shell or reloading Code-OSS. On macOS, the system menu remains available and the separate HTML menu row is hidden by default (`htmlmenus show` temporarily reveals it for development).
+
+Log paths printed in the **Server Log** or other integrated terminals can be opened directly in a Code-OSS editor by clicking their absolute-path links. This is a read-only view for files outside the selected workspace. In Explorer, an editor tab, or the editor context menu, choose **CinterForge: Reveal in Host File Manager** to open the actual containing folder in Finder (macOS), Explorer (Windows), or the Linux file manager. **CinterForge: Open Host Log or File…** also accepts an absolute host path. Paths must belong to the selected workspace or the existing developer/installed Logs directory. On a remote connection, file-manager reveal occurs on the **host** machine, not the browsing client.
 
 When your open folder is the `CinterForgeTerminal` source repository, its own **`Cinter`** lifecycle is available from the real developer shell. On macOS, the supported producer can build macOS, Windows and Linux releases; target-native GUI acceptance is a separate target-platform concern, not proof supplied by cross-compiling.
+
+### Relaunch after a build
+
+The shared **File → Relaunch CinterForge Terminal** action ends the current
+native application and managed HTTP server, then launches the installed
+executable again, after port 20300 has been released. The application restores
+the selected outer CinterForge session and its non-game terminal/computer tabs.
+Code-OSS retains its saved theme and local folder/workspace; integrated shells
+are opened again in that workspace, rather than attempting to resurrect
+terminated shell processes or Bedrock VMs. Use the existing explicit
+`./Cinter` lifecycle inside an integrated shell to build, test, stage or publish;
+relaunch itself does not perform any lifecycle phase.
 
 ### Building the Terminal itself
 

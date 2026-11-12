@@ -15,10 +15,9 @@
     // -----------------------------------------------------------------------------
 
     class NativeTerminal {
-        constructor(id) {
-            this.id = String(
-                id || ''
-            );
+        constructor(id, backend = 'native') {
+            this.id = String(id || '');
+            this.backend = backend;
 
             this.writeEmitter =
                 new vscode.EventEmitter();
@@ -34,9 +33,13 @@
 
             this.timer = null;
             this.busy = false;
+            this.opened = false;
+            this.closed = false;
+            this.pendingDimensions = null;
         }
 
         open() {
+            if (this.closed || this.timer !== null) return;
             // Opening a Code terminal is the explicit creation boundary. Merely
             // launching IFPlayer never starts a native shell.
             const start = async () => {
@@ -44,13 +47,35 @@
                     await request(
                         '/host/code-shell-open',
                         {
-                            id: this.id
+                            id: this.id,
+                            backend: this.backend
                         }
                     );
+                    // close() may have run while the HTTP open was pending.
+                    // Never leave that late-created PTY in the Host registry.
+                    if (this.closed) {
+                        await request('/host/code-shell-close', {id: this.id})
+                            .catch(() => {});
+                        return false;
+                    }
+                    this.opened = true;
+                    // Code-OSS can resize an xterm before its asynchronous
+                    // guest PTY exists. Send only the latest size after open.
+                    if (this.pendingDimensions) {
+                        const dimensions = this.pendingDimensions;
+                        this.pendingDimensions = null;
+                        await request('/host/code-shell-resize', {
+                            id: this.id,
+                            cols: dimensions.columns,
+                            rows: dimensions.rows
+                        }).catch(() => {});
+                    }
+                    return true;
                 } catch (error) {
-                    this.writeEmitter.fire(
-                        `ERROR: ${error.message}\r\n`
-                    );
+                    if (!this.closed) {
+                        this.writeEmitter.fire(`ERROR: ${error.message}\r\n`);
+                    }
+                    return false;
                 }
             };
 
@@ -94,6 +119,13 @@
                             )
                         );
                     }
+                    if (payload.closed) {
+                        // Host has released an exited process. Preserve the
+                        // final transcript without polling or reserving a slot.
+                        this.opened = false;
+                        this.timer = null;
+                        return;
+                    }
 
                     // The host normally long-polls. Keep a small client-side floor
                     // as well so an empty immediate response can never create a
@@ -118,7 +150,12 @@
             };
 
             const loop = async () => {
-                await start();
+                if (!await start()) {
+                    // An unopened backend has no output endpoint; polling it
+                    // forever created the repeated HTTP 400 Web Inspector flood.
+                    this.timer = null;
+                    return;
+                }
 
                 while (this.timer !== null) {
                     await poll();
@@ -133,16 +170,30 @@
         }
 
         close() {
+            if (this.closed) return;
+            this.closed = true;
             this.timer = null;
-
-            void request(
-                '/host/code-shell-close',
-                {
-                    id: this.id
-                }
-            ).catch(() => {
+            // The pending open owns its own delayed close. Sending a close
+            // before open completes is a no-op on the server and leaks the
+            // session the open subsequently creates.
+            if (!this.opened) return;
+            this.opened = false;
+            void request('/host/code-shell-close', {id: this.id}).catch(() => {
                 // The host may already be gone while the terminal is closing.
             });
+        }
+
+        setDimensions(dimensions) {
+            if (this.closed || this.backend === 'server') return;
+            if (!this.opened) {
+                this.pendingDimensions = dimensions;
+                return;
+            }
+            void request('/host/code-shell-resize', {
+                id: this.id,
+                cols: dimensions.columns,
+                rows: dimensions.rows
+            }).catch(() => {});
         }
 
         handleInput(data) {
@@ -150,7 +201,7 @@
                 data || ''
             );
 
-            if (!text) {
+            if (!text || this.backend === 'server') {
                 return;
             }
 

@@ -39,10 +39,12 @@ The older `install devtools` spelling may be retained as a compatibility alias. 
 
 ## Local folder and workspace workflow
 
-1. In Game Terminal, enter `code`.
-2. Choose **Open Folder** or **Open Workspace** and select a local source tree. Folder browsing, save, rename, search and navigation use a real native/Host file capability with ordinary OS permissions and workspace trust.
-3. Close Code-OSS/Terminal; the last selected local folder or workspace is restored on relaunch.
-4. With the **CinterForgeTerminal repository** loaded, open its real integrated platform terminals. On Mac, three default tabs/sessions are Mac, Win, Linux; on Linux/Windows, one native session.
+1. In the Terminal shell, enter `code` (or select the existing Code-OSS machine). The first workspace is the **host user's `~/Source`**, if it exists, otherwise **`~/Documents`** (the home directory is a final fallback when neither exists).
+2. Inside Code-OSS, open the Command Palette and run **CinterForge: Open Local Folder…** or **CinterForge: Open Local Workspace…**. Enter an **absolute path on the Terminal host** to a directory or an existing `.code-workspace` file. The browser-hosted workbench uses a path prompt, not an invented OS-native folder dialog. Multi-root workspaces expose each named local folder in Explorer.
+3. Browse, edit, and save files using the current host user's normal filesystem permissions. Closing and reopening Code-OSS restores the last selected folder/workspace and the dark/light preference. Dark is the initial default; use **CinterForge: Toggle Light/Dark Mode** or the clickable theme control in Code-OSS's status bar to switch.
+4. The integrated terminals start automatically in the selected workspace directory. **Mac: Mac shell, read-only Server Log, Linux shell, Windows shell (four tabs)**. **Windows/Linux: host shell and read-only Server Log (two tabs)**. Mac-hosted Linux/Windows are actual optional DevTools guest environments, not rebranded Mac Bash; Code-OSS mounts the selected host folder at `/workspace` in each guest.
+The main native Terminal Sessions use the same selected workspace root as Code-OSS (normally the source-repository parent). On macOS the outer HTML menubar is hidden by default because the native system menu owns those commands. For development inspection, type `htmlmenus show`, `htmlmenus hide` or `htmlmenus toggle` in a Mac shell Session; this only changes visibility of the existing HTML row. Linux/Windows retain one HTML menu row directly above the Session tabs.
+
 5. Edit and save authored files, use Git and shell tools, then invoke the repository's supported `./Cinter setup|build|stage|test|all|status|publish|fetch` commands directly. Publishing is separately explicit.
 
 A workspace associated with a random folder cannot magically acquire Terminal release commands: the workbench identifies the repository by trusted real source/entry point and scoped permissions. On a Mac producer, the same lifecycle produces all three app releases; the target OS still supplies target-native GUI acceptance.

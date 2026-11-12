@@ -32,7 +32,13 @@
     "onCommand:cinterforge.newTerminal",
     "onCommand:cinterforge.newStory",
     "onCommand:cinterforge.importStory",
-    "onCommand:cinterforge.loadStory"
+    "onCommand:cinterforge.loadStory",
+    "onCommand:cinterforge.openFolder",
+    "onCommand:cinterforge.openWorkspace",
+    "onCommand:cinterforge.newMacTerminal",
+    "onCommand:cinterforge.newLinuxTerminal",
+    "onCommand:cinterforge.newWindowsTerminal",
+    "onCommand:cinterforge.newServerLogTerminal"
   ],
   "contributes": {
     "commands": [
@@ -57,16 +63,48 @@
         "title": "CinterForge: New Terminal"
       },
       {
+        "command": "cinterforge.newMacTerminal",
+        "title": "CinterForge: New Mac Terminal"
+      },
+      {
+        "command": "cinterforge.newLinuxTerminal",
+        "title": "CinterForge: New Linux Terminal"
+      },
+      {
+        "command": "cinterforge.newWindowsTerminal",
+        "title": "CinterForge: New Windows Terminal"
+      },
+      {
+        "command": "cinterforge.newServerLogTerminal",
+        "title": "CinterForge: New Server Log Terminal"
+      },
+      {
         "command": "cinterforge.newStory",
-        "title": "New Story\u2026"
+        "title": "New Story…"
       },
       {
         "command": "cinterforge.importStory",
-        "title": "Import Story\u2026"
+        "title": "Import Story…"
       },
       {
         "command": "cinterforge.loadStory",
-        "title": "Open Story\u2026"
+        "title": "Open Story…"
+      },
+      {
+        "command": "cinterforge.openFolder",
+        "title": "CinterForge: Open Local Folder…"
+      },
+      {
+        "command": "cinterforge.openWorkspace",
+        "title": "CinterForge: Open Local Workspace…"
+      },
+      {
+        "command": "cinterforge.openHostLog",
+        "title": "CinterForge: Open Host Log or File…"
+      },
+      {
+        "command": "cinterforge.revealInHostOS",
+        "title": "CinterForge: Reveal in Host File Manager"
       }
     ],
     "configuration": {
@@ -137,6 +175,39 @@
         {
           "id": "cinterforge.native",
           "title": "CinterForge Terminal"
+        }
+      ]
+    },
+    "configurationDefaults": {
+      "workbench.colorTheme": "Default Dark Modern"
+    },
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "cinterforge.revealInHostOS",
+          "when": "resourceScheme == cinterforge || resourceScheme == cinterforge-host",
+          "group": "navigation@30"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "cinterforge.revealInHostOS",
+          "when": "resourceScheme == cinterforge || resourceScheme == cinterforge-host",
+          "group": "navigation@30"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "cinterforge.revealInHostOS",
+          "when": "resourceScheme == cinterforge || resourceScheme == cinterforge-host",
+          "group": "navigation@30"
+        }
+      ],
+      "openEditors/context": [
+        {
+          "command": "cinterforge.revealInHostOS",
+          "when": "resourceScheme == cinterforge || resourceScheme == cinterforge-host",
+          "group": "navigation@30"
         }
       ]
     }

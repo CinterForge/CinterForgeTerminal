@@ -578,3 +578,74 @@ a {
 #lan-menu-list .museum-entry { overflow-wrap: anywhere; }
 #lan-menu-list .lan-manual { display: flex; gap: .35rem; padding: .5rem; }
 #lan-menu-list .lan-manual input { min-width: 0; flex: 1; }
+
+/* Single HTML menubar on Linux/Windows; on macOS the native system menu
+   owns these actions. The tab strip occupies the top of the web content. */
+html[data-cinter-platform="mac"]:not([data-html-menus="show"]) .terminal-titlebar {
+   display: none;
+}
+.terminal-titlebar {
+   display: flex;
+   flex-wrap: nowrap;
+   align-items: center;
+   justify-content: space-between;
+   gap: 8px;
+   min-width: 0;
+}
+.terminal-titlebar #terminal-mode-title { display: none; }
+#code-menu-zone {
+   display: flex;
+   align-items: center;
+   gap: 2px;
+   min-width: 0;
+}
+#code-menu-zone .terminal-menu summary { padding: 4px 5px; }
+#code-menu-zone .terminal-menu-list { right: auto; left: 0; min-width: 200px; max-height: 72vh; overflow-y: auto; }
+#code-menu-zone .terminal-menu-list button { text-align: left; }
+#terminal-mode-title {
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   gap: 7px;
+   min-width: 0;
+   white-space: nowrap;
+}
+#terminal-mode-title #terminal-shell {
+   margin: 0;
+   max-width: 210px;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+.terminal-titlebar #terminal-menus {
+   justify-self: end;
+   margin-left: 0;
+}
+/* Keep the Code and museum menu groups on the same single row. */
+#code-menu-zone { flex: 1 1 auto; }
+#terminal-menus { flex: 0 0 auto; flex-wrap: nowrap; }
+
+#code-menu-zone .code-menu-disabled summary { opacity: .45; cursor: default; }
+#code-menu-zone .code-menu-disabled:not([open]) .terminal-menu-list { display: none; }
+
+#code-menu-zone .terminal-code-submenu > .terminal-menu-list {
+   left: 100%; top: 0; right: auto; min-width: 210px;
+}
+#code-menu-zone .terminal-code-submenu { position: relative; }
+#code-menu-zone .terminal-code-submenu > summary { border: 0; }
+
+/* Code-OSS full-workbench mode: only outer Terminal chrome is hidden.
+   Keep the iframe, PTYs, native application menus and guest state intact. */
+#terminal-overlay[data-code-wrapper-hidden="true"] {
+   border: 0;
+   box-shadow: none;
+   text-shadow: none;
+}
+#terminal-overlay[data-code-wrapper-hidden="true"]::before,
+#terminal-overlay[data-code-wrapper-hidden="true"]::after {
+   display: none;
+}
+#terminal-overlay[data-code-wrapper-hidden="true"] > .terminal-titlebar,
+#terminal-overlay[data-code-wrapper-hidden="true"] > #terminal-tabs,
+#terminal-overlay[data-code-wrapper-hidden="true"] > .terminal-footer {
+   display: none;
+}

@@ -8,6 +8,7 @@ preserved. No new independent Code compiler or installer is introduced.
 """
 from __future__ import annotations
 import argparse
+import json
 from pathlib import Path
 import sys
 
@@ -15,9 +16,44 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from codeoss import producer
     from codeoss.adapters import codeoss_root
+    from codeoss.extension_bundle import render_extension_bundle
 else:
     from . import producer
     from .adapters import codeoss_root
+    from .extension_bundle import render_extension_bundle
+
+
+def _extension_matches_source(web: Path) -> bool:
+    """Check that the verified Web product contains the current authored extension.
+
+    An upstream Code-OSS build can still be valid after our own extension has
+    changed. Compare its actual staged bytes, not timestamps or a stored receipt.
+    Bundling is deterministic and this check does not write to source or Builds.
+    """
+    source = Path(__file__).resolve().parent / 'extension'
+    staged = Path(web) / 'extensions/cinterforge-if'
+    if not staged.is_dir():
+        return False
+    try:
+        for authored in source.rglob('*'):
+            if not authored.is_file():
+                continue
+            relative = authored.relative_to(source)
+            target = staged / relative
+            if not target.is_file():
+                return False
+            if relative.as_posix() == 'package.json':
+                manifest = json.loads(authored.read_text(encoding='utf-8'))
+                # The existing bundler replaces the extension's browser entry.
+                manifest['browser'] = './extension.bundle.js'
+                if manifest != json.loads(target.read_text(encoding='utf-8')):
+                    return False
+            elif authored.read_bytes() != target.read_bytes():
+                return False
+        return (staged / 'extension.bundle.js').read_text(encoding='utf-8') == \
+            render_extension_bundle(source)
+    except (OSError, RuntimeError, ValueError, UnicodeError):
+        return False
 
 
 def setup(workspace: Path, *, refresh: bool = False) -> dict:
@@ -29,8 +65,10 @@ def setup(workspace: Path, *, refresh: bool = False) -> dict:
     if not refresh:
         try:
             producer.validate_codeoss_web(web)
-            print(f'[CinterForgeTerminal Code] Reusing verified Code-OSS Web build: {web}', flush=True)
-            return {'web': str(web), 'reused': True}
+            if _extension_matches_source(web):
+                print(f'[CinterForgeTerminal Code] Reusing current verified Code-OSS Web build: {web}', flush=True)
+                return {'web': str(web), 'reused': True}
+            print('[CinterForgeTerminal Code] Staged extension differs from authored source; refreshing Web product', flush=True)
         except (RuntimeError, OSError) as error:
             print(f'[CinterForgeTerminal Code] Existing artifact missing/invalid: {error}', flush=True)
     # Invoke the original pinned producer; it owns acquisition, patches,

@@ -31,8 +31,8 @@ CODEOSS_REPOSITORY = "https://github.com/microsoft/vscode.git"
 # commit rather than tracking main so every maintainer produces the same tree.
 CODEOSS_REF = "645f29cc3176500b4b5762ba887cf2a7f0ffdf2c"
 CODEOSS_VERSION = "1.137.0"
-CODEOSS_SCHEMA = "cinterforge.codeoss-web.v41"
-CODEOSS_BUILD_CACHE_SCHEMA = "cinterforge.codeoss-build-cache.v9"
+CODEOSS_SCHEMA = "cinterforge.codeoss-web.v42"
+CODEOSS_BUILD_CACHE_SCHEMA = "cinterforge.codeoss-build-cache.v10"
 CODEOSS_TEST_WEB_VERSION = "0.0.81"
 
 
@@ -95,6 +95,12 @@ def validate_codeoss_web(web: Path) -> None:
             "Code-OSS compiled built-in extension scanner lacks CinterForge discovery. "
             "Rebuild the CodeOSS Web product through WebApp Setup; an HTML manifest cannot activate the extension."
         )
+    if "cinterforge-codeoss-menu-model" not in (web / "out/vs/code/browser/workbench/workbench.js").read_text(encoding="utf-8"):
+        raise RuntimeError(
+            "Code-OSS compiled workbench lacks the real MenubarControl bridge; rebuild through Setup"
+        )
+    if 'cinterforge.newWindowsTerminal' not in (web / 'out/vs/code/browser/workbench/workbench.js').read_text(encoding='utf-8'):
+        raise RuntimeError('Compiled Code-OSS Terminal menu lacks the CinterForge command actions; rebuild through Setup')
     if "{{" in text:
         raise RuntimeError(f"Code - OSS static workbench has unresolved template substitutions: {workbench}")
     # The web workbench revives folderUri with URI.revive(), not URI.parse().
@@ -242,6 +248,148 @@ def _patch_cinterforge_bootstrap_provider(source: Path) -> None:
     text = text.replace(register_anchor, register_anchor + "\n\t\t// CinterForge workspace provider must exist before workspace configuration is resolved.\n\t\tfileService.registerProvider('cinterforge', new CinterForgeBootstrapFileSystemProvider());\n\t\tif (globalThis.location?.protocol === 'file:') { fileService.registerProvider('file', new CinterForgeStaticFileSystemProvider()); }", 1)
     target.write_text(text, encoding="utf-8")
     _log("patched upstream browser bootstrap with early cinterforge: filesystem provider")
+
+
+def _patch_codeoss_menubar_bridge(source: Path) -> None:
+    """Expose Code-OSS's own live MenubarControl actions to its embedding host.
+
+    This runs on the PINNED upstream source during Setup, before compilation.
+    If Code-OSS changes the integration points, fail the producer instead of
+    substituting a fake menu or keeping a stale compiled workbench.
+    """
+    target = source / "src/vs/workbench/browser/parts/titlebar/menubarControl.ts"
+    text = target.read_text(encoding="utf-8")
+    signature = "CINTERFORGE_CODEOSS_MENU_SERVICE_BRIDGE_V1"
+    if signature in text:
+        return
+    anchor = "\t\tfor (const title of Object.keys(this.topLevelTitles)) {"
+    if text.count(anchor) != 1:
+        raise RuntimeError("Pinned Code-OSS MenubarControl loop changed; real menu bridge cannot be installed")
+    before = """        // CINTERFORGE_CODEOSS_MENU_SERVICE_BRIDGE_V1
+        // These are Code-OSS's *actual* IAction objects, not DOM menu guesses.
+        const cinterForgeMenuHandlers = new Map<string, IAction>();
+        const cinterForgeMenuGroups: { name: string; items: unknown[] }[] = [];
+        const cinterForgeMenuEntries = (actions: readonly IAction[], prefix: string): unknown[] =>
+            actions.map((action, index) => {
+                if (action instanceof Separator) {
+                    return { separator: true };
+                }
+                const id = prefix + ':' + index;
+                if (action instanceof SubmenuAction) {
+                    return { title: unmnemonicLabel(action.label), action: id,
+                        enabled: action.enabled,
+                        children: cinterForgeMenuEntries(action.actions, id) };
+                }
+                cinterForgeMenuHandlers.set(id, action);
+                return { title: unmnemonicLabel(action.label), action: id,
+                    enabled: action.enabled, checked: action.checked };
+            });
+"""
+    text = text.replace(anchor, before + anchor, 1)
+    # Retain the exact same actions supplied to the *real* Code-OSS MenuBar.
+    anchor2 = "\t\t\tif (this.menubar) {\n\t\t\t\tif (!firstTime) {"
+    if text.count(anchor2) != 1:
+        raise RuntimeError("Pinned Code-OSS MenubarControl action creation changed")
+    text = text.replace(anchor2, """            if (isWeb && mainWindow.parent !== mainWindow && mainWindow.location.origin !== 'null') {
+                cinterForgeMenuGroups.push({ name: title,
+                    items: cinterForgeMenuEntries(actions, title) });
+            }
+""" + anchor2, 1)
+    # This insertion sits at the end of setupCustomMenubar(), not a parallel menu.
+    end_anchor = "\n\t}\n\n\tprivate getWebNavigationActions(): IAction[] {"
+    if text.count(end_anchor) != 1:
+        raise RuntimeError("Pinned Code-OSS MenubarControl publish boundary changed")
+    text = text.replace(end_anchor, """
+        if (isWeb && mainWindow.parent !== mainWindow && mainWindow.location.origin !== 'null') {
+            const runtime = mainWindow as Window & {
+                __cinterForgeMenuActions?: Map<string, IAction>;
+                __cinterForgeMenuSnapshot?: { name: string; items: unknown[] }[];
+                __cinterForgeMenuListener?: boolean;
+            };
+            runtime.__cinterForgeMenuActions = cinterForgeMenuHandlers;
+            runtime.__cinterForgeMenuSnapshot = cinterForgeMenuGroups;
+            if (!runtime.__cinterForgeMenuListener) {
+                runtime.__cinterForgeMenuListener = true;
+                mainWindow.addEventListener('message', (event: MessageEvent) => {
+                    if (event.source !== mainWindow.parent ||
+                        event.origin !== mainWindow.location.origin) {
+                        return;
+                    }
+                    if (event.data?.type === 'cinterforge-codeoss-menu-request') {
+                        // The embedding page can become ready after the first
+                        // menu publish. Replay the actual latest Code-OSS actions.
+                        mainWindow.parent.postMessage({
+                            type: 'cinterforge-codeoss-menu-model',
+                            groups: runtime.__cinterForgeMenuSnapshot || []
+                        }, mainWindow.location.origin);
+                        return;
+                    }
+                    if (event.data?.type !== 'cinterforge-codeoss-menu-run') {
+                        return;
+                    }
+                    const action = runtime.__cinterForgeMenuActions?.get(String(event.data.action || ''));
+                    if (action?.enabled) {
+                        void Promise.resolve(action.run()).catch(error => {
+                            console.error('[CinterForge Code] menu action failed', error);
+                        });
+                    }
+                });
+            }
+            mainWindow.parent.postMessage({
+                type: 'cinterforge-codeoss-menu-model',
+                groups: cinterForgeMenuGroups
+            }, mainWindow.location.origin);
+        }
+""" + end_anchor, 1)
+    # Changes to context keys/extension actions use Code-OSS's existing scheduler.
+    changed_menu = "this.menubar?.updateMenu({ actions, label: mnemonicMenuLabel(this.topLevelTitles[title]) });"
+    if text.count(changed_menu) < 1:
+        raise RuntimeError("Pinned Code-OSS menu change notification changed")
+    # These two callbacks run whenever context keys change the live Code-OSS menu.
+    # Use Code-OSS's own scheduler to emit a fresh model after its menu changes.
+    if text.count(changed_menu) != 2:
+        raise RuntimeError("Pinned Code-OSS live menu callbacks changed")
+    text = text.replace(changed_menu, changed_menu + "\n\t\t\t\t\t\tthis.updateMenubar();")
+    target.write_text(text, encoding="utf-8")
+    _log("patched pinned Code-OSS MenubarControl to publish and run its real live menus")
+
+
+def _patch_codeoss_terminal_menus(source: Path) -> None:
+    """Contribute our existing PTY commands to the actual Code-OSS Terminal menu.
+
+    A browser extension cannot contribute to `menubar/terminal` using the
+    public manifest extension point. Patch the pinned Code-OSS MenuRegistry
+    during Setup, and fail if upstream moves the expected integration anchor.
+    """
+    target = source / 'src/vs/workbench/contrib/terminal/browser/terminalMenus.ts'
+    text = target.read_text(encoding='utf-8')
+    marker = 'CINTERFORGE_REAL_CODEOSS_TERMINAL_COMMANDS_V1'
+    if marker in text:
+        return
+    anchor = "export function setupTerminalMenus(): void {\n\tMenuRegistry.appendMenuItems(\n\t\t["
+    if text.count(anchor) != 1 or 'MenuId.MenubarTerminalMenu' not in text or 'TerminalMenuBarGroup.Create' not in text:
+        raise RuntimeError('Pinned Code-OSS Terminal menu registry changed; refusing fake fallback commands')
+    entries = [
+        ('cinterforge.newMacTerminal', 'New Mac Terminal', 'cinterforge.hostMac'),
+        ('cinterforge.newLinuxTerminal', 'New Linux Terminal', 'cinterforge.hostLinux'),
+        ('cinterforge.newWindowsTerminal', 'New Windows Terminal', 'cinterforge.hostWindows'),
+        ('cinterforge.newServerLogTerminal', 'New Server Log Terminal', 'cinterforge.hostTerminal'),
+    ]
+    source_items = []
+    for index, (command, label, condition) in enumerate(entries, start=10):
+        when = (f"ContextKeyExpr.or(ContextKeyExpr.has('cinterforge.hostMac'), "
+                f"ContextKeyExpr.has('{condition}'))" if condition in
+                ('cinterforge.hostLinux', 'cinterforge.hostWindows') else
+                f"ContextKeyExpr.has('{condition}')")
+        source_items.append(
+            "\n\t\t\t{ id: MenuId.MenubarTerminalMenu, item: { "
+            f"group: TerminalMenuBarGroup.Create, order: {index}, "
+            f"command: {{ id: '{command}', title: localize('{command}', '{label}') }}, "
+            f"when: {when} }} }},")
+    insertion = "\n\t\t\t// " + marker + "\n" + ''.join(source_items)
+    text = text.replace(anchor, anchor + insertion, 1)
+    target.write_text(text, encoding='utf-8')
+    _log('patched pinned Code-OSS Terminal Menubar MenuRegistry with real CinterForge PTY actions')
 
 
 def _patch_builtin_extension_scanner(source: Path) -> None:
@@ -815,6 +963,8 @@ def _build_cache_path(root: Path) -> Path:
 
 CODEOSS_PATCHED_COMPILE_INPUTS = (
     "src/vs/workbench/browser/web.main.ts",
+    "src/vs/workbench/browser/parts/titlebar/menubarControl.ts",
+    "src/vs/workbench/contrib/terminal/browser/terminalMenus.ts",
     "src/vs/workbench/services/extensionManagement/browser/builtinExtensionsScannerService.ts",
     "src/vs/workbench/contrib/welcomeOnboarding/browser/onboardingVariationA.ts",
     "src/vs/workbench/api/browser/mainThreadExtensionService.ts",
@@ -1684,6 +1834,8 @@ def ensure_codeoss(repo_root: Path | None = None, *, refresh: bool = False, forc
     _log(f"maintainer build ref={ref} source={source} web={web}")
     commit = _sync_checkout(source, refresh=True, ref=ref)
     _patch_cinterforge_bootstrap_provider(source)
+    _patch_codeoss_menubar_bridge(source)
+    _patch_codeoss_terminal_menus(source)
     _patch_builtin_extension_scanner(source)
     _patch_file_onboarding_editor_detection(source)
     _patch_file_extension_module_loading(source)

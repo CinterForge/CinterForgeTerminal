@@ -60,11 +60,13 @@ async function loadClassicScripts(context) {
     classicScriptsLoaded = true;
 }
 
-function activateCoordinator(context) {
+async function activateCoordinator(context) {
     const {
         request,
+        detectTerminalHost,
         registerSearchProviders,
         ZMachineTerminal,
+        HostFileSystemProvider,
         compileInform,
         applyStoryLanguage,
         applyIFPlayerTheme,
@@ -102,6 +104,133 @@ function activateCoordinator(context) {
     context.subscriptions.push(
         buildOutput
     );
+
+    // The same extension is used by IFPlayer and Terminal. Only Terminal has
+    // a host filesystem and native/guest development sessions. Probe the
+    // existing Terminal HTTP service; leave IFPlayer's game/editor path alone.
+    // Only a missing Terminal workspace API means this is IFPlayer. A failed
+    // Terminal lookup must be reported, not silently turned into IF mode.
+    let terminalHost = null;
+    let terminalHostError = null;
+    try {
+        terminalHost = await detectTerminalHost();
+    } catch (error) {
+        terminalHostError = error;
+        console.error('[cinterforge] Terminal host discovery failed', error);
+        vscode.window.showErrorMessage(
+            'CinterForge Terminal workspace unavailable: ' + error.message
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Host log links and native file-manager integration (Terminal only)
+    // -------------------------------------------------------------------------
+    if (terminalHost) {
+        const hostFileScheme = 'cinterforge-host';
+        context.subscriptions.push(vscode.workspace.registerFileSystemProvider(
+            hostFileScheme, new HostFileSystemProvider(), {isReadonly: true}
+        ));
+
+        const hostUri = path => vscode.Uri.from({
+            scheme: hostFileScheme,
+            path: String(path).replace(/\\/g, '/').replace(/^([A-Za-z]:)/, '/$1')
+        });
+
+        const openHostPath = async (path, lineNumber = 0) => {
+            try {
+                const uri = hostUri(path);
+                const result = await request('/code/command', {
+                    operation: 'host-stat', path: uri.path
+                });
+                if (result.type === 'directory') {
+                    await request('/code/command', {
+                        operation: 'reveal-host', path: uri.path
+                    });
+                } else {
+                    const document = await vscode.workspace.openTextDocument(uri);
+                    const options = {preview: false};
+                    if (lineNumber > 0) {
+                        const position = new vscode.Position(lineNumber - 1, 0);
+                        options.selection = new vscode.Range(position, position);
+                    }
+                    await vscode.window.showTextDocument(document, options);
+                }
+            } catch (error) {
+                vscode.window.showErrorMessage('Cannot open host file: ' + error.message);
+            }
+        };
+
+        context.subscriptions.push(vscode.commands.registerCommand(
+            'cinterforge.openHostLog', async () => {
+                const path = await vscode.window.showInputBox({
+                    prompt: 'Absolute path to a host log or workspace file'
+                });
+                if (path) await openHostPath(path);
+            }
+        ));
+
+        context.subscriptions.push(vscode.commands.registerCommand(
+            'cinterforge.revealInHostOS', async (resource) => {
+                const uri = resource || vscode.window.activeTextEditor?.document.uri ||
+                    vscode.workspace.workspaceFolders?.[0]?.uri;
+                if (!uri || (uri.scheme !== 'cinterforge' && uri.scheme !== hostFileScheme)) {
+                    vscode.window.showWarningMessage('Select a CinterForge workspace or log file first');
+                    return;
+                }
+                try {
+                    await request('/code/command', {
+                        operation: uri.scheme === hostFileScheme ? 'reveal-host' : 'reveal-workspace',
+                        path: uri.path
+                    });
+                } catch (error) {
+                    vscode.window.showErrorMessage('Cannot reveal host file: ' + error.message);
+                }
+            }
+        ));
+
+        // Unlike ordinary VS Code Web file links, these open against the real
+        // host filesystem, not the browser's virtual (cinterforge:/) workspace.
+        // Match explicit absolute paths to files, including log lines with :line.
+        if (typeof vscode.window.registerTerminalLinkProvider === 'function') {
+            const fileEnding = '(?:log|txt|json|jsonl|md|py|js|ts|cpp|c|h|html|yaml|yml|out|err)';
+            // Labeled paths may contain spaces (for example "CinterForge Terminal").
+            // Bare terminal links must not swallow surrounding prose or URLs.
+            const labeledPaths = new RegExp('\\bpath=((?:[A-Za-z]:[\\\\/]|/)[^\\r\\n<>"\\x27]*?\\.' +
+                fileEnding + ')(?::(\\d+))?(?=$|[\\s\\]),;:])', 'gi');
+            const barePaths = new RegExp('(?:[A-Za-z]:[\\\\/]|/)[^\\s\\r\\n<>"\\x27()]+?\\.' +
+                fileEnding + '(?::(\\d+))?(?=$|[\\s\\]),;:])', 'gi');
+            context.subscriptions.push(vscode.window.registerTerminalLinkProvider({
+                provideTerminalLinks(context) {
+                    const links = [];
+                    const labeledRanges = [];
+                    for (const match of context.line.matchAll(labeledPaths)) {
+                        const path = match[1];
+                        const offset = match[0].indexOf(path);
+                        const start = match.index + offset;
+                        const length = path.length + (match[2] ? match[2].length + 1 : 0);
+                        labeledRanges.push([start, start + length]);
+                        links.push({startIndex: start, length, path,
+                            line: match[2] ? Number(match[2]) : 0,
+                            tooltip: 'Open on CinterForge host'});
+                    }
+                    for (const match of context.line.matchAll(barePaths)) {
+                        if (labeledRanges.some(([first, last]) => match.index >= first && match.index < last)) continue;
+                        // The trailing 's:/' in https:// is not a Windows disk.
+                        const prefix = context.line.slice(Math.max(0, match.index - 6), match.index);
+                        if (/https?$/i.test(prefix)) continue;
+                        links.push({startIndex: match.index, length: match[0].length,
+                            path: match[0].replace(/:\d+$/, ''),
+                            line: match[1] ? Number(match[1]) : 0,
+                            tooltip: 'Open on CinterForge host'});
+                    }
+                    return links;
+                },
+                handleTerminalLink(link) {
+                    return openHostPath(link.path, link.line);
+                }
+            }));
+        }
+    }
 
     // -------------------------------------------------------------------------
     // Editor Configuration
@@ -208,10 +337,12 @@ function activateCoordinator(context) {
     // broadcasts.
     let themeChannel = null;
 
-    if (
-        typeof BroadcastChannel ===
-        'function'
-    ) {
+    if (terminalHost) {
+        // One shared preference in TerminalState survives WebView restarts.
+        await applyIFPlayerTheme(terminalHost.theme !== 'light');
+    }
+
+    if (!terminalHost && typeof BroadcastChannel === 'function') {
         themeChannel =
             new BroadcastChannel(
                 'cinterforge-ifplayer-theme'
@@ -330,6 +461,53 @@ function activateCoordinator(context) {
         });
     }
 
+    // Expose an obvious dark/light switch inside the real Code-OSS status bar.
+    const themeStatus = terminalHost
+        ? vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100)
+        : null;
+    if (themeStatus) {
+        themeStatus.text = terminalHost.theme === 'light' ? '$(color-mode) Light' : '$(color-mode) Dark';
+        themeStatus.tooltip = 'Switch Code-OSS between dark and light themes';
+        themeStatus.command = 'cinterforge.toggleColorTheme';
+        themeStatus.show();
+        context.subscriptions.push(themeStatus);
+    }
+
+    if (terminalHost) {
+        // Both commands accept any existing local path on the host. Code's
+        // browser does not have access to the operating system's file picker,
+        // so requesting the absolute path is more reliable than pretending the
+        // virtual cinterforge:/ tree is the user's entire local filesystem.
+        const changeWorkspace = async (kind) => {
+            const isFolder = kind === 'folder';
+            const selected = await vscode.window.showInputBox({
+                title: isFolder ? 'Open Local Folder' : 'Open Local Workspace',
+                prompt: isFolder
+                    ? 'Full path to a folder on this Terminal host'
+                    : 'Full path to an existing .code-workspace file on this Terminal host',
+                value: terminalHost.path,
+                ignoreFocusOut: true
+            });
+            if (selected === undefined) return;
+            try {
+                await request('/code/command', {
+                    operation: isFolder ? 'open-folder' : 'open-workspace',
+                    path: selected.trim()
+                });
+                // The browser's bootstrap provider mounts cinterforge:/ before
+                // Code initializes. Reload the workbench after changing roots;
+                // this also recreates integrated shells in the new directory.
+                await vscode.commands.executeCommand('workbench.action.reloadWindow');
+            } catch (error) {
+                vscode.window.showErrorMessage('Cannot open ' + kind + ': ' + error.message);
+            }
+        };
+        context.subscriptions.push(
+            vscode.commands.registerCommand('cinterforge.openFolder', () => changeWorkspace('folder')),
+            vscode.commands.registerCommand('cinterforge.openWorkspace', () => changeWorkspace('workspace'))
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Terminal Configuration
     // -------------------------------------------------------------------------
@@ -387,10 +565,16 @@ function activateCoordinator(context) {
     context.subscriptions.push(
         vscode.commands.registerCommand(
             'cinterforge.toggleColorTheme',
-            () => {
-                themeChannel?.postMessage({
-                    type: 'request-theme'
-                });
+            async () => {
+                if (terminalHost) {
+                    const next = terminalHost.theme === 'light' ? 'dark' : 'light';
+                    await request('/code/command', {operation: 'set-theme', theme: next});
+                    terminalHost.theme = next;
+                    await applyIFPlayerTheme(next === 'dark');
+                    themeStatus.text = next === 'dark' ? '$(color-mode) Dark' : '$(color-mode) Light';
+                } else {
+                    themeChannel?.postMessage({type: 'request-theme'});
+                }
             }
         )
     );
@@ -407,6 +591,7 @@ function activateCoordinator(context) {
     );
 
     let nativeSerial = 0;
+    const codeWindowId = Math.random().toString(36).slice(2);
 
     const nativeTerminals =
         new Map();
@@ -591,20 +776,21 @@ function activateCoordinator(context) {
         return assetTaskTerminal;
     };
 
-    const openNativeTerminal = () => {
+    const hostPlatformName = terminalHost?.platform === 'mac' ? 'Mac' :
+        terminalHost?.platform === 'win' ? 'Windows' : 'Linux';
+
+    const openNativeTerminal = (backend = 'native', label = null) => {
         nativeSerial++;
-
-        const id =
-            `terminal-${nativeSerial}`;
-
-        const pty =
-            createNativeTerminalPty(id);
-
-        const terminal =
-            vscode.window.createTerminal({
-                name: `Terminal ${nativeSerial}`,
-                pty
-            });
+        const id = `terminal-${codeWindowId}-${nativeSerial}`;
+        const pty = createNativeTerminalPty(id, backend);
+        const terminal = vscode.window.createTerminal({
+            name: label || (terminalHost ? (
+                backend === 'server' ? 'Server Log' :
+                backend === 'linux' ? 'Linux' :
+                backend === 'win' ? 'Windows' : hostPlatformName
+            ) : `Terminal ${nativeSerial}`),
+            pty
+        });
 
         nativeTerminals.set(
             terminal,
@@ -630,6 +816,69 @@ function activateCoordinator(context) {
         )
     );
 
+    // The pinned Code-OSS producer registers these command IDs into the real
+    // MenubarTerminalMenu. The extension supplies the existing PTY operations.
+    if (terminalHost) {
+        for (const system of ['mac', 'linux', 'win']) {
+            await vscode.commands.executeCommand('setContext',
+                'cinterforge.host' + (system === 'win' ? 'Windows' :
+                    system === 'mac' ? 'Mac' : 'Linux'),
+                terminalHost.platform === system);
+        }
+        await vscode.commands.executeCommand('setContext', 'cinterforge.hostTerminal', true);
+    }
+    for (const [id, platform, label] of [
+        ['cinterforge.newMacTerminal', 'mac', 'Mac'],
+        ['cinterforge.newLinuxTerminal', 'linux', 'Linux'],
+        ['cinterforge.newWindowsTerminal', 'win', 'Windows'],
+        ['cinterforge.newServerLogTerminal', 'server', 'Server Log']
+    ]) {
+        context.subscriptions.push(vscode.commands.registerCommand(id, () => {
+            if (!terminalHost) return;
+            const host = terminalHost.platform;
+            if (platform !== 'server' && platform !== host && host !== 'mac') {
+                return vscode.window.showErrorMessage(label + ' guest is unavailable on this host');
+            }
+            const backend = platform === host ? 'native' :
+                platform;
+            return openNativeTerminal(backend, label);
+        }));
+    }
+
+    // Native File/Terminal menus and the outer HTML toolbar invoke this same
+    // backend selector. These are integrated Code-OSS terminals: never create
+    // a second CinterForge Session or an unlabeled browser-only shell.
+    const codeCommandChannel = terminalHost && typeof BroadcastChannel === 'function'
+        ? new BroadcastChannel('cinterforge-terminal-code-commands') : null;
+    if (codeCommandChannel) {
+        codeCommandChannel.onmessage = (event) => {
+            const request = event.data || {};
+            if (request.type === 'new-terminal') {
+                const backend = String(request.backend || 'native');
+                const supported = ['mac', 'native', 'linux', 'win', 'server', 'minecraft', 'if'];
+                if (!supported.includes(backend)) return;
+                if (backend === 'if') {
+                    openZMachineInterpreter();
+                } else if (backend === 'minecraft') {
+                    openNativeTerminal('minecraft', 'Minecraft');
+                } else {
+                    const target = backend === 'mac' ? 'native' : backend;
+                    const label = target === 'server' ? 'Server Log' :
+                        target === 'linux' ? 'Linux' :
+                        target === 'win' ? 'Windows' : hostPlatformName;
+                    openNativeTerminal(target, label);
+                }
+            } else if (request.type === 'vscode-command' &&
+                       typeof request.command === 'string' &&
+                       /^(workbench\.|editor\.|references\.|cinterforge\.|undo$|redo$)/.test(request.command)) {
+                void vscode.commands.executeCommand(request.command).catch(error =>
+                    vscode.window.showErrorMessage('Code menu: ' + error.message));
+            }
+        };
+        context.subscriptions.push({dispose: () => codeCommandChannel.close()});
+    }
+
+
     if (
         typeof vscode.window.registerTerminalProfileProvider ===
         'function'
@@ -642,13 +891,13 @@ function activateCoordinator(context) {
                         nativeSerial++;
 
                         const id =
-                            `terminal-${nativeSerial}`;
+                            `terminal-${codeWindowId}-${nativeSerial}`;
 
                         const pty =
                             createNativeTerminalPty(id);
 
                         return new vscode.TerminalProfile({
-                            name:
+                            name: terminalHost ? hostPlatformName :
                                 `Terminal ${nativeSerial}`,
                             pty
                         });
@@ -1557,6 +1806,37 @@ function activateCoordinator(context) {
     // creation must be checked explicitly: an exception here previously left
     // Project/F1 without a terminal and suppressed the reason entirely.
     const initializeProjectWorkspace = async () => {
+        if (terminalHostError) {
+            // A failed authenticated Terminal probe is not an IF session.
+            // Do not load story source or start a Z-Machine fallback.
+            return;
+        }
+        if (terminalHost) {
+            // Exactly two integrated surfaces on Linux/Windows, four on Mac.
+            // Each real shell runs in the directory selected in CodeWorkspace;
+            // Server Log streams the existing read-only HTTP/Python logfile.
+            const current = terminalHost.platform === 'mac' ? 'Mac' :
+                terminalHost.platform === 'win' ? 'Windows' : 'Linux';
+            const startup = [['native', current], ['server', 'Server Log']];
+            if (terminalHost.platform === 'mac') {
+                startup.push(['linux', 'Linux'], ['win', 'Windows']);
+            }
+            try {
+                for (const [backend, label] of startup) {
+                    if (!(vscode.window.terminals || []).some(t => t.name === label)) {
+                        openNativeTerminal(backend, label);
+                    }
+                }
+                const primary = (vscode.window.terminals || []).find(t => t.name === current);
+                primary?.show();
+                await vscode.commands.executeCommand('workbench.action.terminal.focus');
+                publishTerminalTabs();
+            } catch (error) {
+                console.error('[cinterforge] Code-OSS shell startup failed', error);
+                vscode.window.showErrorMessage('Code-OSS terminals: ' + error.message);
+            }
+            return;
+        }
         try {
             await ensureStoryEditor();
         } catch (error) {

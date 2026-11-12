@@ -30,6 +30,7 @@ from __future__ import annotations
 import base64
 import hashlib
 from collections import deque
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from urllib.parse import unquote, urlsplit, parse_qs
@@ -406,7 +407,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     python = str(Path(sys.executable).resolve())
     functions = '\n'.join(
         f'{name}() {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in ('help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'discord', 'setpass'))
+        for name in ('help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'discord', 'setpass', 'code', 'htmlmenus'))
     # These exact source filenames are the shell commands. Load the bundled
     # Terminal manifest; no sibling WebApp source or story package is required.
     catalog = json.loads((ASSETS / 'if_titles.json').read_text(encoding='utf-8'))
@@ -546,6 +547,8 @@ class TerminalSession:
             env['MSYS2_PATH_TYPE'] = 'inherit'
             env['PATH'] = os.pathsep.join([str(msys / 'ucrt64/bin'),
                                             str(msys / 'usr/bin'), env.get('PATH', '')])
+        if working_directory is not None:
+            env['CINTER_CODE_WORKSPACE'] = str(working_directory)
         scripts = _install_shell_commands(self.root, system, env)
         self.shell = command if command is not None else _shell_command(system, scripts, builds)
         working_directory = working_directory or self.root
@@ -1089,6 +1092,113 @@ def _check_lan_login(record: dict | None, username: str, password: str) -> bool:
             secrets.compare_digest(digest, bytes.fromhex(record['digest'])))
 
 
+# A private receipt is used only to recognize/reuse this user's *own* running
+# Terminal HTTP service. It lives in the existing Builds/Steam runtime state;
+# it is not a port lock, user password, or publicly advertised credential.
+LAN_OWNER_FILENAME = 'CinterForgeTerminal/Config/http-owner.json'
+
+
+def _lan_owner_path(writable_root: Path) -> Path:
+    """Location of the current Terminal HTTP process receipt."""
+    return writable_root / LAN_OWNER_FILENAME
+
+
+def _write_lan_owner(server: 'CinterShellServer') -> None:
+    """Atomically publish a private startup grant after port 20300 is bound."""
+    path = _lan_owner_path(server.mutable_builds)
+    if path.parent.is_symlink() or path.is_symlink():
+        raise RuntimeError('Unsafe Terminal HTTP owner receipt')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    receipt = {'schema': 'cinterforge.terminal.http-owner.v1',
+               'port': server.server_port, 'instance': server.lan_id,
+               'native_grant': server.native_grant, 'pid': os.getpid(),
+               'native_pid': os.getppid()}
+    temporary = path.parent / ('http-owner-' + uuid.uuid4().hex + '.tmp')
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            json.dump(receipt, stream, separators=(',', ':'))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        if os.name != 'nt':
+            path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _remove_lan_owner(server: 'CinterShellServer') -> None:
+    """Remove only our own receipt, not that of a replacement service."""
+    path = _lan_owner_path(server.mutable_builds)
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 2048:
+            return
+        record = json.loads(path.read_text(encoding='utf-8'))
+        if record.get('instance') == server.lan_id:
+            path.unlink()
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+
+
+def _existing_lan_owner(builds: Path) -> dict | None:
+    """Reuse only a live Terminal HTTP listener with a verified owner receipt.
+
+    A developer build uses Builds for runtime state, while an installed app
+    uses the selected Steam library. Both may start the *same* account's
+    Terminal on port 20300. Check their existing receipts before deciding the
+    occupied listener is foreign. Do not create folders, trust an unverified
+    health response, or stop a process that we cannot identify.
+    """
+    if LAN_HTTP_PORT <= 0:
+        return None  # In-process smoke fixtures use a randomly assigned port.
+
+    roots = [_terminal_mutable_root(builds)]
+    # Steam library discovery is already part of the Host runtime contract.
+    # A second native launch may be installed even if the first came from the
+    # developer's sibling Builds (or vice versa). Only inspect existing roots.
+    for steam in _runtime_steam_locations():
+        state = steam / 'common/CinterForge/Applications/TerminalState'
+        if state.is_dir() and not state.is_symlink() and state not in roots:
+            roots.append(state)
+
+    from urllib.request import Request, urlopen
+    for root in roots:
+        path = _lan_owner_path(root)
+        try:
+            if path.parent.is_symlink() or path.is_symlink() or not path.is_file():
+                continue
+            if path.stat().st_size > 2048 or (os.name != 'nt' and path.stat().st_mode & 0o077):
+                continue
+            record = json.loads(path.read_text(encoding='utf-8'))
+            if (record.get('schema') != 'cinterforge.terminal.http-owner.v1' or
+                    record.get('port') != LAN_HTTP_PORT or
+                    not re.fullmatch(r'[0-9a-f]{32}', str(record.get('instance', ''))) or
+                    not re.fullmatch(r'[A-Za-z0-9_-]{40,128}', str(record.get('native_grant', '')))):
+                continue
+            # A crashed Xcode native process can leave its Python HTTP child
+            # alive briefly. Never attach to a server whose owning window has
+            # died; its watchdog will close the listener and release 20300.
+            native_pid = record.get('native_pid')
+            if native_pid is not None:
+                if type(native_pid) is not int or native_pid <= 1:
+                    continue
+                try:
+                    os.kill(native_pid, 0)
+                except ProcessLookupError:
+                    continue
+                except PermissionError:
+                    continue
+            request = Request(f'http://127.0.0.1:{LAN_HTTP_PORT}/healthz',
+                              headers={'X-Cinter-Owner': record['native_grant']})
+            with urlopen(request, timeout=1.5) as response:
+                status = json.loads(response.read(2048))
+            if status.get('ready') and status.get('instance') == record['instance']:
+                return record
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            continue
+    return None
+
+
 CINTERFORGE_PORT_FIRST = 20300
 CINTERFORGE_PORT_LAST = 20399
 DISCOVERY_TYPE = b'_http._tcp.local.'
@@ -1329,6 +1439,287 @@ def _discord_resolve(guild_name: str, channel_name: str) -> dict:
             'bot': identity.get('global_name') or identity.get('username') or 'Discord bot'}
 
 
+class CodeWorkspace:
+    """The selected host folder or .code-workspace, mounted at cinterforge:/.
+
+    A single-folder workspace maps the virtual root directly to that directory.
+    Multi-root .code-workspace files expose each named folder below the virtual
+    root, using the existing Code-OSS filesystem provider. Only explicit
+    workspace selections can change the roots; file operations stay inside them.
+    State belongs to the developer Builds or installed TerminalState tree.
+    """
+
+    MAX_FILE_BYTES = 8 * 1024 * 1024
+
+    def __init__(self, writable_root: Path):
+        self.lock = threading.RLock()
+        self.state_file = writable_root / 'CinterForgeTerminal/CodeOSS/workspace.json'
+        self.home = self._user_home()
+        default = self.home / 'Source'
+        if not default.is_dir():
+            default = self.home / 'Documents'
+        if not default.is_dir():
+            default = self.home
+        self.selection = default
+        self.kind = 'folder'
+        self.theme = 'dark'
+        self.roots = [(default.name or 'Home', default)]
+        # The Host attaches its existing Builds/Steam Logs directory after startup.
+        # Logs are readable/revealable without adding them to the editor workspace.
+        self.host_log_roots = []
+        self.revision = 0
+        if self.state_file.is_file() and not self.state_file.is_symlink():
+            try:
+                state = json.loads(self.state_file.read_text('utf-8'))
+                self.theme = state.get('theme') if state.get('theme') in ('dark', 'light') else 'dark'
+                self._select(str(state['path']), str(state.get('kind', 'folder')))
+            except (ValueError, OSError, KeyError, TypeError):
+                # A stale/moved workspace must not keep the editor from starting.
+                self.selection = default
+                self.kind = 'folder'
+                self.roots = [(default.name or 'Home', default)]
+
+    @staticmethod
+    def _user_home() -> Path:
+        provided = os.environ.get('CINTER_USER_HOME')
+        if provided:
+            return Path(provided).expanduser().resolve()
+        if os.name == 'nt':
+            return Path(os.environ.get('USERPROFILE') or Path.home()).resolve()
+        try:
+            import pwd
+            return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+        except (ImportError, KeyError, OSError):
+            return Path.home().resolve()
+
+    def _select(self, raw: str, kind: str) -> None:
+        if kind not in ('folder', 'workspace') or not raw or '\x00' in raw:
+            raise ValueError('Open an existing folder or .code-workspace file')
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError('Provide an absolute host filesystem path')
+        candidate = candidate.resolve(strict=True)
+        if kind == 'folder':
+            if not candidate.is_dir():
+                raise ValueError('Selected folder does not exist')
+            roots = [(candidate.name or 'Home', candidate)]
+        else:
+            if not candidate.is_file() or candidate.suffix != '.code-workspace':
+                raise ValueError('Select an existing .code-workspace file')
+            if candidate.stat().st_size > 256 * 1024:
+                raise ValueError('Workspace definition is too large')
+            workspace = json.loads(candidate.read_text('utf-8'))
+            folders = workspace.get('folders')
+            if not isinstance(folders, list) or not 1 <= len(folders) <= 32:
+                raise ValueError('Workspace must contain 1–32 local folders')
+            roots = []
+            used = set()
+            for folder in folders:
+                if not isinstance(folder, dict) or not isinstance(folder.get('path'), str):
+                    raise ValueError('Workspace must contain local path folders')
+                target = Path(folder['path']).expanduser()
+                if not target.is_absolute():
+                    target = candidate.parent / target
+                target = target.resolve(strict=True)
+                if not target.is_dir():
+                    raise ValueError('Workspace folder does not exist: ' + str(target))
+                label = folder.get('name') or target.name
+                if not isinstance(label, str) or not label or '/' in label or '\\' in label or label in ('.', '..') or label in used:
+                    raise ValueError('Workspace folder names must be unique and path-safe')
+                used.add(label)
+                roots.append((label, target))
+        self.selection, self.kind, self.roots = candidate, kind, roots
+        self.revision += 1
+
+    def persist(self) -> None:
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        if self.state_file.is_symlink():
+            raise ValueError('Unsafe Code-OSS state file')
+        pending = self.state_file.with_name('workspace-' + uuid.uuid4().hex + '.tmp')
+        try:
+            pending.write_text(json.dumps({'path': str(self.selection), 'kind': self.kind,
+                                           'theme': self.theme}, indent=2) + '\n', 'utf-8')
+            os.replace(pending, self.state_file)
+        finally:
+            pending.unlink(missing_ok=True)
+
+    def details(self) -> dict:
+        with self.lock:
+            return {'kind': 'terminal', 'platform': target_platform(),
+                    'workspace_kind': self.kind, 'path': str(self.selection),
+                    'folders': [{'name': name, 'path': str(path)} for name, path in self.roots],
+                    'cwd': str(self.roots[0][1]), 'theme': self.theme}
+
+    def _path(self, uri_path: str) -> Path | None:
+        if not isinstance(uri_path, str) or not uri_path.startswith('/') or '\x00' in uri_path:
+            raise ValueError('Invalid Code-OSS workspace path')
+        segments = uri_path.split('/')[1:]
+        if any(part in ('.', '..') or '\\' in part for part in segments):
+            raise ValueError('Unsafe workspace traversal')
+        if self.kind == 'folder':
+            root, rest = self.roots[0][1], segments
+        else:
+            if not segments or not segments[0]:
+                return None  # The virtual multi-root directory itself.
+            matched = next((root for name, root in self.roots if name == segments[0]), None)
+            if matched is None:
+                raise FileNotFoundError('No such workspace root')
+            root, rest = matched, segments[1:]
+        target = root.joinpath(*rest).resolve()
+        if not target.is_relative_to(root):
+            raise PermissionError('File is outside the selected workspace')
+        return target
+
+    def _host_path(self, raw: str) -> Path:
+        """Resolve host files only inside the selected workspace or existing Logs roots.
+
+        The browser's cinterforge-host: URI names an actual host path. Do not
+        treat that virtual URL as permission to read files outside these roots.
+        """
+        if not isinstance(raw, str) or not raw or '\x00' in raw:
+            raise ValueError('Invalid host file path')
+        if os.name == 'nt' and re.match(r'^/[A-Za-z]:/', raw):
+            raw = raw[1:]
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            raise ValueError('Host file path must be absolute')
+        target = candidate.resolve(strict=True)
+        roots = [root for _, root in self.roots] + self.host_log_roots
+        if not any(target.is_relative_to(root.resolve()) for root in roots):
+            raise PermissionError('Host file is outside the workspace and Logs')
+        return target
+
+    @staticmethod
+    def _reveal_host_file(path: Path) -> None:
+        """Show the actual host folder, selecting files when the OS supports it."""
+        if sys.platform == 'darwin':
+            command = ['open', str(path)] if path.is_dir() else ['open', '-R', str(path)]
+        elif os.name == 'nt':
+            command = (['explorer.exe', str(path)] if path.is_dir()
+                       else ['explorer.exe', '/select,', str(path)])
+        else:
+            command = ['xdg-open', str(path if path.is_dir() else path.parent)]
+        subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def operation(self, body: dict) -> dict:
+        operation = body.get('operation')
+        with self.lock:
+            if operation in ('host-stat', 'host-read-file', 'host-read-directory',
+                             'reveal-host', 'reveal-workspace'):
+                raw = body.get('path', '')
+                target = (self._path(str(raw)) if operation == 'reveal-workspace'
+                          else self._host_path(raw))
+                if target is None:
+                    target = self.selection if self.kind == 'workspace' else self.roots[0][1]
+                if operation.startswith('reveal-'):
+                    self._reveal_host_file(target)
+                    return {'revealed': str(target)}
+                if operation == 'host-stat':
+                    info = target.stat()
+                    return {'type': 'directory' if target.is_dir() else 'file',
+                            'size': info.st_size, 'mtime': int(info.st_mtime * 1000)}
+                if operation == 'host-read-directory':
+                    if not target.is_dir():
+                        raise NotADirectoryError('Not a host directory')
+                    entries = []
+                    for item in sorted(target.iterdir(), key=lambda entry: entry.name.casefold()):
+                        if len(entries) >= 10000:
+                            break
+                        try:
+                            checked = self._host_path(str(item))
+                        except (ValueError, PermissionError, OSError):
+                            continue
+                        entries.append({'name': item.name,
+                                        'type': 'directory' if checked.is_dir() else 'file'})
+                    return {'entries': entries}
+                if not target.is_file() or target.stat().st_size > self.MAX_FILE_BYTES:
+                    raise ValueError('Host log/file is not readable or exceeds 8 MiB')
+                return {'data': base64.b64encode(target.read_bytes()).decode('ascii')}
+            if operation == 'workspace-state':
+                return {'revision': str(self.revision), **self.details()}
+            if operation in ('open-folder', 'open-workspace'):
+                self._select(str(body.get('path', '')), 'folder' if operation == 'open-folder' else 'workspace')
+                self.persist()
+                return self.details()
+            if operation == 'set-theme':
+                theme = body.get('theme')
+                if theme not in ('dark', 'light'):
+                    raise ValueError('Theme must be dark or light')
+                self.theme = theme
+                self.persist()
+                return {'theme': self.theme}
+            raw = str(body.get('path', '/'))
+            target = self._path(raw)
+            if operation == 'stat':
+                if target is None:
+                    return {'type': 'directory', 'size': 0, 'mtime': 0}
+                info = target.stat()
+                return {'type': 'directory' if target.is_dir() else 'file',
+                        'size': info.st_size, 'mtime': int(info.st_mtime * 1000)}
+            if operation == 'read-directory':
+                if target is None:
+                    return {'entries': [{'name': label, 'type': 'directory'} for label, _ in self.roots]}
+                if not target.exists():
+                    raise FileNotFoundError('Workspace directory does not exist')
+                if not target.is_dir():
+                    raise NotADirectoryError('Not a workspace directory')
+                entries = []
+                for item in sorted(target.iterdir(), key=lambda p: p.name.casefold()):
+                    if len(entries) >= 10000:
+                        break
+                    # A symlink escaping this workspace cannot be followed.
+                    try:
+                        self._path(raw.rstrip('/') + '/' + item.name)
+                    except (ValueError, PermissionError, OSError):
+                        continue
+                    entries.append({'name': item.name, 'type': 'directory' if item.is_dir() else 'file'})
+                return {'entries': entries}
+            if target is None or any(target == root for _, root in self.roots):
+                raise ValueError('Cannot modify the workspace root')
+            if operation == 'read-file':
+                if not target.exists():
+                    raise FileNotFoundError('Workspace file does not exist')
+                if not target.is_file() or target.stat().st_size > self.MAX_FILE_BYTES:
+                    raise ValueError('File is not readable or is over 8 MiB')
+                return {'data': base64.b64encode(target.read_bytes()).decode('ascii')}
+            if operation == 'write-file':
+                raw_data = body.get('data', '')
+                if not isinstance(raw_data, str) or len(raw_data) > self.MAX_FILE_BYTES * 2:
+                    raise ValueError('File is too large')
+                data = base64.b64decode(raw_data, validate=True)
+                if len(data) > self.MAX_FILE_BYTES:
+                    raise ValueError('File is over 8 MiB')
+                if target.exists() and (target.is_dir() or body.get('overwrite') is False):
+                    raise FileExistsError('File already exists')
+                if not target.exists() and not body.get('create', False):
+                    raise FileNotFoundError('File does not exist')
+                target.write_bytes(data)
+            elif operation == 'create-directory':
+                target.mkdir()
+            elif operation == 'delete':
+                if target.is_dir():
+                    if body.get('recursive'):
+                        shutil.rmtree(target)
+                    else:
+                        target.rmdir()
+                else:
+                    target.unlink()
+            elif operation == 'rename':
+                destination = self._path(str(body.get('target', '')))
+                if destination is None or any(destination == root for _, root in self.roots):
+                    raise ValueError('Cannot replace the workspace root')
+                if destination.exists() and not body.get('overwrite'):
+                    raise FileExistsError('Destination already exists')
+                if destination.exists() and destination.is_dir():
+                    raise ValueError('Cannot overwrite a directory')
+                target.replace(destination)
+            else:
+                raise ValueError('Unknown Code-OSS workspace operation')
+            self.revision += 1
+            return {'ok': True}
+
+
 class CinterShellServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
@@ -1339,12 +1730,26 @@ class CinterShellServer(ThreadingHTTPServer):
         self.discovery = None
         self.builds = builds
         self.mutable_builds = _terminal_mutable_root(builds)
+        self.code_workspace = CodeWorkspace(self.mutable_builds)
+        self.code_sessions = {}  # Code-OSS terminal name -> real host Session or Server Log cursor
+        self.code_sessions_lock = threading.Lock()
         self.lan_login_lock = threading.Lock()
         self.lan_login = _load_lan_login(self.mutable_builds)
         self.lan_cookie = secrets.token_urlsafe(36)
+        # Only the local native launcher receives this grant via its private
+        # RPC pipe; normal browser pages must use the configured setpass login.
+        self.native_grant = secrets.token_urlsafe(48)
+        self.native_cookie = secrets.token_urlsafe(48)
         self.cli_token = secrets.token_urlsafe(36)
         self.system = target_platform()
-        self.log = ServerRuntimeLog(_runtime_logs_root(self.mutable_builds))
+        log_directory = _runtime_logs_root(self.mutable_builds)
+        self._stopping_lock = threading.Lock()
+        self._stopping = False
+        # Expose the already-designated Logs tree to the read-only Code-OSS
+        # host-file provider; a symlink resolving outside it is still rejected.
+        self.code_workspace.host_log_roots = [next(
+            (ancestor for ancestor in (log_directory, *log_directory.parents)
+             if ancestor.name == 'Logs'), log_directory)]
         self.token = secrets.token_urlsafe(36)
         self.sessions: dict[str, TerminalSession] = {}
         self.sessions_lock = threading.Lock()
@@ -1355,6 +1760,9 @@ class CinterShellServer(ThreadingHTTPServer):
         self.lagomorph_requests = 0
         self.macgame_request = None
         self.wargames_requests = 0
+        # Ordered shell-to-Code actions: run/reselect versus settings refresh.
+        self.code_actions = deque()
+        self.html_menus_override = False  # macOS development inspection only
         # Never overwrite pending browser story commands with a later click.
         # Each title has one live interpreter tab and one launch generation.
         self.if_actions = deque()
@@ -1374,7 +1782,14 @@ class CinterShellServer(ThreadingHTTPServer):
             self.bedrock_error = str(exc)
             print('[CinterForgeTerminal] Bedrock unavailable: ' + self.bedrock_error,
                   file=sys.stderr, flush=True)
+        # Bind the reserved port before creating the persistent Server log.
+        # Retrying after Xcode Stop must not create a new log file per failed bind.
         super().__init__((('0.0.0.0', LAN_HTTP_PORT) if lan else ('127.0.0.1', 0)), Handler)
+        try:
+            self.log = ServerRuntimeLog(log_directory)
+        except Exception:
+            self.server_close()
+            raise
         if lan:
             try:
                 self.discovery = CinterForgeDiscovery(ASSETS.parent, socket.gethostname(),
@@ -1388,10 +1803,22 @@ class CinterShellServer(ThreadingHTTPServer):
         self.log.append(message)
 
     def stop(self) -> None:
+        with self._stopping_lock:
+            if self._stopping:
+                return
+            self._stopping = True
         if self.discovery is not None:
             self.discovery.close()
+        if self.lan:
+            _remove_lan_owner(self)
         for item in list(self.sessions.values()):
             item.close()
+        with self.code_sessions_lock:
+            code_sessions = list(self.code_sessions.values())
+            self.code_sessions.clear()
+        for entry in code_sessions:
+            if isinstance(entry, TerminalSession):
+                entry.close()
         self.sessions.clear()
         if self.devtools_requested:
             # Only our optional 't' profile. Setup's 'w'/'c' are untouched.
@@ -1439,10 +1866,124 @@ class Handler(BaseHTTPRequestHandler):
         import http.cookies
         try:
             cookie = http.cookies.SimpleCookie(self.headers.get('Cookie', ''))
+            native = cookie['cinter_native'].value if 'cinter_native' in cookie else ''
+            # A native WebView is explicitly bootstrapped from the loopback
+            # launcher; a regular localhost browser is NOT implicitly trusted.
+            if (native and self.client_address[0] in ('127.0.0.1', '::1') and
+                    secrets.compare_digest(native, self.server.native_cookie)):
+                return True
             value = cookie['cinter_lan'].value if 'cinter_lan' in cookie else ''
         except (KeyError, http.cookies.CookieError):
             return False
         return secrets.compare_digest(value, self.server.lan_cookie)
+
+    def _code_authorized(self) -> bool:
+        """Same-origin, logged-in Code-OSS iframe; no HTML-embedded API token.
+
+        The workbench bootstrap filesystem provider issues ordinary same-origin
+        fetch requests. Keep that provider usable without changing the token
+        contract for the privileged Terminal APIs.
+        """
+        origin = self.headers.get('Origin')
+        return (self._local() and self._lan_logged_in() and
+                self.headers.get('Sec-Fetch-Site', 'same-origin') != 'cross-site' and
+                (origin is None or origin == 'http://' + self.headers.get('Host', '')))
+
+    def _code_shell_output(self, code_id: str) -> dict:
+        if not re.fullmatch(r'terminal-[a-z0-9-]{1,48}', code_id):
+            raise ValueError('Invalid Code-OSS terminal ID')
+        with self.server.code_sessions_lock:
+            entry = self.server.code_sessions.get(code_id)
+        if entry is None:
+            raise FileNotFoundError('Code-OSS terminal is not open')
+        if isinstance(entry, dict):
+            batch = self.server.log.since(entry['cursor'])
+            entry['cursor'] = batch['cursor']
+            return {'rows': [{'text': line + '\r\n'} for line in batch['lines']], 'closed': False}
+        data, closed = entry.poll(300)
+        if closed:
+            # The client retains the final transcript, but an exited PTY must
+            # not keep occupying one of the six Code-OSS session slots.
+            with self.server.code_sessions_lock:
+                owned = self.server.code_sessions.get(code_id) is entry
+                if owned:
+                    self.server.code_sessions.pop(code_id)
+            if owned:
+                entry.close()
+        return {'rows': [{'text': data.decode('utf-8', errors='replace')}] if data else [],
+                'closed': closed}
+
+    def _code_shell_action(self, route: str, body: dict) -> dict:
+        code_id = body.get('id')
+        if not isinstance(code_id, str) or not re.fullmatch(r'terminal-[a-z0-9-]{1,48}', code_id):
+            raise ValueError('Invalid Code-OSS terminal ID')
+        if route == '/host/code-shell-open':
+            backend = body.get('backend', 'native')
+            if backend not in ('native', 'server', 'linux', 'win', 'minecraft'):
+                raise ValueError('Unknown Code-OSS terminal backend')
+            # Dead guest wrappers may exit before their worker can poll the
+            # final output. Release those PTYs before checking the bound, but
+            # never evict a live shell to make space for another one.
+            with self.server.code_sessions_lock:
+                ended_ids = [key for key, entry in self.server.code_sessions.items()
+                             if isinstance(entry, TerminalSession) and entry.closed]
+                ended = [self.server.code_sessions.pop(key) for key in ended_ids]
+            for entry in ended:
+                entry.close()
+            with self.server.code_sessions_lock:
+                if code_id in self.server.code_sessions:
+                    raise ValueError('Code-OSS terminal ID already in use')
+                if len(self.server.code_sessions) >= MAX_SESSIONS:
+                    raise RuntimeError('Maximum Code-OSS terminal sessions reached')
+                if backend == 'server':
+                    self.server.code_sessions[code_id] = {'cursor': 0}
+                    return {'opened': True, 'backend': backend}
+                command = None
+                if backend == 'minecraft':
+                    if self.server.bedrock is None:
+                        raise RuntimeError('Minecraft needs an installed Bedrock server')
+                    state = self.server.bedrock.status()
+                    if not (state.get('running') or state.get('starting')):
+                        raise RuntimeError('Minecraft disabled: start Bedrock with bedrock run first')
+                    if state.get('console_available') is False:
+                        raise RuntimeError('Bedrock console attachment unavailable')
+                    # Reuse the exact console bridge from /api/terminal/open.
+                    # This is a Code-OSS PTY tab, not a second Bedrock VM.
+                    command = [sys.executable, str(ASSETS / 'CinterForgeTerminal.py'),
+                               '--terminal-cli', 'minecraft']
+                elif self.server.system == 'mac' and backend in ('linux', 'win'):
+                    command = [sys.executable, '-u', str(ASSETS / 'CinterForgeTerminal.py'),
+                               '--guest-shell', backend]
+                    self.server.devtools_requested = True
+                elif backend != 'native' and backend != self.server.system:
+                    raise RuntimeError(backend + ' backend unavailable on ' + self.server.system)
+                cwd = Path(self.server.code_workspace.details()['cwd'])
+                terminal = TerminalSession(
+                    self.server.mutable_builds, self.server.system, 100, 30,
+                    url=self.server.origin, token=self.server.token,
+                    command=command, working_directory=cwd,
+                    internal_token=self.server.cli_token)
+                self.server.code_sessions[code_id] = terminal
+            return {'opened': True, 'backend': backend, 'cwd': str(cwd)}
+        with self.server.code_sessions_lock:
+            entry = self.server.code_sessions.get(code_id)
+            if route == '/host/code-shell-close':
+                self.server.code_sessions.pop(code_id, None)
+        if entry is None:
+            raise FileNotFoundError('Code-OSS terminal is not open')
+        if route == '/host/code-shell-close':
+            if isinstance(entry, TerminalSession):
+                entry.close()
+            return {'closed': True}
+        if isinstance(entry, dict):
+            raise ValueError('Server Log is read-only')
+        if route == '/host/code-shell-write':
+            entry.write(body.get('data', ''))
+            return {'ok': True}
+        if route == '/host/code-shell-resize':
+            entry.resize(body.get('cols', 100), body.get('rows', 30))
+            return {'ok': True}
+        raise ValueError('Unknown Code-OSS shell operation')
 
     def _login_page(self, failed=False) -> None:
         page = ('<!doctype html><html><meta charset="utf-8"><meta name="viewport" '
@@ -1641,13 +2182,49 @@ class Handler(BaseHTTPRequestHandler):
         # Host readiness is not a session and must remain available after
         # setpass; the native launcher probes this route before opening a view.
         if path == '/healthz':
-            self._json(200, {'ready': True})
+            result = {'ready': True}
+            if (self.client_address[0] in ('127.0.0.1', '::1') and
+                    secrets.compare_digest(self.headers.get('X-Cinter-Owner', ''),
+                                           self.server.native_grant)):
+                result['instance'] = self.server.lan_id
+            self._json(200, result)
+            return
+        if path == '/_native_open':
+            # The native launcher receives a one-process grant over the Host
+            # RPC pipe. Exchange it for an HttpOnly loopback WebView cookie.
+            grant = parse_qs(urlsplit(self.path).query).get('key', [''])
+            if (len(grant) != 1 or self.client_address[0] not in ('127.0.0.1', '::1') or
+                    not secrets.compare_digest(grant[0], self.server.native_grant)):
+                self._json(403, {'error': 'native bootstrap unavailable'})
+                return
+            accept_ui = 'accept-ui' in parse_qs(urlsplit(self.path).query)
+            self.send_response(303)
+            self.send_header('Location', '/?accept-ui=1' if accept_ui else '/')
+            self.send_header('Set-Cookie', 'cinter_native=' + self.server.native_cookie +
+                             '; HttpOnly; SameSite=Lax; Path=/')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
             return
         if not self._lan_logged_in():
             if path in ('/', '/index.html', '/login'):
                 self._login_page()
             else:
                 self._json(401, {'error': 'LAN login required'})
+            return
+        if path in ('/host/code-workspace', '/host/code-shell-output'):
+            if not self._code_authorized():
+                self._json(403, {'error': 'Code-OSS login required'})
+                return
+            try:
+                if path == '/host/code-workspace':
+                    self._json(200, self.server.code_workspace.details())
+                else:
+                    code_id = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
+                    self._json(200, self._code_shell_output(code_id))
+            except (OSError, ValueError) as error:
+                self._json(400, {'error': str(error)})
             return
         if self._serve_artifact(path):
             return
@@ -1819,6 +2396,22 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, OSError, UnicodeError) as error:
                 self._json(400, {'error': str(error)})
             return
+        if path == '/api/ui/html-menus':
+            if not self._authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            with self.server.debug_lock:
+                self._json(200, {'show': self.server.system != 'mac' or
+                                 self.server.html_menus_override})
+            return
+        if path == '/api/code/next':
+            if not self._authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            with self.server.debug_lock:
+                action = self.server.code_actions.popleft() if self.server.code_actions else None
+            self._json(200, {'open': bool(action), 'reload': bool(action and action['reload'])})
+            return
         if path == '/api/wargames/next':
             if not self._authorized():
                 self._json(403, {'error':'not authorized'})
@@ -1939,9 +2532,56 @@ class Handler(BaseHTTPRequestHandler):
         data = file.read_bytes()
         if name == 'index.html':
             data = data.replace(b'__CPH_TOKEN__', self.server.token.encode('ascii'))
+            data = data.replace(b'__CPH_PLATFORM__', self.server.system.encode('ascii'))
         self._send(200, data, ctype)
 
     def do_POST(self) -> None:
+        route = urlsplit(self.path).path
+        if route == '/code/command' or route in (
+                '/host/code-shell-open', '/host/code-shell-write',
+                '/host/code-shell-close', '/host/code-shell-resize'):
+            if not self._code_authorized():
+                self._json(403, {'error': 'Code-OSS login required', 'error_code': 'permission_denied'})
+                return
+            body = {}
+            try:
+                n = int(self.headers.get('Content-Length', '0'))
+                limit = 12 * 1024 * 1024 if route == '/code/command' else MAX_BODY
+                if not 0 < n <= limit:
+                    raise ValueError('Invalid Code-OSS request length')
+                body = json.loads(self.rfile.read(n))
+                if not isinstance(body, dict):
+                    raise ValueError('Expected a Code-OSS object')
+                if route == '/code/command':
+                    result = self.server.code_workspace.operation(body)
+                    if body.get('operation') in ('open-folder', 'open-workspace'):
+                        # A workspace change replaces the workbench and its PTYs.
+                        # Release the old sessions before new tabs connect.
+                        with self.server.code_sessions_lock:
+                            old_sessions = list(self.server.code_sessions.values())
+                            self.server.code_sessions.clear()
+                        for item in old_sessions:
+                            if isinstance(item, TerminalSession):
+                                item.close()
+                else:
+                    result = self._code_shell_action(route, body)
+                self._json(200, {'ok': True, **result})
+            except (OSError, RuntimeError, ValueError, KeyError, TypeError, ImportError) as error:
+                code = ('permission_denied' if isinstance(error, PermissionError) else
+                        'not_directory' if isinstance(error, NotADirectoryError) else
+                        'not_found' if isinstance(error, FileNotFoundError) else 'invalid_request')
+                # VS Code probes optional paths continually. Report a missing
+                # workspace file through the existing JSON error contract, but
+                # not as an HTTP transport failure on every stat/read probe.
+                expected_missing = (route == '/code/command' and code == 'not_found' and
+                                    body.get('operation') in ('stat', 'read-file', 'read-directory'))
+                if not expected_missing:
+                    operation = str(body.get('operation', '') if route == '/code/command' else route)
+                    self.server.log_event('Code-OSS request rejected ' + operation[:48] +
+                                          ' (' + code + ', ' + type(error).__name__ + ')')
+                self._json(200 if expected_missing else 400,
+                           {'ok': False, 'error': str(error), 'error_code': code})
+            return
         if self.path == '/login' and self.server.lan and self._local() and self.server.lan_login is not None:
             # The only requirement for login is the user-configured credential.
             # A normal HTML form may be submitted from localhost, .local or a LAN IP.
@@ -2130,7 +2770,9 @@ class Handler(BaseHTTPRequestHandler):
                     terminal = TerminalSession(self.server.mutable_builds, self.server.system,
                                                body.get('cols', 80), body.get('rows', 24),
                                                url=self.server.origin, token=self.server.token,
-                                               command=command, internal_token=self.server.cli_token)
+                                               command=command,
+                                               working_directory=Path(self.server.code_workspace.details()['cwd']),
+                                               internal_token=self.server.cli_token)
                     self.server.sessions[terminal.id] = terminal
                 self.server.log_event('terminal opened: id=' + terminal.id[:10] +
                     ' command=' + Path(terminal.shell[0]).name + ' output=' + str(terminal.output_log.name if terminal.output_log else 'none'))
@@ -2176,6 +2818,61 @@ class Handler(BaseHTTPRequestHandler):
                             del self.server.if_active[command]
                             self.server.if_actions.append({'stop':command,'launch_id':launch})
                     self._json(200,{'stopped':stopped})
+                return
+            if route == '/api/ui/html-menus':
+                source = str(body.get('session_id', ''))
+                with self.server.sessions_lock:
+                    in_main = any(getattr(item, 'id', None) == source
+                                  for item in self.server.sessions.values())
+                with self.server.code_sessions_lock:
+                    in_code = any(getattr(item, 'id', None) == source
+                                  for item in self.server.code_sessions.values())
+                if not (in_main or in_code):
+                    raise ValueError('HTML menu override requires a live Terminal Session')
+                if self.server.system != 'mac':
+                    raise ValueError('HTML menus are already visible on this platform')
+                action = body.get('action')
+                if action not in ('show', 'hide', 'toggle'):
+                    raise ValueError('Usage: htmlmenus show|hide|toggle')
+                with self.server.debug_lock:
+                    if action == 'toggle':
+                        self.server.html_menus_override = not self.server.html_menus_override
+                    else:
+                        self.server.html_menus_override = action == 'show'
+                    visible = self.server.html_menus_override
+                self._json(200, {'show': visible})
+                return
+            if route == '/api/code/open':
+                source_id = str(body.get('session_id', ''))
+                with self.server.sessions_lock:
+                    if source_id not in self.server.sessions:
+                        raise ValueError('Code request requires an active Terminal Session')
+                action = body.get('operation', 'run')
+                if action == 'run':
+                    result = self.server.code_workspace.details()
+                elif action == 'mode':
+                    result = self.server.code_workspace.operation({
+                        'operation': 'set-theme', 'theme': body.get('theme')})
+                elif action == 'open':
+                    path = body.get('path')
+                    if not isinstance(path, str) or not path:
+                        raise ValueError('code open requires an existing absolute path')
+                    kind = 'open-workspace' if path.endswith('.code-workspace') else 'open-folder'
+                    result = self.server.code_workspace.operation({'operation': kind, 'path': path})
+                else:
+                    raise ValueError('Usage: code run | code mode light|dark | code open "<path>"')
+                if action == 'open':
+                    # Workspace switches close the old host-owned Code PTYs. The
+                    # workbench recreates them with the new working directory.
+                    with self.server.code_sessions_lock:
+                        previous = list(self.server.code_sessions.values())
+                        self.server.code_sessions.clear()
+                    for item in previous:
+                        if isinstance(item, TerminalSession):
+                            item.close()
+                with self.server.debug_lock:
+                    self.server.code_actions.append({'reload': action != 'run'})
+                self._json(200, {'requested': True, **result})
                 return
             if route == '/api/wargames/open':
                 with self.server.debug_lock:
@@ -2259,6 +2956,29 @@ _server = None
 _server_thread = None
 
 
+def _watch_native_http_parent(server: CinterShellServer, parent_pid: int) -> None:
+    """Release this worker's listener when its native window exits abruptly.
+
+    Xcode Stop may terminate the parent without giving the Python RPC worker a
+    shutdown message. Do not leave its HTTP service holding the reserved 20300
+    port. This observer only shuts down this worker's own server; it never
+    inspects, adopts, or terminates another process.
+    """
+    global _server
+    while _server is server and os.getppid() == parent_pid:
+        time.sleep(0.5)
+    if _server is not server:
+        return
+    server.log_event('Native HTTP owner exited; releasing managed listener')
+    try:
+        server.stop()
+    except (OSError, RuntimeError) as error:
+        server.log_event('Native listener cleanup failed: ' + str(error))
+    finally:
+        if _server is server:
+            _server = None
+
+
 def handle(method: str, params: dict) -> dict:
     """Invoked through the already-shipped PythonHost service RPC worker."""
     global _server, _server_thread
@@ -2268,10 +2988,49 @@ def handle(method: str, params: dict) -> dict:
         builds = Path(params['builds']).resolve(strict=True)
         if builds.name != 'Builds' or not ASSETS.is_relative_to(builds):
             raise ValueError('Shell resources must be staged inside the shared Builds directory')
-        _server = CinterShellServer(builds, lan=True)
-        _server_thread = threading.Thread(target=_server.serve_forever, name='cinter-http', daemon=True)
-        _server_thread.start()
+        # Opening a second native window should reuse the running local Host,
+        # rather than trying to bind a second listener to the reserved port.
+        existing = _existing_lan_owner(builds)
+        if existing is not None:
+            return {'url': f'http://127.0.0.1:{LAN_HTTP_PORT}/',
+                    'native_grant': existing['native_grant'], 'attached': True}
+        try:
+            _server = CinterShellServer(builds, lan=True)
+        except OSError as error:
+            if getattr(error, 'errno', None) not in (48, 98, 10048):
+                raise
+            # Xcode Stop may have just orphaned the previous native Host's
+            # Python worker. Give that owner's watchdog time to release 20300,
+            # checking for a verified live Terminal meanwhile. Never kill or
+            # overwrite an unrelated listener or choose a different port.
+            for _ in range(16):
+                time.sleep(0.25)
+                existing = _existing_lan_owner(builds)
+                if existing is not None:
+                    return {'url': f'http://127.0.0.1:{LAN_HTTP_PORT}/',
+                            'native_grant': existing['native_grant'], 'attached': True}
+                try:
+                    _server = CinterShellServer(builds, lan=True)
+                    break
+                except OSError as again:
+                    if getattr(again, 'errno', None) not in (48, 98, 10048):
+                        raise
+            else:
+                raise RuntimeError('HTTP port 20300 is occupied by an unverified listener; '
+                                   'no other process was terminated') from error
+        try:
+            _write_lan_owner(_server)
+            _server_thread = threading.Thread(target=_server.serve_forever, name='cinter-http', daemon=True)
+            _server_thread.start()
+            threading.Thread(target=_watch_native_http_parent,
+                             args=(_server, os.getppid()),
+                             name='cinter-native-http-owner', daemon=True).start()
+        except Exception:
+            _server.stop()
+            _server = None
+            raise
         return {'url': _server.origin + '/', 'port': _server.server_port,
+                'native_grant': _server.native_grant,
                 'platform': _server.system, 'server_log': str(_server.log.path)}
     if method == 'next_debugger_request':
         if _server is None:
@@ -2282,9 +3041,10 @@ def handle(method: str, params: dict) -> dict:
                 return {'requested': True}
             return {'requested': False}
     if method == 'stop':
-        if _server is not None:
-            _server.stop()
-            _server = None
+        closing = _server
+        _server = None
+        if closing is not None:
+            closing.stop()
         return {'stopped': True}
     raise ValueError(f'Unsupported CinterForgeTerminal host method: {method}')
 
@@ -3717,6 +4477,10 @@ HELP = '''CinterForgeTerminal custom commands
   stories                       List 16 IF titles (interactive fiction)
   discord <user> <server> <channel>  Open a Discord bot-connected Session tab
   setpass <username> <password>      Set this host's LAN login credentials
+  code [run]                        Open Code-OSS in a tab
+  code mode light|dark              Set and remember the Code-OSS theme
+  code open <absolute-path>         Select host folder or .code-workspace
+  htmlmenus show|hide|toggle        Inspect HTML menus on macOS (native menu remains)
   infinite-mac                  List 67 classic Macintosh games (help infinite-mac)
   <game-name>                   Launch the named game in its existing player
   Infinite Mac: https://infinitemac.org/
@@ -4528,6 +5292,37 @@ def execute(args: list[str]) -> int:
             'session_id': os.environ.get('CINTER_TERMINAL_SESSION_ID', '')})
         print('LAN login updated. Existing remote sessions must log in again.', flush=True)
         return 0
+    if args[0] == 'htmlmenus':
+        if len(args) != 2 or args[1] not in ('show', 'hide', 'toggle'):
+            print('Usage: htmlmenus show|hide|toggle', file=sys.stderr)
+            return 2
+        state = _api('/api/ui/html-menus', body={
+            'action': args[1],
+            'session_id': os.environ.get('CINTER_TERMINAL_SESSION_ID', '')})
+        print('HTML menus: ' + ('visible' if state['show'] else 'hidden'), flush=True)
+        return 0
+    if args[0] == 'code':
+        # Use the same host workspace and theme store as the Code-OSS UI.
+        # Bash has already parsed quoted POSIX paths into a single argument.
+        operation = {'session_id': os.environ.get('CINTER_TERMINAL_SESSION_ID', '')}
+        usage = 'Usage: code [run | mode light|dark | open "<absolute path>"]'
+        if len(args) == 1 or args[1:] == ['run']:
+            operation['operation'] = 'run'
+        elif len(args) == 3 and args[1] == 'mode' and args[2] in ('light', 'dark'):
+            operation.update(operation='mode', theme=args[2])
+        elif len(args) == 3 and args[1] == 'open':
+            operation.update(operation='open', path=args[2])
+        else:
+            print(usage, file=sys.stderr)
+            return 2
+        response = _api('/api/code/open', body=operation)
+        if operation['operation'] == 'mode':
+            print('Code-OSS theme: ' + response['theme'], flush=True)
+        elif operation['operation'] == 'open':
+            print('Code-OSS workspace: ' + response['path'], flush=True)
+        else:
+            print('Opening Code-OSS workbench.', flush=True)
+        return 0
     if args[0] == 'discord':
         # Bash strips quotes and leaves optional trailing commas from the
         # human-friendly: discord "user", "server", "channel" syntax.
@@ -4967,22 +5762,199 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str, timeout
     subprocess.run(command, check=True, env=env, timeout=timeout)
 
 
-def _ensure_docker(sdk: Path, env: dict[str, str]) -> str:
-    colima = str(sdk/'mac/env/bin/colima')
-    docker = str(sdk/'mac/env/bin/docker')
-    ping = subprocess.run([docker, 'info', '--format', '{{.ServerVersion}}'],
-                          env=env, check=False, capture_output=True, text=True, timeout=20)
-    if ping.returncode:
-        print('[DEVTOOLS] Starting managed Terminal shell VM (first launch may provision its disk)', flush=True)
-        _run_checked([colima, 'start', PROFILE, '--runtime', 'docker',
-                      '--vm-type', 'vz', '--vz-rosetta', '--arch', 'aarch64',
-                      '--cpus', '4', '--memory', '8', '--disk', '32',
-                      '--mount', str(sdk), '--save-config'], env,
-                     title='Booting guest execution environment', timeout=1200)
-    _run_checked([docker, 'info', '--format', '{{.ServerVersion}}'], env,
-                 title='Checking managed Docker engine', timeout=45)
-    return docker
+@contextmanager
+def _managed_vm_lock(env: dict[str, str]):
+    """Serialize Colima mutations across native and Code-OSS Session processes.
 
+    Linux and Windows guest shells start as independent children. A thread lock
+    cannot protect against two concurrent `colima start` invocations, which can
+    race for the same Lima host-agent PID/socket and leave a stale Docker context.
+    The lock resides in the permitted app-owned Steam/Builds VM state only.
+    """
+    home = Path(env['COLIMA_HOME'])
+    lock_file = home / 'CinterForgeTerminalGuestVM.lock'
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
+    descriptor = os.open(lock_file, flags, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _ensure_docker(sdk: Path, env: dict[str, str], workspace: Path | None = None) -> str:
+    """Start/recover one shared guest VM with the code workspace really mounted.
+
+    The lock protects VM startup from the separate Win/Linux PTY children, but
+    is released *before* either long-lived interactive shell starts. Never
+    restart an already-running guest with live containers.
+    """
+    with _managed_vm_lock(env):
+        return _ensure_docker_locked(sdk, env, workspace)
+
+
+def _mac_mounted_volumes() -> list[Path]:
+    """Discover visible host volumes; preserve spaces in the *host* paths.
+
+    Sharing /Volumes itself covers volume names containing spaces, which
+    Colima cannot accept as individual mount locations. Extra mounts are
+    provided for volumes with space-free names and nonstandard mount points.
+    """
+    if platform.system() != 'Darwin':
+        return []
+    try:
+        result = subprocess.run(['/sbin/mount'], capture_output=True, text=True,
+                                check=False, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode or not isinstance(getattr(result, 'stdout', None), str):
+        return []
+    found: set[Path] = set()
+    for line in result.stdout.splitlines():
+        match = re.search(r' on (.+?) \(([^,)]+)', line)
+        if not match:
+            continue
+        location = Path(match.group(1).replace('\\040', ' '))
+        filesystem = match.group(2).lower()
+        # Pseudo-filesystems are not user drives, and exposing /dev would
+        # obscure Linux's actual device filesystem.
+        if (location == Path('/') or not location.is_dir() or
+                filesystem in ('devfs', 'procfs', 'autofs', 'fdesc', 'synthfs') or
+                location == Path('/dev')):
+            continue
+        found.add(location)
+    return sorted(found, key=str)
+
+
+def _mac_host_mounts() -> list[tuple[Path, str]]:
+    """Expose macOS files under /host without replacing Linux's / or /usr.
+
+    There is no application-level folder allowlist. Colima's virtiofs driver
+    and the macOS user's filesystem permissions determine which files can be
+    read or written. Mounts use distinct destinations to satisfy Colima's
+    no-overlapping-guest-mounts rule.
+    """
+    mounts: list[tuple[Path, str]] = [(Path('/'), '/host/mac')]
+    if Path('/Volumes').is_dir():
+        mounts.append((Path('/Volumes'), '/host/volumes'))
+    for location in _mac_mounted_volumes():
+        # The root share mirrors internal/system volumes. Extra shares of
+        # external disks help when virtiofs does not traverse nested mounts.
+        if location == Path('/Volumes') or not str(location).startswith('/Volumes/'):
+            continue
+        if ' ' in str(location):
+            # Upstream Colima rejects such paths; /host/volumes is the
+            # supported parent-directory mount for these names.
+            continue
+        key = hashlib.sha256(os.fsencode(str(location))).hexdigest()[:12]
+        mounts.append((location, '/host/drives/' + key))
+    return mounts
+
+
+def _configure_colima_host_mounts(env: dict[str, str], mounts: list[tuple[Path, str]]) -> None:
+    """Update only the app-owned t-profile mount list; keep other VM settings.
+
+    Colima's CLI --mount has no destination-path argument. The profile YAML
+    accepts mountPoint, allowing a complete Mac root at /host/mac without
+    accidentally replacing the Linux VM's root filesystem.
+    """
+    profile = Path(env['COLIMA_HOME']) / PROFILE
+    config = profile / 'colima.yaml'
+    if profile.is_symlink() or config.is_symlink():
+        raise RuntimeError('Managed Terminal VM configuration must not be a symlink')
+    profile.mkdir(parents=True, exist_ok=True)
+    block = 'mounts:\n' + ''.join(
+        '  - location: ' + json.dumps(str(host)) + '\n'
+        '    mountPoint: ' + json.dumps(guest) + '\n'
+        '    writable: true\n'
+        for host, guest in mounts)
+    original = config.read_text('utf-8') if config.is_file() else ''
+    keys = list(re.finditer(r'(?m)^[a-zA-Z][a-zA-Z0-9_-]*:[^\n]*$', original))
+    entry = next((idx for idx, item in enumerate(keys)
+                  if item.group().split(':', 1)[0] == 'mounts'), None)
+    if entry is None:
+        updated = original.rstrip() + ('\n\n' if original.strip() else '') + block
+    else:
+        beginning = keys[entry].start()
+        ending = keys[entry + 1].start() if entry + 1 < len(keys) else len(original)
+        updated = original[:beginning] + block + original[ending:]
+    if updated != original:
+        temporary = config.with_name('colima.yaml.pending')
+        if temporary.is_symlink():
+            raise RuntimeError('Unsafe managed Terminal VM pending configuration')
+        temporary.write_text(updated, encoding='utf-8')
+        os.replace(temporary, config)
+
+
+def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None) -> str:
+    colima = str(sdk / 'mac/env/bin/colima')
+    docker = str(sdk / 'mac/env/bin/docker')
+    mounts = _mac_host_mounts()
+
+    def call(argv: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
+        return subprocess.run(argv, env=env, check=False, capture_output=True,
+                              text=True, timeout=timeout)
+
+    def guest_directory(directory: str) -> bool:
+        probe = call([colima, 'ssh', PROFILE, '--', 'test', '-d', directory])
+        return probe.returncode == 0
+
+    def active_containers(via_guest: bool) -> bool:
+        argv = ([colima, 'ssh', PROFILE, '--', 'docker', 'ps', '--quiet']
+                if via_guest else [docker, 'ps', '--quiet'])
+        result = call(argv, timeout=35)
+        if result.returncode:
+            raise RuntimeError('Managed Terminal VM state cannot be verified; refusing '
+                               'to restart a potentially active guest: ' +
+                               (result.stderr or result.stdout).strip()[:240])
+        return bool(result.stdout.strip())
+
+    # Colima's actual shared root is /host/mac, not /. Docker daemon bind
+    # sources must use the paths in the VM rather than the host's original
+    # path, otherwise a missing source is reported as a Docker mount error.
+    required = ['/host/mac', '/host/mac' + str(sdk)]
+    if workspace is not None:
+        required.append('/host/mac' + str(workspace))
+    required.extend(destination for _, destination in mounts[1:])
+    ping = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=20)
+    if ping.returncode == 0:
+        missing = [path for path in required if not guest_directory(path)]
+        if not missing:
+            return docker
+        if active_containers(via_guest=False):
+            raise RuntimeError('Managed Terminal VM is missing accessible host volumes (' +
+                               ', '.join(missing) +
+                               '), but live guest containers must not be interrupted')
+        print('[DEVTOOLS] Reconfiguring idle Terminal VM host volumes: ' +
+              ', '.join(missing), flush=True)
+        _run_checked([colima, 'stop', PROFILE], env,
+                     title='Stopping idle guest VM for corrected host mounts', timeout=120)
+    else:
+        status = call([colima, 'status', PROFILE])
+        if status.returncode == 0:
+            if active_containers(via_guest=True):
+                raise RuntimeError('Managed Terminal VM has live guest containers '
+                                   'but its Docker socket is unavailable; refusing restart')
+            _run_checked([colima, 'stop', PROFILE], env,
+                         title='Recovering idle VM with stale Docker socket', timeout=120)
+
+    _configure_colima_host_mounts(env, mounts)
+    print('[DEVTOOLS] Sharing accessible Mac filesystem under /host/mac', flush=True)
+    args = [colima, 'start', PROFILE, '--runtime', 'docker',
+            '--vm-type', 'vz', '--mount-type', 'virtiofs',
+            '--vz-rosetta', '--arch', 'aarch64',
+            '--cpus', '4', '--memory', '8', '--disk', '32', '--save-config']
+    _run_checked(args, env, title='Starting managed guest VM with host volumes', timeout=1200)
+    daemon = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=45)
+    if daemon.returncode:
+        raise RuntimeError('Managed Terminal Docker socket still unavailable after VM start: ' +
+                           (daemon.stderr or daemon.stdout).strip()[:240])
+    missing = [path for path in required if not guest_directory(path)]
+    if missing:
+        raise RuntimeError('Managed Terminal VM cannot access shared Mac paths ' +
+                           ', '.join(missing) + '; refusing a broken Docker bind mount')
+    return docker
 
 def stop_runtime_vm() -> None:
     """Best-effort app-owned cleanup; never stop either Setup VM (w or c)."""
@@ -4992,9 +5964,10 @@ def stop_runtime_vm() -> None:
     if sdk is None:
         return
     env = _env(sdk)
-    subprocess.run([str(sdk/'mac/env/bin/colima'), 'stop', PROFILE], env=env,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                   check=False, timeout=35)
+    with _managed_vm_lock(env):
+        subprocess.run([str(sdk/'mac/env/bin/colima'), 'stop', PROFILE], env=env,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       check=False, timeout=35)
 
 
 def guest_shell_main(kind: str) -> int:
@@ -5023,13 +5996,30 @@ def guest_shell_main(kind: str) -> int:
         if sdk is None:
             raise RuntimeError('DevTools installer completed without a usable installed SDK')
     env = _env(sdk)
-    docker = _ensure_docker(sdk, env)
+    # Main Terminal and Code-OSS pass the same selected host workspace.
+    raw_workspace = os.environ.get('CINTER_CODE_WORKSPACE')
+    workspace = Path(raw_workspace).resolve(strict=True) if raw_workspace else None
+    if workspace is not None and not workspace.is_dir():
+        raise RuntimeError('Selected CinterForge source workspace is not a directory')
+    docker = _ensure_docker(sdk, env, workspace)
     tar, image = _image_archive(sdk, kind)
     image_check = subprocess.run([docker, 'image', 'inspect', image], check=False, env=env,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
     if image_check.returncode:
         _run_checked([docker, 'load', '--input', str(tar)], env, title='Loading verified ' + kind + ' environment', timeout=900)
-    command = [docker, 'run', '--rm', '-it', '--platform', 'linux/amd64']
+    # Share the visible Mac host tree with each real guest environment.
+    # This does not replace the guest Linux root or shell/tool directories.
+    host_binds = ['--mount', 'type=bind,src=/host/mac,dst=/host/mac']
+    if Path('/Volumes').is_dir():
+        host_binds += ['--mount', 'type=bind,src=/host/volumes,dst=/host/volumes']
+    for _, guest in _mac_host_mounts()[2 if Path('/Volumes').is_dir() else 1:]:
+        host_binds += ['--mount', 'type=bind,src=' + guest + ',dst=' + guest]
+    command = [docker, 'run', '--rm', '-it', '--platform', 'linux/amd64', *host_binds]
+    # Both host entry points use the selected source workspace, so `ls` in a
+    # guest shows the same sibling CinterForge repositories as the Mac shell.
+    if workspace is not None:
+        command.extend(['--mount', 'type=bind,src=/host/mac' + str(workspace) + ',dst=/workspace',
+                        '--workdir', '/workspace'])
     if kind == 'linux':
         _run_checked([docker, 'run', '--rm', '--platform', 'linux/amd64',
                       image, '/bin/bash', '--version'], env,
@@ -5039,12 +6029,26 @@ def guest_shell_main(kind: str) -> int:
         # The Wine runtime is inside the WindowsCross OCI image; the MSYS2
         # PE executable and DLLs come from the verified unified SDK.
         msys = sdk / 'Windows/MSYS2'
-        runtime_args = ['--mount', 'type=bind,src='+str(msys)+',dst=/msys2,readonly',
-                        '-e', 'MSYSTEM=UCRT64', '-e', 'HOME=/tmp']
+        # MSYS2 resolves /tmp beneath its own root (Z:\msys2\tmp). The SDK
+        # stays read-only, but that directory must be writable for actual Bash
+        # startup/history. Keep temporary data in the app-owned guest VM, not
+        # in the installed DevTools closure or the developer source tree.
+        runtime_args = ['--mount', 'type=bind,src=/host/mac'+str(msys)+',dst=/msys2,readonly',
+                        '--tmpfs', '/msys2/tmp:rw,nosuid,nodev,size=64m',
+                        '-e', 'MSYSTEM=UCRT64', '-e', 'CHERE_INVOKING=1', '-e', 'HOME=/tmp',
+                        '-e', 'TMPDIR=/tmp', '-e', 'TMP=/tmp', '-e', 'TEMP=/tmp']
         guest_executable = r'Z:\msys2\usr\bin\bash.exe'
+        # A --version check bypasses Bash startup and cannot prove /tmp works.
+        # Fail explicitly when the guest cannot create and delete a temp file.
+        check_tmp = ('test -d /tmp && test -w /tmp && '
+                     'f=/tmp/cinterforge-bash-$$ && : > "$f" && rm "$f"')
         _run_checked([docker, 'run', '--rm', '--platform', 'linux/amd64',
-                      *runtime_args, image, 'wine', guest_executable, '--version'], env,
-                     title='Verifying Windows MSYS2 Bash under Wine before opening Session', timeout=150)
+                      *(['--mount', 'type=bind,src=/host/mac' + str(workspace) + ',dst=/workspace',
+                         '--workdir', '/workspace'] if workspace is not None else []),
+                      *host_binds, *runtime_args, image, 'wine', guest_executable,
+                      '--noprofile', '-c', check_tmp], env,
+                     title='Verifying writable MSYS2 /tmp under Wine before opening Windows Bash',
+                     timeout=150)
         command.extend([*runtime_args, image, 'wine', guest_executable, '--noprofile', '-i'])
     print('[DEVTOOLS] Verified backend. Opening actual '+('Linux/amd64 Bash' if kind == 'linux' else 'Windows MSYS2 Bash under Wine'), flush=True)
     process = subprocess.Popen(command, env=env)

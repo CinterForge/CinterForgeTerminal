@@ -628,6 +628,12 @@ def _devtools_assets(builds: Path) -> dict[str, Path | bytes]:
     assets: dict[str, Path | bytes] = {}
     for rel in required:
         assets.update(_files_under(builds / rel, 'DevTools/Builds/' + rel))
+    # An empty MSYS2 /tmp disappears when the SDK is archived. The Windows
+    # guest overlays this directory with writable tmpfs; preserve the mount
+    # point without making the SDK tree itself writable at runtime.
+    tmp_member = 'DevTools/Builds/CinterForgeTerminal/Toolchains/Windows/MSYS2/tmp/README.txt'
+    if tmp_member not in assets:
+        assets[tmp_member] = b'MSYS2 /tmp mount point; Windows guest provides writable tmpfs.\n'
     assets['DevTools/README.txt'] = (
         'CinterForgeTerminal optional unified development tools for macOS, Linux and Windows.\n'
         'The macOS platform compiler is supplied by Xcode on macOS; it cannot be redistributed.\n'

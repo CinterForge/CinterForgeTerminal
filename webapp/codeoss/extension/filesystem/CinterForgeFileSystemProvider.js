@@ -352,5 +352,50 @@
     }
 
     C.optionalProbe = optionalProbe;
+    // A second scheme is intentionally read-only: it opens real log files that
+    // live outside the selected workspace without adding Logs to Explorer.
+    // The host validates every path against the workspace and designated Logs.
+    class HostFileSystemProvider {
+        constructor() {
+            this.emitter = new vscode.EventEmitter();
+            this.onDidChangeFile = this.emitter.event;
+        }
+
+        watch() {
+            return new vscode.Disposable(() => {});
+        }
+
+        async call(uri, operation) {
+            return request('/code/command', {operation, path: uri.path});
+        }
+
+        async stat(uri) {
+            const result = await this.call(uri, 'host-stat');
+            return {type: result.type === 'directory' ? vscode.FileType.Directory : vscode.FileType.File,
+                    ctime: 0, mtime: result.mtime || 0, size: result.size || 0};
+        }
+
+        async readDirectory(uri) {
+            const result = await this.call(uri, 'host-read-directory');
+            return (result.entries || []).map(entry => [entry.name,
+                entry.type === 'directory' ? vscode.FileType.Directory : vscode.FileType.File]);
+        }
+
+        async readFile(uri) {
+            const result = await this.call(uri, 'host-read-file');
+            return decodeBase64(result.data);
+        }
+
+        // Code-OSS validates the *complete* provider interface before it
+        // applies isReadonly. Missing methods cause extension activation to
+        // fail even though the host-log scheme is intentionally read-only.
+        // Refuse every write; do not widen host filesystem permissions.
+        writeFile(uri) { throw vscode.FileSystemError.NoPermissions(uri); }
+        createDirectory(uri) { throw vscode.FileSystemError.NoPermissions(uri); }
+        delete(uri) { throw vscode.FileSystemError.NoPermissions(uri); }
+        rename(oldUri) { throw vscode.FileSystemError.NoPermissions(oldUri); }
+    }
+
+    C.HostFileSystemProvider = HostFileSystemProvider;
     C.CinterForgeFileSystemProvider = CinterForgeFileSystemProvider;
 })(globalThis.CinterForgeCode);

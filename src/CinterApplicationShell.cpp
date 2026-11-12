@@ -48,6 +48,7 @@ extern char **environ;
     std::function<void()> debuggerAction;
     std::function<void()> copyAction;
     std::function<void()> pasteAction;
+    std::function<void(const std::string &)> codeMenuAction;
     NSMenuItem *minecraftItem;
 }
 - (void)newTerminal:(id)sender;
@@ -55,6 +56,7 @@ extern char **environ;
 - (void)openDebugger:(id)sender;
 - (void)copyTerminal:(id)sender;
 - (void)pasteTerminal:(id)sender;
+- (void)dispatchCodeMenu:(id)sender;
 @end
 @implementation CinterFileMenuTarget
 - (void)newTerminal:(id)sender
@@ -86,6 +88,12 @@ extern char **environ;
     (void)sender;
     if (pasteAction)
         pasteAction();
+}
+- (void)dispatchCodeMenu:(id)sender
+{
+    NSString *action = [sender representedObject];
+    if (codeMenuAction && [action isKindOfClass:[NSString class]])
+        codeMenuAction(std::string([action UTF8String]));
 }
 @end
 #endif
@@ -339,6 +347,12 @@ namespace cinterforge
             };
             target->quitAction = []
             { [NSApp terminate:nil]; };
+            target->codeMenuAction = [&window](const std::string &action) {
+                window.dispatch([&window, action] {
+                    window.eval("window.CinterMenuDispatch && window.CinterMenuDispatch(\"" +
+                                jsonEscape(action) + "\")");
+                });
+            };
             target->debuggerAction = [&window]
             { window.dispatch([&window]
                               { openNativeInspector(window); }); };
@@ -382,77 +396,68 @@ namespace cinterforge
             [appItem setSubmenu:appMenu];
             [bar addItem:appItem];
 
-            NSMenuItem *fileItem = [[NSMenuItem alloc] initWithTitle:@"File" action:nil keyEquivalent:@""];
-            NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
-            // New Terminal actions always open Sessions in this WebView window.
-            // Minecraft attaches to a running Bedrock server, never starts one.
-            NSDictionary *labels = @{@"mac" : @"New Mac Bash Terminal",
-                                     @"win" : @"New Windows Bash Terminal",
-                                     @"linux" : @"New Linux Bash Terminal",
-                                     @"minecraft" : @"New Minecraft Console",
-                                     @"server" : @"New Server Log Terminal"};
-            for (NSString *kind in @[ @"mac", @"win", @"linux", @"minecraft", @"server" ])
+            // Every app-wide editor menu is represented once. Code-OSS sends the
+            // live actions when its workbench is ready; these native items are
+            // enabled only in Code mode. Terminal and the quit/copy/paste items
+            // remain usable in the historical terminal modes.
+            NSArray<NSString *> *codeGroups = @[@"File", @"Edit", @"Selection", @"View",
+                                                @"Go", @"Run", @"Terminal", @"Help"];
+            NSMutableDictionary<NSString *, NSMenu *> *menus = [NSMutableDictionary dictionary];
+            for (NSString *group in codeGroups)
             {
-                NSString *key = [kind isEqualToString:@"mac"] ? @"n" : @"";
-                NSMenuItem *item = [fileMenu addItemWithTitle:labels[kind]
-                                                       action:@selector(newTerminal:)
-                                                keyEquivalent:key];
-                [item setRepresentedObject:kind];
+                NSMenuItem *entry = [[NSMenuItem alloc] initWithTitle:group action:nil keyEquivalent:@""];
+                NSMenu *menu = [[NSMenu alloc] initWithTitle:group];
+                [entry setSubmenu:menu];
+                [entry setEnabled:([group isEqualToString:@"File"] ||
+                    [group isEqualToString:@"Edit"] || [group isEqualToString:@"Terminal"])];
+                [bar addItem:entry];
+                menus[group] = menu;
+            }
+            const auto addAction = [&](NSString *group, NSString *name, NSString *action) {
+                NSMenuItem *item = [menus[group] addItemWithTitle:name
+                                                           action:@selector(dispatchCodeMenu:)
+                                                    keyEquivalent:@""];
+                [item setRepresentedObject:action];
                 [item setTarget:target];
+                return item;
+            };
+            addAction(@"File", @"Relaunch CinterForge Terminal", @"app:relaunch");
+            addAction(@"File", @"Quit CinterForge Terminal", @"app:quit");
+            // Native Edit menu owns the standard macOS keyboard equivalents.
+            // Route them to the same working actions used by mouse selection.
+            NSMenuItem *copyItem = addAction(@"Edit", @"Copy", @"edit:copy");
+            NSMenuItem *pasteItem = addAction(@"Edit", @"Paste", @"edit:paste");
+            [copyItem setKeyEquivalent:@"c"];
+            [pasteItem setKeyEquivalent:@"v"];
+            NSDictionary *terminalLabels = @{
+                @"code": @"New CinterForge Code Terminal", @"mac": @"New Mac Terminal",
+                @"linux": @"New Linux Terminal", @"win": @"New Windows Terminal",
+                @"server": @"New Server Log Terminal", @"if": @"New Z-Machine Terminal",
+                @"minecraft": @"New Minecraft Terminal"
+            };
+            for (NSString *kind in @[@"code", @"mac", @"linux", @"win", @"server", @"if", @"minecraft"])
+            {
+                NSMenuItem *item = addAction(@"Terminal", terminalLabels[kind],
+                    [@"terminal:" stringByAppendingString:kind]);
                 if ([kind isEqualToString:@"minecraft"])
                 {
                     target->minecraftItem = item;
-                    [item setEnabled:NO]; // Enabled only after confirmed Bedrock status.
+                    [item setEnabled:NO];
                 }
             }
-            [fileMenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *lanItem = [fileMenu addItemWithTitle:@"CinterForge LAN Services" action:nil keyEquivalent:@""];
-            [lanItem setSubmenu:[[NSMenu alloc] initWithTitle:@"CinterForge LAN Services"]];
-            NSMenuItem *connectItem = [[lanItem submenu] addItemWithTitle:@"Connect / Refresh…" action:@selector(newTerminal:) keyEquivalent:@""];
-            [connectItem setRepresentedObject:@"lan-popup"];
-            [connectItem setTarget:target];
-            [fileMenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *debugItem = [fileMenu addItemWithTitle:@"Open Debugger" action:@selector(openDebugger:) keyEquivalent:@"d"];
-            [debugItem setTarget:target];
-            [fileMenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *quitItem = [fileMenu addItemWithTitle:@"Quit" action:@selector(quitTerminal:) keyEquivalent:@""];
-            [quitItem setTarget:target];
-            [fileItem setSubmenu:fileMenu];
-            [bar addItem:fileItem];
-
-            NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:@"Edit" action:nil keyEquivalent:@""];
-            NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
-            for (NSString *name in @[ @"Undo", @"Redo", @"Cut" ])
+            // These CinterForge catalogs stay at the far right of both bars.
+            for (NSString *group in @[@"LAN", @"Macintosh", @"BeOS", @"NeXTSTEP", @"Machines"])
             {
-                NSMenuItem *item = [editMenu addItemWithTitle:name action:nil keyEquivalent:@""];
-                [item setEnabled:NO];
-            }
-            [editMenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *copyItem = [editMenu addItemWithTitle:@"Copy" action:@selector(copyTerminal:) keyEquivalent:@"c"];
-            [copyItem setTarget:target];
-            NSMenuItem *pasteItem = [editMenu addItemWithTitle:@"Paste" action:@selector(pasteTerminal:) keyEquivalent:@"v"];
-            [pasteItem setTarget:target];
-            [editMenu addItem:[NSMenuItem separatorItem]];
-            for (NSString *name in @[ @"Delete", @"Select All" ])
-            {
-                NSMenuItem *item = [editMenu addItemWithTitle:name action:nil keyEquivalent:@""];
-                [item setEnabled:NO];
-            }
-            [editItem setSubmenu:editMenu];
-            [bar addItem:editItem];
-
-            // Mirror the four HTML historical-machine menus from the exact staged
-            // profiles manifest. No hard-coded partial Mac/BeOS/NeXTSTEP catalog.
-            NSArray<NSString *> *groups = @[ @"Terminals", @"Macintosh", @"BeOS", @"NeXTSTEP" ];
-            NSMutableDictionary<NSString *, NSMenu *> *menus = [NSMutableDictionary dictionary];
-            for (NSString *group in groups)
-            {
-                NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:group action:nil keyEquivalent:@""];
+                NSMenuItem *entry = [[NSMenuItem alloc] initWithTitle:group action:nil keyEquivalent:@""];
                 NSMenu *menu = [[NSMenu alloc] initWithTitle:group];
-                [item setSubmenu:menu];
-                [bar addItem:item];
+                [entry setSubmenu:menu];
+                [bar addItem:entry];
                 menus[group] = menu;
             }
+            NSMenuItem *connect = [menus[@"LAN"] addItemWithTitle:@"Connect / Refresh…"
+                                                            action:@selector(newTerminal:) keyEquivalent:@""];
+            [connect setRepresentedObject:@"lan-popup"];
+            [connect setTarget:target];
             fs::path stagedProfiles = fs::path(cfg.service).parent_path() / "terminal_styles.json";
             NSData *data = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:stagedProfiles.string().c_str()]];
             NSDictionary *catalog = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
@@ -488,7 +493,7 @@ namespace cinterforge
                 if ([identifier isEqualToString:@"quadra-650"] || [added containsObject:identifier])
                     continue;
                 [added addObject:identifier];
-                NSString *group = @"Terminals";
+                NSString *group = @"Machines";
                 if ([entry[@"kind"] isEqualToString:@"emulator"])
                 {
                     if ([identifier hasPrefix:@"beos-"])
@@ -593,6 +598,17 @@ namespace cinterforge
 #endif
         }
 
+        std::string nativeBootstrapUrl(const std::string &rpc, const std::string &base)
+        {
+            // The private Host RPC returns this grant only to a local native
+            // launch. Never print it, persist it, or expose it to remote windows.
+            static const std::regex grant(R"re("native_grant"\s*:\s*"([A-Za-z0-9_-]{40,128})")re");
+            std::smatch match;
+            if (!std::regex_search(rpc, match, grant))
+                throw std::runtime_error("Native Terminal startup grant is missing");
+            return base + "_native_open?key=" + match[1].str();
+        }
+
         std::string readyUrl(const std::string &rpc)
         {
             // An application RPC error is a valid JSONL response. Never navigate to
@@ -678,15 +694,22 @@ namespace cinterforge
         PythonHost host;
         bool started = false;
         bool hostRunning = false;
+        std::atomic<bool> relaunchRequested{false};
         try
         {
             std::string url = config.connect_url;
-            if (url.empty()) {
+            std::string navigationUrl = url;
+            // This machine's own advertised loopback service is still a native
+            // launch; use the existing private grant instead of browser login.
+            const bool ownLoopback = url == "http://127.0.0.1:20300/" ||
+                                     url == "http://127.0.0.1:20300";
+            if (url.empty() || ownLoopback) {
                 host.start(config.python, config.worker, config.service, std::chrono::seconds(10));
                 hostRunning = true;
                 const std::string reply = host.call("start", "{\"builds\":\"" + jsonEscape(config.builds) + "\"}",
                                                     std::chrono::seconds(15));
                 url = readyUrl(reply);
+                navigationUrl = nativeBootstrapUrl(reply, url);
                 started = true;
             }
             std::cerr << "[CinterForgeTerminal] managed HTTP service ready: " << url << '\n';
@@ -746,6 +769,11 @@ namespace cinterforge
                 });
                 return R"("tab-opened")";
             }
+            if (std::regex_search(args,std::regex(R"re("action"\s*:\s*"relaunch")re"))) {
+                relaunchRequested.store(true);
+                window.dispatch([&window] { window.terminate(); });
+                return R"("relaunching")";
+            }
             if (std::regex_search(args,std::regex(R"re("action"\s*:\s*"quit")re"))) {
                 window.dispatch([&window] { window.terminate(); });
                 return R"("closing")";
@@ -774,14 +802,78 @@ namespace cinterforge
             if (args.find("\"event\":\"minecraft-menu\"") != std::string::npos) {
                 const bool enabled=args.find("\"enabled\":true") != std::string::npos;
                 window.dispatch([enabled] {
-                    NSMenu *file=[[[NSApp mainMenu] itemWithTitle:@"File"] submenu];
-                    for (NSMenuItem *item in [file itemArray])
-                        if ([[item representedObject] isEqual:@"minecraft"])
+                    NSMenu *terminal=[[[NSApp mainMenu] itemWithTitle:@"Terminal"] submenu];
+                    for (NSMenuItem *item in [terminal itemArray])
+                        if ([[item representedObject] isEqual:@"terminal:minecraft"])
                             [item setEnabled:enabled];
                 });
             }
 #endif
 #ifdef __APPLE__
+            if (args.find("\"event\":\"code-menu-mode\"") != std::string::npos) {
+                const bool enabled = args.find("\"enabled\":true") != std::string::npos;
+                window.dispatch([enabled] {
+                    for (NSString *name in @[@"Selection", @"View", @"Go", @"Run", @"Help"])
+                        [[NSApp.mainMenu itemWithTitle:name] setEnabled:enabled];
+                });
+            }
+            if (args.find("\"event\":\"code-menu-model\"") != std::string::npos) {
+                const std::string payload = args;
+                window.dispatch([payload] {
+                    NSData *data = [NSData dataWithBytes:payload.data() length:payload.size()];
+                    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    NSDictionary *object = [json isKindOfClass:[NSArray class]] && [json count]
+                        ? [json firstObject] : json;
+                    NSString *name = [object isKindOfClass:[NSDictionary class]] ? object[@"name"] : nil;
+                    NSArray *items = [object isKindOfClass:[NSDictionary class]] ? object[@"items"] : nil;
+                    if (![name isKindOfClass:[NSString class]] || !name.length) return;
+                    NSMenu *menu = [[NSApp.mainMenu itemWithTitle:name] submenu];
+                    if (!menu || ![items isKindOfClass:[NSArray class]]) return;
+                    [menu removeAllItems];
+                    CinterFileMenuTarget *target = (CinterFileMenuTarget *)
+                        [[[NSApp.mainMenu itemWithTitle:@"LAN"] submenu] itemAtIndex:0].target;
+                    // Reproduce Monaco submenus recursively; all leaf commands
+                    // route back to the Code workbench, never native substitutes.
+                    std::function<void(NSMenu *, NSArray *, int)> fill =
+                        [&](NSMenu *destination, NSArray *values, int depth) {
+                        if (depth > 4 || values.count > 120) return;
+                        for (id item in values) {
+                            if (![item isKindOfClass:[NSDictionary class]]) continue;
+                            // Separator entries come directly from Code-OSS's
+                            // IMenuService. Do not treat them as commands.
+                            if ([item[@"separator"] respondsToSelector:@selector(boolValue)] &&
+                                [item[@"separator"] boolValue]) {
+                                [destination addItem:[NSMenuItem separatorItem]];
+                                continue;
+                            }
+                            NSString *title = item[@"title"], *action = item[@"action"];
+                            if (![title isKindOfClass:[NSString class]] || !title.length ||
+                                ![action isKindOfClass:[NSString class]] || !action.length) continue;
+                            NSMenuItem *entry = [destination addItemWithTitle:title
+                                action:@selector(dispatchCodeMenu:) keyEquivalent:@""];
+                            [entry setRepresentedObject:action];
+                            [entry setTarget:target];
+                            // Code-OSS refresh replaces the whole native Edit menu.
+                            // Keep Command-C/V bound to the live workbench actions.
+                            if ([name isEqualToString:@"Edit"] && depth == 0) {
+                                if ([title isEqualToString:@"Copy"])
+                                    [entry setKeyEquivalent:@"c"];
+                                else if ([title isEqualToString:@"Paste"])
+                                    [entry setKeyEquivalent:@"v"];
+                            }
+                            [entry setEnabled:![item[@"enabled"] respondsToSelector:@selector(boolValue)] ||
+                                [item[@"enabled"] boolValue]];
+                            NSArray *children = item[@"children"];
+                            if ([children isKindOfClass:[NSArray class]] && children.count) {
+                                NSMenu *sub = [[NSMenu alloc] initWithTitle:title];
+                                [entry setSubmenu:sub];
+                                fill(sub, children, depth + 1);
+                            }
+                        }
+                    };
+                    fill(menu, items, 0);
+                });
+            }
             if (args.find("\"event\":\"lan-peers\"") != std::string::npos) {
                 // Parse only after dispatch: no autoreleased Foundation object
                 // crosses the native WebView thread boundary.
@@ -791,8 +883,7 @@ namespace cinterforge
                     id parsed = [NSJSONSerialization JSONObjectWithData:encoded options:0 error:nil];
                     NSDictionary *detail = [parsed isKindOfClass:[NSArray class]] && [parsed count] ? [parsed firstObject] : parsed;
                     NSArray *peers = [detail isKindOfClass:[NSDictionary class]] ? detail[@"peers"] : nil;
-                    NSMenu *file = [[[NSApp mainMenu] itemWithTitle:@"File"] submenu];
-                    NSMenu *list = [[file itemWithTitle:@"CinterForge LAN Services"] submenu];
+                    NSMenu *list = [[[NSApp mainMenu] itemWithTitle:@"LAN"] submenu];
                     if (!list) return;
                     while ([list numberOfItems] > 1) [list removeItemAtIndex:1];
                     CinterFileMenuTarget *target = (CinterFileMenuTarget *)[[list itemAtIndex:0] target];
@@ -820,14 +911,18 @@ namespace cinterforge
             if (isMuseum) museum.store(true);
             if (isTerminal) returned.store(true);
             if (isError) failed.store(true);
-            std::cerr << "[CinterForgeTerminal] UI event: " << args << '\n';
+            if (args.find("\"event\":\"code-menu-model\"") == std::string::npos &&
+                args.find("\"event\":\"lan-peers\"") == std::string::npos)
+                std::cerr << "[CinterForgeTerminal] UI event: " << args << '\n';
             if (config.accept_ui && (isError || (ready.load() && museum.load() && returned.load())))
                 window.dispatch([&window] { window.terminate(); });
             return R"("ok")"; });
             // The acceptance flag is part of the real loopback page navigation.
             // Unlike WebView init scripts, URL parameters have consistent timing
             // on WKWebView, WebKitGTK and WebView2. It grants no host privileges.
-            window.navigate(config.accept_ui ? url + "?accept-ui=1" : url);
+            window.navigate(config.accept_ui
+                ? navigationUrl + (navigationUrl.find('?') == std::string::npos ? "?" : "&") + "accept-ui=1"
+                : navigationUrl);
             std::thread watchdog;
             if (config.accept_ui)
             {
@@ -887,6 +982,10 @@ namespace cinterforge
             }
             if (started) { host.call("stop", "{}", std::chrono::seconds(5)); started = false; }
             if (hostRunning) host.stop();
+            // Only launch the updated executable AFTER the old HTTP host has
+            // released 20300. Never run two live owners during replacement.
+            if (relaunchRequested.load() && !config.accept_ui && config.connect_url.empty())
+                spawnNewTerminal(config);
             return 0;
         }
         catch (...)
