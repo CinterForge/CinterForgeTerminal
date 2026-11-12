@@ -317,8 +317,13 @@ class PublishChannelTests(unittest.TestCase):
             downloads.append(name)
             dest.write_bytes(manifest if name == 'four-artifacts.json' else self.files[name].read_bytes())
         sdk = release.artifact_filename('devtools')
-        with (mock.patch.object(r2, '_list_remote', return_value=remote),
+        # The Mac artifact fixture above contains text, not a real DMG.
+        # Exercise the macOS verification call without invoking hdiutil on that
+        # synthetic payload. Production verification remains unmodified.
+        with (mock.patch('sys.platform', 'darwin'),
+              mock.patch.object(r2, '_list_remote', return_value=remote),
               mock.patch.object(r2, '_get_file', side_effect=fetch),
+              mock.patch('host.mac_dmg.verify_dmg') as verify_mac_dmg,
               mock.patch.object(release, '_verify_release_zip'),
               mock.patch.object(release, '_replace_generated_output', side_effect=lambda src,dst,builds: src.replace(dst))):
             result = release._download_four_to(
@@ -326,6 +331,10 @@ class PublishChannelTests(unittest.TestCase):
                 self.builds / 'CinterForgeTerminal/Publish/TestDestination',
                 prefix='CinterForgeTerminal/Distribution/beta',
                 reuse_verified={sdk: self.report['artifacts']['devtools']['sha256']})
+        verify_mac_dmg.assert_called_once_with(
+            self.builds.resolve() / 'Intermediates/CinterForgeTerminal/CloudflareDownloads'
+            / HOST_RELEASE / release.artifact_filename('mac'),
+            self.builds, app_name=release.APP_ROOTS['mac'])
         self.assertEqual(result, self.report)
         self.assertNotIn(sdk, downloads)
         self.assertIn(release.artifact_filename('linux'), downloads)
