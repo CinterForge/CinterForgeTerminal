@@ -160,6 +160,80 @@ class SharedGuestVMTests(unittest.TestCase):
                 terminal._ensure_docker(self.sdk, self.env, self.workspace)
         checked.assert_not_called()
 
+    def test_running_vm_mount_verification_uses_real_colima_ssh_profile(self):
+        """An already healthy guest must be reused, not falsely reconfigured.
+
+        Colima's `ssh` subcommand does *not* take the profile as a positional
+        argument. That old syntax attempted to run `t` in the guest, causing
+        every mount probe to return nonzero and every shell startup to fail.
+        """
+        ssh_calls = []
+        expected_mounts = [(Path('/'), '/host/mac'),
+                           (Path('/Volumes'), '/host/volumes')]
+        def run(argv, **kwargs):
+            if argv[1] == 'info':
+                return subprocess.CompletedProcess(argv, 0, '29.5.2', '')
+            if argv[1] == 'ssh':
+                self.assertEqual(argv[2:5], ['--profile', terminal.PROFILE, '--'])
+                self.assertEqual(argv[5:7], ['test', '-d'])
+                self.assertTrue(argv[-1].startswith('/host/'))
+                ssh_calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, '', '')
+            raise AssertionError('Unexpected restart or subprocess: ' + str(argv))
+        with (mock.patch.object(terminal, '_mac_host_mounts', return_value=expected_mounts),
+              mock.patch.object(terminal.subprocess, 'run', side_effect=run),
+              mock.patch.object(terminal, '_run_checked') as checked):
+            docker = terminal._ensure_docker(self.sdk, self.env, self.workspace)
+        checked.assert_not_called()
+        self.assertEqual(docker, str(self.sdk / 'mac/env/bin/docker'))
+        self.assertGreaterEqual(len(ssh_calls), 3)
+
+    def test_unavailable_socket_checks_guest_containers_with_correct_profile(self):
+        """Recover an idle guest only after inspecting its actual Docker service."""
+        ops = []
+        state = {'socket': False, 'guest_ps': 0}
+        def run(argv, **kwargs):
+            if argv[1] == 'info':
+                return subprocess.CompletedProcess(argv, 0 if state['socket'] else 1, '', '')
+            if argv[1] == 'status':
+                return subprocess.CompletedProcess(argv, 0, 'running', '')
+            if argv[1] == 'ssh':
+                self.assertEqual(argv[2:5], ['--profile', terminal.PROFILE, '--'])
+                if argv[5:7] == ['docker', 'ps']:
+                    self.assertEqual(argv[-1], '--quiet')
+                    state['guest_ps'] += 1
+                    return subprocess.CompletedProcess(argv, 0, '', '')
+                if argv[5:7] == ['test', '-d']:
+                    return subprocess.CompletedProcess(argv, 0, '', '')
+            raise AssertionError(argv)
+        def checked(argv, env, **kwargs):
+            ops.append(argv[1])
+            if argv[1] == 'start':
+                state['socket'] = True
+        with (mock.patch.object(terminal, '_mac_host_mounts', return_value=[(Path('/'), '/host/mac')]),
+              mock.patch.object(terminal.subprocess, 'run', side_effect=run),
+              mock.patch.object(terminal, '_run_checked', side_effect=checked)):
+            terminal._ensure_docker(self.sdk, self.env, self.workspace)
+        self.assertEqual(ops, ['stop', 'start'])
+        self.assertEqual(state['guest_ps'], 1)
+
+    def test_reboot_docker_uses_named_colima_ssh_profile(self):
+        commands = []
+        def run(argv, **kwargs):
+            self.assertEqual(argv[1:5], ['ssh', '--profile', terminal.PROFILE, '--'])
+            commands.append(argv)
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        with (mock.patch.object(terminal, 'sdk_root', return_value=self.sdk),
+              mock.patch.object(terminal, '_env', return_value=self.env),
+              mock.patch.object(terminal, '_guest_workspace', return_value=self.workspace),
+              mock.patch.object(terminal, '_stop_owned_guests_locked'),
+              mock.patch.object(terminal, '_start_guest_locked'),
+              mock.patch.object(terminal, '_docker_call', return_value=subprocess.CompletedProcess([], 0, '29.5.2', '')),
+              mock.patch.object(terminal.subprocess, 'run', side_effect=run)):
+            result = terminal.reboot_runtime_guests('docker')
+        self.assertEqual(result['ready'], True)
+        self.assertEqual(len(commands), 1)
+
     def test_windows_shell_keeps_real_wine_msys2_and_writable_tmp(self):
         code = (ROOT / 'webapp/CinterForgeTerminal.py').read_text()
         self.assertIn("'--tmpfs', '/msys2/tmp:rw,nosuid,nodev,size=64m'", code)

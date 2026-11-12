@@ -235,8 +235,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				CINTER_MAC_NOTARY_PROFILE = "";
-				CODE_SIGN_IDENTITY = "Developer ID Application";
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Mac Developer";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Developer ID Application";
 				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
@@ -256,7 +256,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.cinterforge.terminal;
 				PRODUCT_NAME = "CinterForge Terminal";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				"PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]" = "CinterForge Mac Development";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]" = "CinterForge Terminal App";
 				SKIP_INSTALL = NO;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 			};

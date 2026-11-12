@@ -329,14 +329,14 @@ class OptionalGuestBashTests(unittest.TestCase):
              mock.patch.object(self.adapter, 'sdk_root', return_value=Path('/sdk')), \
              mock.patch.object(self.adapter, '_env', return_value={'PATH':'p'}), \
              mock.patch.object(self.adapter, '_guest_workspace', return_value=Path('/Source')), \
-             mock.patch.object(self.adapter, 'boot_runtime_guests', return_value={'installed':True}) as boot, \
+             mock.patch.object(self.adapter, '_wait_for_app_guests') as boot, \
              mock.patch.object(self.adapter, '_image_archive') as image, \
              mock.patch.object(self.adapter, 'install_devtools') as installer, \
              mock.patch.object(self.adapter.subprocess, 'Popen') as popen:
             popen.return_value.wait.return_value=0
             self.assertEqual(self.adapter.guest_shell_main('linux'),0)
             args=popen.call_args.args[0]
-        boot.assert_called_once()
+        boot.assert_called_once_with('linux')
         image.assert_not_called()  # Image lifecycle belongs to app bootstrap
         installer.assert_not_called()
         self.assertEqual(args[:6], ['/sdk/mac/env/bin/docker', 'exec', '-it',
@@ -349,12 +349,12 @@ class OptionalGuestBashTests(unittest.TestCase):
              mock.patch.object(self.adapter, 'sdk_root', return_value=Path('/sdk')), \
              mock.patch.object(self.adapter, '_env', return_value={'PATH':'p'}), \
              mock.patch.object(self.adapter, '_guest_workspace', return_value=Path('/Source')), \
-             mock.patch.object(self.adapter, 'boot_runtime_guests', return_value={'installed':True}) as boot, \
+             mock.patch.object(self.adapter, '_wait_for_app_guests') as boot, \
              mock.patch.object(self.adapter.subprocess, 'Popen') as popen:
             popen.return_value.wait.return_value=0
             self.assertEqual(self.adapter.guest_shell_main('win'),0)
             args=popen.call_args.args[0]
-        boot.assert_called_once()
+        boot.assert_called_once_with('win')
         self.assertEqual(args[:6], ['/sdk/mac/env/bin/docker', 'exec', '-it',
                                     '--workdir', '/host/mac/Source', 'cinterforge-terminal-t-win'])
         self.assertEqual(args[-4:], ['wine', r'Z:\msys2\usr\bin\bash.exe', '--noprofile', '-i'])
@@ -544,11 +544,11 @@ class WorkspaceGuestAndHtmlMenuTests(unittest.TestCase):
                  mock.patch.object(self.app.platform,'system',return_value='Darwin'), \
                  mock.patch.object(self.app,'sdk_root',return_value=Path('/sdk')), \
                  mock.patch.object(self.app,'_env',return_value={}), \
-                 mock.patch.object(self.app,'boot_runtime_guests',return_value={'installed':True}) as boot, \
+                 mock.patch.object(self.app,'_wait_for_app_guests') as boot, \
                  mock.patch.object(self.app.subprocess,'Popen') as popen:
                 popen.return_value.wait.return_value=0
                 self.assertEqual(self.app.guest_shell_main('linux'),0)
-            boot.assert_called_once()
+            boot.assert_called_once_with('linux')
             args=popen.call_args.args[0]
             self.assertIn('--workdir',args)
             self.assertIn('/host/mac'+str(source),args)
@@ -563,11 +563,11 @@ class WorkspaceGuestAndHtmlMenuTests(unittest.TestCase):
                  mock.patch.object(self.app.platform,'system',return_value='Darwin'), \
                  mock.patch.object(self.app,'sdk_root',return_value=Path('/sdk')), \
                  mock.patch.object(self.app,'_env',return_value={}), \
-                 mock.patch.object(self.app,'boot_runtime_guests',return_value={'installed':True}) as boot, \
+                 mock.patch.object(self.app,'_wait_for_app_guests') as boot, \
                  mock.patch.object(self.app.subprocess,'Popen') as popen:
                 popen.return_value.wait.return_value=0
                 self.assertEqual(self.app.guest_shell_main('win'),0)
-            boot.assert_called_once()
+            boot.assert_called_once_with('win')
             args=popen.call_args.args[0]
             self.assertIn('/host/mac'+str(source),args)
             self.assertIn('cinterforge-terminal-t-win',args)
@@ -659,3 +659,100 @@ class MacEditShortcutSourceTests(unittest.TestCase):
         self.assertIn('[title isEqualToString:@"Paste"]', self.source)
         self.assertIn('[entry setKeyEquivalent:@"c"]', self.source)
         self.assertIn('[entry setKeyEquivalent:@"v"]', self.source)
+
+
+class AppOwnedGuestWarmupTests(unittest.TestCase):
+    """App boots one pair; opening a tab only observes readiness and attaches."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = load_module('cinter_app_guest_warmup',
+                              CINTERFORGETERMINAL_COMMANDS_REPO / 'webapp/CinterForgeTerminal.py')
+
+    def server(self):
+        from types import SimpleNamespace
+        logs=[]
+        server=SimpleNamespace(guest_start_lock=threading.Lock(),
+                               guest_start_state='not-installed', guest_start_error='',
+                               native_parent_pid=1234, mutable_builds=Path('/test/Builds'),
+                               log_event=logs.append)
+        return server, logs
+
+    def test_launch_boot_scheduled_once_and_both_guests_mark_ready(self):
+        server, logs=self.server()
+        with mock.patch.object(self.app,'sdk_root',return_value=Path('/sdk')), \
+             mock.patch.object(self.app,'_start_runtime_watchdog'), \
+             mock.patch.object(self.app,'_runtime_logs_root',return_value=Path('/logs')), \
+             mock.patch.object(self.app.threading,'Thread') as thread:
+            self.assertEqual(self.app._schedule_guest_boot(server)['state'],'starting')
+            self.assertEqual(self.app._schedule_guest_boot(server)['state'],'starting')
+            thread.assert_called_once()
+            thread.return_value.start.assert_called_once()
+        with mock.patch.object(self.app,'boot_runtime_guests',return_value={
+                'installed':True,'guests':['linux','win']}) as boot:
+            self.app._boot_guests_logged(server)
+        boot.assert_called_once()
+        self.assertEqual(self.app._guest_boot_snapshot(server)['state'],'ready')
+        self.assertIn('ready',logs[-1])
+
+    def test_launch_without_devtools_never_starts_vm_or_watchdog(self):
+        server,_=self.server()
+        with mock.patch.object(self.app,'sdk_root',return_value=None), \
+             mock.patch.object(self.app,'_start_runtime_watchdog') as watchdog, \
+             mock.patch.object(self.app.threading,'Thread') as thread:
+            self.assertEqual(self.app._schedule_guest_boot(server)['state'],'not-installed')
+        watchdog.assert_not_called()
+        thread.assert_not_called()
+
+    def test_failed_warmup_is_reported_not_retried_by_opening_tab(self):
+        server,_=self.server()
+        server.guest_start_state='starting'
+        with mock.patch.object(self.app,'boot_runtime_guests',side_effect=RuntimeError('Colima mount failed')) as boot:
+            self.app._boot_guests_logged(server)
+        boot.assert_called_once()
+        self.assertEqual(self.app._guest_boot_snapshot(server)['state'],'failed')
+        with mock.patch.object(self.app,'_api',return_value=self.app._guest_boot_snapshot(server)) as api, \
+             mock.patch.object(self.app,'boot_runtime_guests') as forbidden:
+            with self.assertRaisesRegex(RuntimeError,'Colima mount failed'):
+                self.app._wait_for_app_guests('linux',timeout_seconds=5)
+        forbidden.assert_not_called()
+        api.assert_called_once_with('/api/lifecycle/guest-status')
+
+    def test_tab_waits_for_app_boot_then_execs_without_new_boot(self):
+        with mock.patch.object(self.app,'_api',side_effect=[{'state':'starting'},{'state':'ready'}]) as api, \
+             mock.patch.object(self.app.time,'sleep') as sleep, \
+             mock.patch.object(self.app,'boot_runtime_guests') as forbidden:
+            self.app._wait_for_app_guests('win',timeout_seconds=5)
+        self.assertEqual(api.call_count,2)
+        sleep.assert_called_once_with(1)
+        forbidden.assert_not_called()
+
+    def test_native_server_launch_schedules_guests_before_any_session_tab(self):
+        from types import SimpleNamespace
+        TOOLCHAIN_SIGN_OF_LIFE_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TOOLCHAIN_SIGN_OF_LIFE_ROOT) as temp:
+            builds=Path(temp)/'Builds'
+            (builds/'webapp').mkdir(parents=True)
+            server=SimpleNamespace(mutable_builds=builds,
+                code_workspace=SimpleNamespace(details=lambda: {'cwd':str(builds.parent)}),
+                log=SimpleNamespace(path=builds/'Logs/server.log'),
+                origin='http://127.0.0.1:20300',server_port=20300,system='mac',
+                serve_forever=mock.Mock(),stop=mock.Mock(), native_grant='test-native')
+            with mock.patch.dict(os.environ,{}), \
+                 mock.patch.object(self.app,'ASSETS',builds/'webapp'), \
+                 mock.patch.object(self.app,'_server',None), \
+                 mock.patch.object(self.app,'_server_thread',None), \
+                 mock.patch.object(self.app.platform,'system',return_value='Darwin'), \
+                 mock.patch.object(self.app,'_existing_lan_owner',return_value=None), \
+                 mock.patch.object(self.app,'CinterShellServer',return_value=server), \
+                 mock.patch.object(self.app,'_steam_library_for_installed_root',
+                                   return_value=Path('/real/steamapps')) as steam, \
+                 mock.patch.object(self.app,'_write_lan_owner'), \
+                 mock.patch.object(self.app,'_schedule_guest_boot',return_value={'state':'starting'}) as warmup, \
+                 mock.patch.object(self.app.threading,'Thread') as threads:
+                result=self.app.handle('start',{'builds':str(builds)})
+                self.assertEqual(result['port'],20300)
+                warmup.assert_called_once_with(server)
+                steam.assert_called_once_with(builds)
+                self.assertEqual(os.environ['CINTER_STEAMAPPS'],'/real/steamapps')
+                self.assertEqual(threads.call_count,2)  # HTTP + native-parent watcher; no PTY

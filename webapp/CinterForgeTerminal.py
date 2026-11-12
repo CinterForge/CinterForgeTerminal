@@ -1142,8 +1142,8 @@ def _remove_lan_owner(server: 'CinterShellServer') -> None:
         pass
 
 
-def _existing_lan_owner(builds: Path) -> dict | None:
-    """Reuse only a live Terminal HTTP listener with a verified owner receipt.
+def _existing_lan_owner(builds: Path, *, orphaned: bool = False) -> dict | None:
+    """Find a verified Terminal listener, distinguishing active from orphaned owners.
 
     A developer build uses Builds for runtime state, while an installed app
     uses the selected Steam library. Both may start the *same* account's
@@ -1177,19 +1177,21 @@ def _existing_lan_owner(builds: Path) -> dict | None:
                     not re.fullmatch(r'[0-9a-f]{32}', str(record.get('instance', ''))) or
                     not re.fullmatch(r'[A-Za-z0-9_-]{40,128}', str(record.get('native_grant', '')))):
                 continue
-            # A crashed Xcode native process can leave its Python HTTP child
-            # alive briefly. Never attach to a server whose owning window has
-            # died; its watchdog will close the listener and release 20300.
+            # Do not mistake a stale receipt (or a reused PID) for authority.
+            # Only a live service that proves its private grant AND instance
+            # can be reused or asked to release its own listener.
             native_pid = record.get('native_pid')
-            if native_pid is not None:
-                if type(native_pid) is not int or native_pid <= 1:
-                    continue
-                try:
-                    os.kill(native_pid, 0)
-                except ProcessLookupError:
-                    continue
-                except PermissionError:
-                    continue
+            if type(native_pid) is not int or native_pid <= 1:
+                continue
+            try:
+                os.kill(native_pid, 0)
+                native_alive = True
+            except ProcessLookupError:
+                native_alive = False
+            except PermissionError:
+                continue
+            if native_alive == orphaned:
+                continue
             request = Request(f'http://127.0.0.1:{LAN_HTTP_PORT}/healthz',
                               headers={'X-Cinter-Owner': record['native_grant']})
             with urlopen(request, timeout=1.5) as response:
@@ -1199,6 +1201,30 @@ def _existing_lan_owner(builds: Path) -> dict | None:
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             continue
     return None
+
+
+def _request_orphaned_lan_shutdown(builds: Path) -> bool:
+    """Ask a *verified* leftover Terminal HTTP worker to release port 20300.
+
+    Never kill by port/PID. A 0600 owner receipt, challenge-response over
+    loopback, dead native owner, and the server's own orphan check are all
+    required. Foreign listeners and healthy Terminal windows remain untouched.
+    """
+    record = _existing_lan_owner(builds, orphaned=True)
+    if record is None:
+        return False
+    from urllib.request import Request, urlopen
+    request = Request(f'http://127.0.0.1:{LAN_HTTP_PORT}/_native_orphan_shutdown',
+                      data=b'{}', method='POST', headers={
+                          'Content-Type': 'application/json',
+                          'X-Cinter-Owner': record['native_grant'],
+                          'X-Cinter-Instance': record['instance']})
+    try:
+        with urlopen(request, timeout=2) as response:
+            result = json.loads(response.read(2048))
+        return result.get('stopping') is True and result.get('instance') == record['instance']
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
 
 
 CINTERFORGE_PORT_FIRST = 20300
@@ -1747,6 +1773,8 @@ class CinterShellServer(ThreadingHTTPServer):
         log_directory = _runtime_logs_root(self.mutable_builds)
         self._stopping_lock = threading.Lock()
         self._stopping = False
+        self.native_parent_pid = os.getppid()
+        self._http_serving = threading.Event()
         # Expose the already-designated Logs tree to the read-only Code-OSS
         # host-file provider; a symlink resolving outside it is still rejected.
         self.code_workspace.host_log_roots = [next(
@@ -1758,6 +1786,10 @@ class CinterShellServer(ThreadingHTTPServer):
         self.bedrock_terminal_lock = threading.Lock()
         self.bedrock_terminal_requests = deque()
         self.devtools_requested = False
+        # One app-owned guest initialization, never one per opened terminal tab.
+        self.guest_start_lock = threading.Lock()
+        self.guest_start_state = 'not-installed'
+        self.guest_start_error = ''
         # Native app consumes these atomic reboot requests over its existing
         # private JSON-RPC pipe, never through an unauthenticated browser menu.
         self.lifecycle_actions = deque()
@@ -1807,33 +1839,45 @@ class CinterShellServer(ThreadingHTTPServer):
     def log_event(self, message: str) -> None:
         self.log.append(message)
 
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
+        self._http_serving.set()
+        try:
+            super().serve_forever(poll_interval=poll_interval)
+        finally:
+            self._http_serving.clear()
+
     def stop(self) -> None:
         with self._stopping_lock:
             if self._stopping:
                 return
             self._stopping = True
-        if self.discovery is not None:
-            self.discovery.close()
-        if self.lan:
-            _remove_lan_owner(self)
-        for item in list(self.sessions.values()):
-            item.close()
-        with self.code_sessions_lock:
-            code_sessions = list(self.code_sessions.values())
-            self.code_sessions.clear()
-        for entry in code_sessions:
-            if isinstance(entry, TerminalSession):
-                entry.close()
-        self.sessions.clear()
-        # Do not stop the shared guest VM when only the HTTP server reboots.
-        # The native app's shutdown_runtime RPC / detached owner watchdog
-        # tears down both guests and Colima only when the APP actually exits.
-        if self.bedrock is not None:
-            self.bedrock.stop()
-        self.log_event('backend shutdown completed')
-        self.shutdown()
-        self.server_close()
-        self.log.close()
+        # Release the listener FIRST. Slow PTY/Bedrock cleanup must not hold
+        # 20300 after a native Quit, Xcode Stop, or an authenticated recovery.
+        try:
+            if self._http_serving.is_set():
+                self.shutdown()
+        finally:
+            self.server_close()
+            if self.lan:
+                _remove_lan_owner(self)
+        try:
+            if self.discovery is not None:
+                self.discovery.close()
+            for item in list(self.sessions.values()):
+                item.close()
+            with self.code_sessions_lock:
+                code_sessions = list(self.code_sessions.values())
+                self.code_sessions.clear()
+            for entry in code_sessions:
+                if isinstance(entry, TerminalSession):
+                    entry.close()
+            self.sessions.clear()
+            # Guest VM is application-owned, not HTTP-reload-owned.
+            if self.bedrock is not None:
+                self.bedrock.stop()
+            self.log_event('backend shutdown completed')
+        finally:
+            self.log.close()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2282,6 +2326,12 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, OverflowError) as error:
                 self._json(400, {'error': str(error)})
             return
+        if path == '/api/lifecycle/guest-status':
+            if not self._authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            self._json(200, _guest_boot_snapshot(self.server))
+            return
         if path == '/api/status':
             if not self._authorized():
                 self._json(403, {'error': 'not authorized'})
@@ -2539,6 +2589,29 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = urlsplit(self.path).path
+        if route == '/_native_orphan_shutdown':
+            # An orphan can terminate ITSELF, never a PID supplied by a caller.
+            # Only a loopback caller with the private grant/instance may ask.
+            allowed = (self.client_address[0] in ('127.0.0.1', '::1') and
+                       secrets.compare_digest(self.headers.get('X-Cinter-Owner', ''),
+                                              self.server.native_grant) and
+                       secrets.compare_digest(self.headers.get('X-Cinter-Instance', ''),
+                                              self.server.lan_id) and
+                       os.getppid() != self.server.native_parent_pid)
+            if not allowed:
+                self._json(403, {'error': 'Orphaned native owner verification required'})
+                return
+            self._json(200, {'stopping': True, 'instance': self.server.lan_id})
+            def release_orphan() -> None:
+                global _server
+                try:
+                    self.server.stop()
+                finally:
+                    if _server is self.server:
+                        _server = None
+            threading.Thread(target=release_orphan, name='cinter-http-orphan-recovery',
+                             daemon=True).start()
+            return
         if route == '/code/command' or route in (
                 '/host/code-shell-open', '/host/code-shell-write',
                 '/host/code-shell-close', '/host/code-shell-resize'):
@@ -2605,8 +2678,8 @@ class Handler(BaseHTTPRequestHandler):
                 if route == '/api/lifecycle/guest-boot':
                     if body:
                         raise ValueError('Guest boot takes no options')
-                    result = boot_runtime_guests()
-                    self._json(200, {'ready': True, **result})
+                    result = _schedule_guest_boot(self.server)
+                    self._json(202 if result['state'] == 'starting' else 200, result)
                 else:
                     component = body.get('component')
                     if component not in ('server', 'docker', 'colima', 'app'):
@@ -2631,7 +2704,23 @@ class Handler(BaseHTTPRequestHandler):
                             self.server.lifecycle_actions.append({'component': component, 'service': service})
                         self._json(202, {'accepted': component, 'status': 'queued'})
                     else:
-                        result = reboot_runtime_guests(component)
+                        # Reboot is an app-owned lifecycle transition, not a
+                        # second invisible boot when a tab is opened.
+                        with self.server.guest_start_lock:
+                            if self.server.guest_start_state == 'starting':
+                                raise RuntimeError('Managed guests are still starting; wait for readiness')
+                            self.server.guest_start_state = 'starting'
+                            self.server.guest_start_error = ''
+                        try:
+                            result = reboot_runtime_guests(component)
+                        except Exception as error:
+                            with self.server.guest_start_lock:
+                                self.server.guest_start_state = 'failed'
+                                self.server.guest_start_error = str(error)
+                            raise
+                        with self.server.guest_start_lock:
+                            self.server.guest_start_state = 'ready'
+                            self.server.guest_start_error = ''
                         self._json(200, result)
             except (OSError, RuntimeError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
                 self.server.log_event('Lifecycle request FAILED: ' + str(error))
@@ -3054,12 +3143,15 @@ def handle(method: str, params: dict) -> dict:
         except OSError as error:
             if getattr(error, 'errno', None) not in (48, 98, 10048):
                 raise
-            # Xcode Stop may have just orphaned the previous native Host's
-            # Python worker. Give that owner's watchdog time to release 20300,
-            # checking for a verified live Terminal meanwhile. Never kill or
-            # overwrite an unrelated listener or choose a different port.
-            for _ in range(16):
+            # On abrupt native/Xcode exit a previous worker can survive past
+            # the old four-second grace period. Ask only an authenticated,
+            # orphaned CinterForge listener to stop itself, then wait for bind.
+            # A foreign listener is never killed or re-used.
+            recovery_requested = _request_orphaned_lan_shutdown(builds)
+            for _ in range(60):
                 time.sleep(0.25)
+                if not recovery_requested:
+                    recovery_requested = _request_orphaned_lan_shutdown(builds)
                 existing = _existing_lan_owner(builds)
                 if existing is not None:
                     return {'url': f'http://127.0.0.1:{LAN_HTTP_PORT}/',
@@ -3080,6 +3172,13 @@ def handle(method: str, params: dict) -> dict:
             if writable.name == 'Builds':
                 os.environ['CINTER_BUILDS_ROOT'] = str(writable)
                 os.environ['CINTER_TERMINAL_RUNTIME_MODE'] = 'developer'
+                # Xcode's native service worker starts before any PTY. Resolve
+                # the same real Steam library that a later shell would use,
+                # otherwise sdk_root() may report no DevTools until a tab opens.
+                # Do not invent a default path or create a library here.
+                steam = _steam_library_for_installed_root(builds)
+                if steam is not None:
+                    os.environ['CINTER_STEAMAPPS'] = str(steam)
             else:
                 steam = _steam_library_for_installed_root(builds)
                 if steam is not None:
@@ -3087,15 +3186,16 @@ def handle(method: str, params: dict) -> dict:
                     os.environ['CINTER_TERMINAL_RUNTIME_MODE'] = 'installed'
             os.environ['CINTER_CODE_WORKSPACE'] = str(Path(_server.code_workspace.details()['cwd']))
             _write_lan_owner(_server)
-            if sdk_root() is not None and platform.system() == 'Darwin':
-                _start_runtime_watchdog(os.getppid(), _runtime_logs_root(_server.mutable_builds))
-                threading.Thread(target=_boot_guests_logged, args=(_server,),
-                                 daemon=True, name='cinter-runtime-guests').start()
             _server_thread = threading.Thread(target=_server.serve_forever, name='cinter-http', daemon=True)
             _server_thread.start()
             threading.Thread(target=_watch_native_http_parent,
                              args=(_server, os.getppid()),
                              name='cinter-native-http-owner', daemon=True).start()
+            if platform.system() == 'Darwin':
+                # Start as part of native application startup. The WebView can
+                # render while the one owned VM and two reusable guests boot.
+                # A tab must only wait for this work, never start it again.
+                _schedule_guest_boot(_server)
         except Exception:
             _server.stop()
             _server = None
@@ -5147,9 +5247,13 @@ def install_devtools() -> int:
     # without waiting for a second application launch. The installer runs in
     # its own shell process; the managed runtime belongs to the app worker.
     try:
-        _api('/api/lifecycle/guest-boot', body={})
+        result = _api('/api/lifecycle/guest-boot', body={})
+        if result.get('state') == 'failed':
+            print('[DEVTOOLS] Guest startup FAILED: ' + str(result.get('error', '')), flush=True)
     except (OSError, RuntimeError, ValueError) as error:
-        print('[DEVTOOLS] Installed. Guest startup deferred: ' + str(error), flush=True)
+        print('[DEVTOOLS] Installed, but app-owned guest startup could not be requested: ' +
+              str(error), flush=True)
+        return 1
     return 0
 
 
@@ -5999,11 +6103,11 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
                               text=True, timeout=timeout)
 
     def guest_directory(directory: str) -> bool:
-        probe = call([colima, 'ssh', PROFILE, '--', 'test', '-d', directory])
+        probe = call([colima, 'ssh', '--profile', PROFILE, '--', 'test', '-d', directory])
         return probe.returncode == 0
 
     def active_containers(via_guest: bool) -> bool:
-        argv = ([colima, 'ssh', PROFILE, '--', 'docker', 'ps', '--quiet']
+        argv = ([colima, 'ssh', '--profile', PROFILE, '--', 'docker', 'ps', '--quiet']
                 if via_guest else [docker, 'ps', '--quiet'])
         result = call(argv, timeout=35)
         if result.returncode:
@@ -6074,12 +6178,97 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
     return docker
 
 
+def _guest_boot_snapshot(server: CinterShellServer) -> dict:
+    with server.guest_start_lock:
+        return {'state': server.guest_start_state, 'error': server.guest_start_error,
+                'guests': ['linux', 'win'] if server.guest_start_state == 'ready' else []}
+
+
+def _schedule_guest_boot(server: CinterShellServer) -> dict:
+    """Exactly one app-owned initialization per run, including a later SDK install.
+
+    The HTTP service is already accepting requests when this is called. It
+    publishes readiness explicitly rather than claiming the guests are ready
+    just because the native WebView opened. An explicit reinstall may retry a
+    failed boot; ordinary terminal tabs never call this function.
+    """
+    with server.guest_start_lock:
+        if server.guest_start_state in ('starting', 'ready'):
+            return {'state': server.guest_start_state, 'error': server.guest_start_error}
+        try:
+            installed = sdk_root() is not None
+        except (OSError, ValueError, RuntimeError) as error:
+            server.guest_start_state = 'failed'
+            server.guest_start_error = 'Cannot inspect installed DevTools: ' + str(error)
+            server.log_event('Managed reusable guests FAILED: ' + server.guest_start_error)
+            return {'state': 'failed', 'error': server.guest_start_error}
+        if not installed:
+            server.guest_start_state = 'not-installed'
+            server.guest_start_error = ''
+            server.log_event('Managed reusable guests: DevTools not installed; no VM started')
+            return {'state': 'not-installed', 'error': ''}
+        server.guest_start_state = 'starting'
+        server.guest_start_error = ''
+    try:
+        # This watchdog is independent of the Python worker and survives an
+        # Xcode Stop; it owns only the dedicated Terminal guest environment.
+        _start_runtime_watchdog(server.native_parent_pid,
+                                _runtime_logs_root(server.mutable_builds))
+        threading.Thread(target=_boot_guests_logged, args=(server,),
+                         daemon=True, name='cinter-runtime-guests').start()
+    except (OSError, RuntimeError, ValueError) as error:
+        with server.guest_start_lock:
+            server.guest_start_state = 'failed'
+            server.guest_start_error = 'Cannot start guest supervisor: ' + str(error)
+        server.log_event('Managed reusable guests FAILED: ' + str(error))
+        return _guest_boot_snapshot(server)
+    server.log_event('Managed reusable guests: starting Linux and Windows at application launch')
+    return _guest_boot_snapshot(server)
+
+
 def _boot_guests_logged(server: CinterShellServer) -> None:
     try:
         result = boot_runtime_guests()
+        if not result.get('installed'):
+            raise RuntimeError('DevTools disappeared during managed guest startup')
+        with server.guest_start_lock:
+            server.guest_start_state = 'ready'
+            server.guest_start_error = ''
         server.log_event('Managed reusable guests ready: ' + json.dumps(result, sort_keys=True))
-    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
+    except Exception as error:
+        # The background startup must NEVER die silently and leave tabs
+        # waiting forever. Report unexpected failures through Server log.
+        with server.guest_start_lock:
+            server.guest_start_state = 'failed'
+            server.guest_start_error = str(error)
         server.log_event('Managed reusable guests FAILED: ' + str(error))
+
+
+def _wait_for_app_guests(kind: str, *, timeout_seconds: float = 1800) -> None:
+    """Attach to an app-booted guest. Never provision/start a VM in a tab."""
+    deadline = time.monotonic() + timeout_seconds
+    announced = False
+    while True:
+        state = _api('/api/lifecycle/guest-status')
+        current = state.get('state')
+        if current == 'ready':
+            return
+        if current == 'failed':
+            raise RuntimeError('App-owned Linux/Windows guest startup failed: ' +
+                               str(state.get('error') or 'see Server log') +
+                               '. Use reboot colima after repairing the underlying error.')
+        if current == 'not-installed':
+            raise RuntimeError('The native application has not initialized DevTools guests; '
+                               'install DevTools or restart the application')
+        if current != 'starting':
+            raise RuntimeError('Unknown managed guest state: ' + str(current))
+        if not announced:
+            print('[DEVTOOLS] Waiting for the Linux and Windows guests started at app launch', flush=True)
+            announced = True
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Timed out waiting for app-owned ' + kind + ' Bash guest readiness; '
+                               'see Server log. No additional VM was started')
+        time.sleep(1)
 
 
 def _start_runtime_watchdog(native_pid: int, logs: Path) -> None:
@@ -6319,7 +6508,7 @@ def reboot_runtime_guests(component: str) -> dict:
                         ('sudo', 'service', 'docker', 'restart'))
             restarted = False
             for service in services:
-                check = subprocess.run([colima, 'ssh', PROFILE, '--', *service],
+                check = subprocess.run([colima, 'ssh', '--profile', PROFILE, '--', *service],
                                        env=env, text=True, capture_output=True,
                                        timeout=120, check=False)
                 if check.returncode == 0:
@@ -6353,10 +6542,9 @@ def guest_shell_main(kind: str) -> int:
             raise RuntimeError('DevTools installer completed without usable SDK')
     env = _env(sdk)
     docker = str(sdk / 'mac/env/bin/docker')
-    # Boot is idempotent, and the VM lock ensures concurrent Session tabs
-    # cannot create second guest containers. Once booted, each Session uses
-    # docker exec -it, never docker run (which would start another container).
-    boot_runtime_guests()
+    # The app initializes its two reusable guests at launch. Session tabs
+    # wait for readiness; they MUST NOT start Colima or Docker themselves.
+    _wait_for_app_guests(kind)
     name = _guest_name(kind)
     workspace = _guest_workspace()
     cwd = '/host/mac' + str(workspace) if workspace else '/'
