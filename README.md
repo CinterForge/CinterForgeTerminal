@@ -33,7 +33,7 @@ CinterForge Terminal brings games, historical computers, Minecraft server manage
 
 ### Play 68 games
 
-Type `games` to explore the catalog. `wargames` opens **JOSHUA**, the WarGames-inspired experience; the other 67 game entries point to classic Macintosh titles such as **SimCity**, **Loom**, **Marathon** and **Prince of Persia**, using their appropriate player or emulator. Type `stories` to discover **16** separate interactive-fiction titles. And `lagomorph` opens the dedicated classic-Mac easter egg.
+Type `games` to explore the catalog. `wargames` opens **JOSHUA**, the WarGames-inspired experience; the other 67 game entries point to classic Macintosh titles such as **SimCity**, **Loom**, **Marathon** and **Prince of Persia**, using their appropriate player or emulator. Type `stories` to discover **16** separate interactive-fiction titles. 
 
 ### Explore classic computers
 
@@ -67,7 +67,6 @@ games            List the 68 game commands
 wargames         Open JOSHUA
 stories          Explore interactive fiction
 infinite-mac     List classic Macintosh game commands
-lagomorph        Open the protected classic-Mac experience
 bedrock help     See Minecraft Bedrock management commands
 code             Open Code-OSS
 ```
@@ -110,7 +109,7 @@ After public verification, the publisher updates the **managed download section 
 ## Documentation
 
 - [User Manual](docs/User%20Manual.md) — product features, first steps and complete command workflows
-- [Games and Experiences](docs/Game%20Catalog.md) — all game commands, 16 stories and Lagomorph
+- [Games and Experiences](docs/Game%20Catalog.md) — all game commands, including 16 stories
 - [Architecture](docs/Architecture.md) — native Host, WebViews, Python, services and platform boundaries
 - [Build and Release](docs/Build%20and%20Release.md) — lifecycle phases, four release archives and publication
 - [Developer Tooling](docs/Developer%20Tooling.md) — optional toolchain installation and real platform terminals
