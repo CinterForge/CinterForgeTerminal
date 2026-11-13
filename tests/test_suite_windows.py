@@ -3,6 +3,30 @@ from tests._support import *
 
 WINDOWS_SETUP_RETRIES_PAYLOAD = b'MZ' + b'official-installer-test' * 55000
 
+class WindowsSetupProgressTests(unittest.TestCase):
+    def test_reports_live_heartbeat_and_completion_without_changing_result(self):
+        from host.setup_progress import progress_step
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            with progress_step('initialize Wine prefix', interval_seconds=0.01):
+                time.sleep(0.045)
+        value = output.getvalue()
+        self.assertIn('START initialize Wine prefix', value)
+        self.assertIn('WORKING initialize Wine prefix', value)
+        self.assertIn('PASS initialize Wine prefix', value)
+        self.assertNotIn('FAIL initialize Wine prefix', value)
+
+    def test_reports_failure_and_propagates_original_exception(self):
+        from host.setup_progress import progress_step
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            with self.assertRaisesRegex(RuntimeError, 'original error'):
+                with progress_step('verify Wine loader', interval_seconds=0.01):
+                    raise RuntimeError('original error')
+        self.assertIn('FAIL verify Wine loader', output.getvalue())
+        self.assertNotIn('PASS verify Wine loader', output.getvalue())
+
+
 class WindowsCrossEnvironmentTests(unittest.TestCase):
     def setUp(self):
         root = Path(__file__).resolve().parents[2] / 'Builds/Intermediates/CinterForgeTerminalTests'
@@ -89,6 +113,143 @@ class WindowsCrossEnvironmentTests(unittest.TestCase):
         self.assertEqual(provider.path(cwd), '/builds/Intermediates/CinterForgeTerminal/WindowsCrossSmoke')
         with self.assertRaisesRegex(RuntimeError, 'outside source/Builds'):
             provider.path(self.builds.parent / 'outside/anything')
+
+    def test_patched_wine_pin_rejects_stock_cross_image(self):
+        provider = win.WindowsCrossEnvironment(self.builds)
+        provider.provider = 'docker-linux-amd64-wine'
+        provider.image = 'cinterforge-terminal-windows-cross:test'
+        provider.docker = 'docker'
+        for actual in ('wine-8.0', 'wine-11.1', 'wine-11.0-rc5'):
+            def probe(command, **kwargs):
+                output = actual if command[0] == 'wine' else 'ok'
+                return subprocess.CompletedProcess(command, 0, output)
+            with mock.patch.object(provider, 'execute', side_effect=probe):
+                with self.assertRaisesRegex(RuntimeError, 'requires MSYS2-patched wine-11.15'):
+                    provider.version_probes(self.builds)
+
+    def test_patched_wine_pin_accepts_exact_cross_version(self):
+        provider = win.WindowsCrossEnvironment(self.builds)
+        provider.provider = 'docker-linux-amd64-wine'
+        provider.image = 'cinterforge-terminal-windows-cross:test'
+        provider.docker = 'docker'
+        def probe(command, **kwargs):
+            return subprocess.CompletedProcess(command, 0, 'wine-11.15' if command[0] == 'wine' else 'ok')
+        with mock.patch.object(provider, 'execute', side_effect=probe):
+            receipt = provider.version_probes(self.builds)
+        self.assertEqual(receipt['wine']['output'], 'wine-11.15')
+
+    def test_old_host_wine_not_selected_as_pinned_toolchain(self):
+        provider = win.WindowsCrossEnvironment(self.builds)
+        with mock.patch.object(win.shutil, 'which', return_value='/tmp/fake/wine'), \
+             mock.patch.object(win, '_run', return_value=subprocess.CompletedProcess(
+                 [], 0, 'wine-8.0')):
+            self.assertFalse(provider._native_ready())
+        with mock.patch.object(win.shutil, 'which', return_value='/tmp/fake/wine'), \
+             mock.patch.object(win, '_run', return_value=subprocess.CompletedProcess(
+                 [], 0, 'wine-11.15')):
+            self.assertTrue(provider._native_ready())
+
+    def test_subprocess_writes_wine_diagnostics_during_execution(self):
+        log = self.builds / 'Logs/CinterForgeTerminal/wine-test.log'
+        # The operating system writes directly to the file, rather than a
+        # Python PIPE whose contents are lost if wineboot gets interrupted.
+        result = win._run([sys.executable, '-c',
+                           'import sys; print("WINE_DIAGNOSTIC_MARKER", flush=True)'],
+                          quiet=True, output_log=log, timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('WINE_DIAGNOSTIC_MARKER', result.stdout)
+        self.assertIn('WINE_DIAGNOSTIC_MARKER', log.read_text())
+
+    def test_guest_native_wine_volumes_isolated_and_setup_owned(self):
+        provider = win.WindowsCrossEnvironment(self.builds)
+        provider.provider = 'docker-linux-amd64-wine'
+        provider.docker = 'docker'
+        cwd = self.builds / 'Intermediates/CinterForgeTerminal/WindowsCrossSmoke'
+        cwd.mkdir(parents=True)
+        provider.image = 'cinterforge-terminal-windows-cross:1111111111111111'
+        volume1 = provider._wine_volume_name()
+        # Build and Publish may not silently provision a missing Wine volume.
+        with self.assertRaisesRegex(RuntimeError, 'rerun ./Cinter setup win'):
+            provider.execute(['winepath', '-w', '/builds'], cwd=cwd)
+        responses = [SimpleNamespace(returncode=1, stdout='not found'),
+                     SimpleNamespace(returncode=0, stdout=volume1),
+                     SimpleNamespace(returncode=0, stdout='')]
+        with mock.patch.object(win, '_run', side_effect=responses) as runner:
+            provider.prepare_wine_runtime()
+        argv = [call.args[0] for call in runner.call_args_list]
+        self.assertIn(['docker', 'volume', 'inspect', volume1], argv)
+        self.assertIn('volume', argv[1])
+        self.assertIn('create', argv[1])
+        self.assertIn('0:0', argv[2])
+        self.assertIn(f'type=volume,src={volume1},dst=/cinterwine', argv[2])
+        self.assertFalse(provider.wine_prefix_initialized())
+        with mock.patch.object(win, '_run', return_value=SimpleNamespace(returncode=0, stdout=r'Z:\builds')) as run:
+            provider.execute(['winepath', '-w', '/builds'], cwd=cwd)
+        cmd = run.call_args.args[0]
+        self.assertIn(f'type=volume,src={volume1},dst=/cinterwine', cmd)
+        self.assertIn('WINEPREFIX=/cinterwine/prefix', cmd)
+        self.assertIn('HOME=/cinterwine/home', cmd)
+        self.assertNotIn('/builds/Run/CinterForgeTerminal/WindowsCross/WinePrefixes/1111111111111111', cmd)
+        generation = provider.wine_volume_generation()
+        self.assertEqual(len(generation), 32)
+        provider.mark_wine_prefix_initialized()
+        self.assertTrue(provider.wine_prefix_initialized())
+        # A different toolchain image must not inherit the verified prefix.
+        provider.image = 'cinterforge-terminal-windows-cross:2222222222222222'
+        self.assertNotEqual(volume1, provider._wine_volume_name())
+        with self.assertRaisesRegex(RuntimeError, 'rerun ./Cinter setup win'):
+            provider.execute(['winepath', '-w', '/builds'], cwd=cwd)
+        with mock.patch.object(win, '_run', return_value=SimpleNamespace(returncode=0, stdout='ok')) as run:
+            provider.execute(['wine', '--version'], cwd=cwd)
+        self.assertNotIn('WINEPREFIX=/cinterwine/prefix', run.call_args.args[0])
+
+    def test_prepared_wine_volume_must_still_exist_in_colima(self):
+        provider = win.WindowsCrossEnvironment(self.builds)
+        provider.provider = 'docker-linux-amd64-wine'
+        provider.image = 'cinterforge-terminal-windows-cross:1111111111111111'
+        provider.docker = 'docker'
+        with mock.patch.object(win, '_run', return_value=SimpleNamespace(returncode=0, stdout='ok')):
+            provider.prepare_wine_runtime()
+        new_process = win.WindowsCrossEnvironment(self.builds)
+        new_process.provider = provider.provider
+        new_process.image = provider.image
+        new_process.docker = provider.docker
+        with mock.patch.object(win, '_run', return_value=SimpleNamespace(returncode=1, stdout='not found')):
+            with self.assertRaisesRegex(RuntimeError, 'unavailable or stale'):
+                new_process.execute(['winepath', '-w', '/builds'], cwd=self.builds)
+
+    def test_wine_runtime_requires_boot_before_functional_winepath(self):
+        from host import windows_dependencies as dependencies
+        cross = mock.Mock()
+        cross.wine_prefix_initialized.return_value = False
+        cross.execute.side_effect = [
+            SimpleNamespace(returncode=0, stdout='initialized'),
+            SimpleNamespace(returncode=0, stdout=r'Z:\builds'),
+        ]
+        result = dependencies._verify_wine_runtime(cross, cwd=self.builds)
+        self.assertEqual(result['winepath'], 'executable-verified')
+        cross.prepare_wine_runtime.assert_called_once_with()
+        cross.mark_wine_prefix_initialized.assert_called_once_with()
+        self.assertEqual(cross.execute.call_args_list[0].args[0][-2:], ['wineboot', '--init'])
+        self.assertEqual(cross.execute.call_args_list[0].kwargs['timeout'], 180)
+        self.assertTrue(str(cross.execute.call_args_list[0].kwargs['diagnostic_log']).endswith('windows-wineboot.log'))
+        self.assertEqual(cross.execute.call_args_list[1].args[0], ['winepath', '-w', '/builds'])
+        cross.execute.reset_mock()
+        cross.execute.side_effect = [SimpleNamespace(returncode=1, stdout='c0000135')]
+        with self.assertRaisesRegex(RuntimeError, 'prefix initialization failed'):
+            dependencies._verify_wine_runtime(cross, cwd=self.builds)
+        self.assertEqual(cross.execute.call_count, 1)
+        cross.execute.reset_mock()
+        cross.execute.side_effect = [SimpleNamespace(returncode=0, stdout='booted'),
+                                     SimpleNamespace(returncode=1, stdout='c0000135')]
+        with self.assertRaisesRegex(RuntimeError, 'winepath'):
+            dependencies._verify_wine_runtime(cross, cwd=self.builds)
+        cross.execute.reset_mock()
+        cross.wine_prefix_initialized.return_value = True
+        cross.execute.side_effect = [SimpleNamespace(returncode=0, stdout=r'Z:\builds')]
+        dependencies._verify_wine_runtime(cross, cwd=self.builds)
+        self.assertEqual(cross.execute.call_count, 1)
+        self.assertEqual(cross.execute.call_args.args[0][0], 'winepath')
 
     def test_missing_engine_rejects_cross_environment(self):
         provider = win.WindowsCrossEnvironment(self.builds)
@@ -438,10 +599,12 @@ class WindowsWineWebViewTests(unittest.TestCase):
         pe = cwd / 'sample.exe'
         pe.write_bytes(b'MZ')
         with mock.patch('host.windows_environment._run', return_value=SimpleNamespace(returncode=0, stdout='PASS')) as run:
+            executor.prepare_wine_runtime()
             result = executor.execute(['wine', executor.path(pe), '--smoke-js'], cwd=cwd, graphical=True)
         args = run.call_args.args[0]
         self.assertIn('none', args)
-        self.assertEqual(args[-6:], ['xvfb-run', '-a', '--server-args=-screen 0 1280x800x24',
+        from host.gui_preflight import IMAGE_SCRIPT
+        self.assertEqual(args[-9:], ['python3', '-u', IMAGE_SCRIPT, '--platform', 'windows', '--',
                                      'wine', executor.path(pe), '--smoke-js'])
         self.assertEqual(result.returncode, 0)
 

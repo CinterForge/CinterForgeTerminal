@@ -7,9 +7,12 @@ Application build products remain under Builds/CreativeSuite/Built.
 """
 from __future__ import annotations
 
+import codecs
 import os
 import shlex
+import signal
 import sys
+import time
 from pathlib import Path
 import platform
 import shutil
@@ -167,6 +170,82 @@ def _managed_startup_diagnostics(environment: dict[str, str], profile: str) -> s
     return '\n'.join(reports)
 
 
+
+def _run_colima_start_live(command: list[str], environment: dict[str, str],
+                           log_path: Path, *, timeout: float = 600,
+                           heartbeat: float = 20) -> subprocess.CompletedProcess[str]:
+    """Stream the managed c VM's actual boot output with a bounded wait.
+
+    Do not pipe stdout into ``subprocess.run(capture_output=True)``: cold
+    Lima/Colima boots can take minutes, and that hid every useful diagnostic.
+    Keep a dedicated Setup log under sibling Builds/Logs, and terminate only
+    the start command's process group if interrupted or timed out. The outer
+    lifecycle remains responsible for stopping the owned VM itself.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f'[Ubuntu backend] Colima startup output: {log_path}', flush=True)
+    with log_path.open('wb', buffering=0) as writer:
+        process = subprocess.Popen(
+            command, env=environment, stdout=writer, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        started = time.monotonic()
+        next_heartbeat = started + heartbeat
+        last_bytes = b''
+        decoder = codecs.getincrementaldecoder('utf-8')('replace')
+        with log_path.open('rb', buffering=0) as reader:
+            def drain() -> None:
+                nonlocal last_bytes
+                data = reader.read()
+                if data:
+                    last_bytes = (last_bytes + data)[-32768:]
+                    visible = decoder.decode(data)
+                    if visible:
+                        print(visible, end='', flush=True)
+
+            try:
+                while True:
+                    drain()
+                    returncode = process.poll()
+                    if returncode is not None:
+                        drain()
+                        remaining = decoder.decode(b'', final=True)
+                        if remaining:
+                            print(remaining, end='', flush=True)
+                        break
+                    now = time.monotonic()
+                    if now - started >= timeout:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    if now >= next_heartbeat:
+                        print(f'[Ubuntu backend] Waiting for Colima c boot '
+                              f'({int(now - started)}s elapsed; limit {int(timeout)}s); '
+                              f'live details: {log_path}', flush=True)
+                        next_heartbeat = now + heartbeat
+                    time.sleep(min(0.25, max(0, timeout - (now - started))))
+            except BaseException:
+                # Interrupt/timeout must not orphan the CLI or its attached
+                # helpers. Its dedicated session is ours, not another VM's.
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.wait(timeout=5)
+                drain()
+                raise
+    return subprocess.CompletedProcess(
+        command, returncode, stdout=last_bytes.decode('utf-8', errors='replace'),
+        stderr='',
+    )
+
+
 def ensure_backend(source: Path) -> tuple[str, dict[str, str]]:
     """Start or reuse one headless Apple Silicon Colima guest-input VM."""
     if platform.system() == 'Linux':
@@ -239,21 +318,19 @@ def ensure_backend(source: Path) -> tuple[str, dict[str, str]]:
         managed_disk = Path(environment['LIMA_HOME']) / '_disks' / f'colima-{profile}'
         for attempt in range(4):
             try:
-                start = subprocess.run(
-                    start_command, env=environment, capture_output=True, text=True,
-                    check=False, timeout=600,
+                start = _run_colima_start_live(
+                    start_command, environment,
+                    builds / 'Logs/CinterForgeTerminal/linuxkit-colima-c-start.log',
+                    timeout=600,
                 )
             except subprocess.TimeoutExpired as exc:
                 details = _managed_startup_diagnostics(environment, profile)
                 raise RuntimeError(
-                    f'Managed Ubuntu builder {profile} startup timed out'
+                    f'Managed Ubuntu builder {profile} startup timed out after 600s; '
+                    f'Colima output: {builds / "Logs/CinterForgeTerminal/linuxkit-colima-c-start.log"}'
                     + ('\nLima/VZ diagnostics:\n' + details if details else
                        f'; inspect {Path(environment["LIMA_HOME"]) / ("colima-" + profile) / "ha.stderr.log"}')
                 ) from exc
-            if start.stdout:
-                print(start.stdout, end='' if start.stdout.endswith('\n') else '\n', flush=True)
-            if start.stderr:
-                print(start.stderr, end='' if start.stderr.endswith('\n') else '\n', flush=True)
             if start.returncode == 0:
                 break
 

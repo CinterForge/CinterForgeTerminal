@@ -227,7 +227,8 @@ class SetupPreflightOrderingTests(unittest.TestCase):
             self.assertEqual(cli.main(['setup', 'all']), 0)
         invoked = [' '.join(map(str, c.args)) for c in call.call_args_list]
         self.assertIn('host.windows_dependencies', invoked[0])
-        self.assertIn('host.devtooling', invoked[1])
+        self.assertIn('host.msi_installer', invoked[1])
+        self.assertIn('host.devtooling', invoked[2])
         guest = next(i for i,v in enumerate(invoked) if 'linuxos/lifecycle.py setup' in v)
         accept = next(i for i,v in enumerate(invoked) if 'linuxos/lifecycle.py test' in v)
         self.assertLess(guest, accept)
@@ -253,7 +254,8 @@ class SetupPreflightOrderingTests(unittest.TestCase):
         invoked = [x for x in sequence if x not in ('stop-owned-w', 'stop-owned-c')]
         self.assertIn('host.mac_bootstrap', invoked[0])
         self.assertIn('host.windows_dependencies', invoked[1])
-        self.assertIn('host.devtooling', invoked[2])
+        self.assertIn('host.msi_installer', invoked[2])
+        self.assertIn('host.devtooling', invoked[3])
         guest = next(x for x in sequence if 'linuxos/lifecycle.py setup' in x)
         accept = next(x for x in sequence if 'linuxos/lifecycle.py test' in x)
         # w is released within LinuxKit Setup, *after* its custom-kernel
@@ -860,7 +862,7 @@ vm.runInNewContext(source, context, {filename:'ControlTransport.js'});
 
 
 class CodeOSSHostOptionalDependencyTests(unittest.TestCase):
-    """Upstream Code-OSS nested npm installs must match the native build host."""
+    """Pinned Code-OSS can build without the non-shipped Copilot SDK."""
 
     def setUp(self):
         build_root = BOOTSTRAP_BUNDLE_BUILDS / "Intermediates/CinterForgeTerminalTests"
@@ -882,7 +884,7 @@ class CodeOSSHostOptionalDependencyTests(unittest.TestCase):
             },
         }}), encoding="utf-8")
 
-    def test_environment_preserves_optional_sdk_and_clears_cross_target_flags(self):
+    def test_environment_preserves_host_optional_packages_and_clears_cross_target_flags(self):
         inherited = {
             "NPM_CONFIG_ARCH": "x64", "npm_config_platform": "win32",
             "npm_config_omit": "optional", "NPM_CONFIG_OPTIONAL": "false",
@@ -900,28 +902,38 @@ class CodeOSSHostOptionalDependencyTests(unittest.TestCase):
         self.assertEqual(actual["HTTPS_PROXY"], inherited["HTTPS_PROXY"])
         self.assertEqual(actual["PATH"], inherited["PATH"])
 
-    def test_locked_darwin_arm64_copilot_sdk_is_accepted(self):
-        with mock.patch.object(producer.platform, "system", return_value="Darwin"), \
-             mock.patch.object(producer.platform, "machine", return_value="arm64"):
-            producer._verify_locked_copilot_sdk_platform(self.source)
+    def _upstream_npm_dirs(self, content: str) -> Path:
+        path = self.source / "build" / "npm" / "dirs.ts"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
 
-    def test_missing_host_sdk_fails_before_npm_install(self):
-        self.lock.write_text(json.dumps({"packages": {
-            "node_modules/@github/copilot": {"version": "1.0.73"},
-        }}), encoding="utf-8")
-        with mock.patch.object(producer.platform, "system", return_value="Darwin"), \
-             mock.patch.object(producer.platform, "machine", return_value="arm64"):
-            with self.assertRaisesRegex(RuntimeError, "absent from lockfile"):
-                producer._verify_locked_copilot_sdk_platform(self.source)
+    def test_copilot_nested_install_is_excluded_without_touching_other_extensions(self):
+        path = self._upstream_npm_dirs("export const dirs = [\n\t'build',\n\t'extensions/copilot',\n\t'extensions/emmet',\n];\n")
+        producer._skip_upstream_copilot_install(self.source)
+        once = path.read_text(encoding="utf-8")
+        self.assertNotIn("'extensions/copilot'", once)
+        self.assertIn("'extensions/emmet'", once)
+        self.assertIn("CINTERFORGE_SKIP_OPTIONAL_COPILOT_NPM_V1", once)
+        producer._skip_upstream_copilot_install(self.source)
+        self.assertEqual(path.read_text(encoding="utf-8"), once)
 
-    def test_unpinned_platform_dependency_is_rejected(self):
-        data = json.loads(self.lock.read_text(encoding="utf-8"))
-        data["packages"]["node_modules/@github/copilot-darwin-arm64"]["version"] = "1.0.108"
-        self.lock.write_text(json.dumps(data), encoding="utf-8")
-        with mock.patch.object(producer.platform, "system", return_value="Darwin"), \
-             mock.patch.object(producer.platform, "machine", return_value="arm64"):
-            with self.assertRaisesRegex(RuntimeError, "lock mismatch"):
-                producer._verify_locked_copilot_sdk_platform(self.source)
+    def test_upstream_npm_directory_change_is_not_silently_ignored(self):
+        path = self._upstream_npm_dirs("export const dirs = ['extensions/copilot-new'];\n")
+        with self.assertRaisesRegex(RuntimeError, "directory list changed"):
+            producer._skip_upstream_copilot_install(self.source)
+        self.assertEqual(path.read_text(encoding="utf-8"), "export const dirs = ['extensions/copilot-new'];\n")
+
+    def test_missing_copilot_sdk_is_not_an_install_precondition(self):
+        # A missing, wrong-platform, or differently versioned optional SDK
+        # must not prevent Code-OSS's independently compiled browser workbench.
+        self.lock.unlink()
+        self.assertIn("copilot", producer.CODEOSS_NONPRODUCTION_EXTENSIONS)
+        with mock.patch.object(producer, "_ensure_pinned_node", return_value=(
+            self.tmp / "node" / "bin" / "node", self.tmp / "node" / "npm-cli.js", "24.18.0",
+        )), mock.patch.object(producer, "_run_checked", side_effect=RuntimeError("controlled npm call")):
+            with self.assertRaisesRegex(RuntimeError, "controlled npm call"):
+                producer._build_web(self.source)
 
     def test_build_uses_optional_deps_in_root_and_nested_npm(self):
         seen = []

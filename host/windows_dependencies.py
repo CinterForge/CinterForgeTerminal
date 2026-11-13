@@ -27,6 +27,8 @@ import zipfile
 from host.webview import provision as provision_webview, provision_webview2
 from host.wine_webview2 import _install_archive as provision_offline_webview2
 from host.windows_environment import WindowsCrossEnvironment
+from host.setup_progress import progress_step
+from host.gui_preflight import verify_guest_gui
 from host.windows_install import MSYS2_INSTALLER_URL, MSYS2_VERSION
 from host.windows_fixed_runtime import (ensure as provision_fixed_webview2,
                                         VERSION as WEBVIEW2_FIXED_VERSION)
@@ -273,6 +275,45 @@ def _mac_transfer_entries(builds: Path) -> dict[str, Path]:
     return entries
 
 
+
+def _verify_wine_runtime(cross: WindowsCrossEnvironment, *, cwd: Path) -> dict[str, str]:
+    """Functional Setup acceptance; never repair or provision in Build/Publish.
+
+    Avoid Wine's interactive Mono/Gecko first-run prompt here. The independent
+    native Linux wixl MSI producer does not require either component.
+    """
+    # Set up Wine on the managed Colima Linux disk, never on the macOS
+    # bind mount. A previously verified prefix is reused across Setup runs.
+    if hasattr(cross, 'prepare_wine_runtime'):
+        with progress_step('prepare guest-native Wine storage'):
+            cross.prepare_wine_runtime()
+    initialized = (cross.wine_prefix_initialized()
+                   if hasattr(cross, 'wine_prefix_initialized') else False)
+    if not initialized:
+        log_path = cwd / 'Logs/CinterForgeTerminal/windows-wineboot.log'
+        print(f'[WINDOWS SETUP] Wine boot diagnostic log: {log_path}', flush=True)
+        with progress_step('initialize managed Wine prefix (wineboot --init)'):
+            command = ['env', 'WINEDLLOVERRIDES=mscoree,mshtml=',
+                       'WINEDEBUG=warn+all,err+all', 'wineboot', '--init']
+            boot = cross.execute(command, cwd=cwd, timeout=180, graphical=True,
+                                 diagnostic_log=log_path)
+        if boot.returncode:
+            raise RuntimeError('Windows cross Wine prefix initialization failed: '
+                               + (boot.stdout or '')[-1000:])
+    else:
+        print('[WINDOWS SETUP] REUSE previously verified Wine prefix', flush=True)
+    with progress_step('verify Wine executable loader (winepath)'):
+        result = cross.execute(['winepath', '-w', '/builds'], cwd=cwd, timeout=90,
+                               graphical=True)
+    if (result.returncode or not (result.stdout or '').strip() or
+            not (result.stdout or '').strip().lower().endswith('\\builds')):
+        raise RuntimeError('Windows cross Wine runtime failed executable preflight (winepath): '
+                           + (result.stdout or '')[-1000:])
+    if hasattr(cross, 'mark_wine_prefix_initialized'):
+        cross.mark_wine_prefix_initialized()
+    return {'wineboot': 'prefix-initialized', 'winepath': 'executable-verified'}
+
+
 def ensure(builds: Path) -> dict:
     builds = builds.resolve()
     if builds.name != 'Builds' or not builds.is_dir():
@@ -296,35 +337,67 @@ def ensure(builds: Path) -> dict:
             'xvfb': ['xvfb-run', '--help'],
             'windows-binutils': ['x86_64-w64-mingw32-objdump', '--version'],
             'cab-extractor': ['7z', '--help'],
-            'winepath': ['winepath', '-w', '/builds'],
         }.items():
-            proc = cross.execute(command, cwd=builds, timeout=120)
+            with progress_step(f'verify Windows cross dependency {component}'):
+                proc = cross.execute(command, cwd=builds, timeout=120)
             if proc.returncode != 0:
                 raise RuntimeError(f'Windows cross runtime missing {component}: {proc.stdout[-400:]}')
             report['stages'][component] = 'executable-verified'
+        # Provision the *existing* native Linux sample image during Setup,
+        # and validate its real display/VNC path before any Wine process.
+        # The later Developer Tooling phase reuses this exact image/receipt.
+        from host.three_samples import _docker_image
+        linux_docker = (cross.docker if cross.provider != 'host' else
+                        (shutil.which('docker') or shutil.which('podman')))
+        if not linux_docker:
+            from host.mac_bootstrap import ensure_docker
+            linux_docker = ensure_docker(builds)
+        linux_image = _docker_image(builds, str(linux_docker),
+                                   builds / 'Logs/CinterForgeTerminal/DevTooling-linux-image.log')
+        with progress_step('verify Linux X11 and VNC display'):
+            report['stages']['LinuxGUI'] = verify_guest_gui(
+                builds, guest='linux', docker=str(linux_docker), image=linux_image)
+        # Do not start Wine until a real X11 screen, RFB connection and
+        # noVNC HTTP endpoint all pass. Wine commands then re-run this check
+        # in their own container before launch, on that exact same display.
+        with progress_step('verify Windows X11 and VNC display before Wine'):
+            report['stages']['WindowsGUI'] = verify_guest_gui(
+                builds, guest='windows', docker=cross.docker if cross.provider != 'host' else None,
+                image=cross.image if cross.provider != 'host' else None)
+        # A Wine version string does not prove the actual PE loader works.
+        # Initialize the image-specific, Builds-owned prefix before probing
+        # winepath (the old shared prefix could fail loading kernel32.dll).
+        report['stages'].update(_verify_wine_runtime(cross, cwd=builds))
         image_archive = _verify_image(builds)
         report['stages']['WindowsCrossImage'] = str(image_archive)
         print('[WINDOWS DEPENDENCIES] OCI MinGW/Wine/Xvfb image staged: ' + str(image_archive), flush=True)
 
-        webview = provision_webview(builds)
+        with progress_step('provision WebView source'):
+            webview = provision_webview(builds)
         report['stages']['WebViewSource'] = str(webview)
-        sdk = provision_webview2(builds)
+        with progress_step('provision Windows WebView2 SDK'):
+            sdk = provision_webview2(builds)
         report['stages']['WebView2SDK'] = str(sdk)
-        installer, _ = provision_offline_webview2(builds)
+        with progress_step('provision offline WebView2 runtime'):
+            installer, _ = provision_offline_webview2(builds)
         report['stages']['WebView2OfflineRuntime'] = str(installer)
-        msys2_installer = _download_msys2(builds)
+        with progress_step('verify/download Windows MSYS2 bootstrap'):
+            msys2_installer = _download_msys2(builds)
         report['stages']['MSYS2Installer'] = str(msys2_installer)
         # Executable closure, not simply installers: both browser and MSYS2
         # must be fully unpacked/installed in Builds during Setup.
-        browser_folder = provision_fixed_webview2(builds, executor=cross)
+        with progress_step('provision fixed Windows WebView2 browser'):
+            browser_folder = provision_fixed_webview2(builds, executor=cross)
         report['stages']['WebView2FixedBrowser'] = str(browser_folder)
         # The official MSYS2 base archive is functionally equivalent to the
         # Qt installer, which hangs under Wine. Native UCRT64 packages are
         # resolved and staged without executing Cygwin-derived tools in Wine.
-        msys2_base = fetch_msys2_base(
-            MSYS2_BASE_URL + f'msys2-base-x86_64-{MSYS2_VERSION}.tar.xz',
-            msys2_installer.parent / f'msys2-base-x86_64-{MSYS2_VERSION}.tar.xz')
-        msys2_root = provision_msys2_cross(builds, cross, msys2_base)
+        with progress_step('verify/download Windows MSYS2 base archive'):
+            msys2_base = fetch_msys2_base(
+                MSYS2_BASE_URL + f'msys2-base-x86_64-{MSYS2_VERSION}.tar.xz',
+                msys2_installer.parent / f'msys2-base-x86_64-{MSYS2_VERSION}.tar.xz')
+        with progress_step('provision Windows MSYS2 UCRT64 toolchain'):
+            msys2_root = provision_msys2_cross(builds, cross, msys2_base)
         report['stages']['WindowsMSYS2Installed'] = str(msys2_root)
         entries = {'WindowsCrossImage': image_archive,
                    'WindowsCrossManifest': image_archive.with_suffix('.json'),

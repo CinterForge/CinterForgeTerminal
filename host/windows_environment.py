@@ -15,10 +15,22 @@ import platform
 import shutil
 import subprocess
 import time
+import uuid
 
 SCHEMA = 'cinterforge.terminal.windows-cross-environment.v1'
 IMAGE_NAME = 'cinterforge-terminal-windows-cross'
+PINNED_WINE_VERSION = 'wine-11.15'
 DOCKERFILE = Path(__file__).resolve().parent / 'docker/windows-cross.Dockerfile'
+GUI_PREFLIGHT_SOURCE = DOCKERFILE.parent / 'gui_preflight.py'
+
+
+def _image_recipe_sha256() -> str:
+    # COPY source is a build input too; never silently reuse an older image.
+    digest = hashlib.sha256(DOCKERFILE.read_bytes())
+    digest.update(b'\0')
+    digest.update(GUI_PREFLIGHT_SOURCE.read_bytes())
+    return digest.hexdigest()
+
 TOOL_VERSIONS = {
     'mingw-w64': ['x86_64-w64-mingw32-g++', '--version'],
     'mingw-w64-c': ['x86_64-w64-mingw32-gcc', '--version'],
@@ -29,9 +41,25 @@ TOOL_VERSIONS = {
 
 
 def _run(command: list[str], *, cwd: Path | None = None, timeout: int = 600,
-         quiet: bool = False, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+         quiet: bool = False, env: dict[str, str] | None = None,
+         output_log: Path | None = None) -> subprocess.CompletedProcess:
     if not quiet:
         print('[WINDOWS CROSS] ' + ' '.join(map(str, command)), flush=True)
+    if output_log is not None:
+        # Persist Wine diagnostics as the child emits them. A Ctrl-C/timeout
+        # must not discard the only evidence of a stalled wineboot process.
+        output_log.parent.mkdir(parents=True, exist_ok=True)
+        with output_log.open('w', encoding='utf-8', errors='replace') as stream:
+            stream.write('$ ' + ' '.join(map(str, command)) + '\n')
+            stream.flush()
+            result = subprocess.run([str(c) for c in command], cwd=cwd, text=True,
+                                    stdout=stream, stderr=subprocess.STDOUT,
+                                    timeout=timeout, check=False, env=env)
+        # The caller only needs a diagnostic tail, not a huge log in memory.
+        with output_log.open('rb') as stream:
+            stream.seek(max(0, output_log.stat().st_size - 20000))
+            tail = stream.read().decode('utf-8', errors='replace')
+        return subprocess.CompletedProcess(result.args, result.returncode, tail)
     return subprocess.run([str(c) for c in command], cwd=cwd, text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           timeout=timeout, check=False, env=env)
@@ -54,6 +82,7 @@ class WindowsCrossEnvironment:
         self.provider = 'host'
         self.native_path = os.environ.get('PATH', '')
         self.container_kind = 'docker'
+        self._wine_volume_checked = None
 
     def _native_ready(self) -> bool:
         """Find complete host tools in PATH OR their existing Builds stage.
@@ -73,7 +102,13 @@ class WindowsCrossEnvironment:
         self.native_path = os.pathsep.join([*valid, os.environ.get('PATH', '')])
         required = ('x86_64-w64-mingw32-gcc', 'x86_64-w64-mingw32-g++',
                     'wine', 'cmake', 'ninja')
-        return all(shutil.which(command, path=self.native_path) for command in required)
+        if not all(shutil.which(command, path=self.native_path) for command in required):
+            return False
+        # Do not silently select an older host Wine instead of patched Wine.
+        # The optional host provider must match the exact Setup-managed version.
+        version = _run(['wine', '--version'], quiet=True, timeout=15,
+                       env=dict(os.environ, PATH=self.native_path))
+        return version.returncode == 0 and version.stdout.strip() == PINNED_WINE_VERSION
 
     @property
     def stage(self) -> Path:
@@ -124,7 +159,7 @@ class WindowsCrossEnvironment:
     def _image_identity(self) -> tuple[str, str]:
         if not DOCKERFILE.is_file():
             raise RuntimeError(f'Windows cross image recipe missing: {DOCKERFILE}')
-        digest = hashlib.sha256(DOCKERFILE.read_bytes()).hexdigest()
+        digest = _image_recipe_sha256()
         return f'{IMAGE_NAME}:{digest[:16]}', digest
 
     def _has_image(self, image: str) -> bool:
@@ -134,7 +169,7 @@ class WindowsCrossEnvironment:
     @classmethod
     def validate_staged(cls, builds: Path) -> tuple[Path, dict]:
         """Verify the offline Docker image without consulting the Docker daemon."""
-        digest = hashlib.sha256(DOCKERFILE.read_bytes()).hexdigest()
+        digest = _image_recipe_sha256()
         staged = builds / 'CinterForgeTerminal/Toolchains/WindowsCross'
         archive = staged / f'{digest[:16]}.tar'
         manifest = staged / f'{digest[:16]}.json'
@@ -143,6 +178,7 @@ class WindowsCrossEnvironment:
         data = json.loads(manifest.read_text(encoding='utf-8'))
         if (data.get('schema') != SCHEMA or data.get('dockerfile_sha256') != digest or
                 data.get('image') != f'{IMAGE_NAME}:{digest[:16]}' or
+                data.get('wine_version') != PINNED_WINE_VERSION or
                 data.get('archive_sha256') != cls._hash_file(archive)):
             raise RuntimeError(f'Windows cross-image stage is modified or corrupt: {archive}')
         return staged, data
@@ -187,6 +223,7 @@ class WindowsCrossEnvironment:
                 manifest.write_text(json.dumps({
                     'schema': SCHEMA, 'dockerfile_sha256': digest, 'image': image,
                     'archive_sha256': archive_hash, 'platform': 'linux/amd64',
+                    'wine_version': PINNED_WINE_VERSION,
                 }, indent=2, sort_keys=True) + '\n', encoding='utf-8')
             finally:
                 temporary.unlink(missing_ok=True)
@@ -239,8 +276,137 @@ class WindowsCrossEnvironment:
             return '/builds/' + path.relative_to(self.builds).as_posix()
         raise RuntimeError(f'Windows cross-build path is outside source/Builds: {path}')
 
+    def _wine_volume_name(self) -> str:
+        """Stable, private guest-native Wine state for this Builds tree/image.
+
+        Docker stores named volumes on the managed Colima-w Linux disk, itself
+        under the sibling Builds/CFTVM tree. Wine's many registry/drive writes
+        must not be made through macOS VirtioFS into /builds.
+        """
+        if not self.image or ':' not in self.image:
+            raise RuntimeError('Windows cross image has not been selected')
+        image_key = self.image.rsplit(':', 1)[1]
+        if not image_key or not all(c.isalnum() or c in '-_' for c in image_key):
+            raise RuntimeError('Invalid Windows cross image identity')
+        builds_key = hashlib.sha256(str(self.builds).encode('utf-8')).hexdigest()[:12]
+        return f'cinterforge-terminal-wine-{builds_key}-{image_key}'
+
+    def _wine_receipt(self) -> Path:
+        return self.builds / 'Run/CinterForgeTerminal/WindowsCross/WineVolume.json'
+
+    def _wine_volume_available(self) -> bool:
+        if not self.docker:
+            return False
+        volume = self._wine_volume_name()
+        result = _run([self.docker, 'volume', 'inspect', volume], quiet=True, timeout=30)
+        return result.returncode == 0
+
+    def prepare_wine_runtime(self) -> None:
+        """Setup-only provisioning; Build/Publish may only reuse this volume."""
+        if self.provider == 'host':
+            return
+        if not self.docker or not self.image:
+            raise RuntimeError('Windows cross image must be provisioned before Wine Setup')
+        volume = self._wine_volume_name()
+        volume_was_missing = not self._wine_volume_available()
+        if volume_was_missing:
+            created = _run([self.docker, 'volume', 'create',
+                            '--label', 'cinterforge.owner=CinterForgeTerminal',
+                            '--label', f'cinterforge.image={self.image}', volume],
+                           quiet=True, timeout=60)
+            if created.returncode:
+                raise RuntimeError('Cannot create managed guest-native Wine volume: '
+                                   + created.stdout[-1000:])
+        # The only root process here creates private folders with the host
+        # user's numeric ownership. Wine itself always runs unprivileged.
+        uid = os.getuid() if hasattr(os, 'getuid') else 1000
+        gid = os.getgid() if hasattr(os, 'getgid') else 1000
+        init = _run([self.docker, 'run', '--rm', '--platform', 'linux/amd64',
+                     '--network', 'none', '--user', '0:0',
+                     '--mount', f'type=volume,src={volume},dst=/cinterwine',
+                     '--entrypoint', '/bin/sh', self.image, '-c',
+                     f'install -d -m 700 -o {uid} -g {gid} '
+                     '/cinterwine/home /cinterwine/prefix /cinterwine/home/.cache'],
+                    quiet=True, timeout=90)
+        if init.returncode:
+            raise RuntimeError('Cannot prepare guest-native Wine directories: '
+                               + init.stdout[-1000:])
+        receipt = self._wine_receipt()
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        old = {}
+        try:
+            old = json.loads(receipt.read_text('utf-8'))
+        except (OSError, ValueError):
+            pass
+        initialized = bool(not volume_was_missing and old.get('initialized')
+                           and old.get('image') == self.image
+                           and old.get('volume') == volume)
+        generation = (old.get('generation') if not volume_was_missing else None)
+        if not isinstance(generation, str) or not generation:
+            generation = uuid.uuid4().hex
+        receipt.write_text(json.dumps({'schema': 'cinterforge.terminal.wine-volume.v1',
+                                       'image': self.image, 'volume': volume,
+                                       'builds': str(self.builds),
+                                       'initialized': initialized,
+                                       'generation': generation},
+                                      indent=2, sort_keys=True) + '\n', encoding='utf-8')
+        self._wine_volume_checked = volume
+        print(f'[WINDOWS CROSS] Guest-native Wine prefix ready: {volume} '
+              f'(initialized={initialized})', flush=True)
+
+    def _require_wine_volume(self) -> str:
+        """Never provision Wine state implicitly during Build or Publish."""
+        volume = self._wine_volume_name()
+        if self._wine_volume_checked == volume:
+            return volume
+        try:
+            receipt = json.loads(self._wine_receipt().read_text('utf-8'))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError('Managed Wine runtime missing; rerun ./Cinter setup win') from exc
+        if (receipt.get('schema') != 'cinterforge.terminal.wine-volume.v1'
+                or receipt.get('builds') != str(self.builds)
+                or receipt.get('image') != self.image
+                or receipt.get('volume') != volume
+                or not self._wine_volume_available()):
+            raise RuntimeError('Managed Wine volume unavailable or stale; '
+                               'rerun ./Cinter setup win')
+        self._wine_volume_checked = volume
+        return volume
+
+    def wine_volume_generation(self) -> str:
+        self._require_wine_volume()
+        receipt = json.loads(self._wine_receipt().read_text('utf-8'))
+        generation = receipt.get('generation')
+        if not isinstance(generation, str) or not generation:
+            raise RuntimeError('Managed Wine volume generation missing; rerun Setup')
+        return generation
+
+    def wine_prefix_initialized(self) -> bool:
+        if self.provider == 'host':
+            return False
+        self._require_wine_volume()
+        receipt = json.loads(self._wine_receipt().read_text('utf-8'))
+        return bool(receipt.get('initialized'))
+
+    def mark_wine_prefix_initialized(self) -> None:
+        if self.provider == 'host':
+            return
+        self._require_wine_volume()
+        receipt = json.loads(self._wine_receipt().read_text('utf-8'))
+        receipt['initialized'] = True
+        self._wine_receipt().write_text(json.dumps(receipt, indent=2, sort_keys=True)
+                                        + '\n', encoding='utf-8')
+
+    @staticmethod
+    def _uses_wine_prefix(command: list[str]) -> bool:
+        names = {Path(str(part)).name.lower() for part in command}
+        uses = bool(names.intersection({'wine', 'wine64', 'wineboot', 'winepath',
+                                        'wineserver', 'msiexec'}))
+        return uses and '--version' not in command
+
     def execute(self, command: list[str], *, cwd: Path, timeout: int = 600,
-                graphical: bool = False, network: bool = False) -> subprocess.CompletedProcess:
+                graphical: bool = False, network: bool = False,
+                diagnostic_log: Path | None = None) -> subprocess.CompletedProcess:
         if self.provider == 'host':
             # A host Wine run must not put its prefix, caches or runtime state
             # under ~/.wine, ~/.cache, or /tmp; keep all generated files in Builds.
@@ -251,7 +417,7 @@ class WindowsCrossEnvironment:
             for directory in (home, prefix, temp, home / '.cache', home / '.config'):
                 directory.mkdir(parents=True, exist_ok=True)
             env = dict(os.environ, PATH=self.native_path, HOME=str(home),
-                       WINEPREFIX=str(prefix), WINEDEBUG='-all', TMPDIR=str(temp),
+                       WINEPREFIX=str(prefix), WINEARCH='win64', WINEDEBUG='-all', TMPDIR=str(temp),
                        XDG_CACHE_HOME=str(home / '.cache'),
                        XDG_CONFIG_HOME=str(home / '.config'))
             if graphical and platform.system() == 'Linux':
@@ -259,26 +425,45 @@ class WindowsCrossEnvironment:
                 if not xvfb:
                     raise RuntimeError('Wine WebView requires xvfb-run on the Linux host')
                 command = [xvfb, '-a', '--server-args=-screen 0 1280x800x24', *command]
-            return _run(command, cwd=cwd, timeout=timeout, quiet=True, env=env)
+            return _run(command, cwd=cwd, timeout=timeout, quiet=True, env=env,
+                        output_log=diagnostic_log)
         if not self.docker or not self.image:
             raise RuntimeError('Windows cross environment was not successfully provisioned')
-        home = self.builds / 'Run/CinterForgeTerminal/WindowsCross/Home'
-        wineprefix = self.builds / 'Run/CinterForgeTerminal/WindowsCross/WinePrefix'
-        home.mkdir(parents=True, exist_ok=True)
-        wineprefix.mkdir(parents=True, exist_ok=True)
+        # Native Linux filesystems are required for Wine's registry, DLL
+        # cache, and drive mapping. Only non-Wine build output uses /builds.
+        # Setup must have provisioned this named volume; other lifecycle
+        # phases cannot create or repair it implicitly.
+        uses_wine = self._uses_wine_prefix(command)
         docker_command = [self.docker, 'run', '--rm', '--platform', 'linux/amd64',
-                          '--network', ('bridge' if network else 'none'), '--mount', f'type=bind,src={self.repository},dst=/source,readonly',
+                          '--network', ('bridge' if network else 'none'),
+                          '--mount', f'type=bind,src={self.repository},dst=/source,readonly',
                           '--mount', f'type=bind,src={self.builds},dst=/builds',
-                          '--workdir', self.path(cwd),
-                          '--env', 'HOME=/builds/Run/CinterForgeTerminal/WindowsCross/Home',
-                          '--env', 'WINEPREFIX=/builds/Run/CinterForgeTerminal/WindowsCross/WinePrefix',
-                          '--env', 'WINEDEBUG=-all']
+                          '--workdir', self.path(cwd)]
+        if uses_wine:
+            volume = self._require_wine_volume()
+            docker_command += [
+                '--mount', f'type=volume,src={volume},dst=/cinterwine',
+                '--env', 'HOME=/cinterwine/home',
+                '--env', 'WINEPREFIX=/cinterwine/prefix',
+                '--env', 'XDG_CACHE_HOME=/cinterwine/home/.cache',
+                '--env', 'WINEARCH=win64',
+                '--env', 'WINEDEBUG=-all',
+            ]
+        else:
+            docker_command += [
+                '--env', 'HOME=/builds/Run/CinterForgeTerminal/WindowsCross/Home',
+            ]
         if hasattr(os, 'getuid'):
             docker_command.extend(['--user', f'{os.getuid()}:{os.getgid()}'])
-        guest_command = (['xvfb-run', '-a', '--server-args=-screen 0 1280x800x24']
+        # The GUI wrapper verifies the real X11 display, x11vnc RFB handshake
+        # and noVNC endpoint before executing Wine on *that same display*.
+        # Do not use xvfb-run here: its fresh display would not be the one
+        # which passed the Setup check.
+        from host.gui_preflight import IMAGE_SCRIPT
+        guest_command = (['python3', '-u', IMAGE_SCRIPT, '--platform', 'windows', '--']
                          if graphical else []) + [str(part) for part in command]
         return _run(docker_command + [self.image] + guest_command,
-                    cwd=cwd, timeout=timeout, quiet=True)
+                    cwd=cwd, timeout=timeout, quiet=True, output_log=diagnostic_log)
 
     def version_probes(self, cwd: Path) -> dict[str, dict]:
         result = {}
@@ -287,6 +472,8 @@ class WindowsCrossEnvironment:
             output = execution.stdout.strip()
             if execution.returncode or not output:
                 raise RuntimeError(f'{name}: cross-tool sign-of-life failed rc={execution.returncode}: {output[-600:]}')
+            if name == 'wine' and output.splitlines()[0].strip() != PINNED_WINE_VERSION:
+                raise RuntimeError(f'Windows Setup requires MSYS2-patched {PINNED_WINE_VERSION}, got {output[:200]!r}')
             resolved = ('docker://' + str(self.image) + '/' + command[0]
                         if self.provider != 'host' else shutil.which(command[0], path=self.native_path))
             result[name] = {'executable': resolved, 'command': command,

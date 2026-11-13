@@ -468,6 +468,54 @@ class ShellServerRuntimeTests(unittest.TestCase):
 class CodeTerminalLifetimeTests(unittest.TestCase):
     """Closed Code-OSS guest sessions cannot exhaust the live session bound."""
 
+    def test_guest_bash_is_single_instance_in_code_only(self):
+        class ExistingGuest(terminal.TerminalSession):
+            def __init__(self, backend):
+                self.code_backend = backend
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        root = Path(__file__).resolve().parents[2] / 'Builds' / 'Intermediates' / 'CinterForgeTerminalTests'
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='code-guest-singleton-', dir=root) as temp:
+            with mock.patch.object(terminal, '_load_bedrock_manager', side_effect=RuntimeError('no bedrock needed')):
+                server = terminal.CinterShellServer(Path(temp))
+            server.system = 'mac'  # macOS hosts the managed cross-platform development guests.
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                guest = ExistingGuest('linux')
+                with server.code_sessions_lock:
+                    server.code_sessions['terminal-existing-linux'] = guest
+                from urllib.error import HTTPError
+                with self.assertRaises(HTTPError) as duplicate:
+                    urlopen(Request(server.origin + '/host/code-shell-open',
+                                    data=json.dumps({'id':'terminal-second-linux', 'backend':'linux'}).encode(),
+                                    headers={'Content-Type':'application/json'}, method='POST'), timeout=6)
+                self.assertEqual(duplicate.exception.code, 400)
+                self.assertIn('already open', duplicate.exception.read().decode())
+                self.assertFalse(guest.closed)
+                self.assertEqual(len(server.code_sessions), 1)
+                # Bypassing the UI cannot create Windows/Linux Bash in a Session.
+                for backend in ('linux', 'win'):
+                    with self.assertRaises(HTTPError) as rejected:
+                        urlopen(Request(server.origin + '/api/terminal/open',
+                                        data=json.dumps({'backend':backend}).encode(),
+                                        headers={'Content-Type':'application/json',
+                                                 'X-CPH-Token':server.token}, method='POST'), timeout=6)
+                    self.assertEqual(rejected.exception.code, 400)
+                    self.assertIn('Code-OSS', rejected.exception.read().decode())
+                # Closing releases the singleton slot without terminating another guest.
+                with server.code_sessions_lock:
+                    server.code_sessions.pop('terminal-existing-linux')
+                guest.close()
+                self.assertTrue(guest.closed)
+            finally:
+                server.stop()
+                thread.join(timeout=3)
+
     def test_exited_guest_session_reclaimed_without_evicting_live_shells(self):
         class MockSession(terminal.TerminalSession):
             def __init__(self, closed):
@@ -530,3 +578,37 @@ class CodeTerminalLifetimeTests(unittest.TestCase):
                 thread.join(timeout=3)
 if __name__ == '__main__':
     unittest.main()
+
+
+class LauncherBackgroundAssetsTests(unittest.TestCase):
+    """Three replaceable PNGs; toolbar/dock must not be baked into wallpaper."""
+
+    def test_three_independent_platform_backgrounds_ship_as_authored_pngs(self):
+        root = Path(__file__).resolve().parents[1]
+        asset_dir = root / 'webapp/launcher/assets/backgrounds'
+        backgrounds = [asset_dir / f'{platform}.png'
+                       for platform in ('mac', 'windows', 'linux')]
+        image_hashes = set()
+        for image in backgrounds:
+            content = image.read_bytes()
+            self.assertTrue(content.startswith(b'\x89PNG\r\n\x1a\n'))
+            # All start with replaceable 1920x1080 images, not giant GUI themes.
+            self.assertEqual(tuple(int.from_bytes(content[i:i+4], 'big')
+                                   for i in (16, 20)), (1920, 1080))
+            self.assertLess(len(content), 100_000)
+            image_hashes.add(__import__('hashlib').sha256(content).digest())
+        self.assertEqual(len(image_hashes), 3)
+        js = (root / 'webapp/launcher/app.js').read_text()
+        html = (root / 'webapp/launcher/index.html').read_text()
+        css = (root / 'webapp/launcher/style.css').read_text()
+        self.assertIn('assets/backgrounds/${wallpaperFile}.png', js)
+        self.assertIn('id="wallpaper"', html)
+        self.assertIn('class="dock"', html)
+        self.assertIn('.dock {', css)
+        self.assertNotIn('desktop-reference.png', html)
+        from host import universal_package
+        staged = universal_package._files_under(root / 'webapp/launcher',
+                                                 'Host/webapp/launcher')
+        for image in backgrounds:
+            self.assertIn('Host/webapp/launcher/assets/backgrounds/' + image.name,
+                          staged)

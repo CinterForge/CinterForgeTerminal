@@ -425,8 +425,7 @@ namespace cinterforge
                 NSMenuItem *entry = [[NSMenuItem alloc] initWithTitle:group action:nil keyEquivalent:@""];
                 NSMenu *menu = [[NSMenu alloc] initWithTitle:group];
                 [entry setSubmenu:menu];
-                [entry setEnabled:([group isEqualToString:@"File"] ||
-                    [group isEqualToString:@"Edit"] || [group isEqualToString:@"Terminal"])];
+                [entry setEnabled:YES]; // All modes share the same menu skeleton.
                 [bar addItem:entry];
                 menus[group] = menu;
             }
@@ -449,12 +448,15 @@ namespace cinterforge
             [copyItem setKeyEquivalent:@"c"];
             [pasteItem setKeyEquivalent:@"v"];
             NSDictionary *terminalLabels = @{
-                @"code": @"New CinterForge Code Terminal", @"mac": @"New Mac Terminal",
-                @"linux": @"New Linux Terminal", @"win": @"New Windows Terminal",
+                @"code": @"New CinterForge Code Terminal", @"mac": @"New Mac Bash",
+                @"linux": @"Open Linux Bash in Code-OSS", @"win": @"Open Windows Bash in Code-OSS",
+                @"launcher:mac": @"Mac Launcher", @"launcher:win": @"Windows Launcher",
+                @"launcher:linux": @"Linux Launcher",
                 @"server": @"New Server Log Terminal", @"if": @"New Z-Machine Terminal",
                 @"minecraft": @"New Minecraft Terminal"
             };
-            for (NSString *kind in @[@"code", @"mac", @"linux", @"win", @"server", @"if", @"minecraft"])
+            for (NSString *kind in @[@"code", @"mac", @"linux", @"win", @"launcher:mac",
+                                    @"launcher:win", @"launcher:linux", @"server", @"if", @"minecraft"])
             {
                 NSMenuItem *item = addAction(@"Terminal", terminalLabels[kind],
                     [@"terminal:" stringByAppendingString:kind]);
@@ -862,8 +864,9 @@ namespace cinterforge
             if (args.find("\"event\":\"code-menu-mode\"") != std::string::npos) {
                 const bool enabled = args.find("\"enabled\":true") != std::string::npos;
                 window.dispatch([enabled] {
-                    for (NSString *name in @[@"Selection", @"View", @"Go", @"Run", @"Help"])
-                        [[NSApp.mainMenu itemWithTitle:name] setEnabled:enabled];
+                    // Keep menu headings in place in both Code and Session.
+                    // Unsupported leaves are disabled by code-menu-model.
+                    (void)enabled;
                 });
             }
             if (args.find("\"event\":\"code-menu-model\"") != std::string::npos) {

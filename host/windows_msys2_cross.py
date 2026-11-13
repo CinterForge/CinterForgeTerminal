@@ -1,8 +1,8 @@
 """Stage a complete native Windows MSYS2/UCRT64 toolchain from official packages.
 
 MSYS2 (Cygwin-derived) programs cannot run reliably under standard Wine.
-Wine is retained for MinGW-generated Windows PE tests, not for MSYS2's Qt
-installer, Bash, or pacman.  The official, dated MSYS2 base archive and the
+The managed guest uses MSYS2-patched Wine for its real Bash, independently
+from the native Windows Setup path. Do not execute pacman for Setup in Wine.  The official, dated MSYS2 base archive and the
 transitive UCRT64 packages are installed in Builds without executing any
 Windows installers.  Native Windows acceptance remains a separate gate.
 """
@@ -304,6 +304,6 @@ def ensure(builds: Path, cross, base: Path) -> Path:
         'downloaded': downloaded, 'resolved': resolved,
         'required_executables': [*REQUIRED, 'usr/bin/winpty.exe'],
         'native_windows_test': 'not-run',
-        'wine_msys2_test': 'unsupported-by-upstream',
+        'wine_msys2_test': 'guest-startup-acceptance-required',
     }, indent=2, sort_keys=True) + '\n', encoding='utf-8')
     return root

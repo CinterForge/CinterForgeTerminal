@@ -647,6 +647,11 @@ class FourArtifactSteamReleaseTests(unittest.TestCase):
     def test_publish_remote_only_devtools_end_to_end_without_sdk_transfer(self):
         self.built()
         original = universal.prepare_publish_packages(self.builds, release=self.release)
+        # This fixture stands in for an already-notarized public Mac release;
+        # only the remote DevTools reuse path is under test here.
+        original['artifacts']['mac']['notarized'] = True
+        (self.builds / 'CinterForgeTerminal/Distribution/four-artifacts.json').write_text(
+            json.dumps(original))
         old_manifest = (self.builds / 'CinterForgeTerminal/Distribution/four-artifacts.json').read_bytes()
         sdk = 'CinterForgeTerminal-devtools.zip'
         (self.builds / 'CinterForgeTerminal/Distribution' / sdk).unlink()
@@ -669,7 +674,8 @@ class FourArtifactSteamReleaseTests(unittest.TestCase):
               mock.patch.object(r2, '_list_remote', return_value=remote),
               mock.patch.object(r2, '_request', return_value=(200, {}, old_manifest)),
               mock.patch.object(r2, '_put_file', side_effect=lambda cfg,key,path,**kw: sent.append(key)),
-              mock.patch.object(universal, '_write_release_zip', side_effect=AssertionError('SDK or other ZIP recompressed'))):
+              mock.patch.object(universal, '_write_release_zip', side_effect=AssertionError('SDK or other ZIP recompressed')),
+              mock.patch.dict(os.environ, {'CINTER_MAC_SIGN_IDENTITY': 'Developer ID Application: fixture'})):
             receipt = universal.publish_four(self.builds, release=self.release, channel='beta')
         self.assertEqual([key.rsplit('/', 1)[-1] for key in sent], ['four-artifacts.json'])
         self.assertFalse((self.builds / 'CinterForgeTerminal/Distribution' / sdk).exists())
@@ -686,7 +692,7 @@ class FourArtifactSteamReleaseTests(unittest.TestCase):
                 'CINTER_MAC_SIGN_IDENTITY': 'Developer ID Application: fixture',
                 'CINTER_MAC_NOTARY_PROFILE': 'fixture-notary-profile'}), \
              mock.patch.object(universal, '_notarize_mac_app') as notarize:
-            result = universal.prepare_publish_packages(self.builds, release=self.release)
+            result = universal.prepare_publish_packages(self.builds, release=self.release, notarize=True)
         notarize.assert_called_once()
         self.assertTrue(result['artifacts']['mac']['notarized'])
         for target in ('linux', 'win', 'devtools'):

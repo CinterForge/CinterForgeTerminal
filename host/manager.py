@@ -813,11 +813,15 @@ def stage_host(builds: Path) -> dict:
         # application service. Never omit its JS, terminal bindings or EULA
         # manager from the immutable artifact consumed by product applications.
         for name in ('CinterForgeTerminal.py', 'if_titles.json', 'mac_games.json', 'index.html',
-                     'terminal_styles.json', 'terminal.js', 'terminal.css'):
+                     'terminal_styles.json', 'terminal.js', 'terminal.css', 'startup.html', 'startup.js'):
             shutil.copy2(repo / 'webapp' / name, candidate / 'webapp' / name)
         # JOSHUA remains self-contained (including its AGPL license) and is
         # embedded in the same authenticated Terminal origin, not a repo clone.
         shutil.copytree(repo / 'webapp/joshua', candidate / 'webapp/joshua')
+        # Shared Mac/Windows/Linux Launcher UI and replaceable PNGs are part
+        # of the signed/staged Host closure, never read from a sibling repo.
+        shutil.copytree(repo / 'webapp/launcher', candidate / 'webapp/launcher',
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store'))
         files = {item.relative_to(candidate).as_posix(): hashlib.sha256(item.read_bytes()).hexdigest()
                  for item in sorted(candidate.rglob('*')) if item.is_file()}
         receipt = {'schema': _HOST_STAGE_SCHEMA, 'platform': system,

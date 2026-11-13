@@ -595,6 +595,9 @@ async function activateCoordinator(context) {
 
     const nativeTerminals =
         new Map();
+    // Linux and Windows are development-only: one Code-OSS terminal each.
+    // Mac shells intentionally have no singleton limit.
+    const guestTerminals = new Map();
 
     let zMachinePty = null;
 
@@ -776,10 +779,22 @@ async function activateCoordinator(context) {
         return assetTaskTerminal;
     };
 
+    let devtoolsInstalled = terminalHost?.platform === 'mac' && terminalHost.devtools_installed === true;
+
     const hostPlatformName = terminalHost?.platform === 'mac' ? 'Mac' :
         terminalHost?.platform === 'win' ? 'Windows' : 'Linux';
 
     const openNativeTerminal = (backend = 'native', label = null) => {
+        // The menu, command channel and startup all use this one creation path.
+        // Reopening a guest shell focuses it instead of allocating another PTY.
+        if (backend === 'linux' || backend === 'win') {
+            const existing = guestTerminals.get(backend);
+            if (existing && (vscode.window.terminals || []).includes(existing)) {
+                existing.show();
+                return existing;
+            }
+            guestTerminals.delete(backend);
+        }
         nativeSerial++;
         const id = `terminal-${codeWindowId}-${nativeSerial}`;
         const pty = createNativeTerminalPty(id, backend);
@@ -796,6 +811,9 @@ async function activateCoordinator(context) {
             terminal,
             id
         );
+        if (backend === 'linux' || backend === 'win') {
+            guestTerminals.set(backend, terminal);
+        }
 
         terminal.show();
 
@@ -826,6 +844,8 @@ async function activateCoordinator(context) {
                 terminalHost.platform === system);
         }
         await vscode.commands.executeCommand('setContext', 'cinterforge.hostTerminal', true);
+        await vscode.commands.executeCommand('setContext', 'cinterforge.devtoolsInstalled',
+            devtoolsInstalled);
     }
     for (const [id, platform, label] of [
         ['cinterforge.newMacTerminal', 'mac', 'Mac'],
@@ -836,8 +856,9 @@ async function activateCoordinator(context) {
         context.subscriptions.push(vscode.commands.registerCommand(id, () => {
             if (!terminalHost) return;
             const host = terminalHost.platform;
-            if (platform !== 'server' && platform !== host && host !== 'mac') {
-                return vscode.window.showErrorMessage(label + ' guest is unavailable on this host');
+            if (platform !== 'server' && platform !== host &&
+                !(host === 'mac' && devtoolsInstalled)) {
+                return vscode.window.showErrorMessage(label + ' requires supported host DevTools');
             }
             const backend = platform === host ? 'native' :
                 platform;
@@ -851,8 +872,29 @@ async function activateCoordinator(context) {
     const codeCommandChannel = terminalHost && typeof BroadcastChannel === 'function'
         ? new BroadcastChannel('cinterforge-terminal-code-commands') : null;
     if (codeCommandChannel) {
+        // This identifier is the owner prefix of all PTYs in this ONE
+        // workbench. It lets Terminal close only these PTYs on explicit close.
+        codeCommandChannel.postMessage({type: 'code-workbench-owner', owner: codeWindowId});
+        for (const [command, system] of [
+            ['cinterforge.openMacLauncher', 'mac'],
+            ['cinterforge.openWindowsLauncher', 'win'],
+            ['cinterforge.openLinuxLauncher', 'linux']
+        ]) {
+            context.subscriptions.push(vscode.commands.registerCommand(
+                command, () => {
+                    if (terminalHost.platform !== 'mac' ||
+                        (system !== 'mac' && !devtoolsInstalled)) return;
+                    codeCommandChannel.postMessage({type: 'open-launcher', platform: system});
+                }));
+        }
         codeCommandChannel.onmessage = (event) => {
             const request = event.data || {};
+            if (request.type === 'devtools-capabilities') {
+                devtoolsInstalled = terminalHost.platform === 'mac' && request.installed === true;
+                void vscode.commands.executeCommand('setContext',
+                    'cinterforge.devtoolsInstalled', devtoolsInstalled);
+                return;
+            }
             if (request.type === 'new-terminal') {
                 const backend = String(request.backend || 'native');
                 const supported = ['mac', 'native', 'linux', 'win', 'server', 'minecraft', 'if'];
@@ -928,6 +970,9 @@ async function activateCoordinator(context) {
                     nativeTerminals.delete(
                         terminal
                     );
+                    for (const [backend, current] of guestTerminals) {
+                        if (current === terminal) guestTerminals.delete(backend);
+                    }
 
                     if (
                         terminal ===
@@ -1817,9 +1862,10 @@ async function activateCoordinator(context) {
             // Server Log streams the existing read-only HTTP/Python logfile.
             const current = terminalHost.platform === 'mac' ? 'Mac' :
                 terminalHost.platform === 'win' ? 'Windows' : 'Linux';
-            const startup = [['native', current], ['server', 'Server Log']];
+            const startup = [['native', current]];
             if (terminalHost.platform === 'mac') {
-                startup.push(['linux', 'Linux'], ['win', 'Windows']);
+                startup.push(['server', 'Server Log']);
+                if (devtoolsInstalled) startup.push(['linux', 'Linux'], ['win', 'Windows']);
             }
             try {
                 for (const [backend, label] of startup) {

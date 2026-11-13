@@ -157,7 +157,7 @@ def _smoke_http(builds: Path, stage: Path, executable: Path) -> dict:
     server_py = stage / 'webapp/CinterForgeTerminal.py'
     assets = stage / 'webapp'
     for name in ('CinterForgeTerminal.py', 'if_titles.json', 'mac_games.json', 'index.html',
-                 'terminal.js', 'terminal.css', 'terminal_styles.json'):
+                 'terminal.js', 'terminal.css', 'terminal_styles.json', 'startup.html', 'startup.js'):
         if not (assets / name).is_file():
             raise RuntimeError(f'HTTP service asset missing: {name}')
     if not executable.is_file():

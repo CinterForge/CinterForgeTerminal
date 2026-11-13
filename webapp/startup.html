@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en" data-cph-token="__CPH_TOKEN__">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CinterForge Terminal — Initializing DevTools</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { height: 100%; margin: 0; }
+    body { display: grid; place-items: center; background: #111821; color: #e2e9f0;
+           font: 15px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    main { text-align: center; padding: 2rem; max-width: 38rem; }
+    .spinner { width: 34px; height: 34px; border: 3px solid #435061;
+               border-top-color: #b0c9ed; border-radius: 50%; margin: 0 auto 1.5rem;
+               animation: spin 1s linear infinite; }
+    p { color: #aebccc; line-height: 1.5; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+  </style>
+  <script defer src="/startup.js"></script>
+</head>
+<body>
+  <main role="status" aria-live="polite">
+    <div class="spinner" aria-hidden="true"></div>
+    <h1>Initializing DevTools...</h1>
+    <p id="startup-status">Starting Colima and verifying Linux and Windows Bash connections.</p>
+  </main>
+</body>
+</html>

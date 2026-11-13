@@ -14,7 +14,7 @@ import shlex
 import shutil
 import subprocess
 
-from host.three_samples import _docker_image, LINUX_DOCKERFILE
+from host.three_samples import _docker_image, LINUX_DOCKERFILE, linux_recipe_sha256
 from host.portable_python import PACKAGES, VERSION, UPSTREAM, _download_verified
 
 
@@ -34,7 +34,7 @@ def stage(builds: Path, *, docker: str, logfile: Path) -> Path:
     root = builds / 'CinterForgeTerminal/Toolchains/TargetRunners/linux'
     root.mkdir(parents=True, exist_ok=True)
     executable = root / 'run'
-    recipe_hash = hashlib.sha256(LINUX_DOCKERFILE.read_bytes()).hexdigest()
+    recipe_hash = linux_recipe_sha256()
     script = f'''#!/bin/sh
 set -eu
 # Actual Linux/x64 process, not a host-generated PASS receipt.
@@ -91,7 +91,7 @@ def build_terminal(builds: Path, *, docker: str, logfile: Path) -> Path:
     signature = {
         'schema': 'cinterforge.terminal.linux-native-build-inputs.v1',
         'image': image,
-        'linux_recipe_sha256': hashlib.sha256(LINUX_DOCKERFILE.read_bytes()).hexdigest(),
+        'linux_recipe_sha256': linux_recipe_sha256(),
         'cmake_source_sha256': hashlib.sha256((repo / 'CMakeLists.txt').read_bytes()).hexdigest(),
         'webview': webview.relative_to(builds).as_posix(),
     }

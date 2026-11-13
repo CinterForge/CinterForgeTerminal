@@ -334,6 +334,12 @@ def ensure(builds: Path) -> Path:
             image = _docker_image(builds, str(docker), builds / 'Logs/CinterForgeTerminal/DevTooling-linux-image.log')
         except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
             print(f'[DEVTOOLING] Linux image unavailable: {exc}', flush=True)
+        # This is Setup, not runtime. Verify the actual Linux GUI endpoint
+        # before recording a usable Linux environment; no cached CLI version
+        # string can substitute for a real X11 + VNC + noVNC connection.
+        if image:
+            from host.gui_preflight import verify_guest_gui
+            verify_guest_gui(builds, guest='linux', docker=str(docker), image=image)
         for name, binary, args in LINUX_TOOLS:
             def linux_probe(b=binary, a=args, n=name):
                 if not image:

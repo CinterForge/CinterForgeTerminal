@@ -133,6 +133,7 @@ CODEOSS_OBSERVER = r"""<script nonce="cinterforge">
 STATIC_FILES = {
     '/': ('index.html', 'text/html; charset=utf-8'),
     '/index.html': ('index.html', 'text/html; charset=utf-8'),
+    '/startup.js': ('startup.js', 'text/javascript; charset=utf-8'),
     '/terminal.js': ('terminal.js', 'text/javascript; charset=utf-8'),
     '/terminal.css': ('terminal.css', 'text/css; charset=utf-8'),
     '/terminal_styles.json': ('terminal_styles.json', 'application/json; charset=utf-8'),
@@ -400,7 +401,7 @@ def _mac_catalog():
 
 
 def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Path:
-    """Author command bindings and native directory listing under Builds."""
+    """Author shell bindings in developer Builds or installed runtime cache."""
     directory = root / 'scripts'
     directory.mkdir(parents=True, exist_ok=True)
     cli = ASSETS / 'CinterForgeTerminal.py'
@@ -441,7 +442,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     # (pacman-key, /dev/shm and /dev/mqueue setup), even for read-only bundles.
     # Our explicit --rcfile requires no machine-wide profile or pacman setup.
     preamble = ("# Native CinterForge Terminal session (preconfigured UCRT64 environment)\n"
-                + ("PS1='$ '\n" if system == 'win' else '')
+                + "PS1='\\u@\\h \\w \\$ '\n"
                 + "HISTIGNORE='setpass *'\n"  # Do not retain credentials in Bash history.
                 + "printf 'Welcome to CinterForge. Type help for instructions.\\n'\n")
 
@@ -449,28 +450,72 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     return directory
 
 
-def _session_environment(builds: Path, system: str) -> dict[str, str]:
-    """Confine shell history/cache/temp to developer Builds or installed Steam."""
-    root = builds / 'Run' / 'CinterForgeTerminal' / system
-    paths = {name: root / name for name in ('home', 'tmp', 'cache', 'config', 'data')}
-    for path in paths.values():
-        path.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ)
-    if system == 'win':
-        user_home = env.get('USERPROFILE','')
+def _real_login_home() -> Path:
+    """Get the real account home, never the isolated shell/Colima HOME."""
+    configured = os.environ.get('CINTER_USER_HOME', '').strip()
+    if configured:
+        home = Path(configured).expanduser()
+    elif os.name == 'nt':
+        home = Path(os.environ.get('USERPROFILE', str(Path.home())))
     else:
         try:
             import pwd
-            user_home = pwd.getpwuid(os.getuid()).pw_dir
+            home = Path(pwd.getpwuid(os.getuid()).pw_dir)
         except (ImportError, KeyError, OSError):
-            user_home = str(Path.home())
+            home = Path.home()
+    if not home.is_absolute() or not home.is_dir():
+        raise RuntimeError('Installed Terminal requires the real account home for runtime cache')
+    return home.resolve(strict=True)
+
+
+def _installed_cache_root(home: Path) -> Path:
+    """Transient runtime files live in the OS cache, NEVER in steamapps.
+
+    Steam stores applications and persistent player configuration/history;
+    Setup/developer intermediates stay in sibling Builds.  This cache is not
+    an installer or a duplicate of the downloaded DevTools bundle.
+    """
+    system = platform.system()
+    if system == 'Darwin':
+        path = home / 'Library/Caches/CinterForgeTerminal'
+    elif system == 'Windows':
+        path = home / 'AppData/Local/CinterForgeTerminal/Cache'
+    else:
+        path = home / '.cache/CinterForgeTerminal'
+    # An OS cache can be redirected by a user-controlled symlink. Never let
+    # that redirect our multi-GB VM or download scratch into a Steam library.
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise RuntimeError('Unsafe installed Terminal cache: ' + str(path))
+    resolved = path.resolve()
+    if any(item.name.casefold() == 'steamapps' for item in (resolved, *resolved.parents)):
+        raise RuntimeError('Installed Terminal cache must not resolve inside steamapps: ' + str(path))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _session_environment(builds: Path, system: str) -> dict[str, str]:
+    """Keep persistent user data in Steam, transient runtime data out of it."""
+    installed = (builds.name != 'Builds' and
+                 _steam_library_for_installed_root(builds) is not None)
+    user_home = _real_login_home()
+    root = builds / 'Run' / 'CinterForgeTerminal' / system
+    scratch = ((_installed_cache_root(user_home) / 'Sessions' / system)
+               if installed else root)
+    paths = {'home': root / 'home', 'config': root / 'config',
+             'data': root / 'data', 'tmp': scratch / 'tmp',
+             'cache': scratch / 'cache'}
+    for path in paths.values():
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise RuntimeError('Unsafe Terminal session state: ' + str(path))
+        path.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
     env['CINTER_USER_HOME'] = str(user_home)
-    # The interactive shell HOME is relocated into managed per-session state.
-    # Preserve the *real* Steam root before rewriting HOME, otherwise an
-    # optional public DevTools install would target the session sandbox.
-    # An installed application may be on any Steam library drive. Its real
-    # installation path takes precedence over the inherited/default library,
-    # and must be passed into the PTY before its HOME is moved into Builds.
+    env['CINTER_TERMINAL_SCRATCH_ROOT'] = str(scratch)
+    # Guest shells have isolated HOME, but Mac Bash must retain the real
+    # login HOME. Host signing, Keychain preferences, and normal ./Cinter
+    # publishing must work from the integrated terminal without workaround.
+    # Temp/cache/config/history still use the managed paths below.
+    # Preserve the actual installed Steam library independently of HOME.
     installed_steam = None
     for parent in (builds.resolve(), *builds.resolve().parents):
         if (parent.name.lower() == 'steamapps' and
@@ -501,7 +546,8 @@ def _session_environment(builds: Path, system: str) -> dict[str, str]:
     env['CINTER_TERMINAL_RELEASE'] = release
     if builds.name == 'Builds':
         env['CINTER_BUILDS_ROOT'] = str(builds.resolve())
-    env.update({'HOME': str(paths['home']), 'TMPDIR': str(paths['tmp']),
+    env.update({'HOME': str(user_home if system == 'mac' else paths['home']),
+                'TMPDIR': str(paths['tmp']),
                 'TMP': str(paths['tmp']), 'TEMP': str(paths['tmp']),
                 'XDG_CACHE_HOME': str(paths['cache']), 'XDG_CONFIG_HOME': str(paths['config']),
                 'XDG_DATA_HOME': str(paths['data']), 'HISTFILE': str(paths['home'] / 'history'),
@@ -540,6 +586,8 @@ class TerminalSession:
         if internal_token:
             env['CINTER_TERMINAL_CLI_TOKEN'] = internal_token
         env['CINTER_TERMINAL_SESSION_ID'] = self.id
+        # Preserve the existing persistent session working directory in Steam.
+        # Only generated shell bindings and disposable files use OS cache.
         self.root = builds / 'Run' / 'CinterForgeTerminal' / system
         env['CINTER_TARGET_PLATFORM'] = system
         if system == 'win':
@@ -551,7 +599,7 @@ class TerminalSession:
                                             str(msys / 'usr/bin'), env.get('PATH', '')])
         if working_directory is not None:
             env['CINTER_CODE_WORKSPACE'] = str(working_directory)
-        scripts = _install_shell_commands(self.root, system, env)
+        scripts = _install_shell_commands(Path(env['CINTER_TERMINAL_SCRATCH_ROOT']), system, env)
         self.shell = command if command is not None else _shell_command(system, scripts, builds)
         working_directory = working_directory or self.root
         if output_log is None:
@@ -915,6 +963,16 @@ def _runtime_logs_root(writable_root: Path) -> Path:
     if root.name == 'Builds':
         return root / 'Logs/CinterForgeTerminal/Runtime'
     raise RuntimeError('Runtime logs cannot escape developer Builds or the Steam installation')
+
+
+def _devtools_menu_ready(system: str) -> bool:
+    """Read-only host capability check; malformed/missing SDK never blocks the UI."""
+    if system != 'mac':
+        return False
+    try:
+        return sdk_root() is not None
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 class ServerRuntimeLog:
@@ -1761,6 +1819,7 @@ class CinterShellServer(ThreadingHTTPServer):
         self.code_workspace = CodeWorkspace(self.mutable_builds)
         self.code_sessions = {}  # Code-OSS terminal name -> real host Session or Server Log cursor
         self.code_sessions_lock = threading.Lock()
+        self.code_closed_owners = set()  # Late worker requests cannot revive a closed CodeOSS tab.
         self.lan_login_lock = threading.Lock()
         self.lan_login = _load_lan_login(self.mutable_builds)
         self.lan_cookie = secrets.token_urlsafe(36)
@@ -1790,6 +1849,8 @@ class CinterShellServer(ThreadingHTTPServer):
         self.guest_start_lock = threading.Lock()
         self.guest_start_state = 'not-installed'
         self.guest_start_error = ''
+        self.guest_ready = []  # Per-platform readiness survives a failed Wine probe.
+        self.guest_errors = {}
         # Native app consumes these atomic reboot requests over its existing
         # private JSON-RPC pipe, never through an unauthenticated browser menu.
         self.lifecycle_actions = deque()
@@ -1960,6 +2021,24 @@ class Handler(BaseHTTPRequestHandler):
                 'closed': closed}
 
     def _code_shell_action(self, route: str, body: dict) -> dict:
+        if route == '/host/code-shell-close-owner':
+            owner = body.get('owner')
+            if not isinstance(owner, str) or not re.fullmatch(r'[a-z0-9]{1,24}', owner):
+                raise ValueError('Invalid Code-OSS owner')
+            prefix = 'terminal-' + owner + '-'
+            with self.server.code_sessions_lock:
+                self.server.code_closed_owners.add(owner)
+                # Bound tombstones; closed owners are unguessable short-lived
+                # workbench IDs, and this is only an additional race barrier.
+                if len(self.server.code_closed_owners) > 256:
+                    self.server.code_closed_owners.clear()
+                    self.server.code_closed_owners.add(owner)
+                names = [name for name in self.server.code_sessions if name.startswith(prefix)]
+                entries = [self.server.code_sessions.pop(name) for name in names]
+            for entry in entries:
+                if isinstance(entry, TerminalSession):
+                    entry.close()
+            return {'closed': len(entries)}
         code_id = body.get('id')
         if not isinstance(code_id, str) or not re.fullmatch(r'terminal-[a-z0-9-]{1,48}', code_id):
             raise ValueError('Invalid Code-OSS terminal ID')
@@ -1977,8 +2056,17 @@ class Handler(BaseHTTPRequestHandler):
             for entry in ended:
                 entry.close()
             with self.server.code_sessions_lock:
+                owner = code_id[len('terminal-'):].rsplit('-', 1)[0]
+                if owner in self.server.code_closed_owners:
+                    raise RuntimeError('Code-OSS workbench is closed; refusing a late PTY open')
                 if code_id in self.server.code_sessions:
                     raise ValueError('Code-OSS terminal ID already in use')
+                if backend in ('linux', 'win'):
+                    # Defense in depth: even multiple Code-OSS clients may not
+                    # allocate a second Windows/Linux development shell.
+                    if any(getattr(item, 'code_backend', None) == backend
+                           for item in self.server.code_sessions.values()):
+                        raise RuntimeError(backend.title() + ' Bash is already open in Code-OSS')
                 if len(self.server.code_sessions) >= MAX_SESSIONS:
                     raise RuntimeError('Maximum Code-OSS terminal sessions reached')
                 if backend == 'server':
@@ -2009,6 +2097,7 @@ class Handler(BaseHTTPRequestHandler):
                     url=self.server.origin, token=self.server.token,
                     command=command, working_directory=cwd,
                     internal_token=self.server.cli_token)
+                terminal.code_backend = backend
                 self.server.code_sessions[code_id] = terminal
             return {'opened': True, 'backend': backend, 'cwd': str(cwd)}
         with self.server.code_sessions_lock:
@@ -2265,7 +2354,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 if path == '/host/code-workspace':
-                    self._json(200, self.server.code_workspace.details())
+                    self._json(200, {**self.server.code_workspace.details(),
+                                     'devtools_installed': _devtools_menu_ready(self.server.system)})
                 else:
                     code_id = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
                     self._json(200, self._code_shell_output(code_id))
@@ -2273,6 +2363,41 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {'error': str(error)})
             return
         if self._serve_artifact(path):
+            return
+        if path.startswith('/launcher/'):
+            # Fixed, read-only CFOS assets. No user paths or guest files become
+            # available through the shared HTTP service. Same-origin iframe.
+            rel = unquote(path[len('/launcher/'):])
+            if not rel or rel.endswith('/'):
+                rel += 'index.html'
+            parts = Path(rel)
+            root = ASSETS / 'launcher'
+            candidate = root / parts
+            if (parts.is_absolute() or '..' in parts.parts or '\\' in rel or
+                    root.is_symlink() or any(item.is_symlink() for item in
+                    (candidate, *candidate.parents) if item == root or root in item.parents) or
+                    not candidate.is_file()):
+                self._json(404, {'error': 'Unknown launcher asset'})
+                return
+            mime = mimetypes.guess_type(str(candidate))[0] or 'application/octet-stream'
+            # The launcher alone embeds the forwarded, localhost-only noVNC
+            # viewer; never relax the main Terminal/Code/IF CSP for this.
+            if rel == 'index.html':
+                body = candidate.read_bytes()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('X-Frame-Options', 'SAMEORIGIN')
+                self.send_header('Content-Security-Policy',
+                    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                    "img-src 'self' data:; connect-src 'self'; "
+                    "frame-src http://127.0.0.1:20601 http://127.0.0.1:20602; "
+                    "object-src 'none'; base-uri 'none'; frame-ancestors 'self'")
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self._send(200, candidate.read_bytes(), mime)
             return
         if path == '/api/discord/messages':
             if not self._authorized():
@@ -2337,7 +2462,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(403, {'error': 'not authorized'})
                 return
             self._json(200, {'platform': self.server.system, 'sessions': len(self.server.sessions),
-                             'debug': True})
+                             'debug': True, 'devtools_installed':
+                             _devtools_menu_ready(self.server.system)})
             return
         if path.startswith('/zmachine/'):
             # Exact scoped staged runtime, no arbitrary Builds path access.
@@ -2573,6 +2699,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200,asset.read_bytes(),mime,same_origin_frame=asset.name=='index.html')
             return
         info = STATIC_FILES.get(path)
+        if _boot_splash_required(self.server, path, urlsplit(self.path).query):
+            # Only the owner boot thread starts the VM; WebView just polls.
+            info = ('startup.html', 'text/html; charset=utf-8')
         if not info:
             self._json(404, {'error': 'not found'})
             return
@@ -2582,7 +2711,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(503, {'error': f'Incomplete shell package: {name}'})
             return
         data = file.read_bytes()
-        if name == 'index.html':
+        if name in ('index.html', 'startup.html'):
             data = data.replace(b'__CPH_TOKEN__', self.server.token.encode('ascii'))
             data = data.replace(b'__CPH_PLATFORM__', self.server.system.encode('ascii'))
         self._send(200, data, ctype)
@@ -2614,7 +2743,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if route == '/code/command' or route in (
                 '/host/code-shell-open', '/host/code-shell-write',
-                '/host/code-shell-close', '/host/code-shell-resize'):
+                '/host/code-shell-close', '/host/code-shell-close-owner',
+                '/host/code-shell-resize'):
             if not self._code_authorized():
                 self._json(403, {'error': 'Code-OSS login required', 'error_code': 'permission_denied'})
                 return
@@ -2763,6 +2893,23 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n))
             if not isinstance(body, dict):
                 raise ValueError('Expected a JSON object')
+            if route == '/api/launcher/start':
+                if self.server.system != 'mac':
+                    raise ValueError('Cross-platform Launchers are only available on the Mac host')
+                kind = body.get('platform')
+                if kind not in ('mac', 'linux', 'win'):
+                    raise ValueError('Unknown graphical launcher platform')
+                result = {'platform': kind} if kind == 'mac' else _launcher_start(kind, self.server)
+                self._json(200, {'ready': True, **result})
+                return
+            if route == '/api/launcher/launch':
+                if self.server.system != 'mac':
+                    raise ValueError('Cross-platform Launchers are only available on the Mac host')
+                kind, app = body.get('platform'), body.get('app')
+                if kind not in ('mac', 'linux', 'win') or not isinstance(app, str):
+                    raise ValueError('Invalid graphical launcher request')
+                self._json(200, _launcher_launch(kind, app, self.server))
+                return
             if route == '/api/lan/setpass':
                 # The command must originate inside a live, authenticated Terminal
                 # session. Do not expose credentials through LAN info or logs.
@@ -2888,6 +3035,10 @@ class Handler(BaseHTTPRequestHandler):
                     ' platform=' + self.server.system)
                 if backend not in ('native','mac','linux','win','minecraft'):
                     raise ValueError('Unknown Terminal backend')
+                # On macOS these are Code-OSS development-only shells. Do not
+                # create a guest Bash Session through direct API calls either.
+                if self.server.system == 'mac' and backend in ('linux', 'win'):
+                    raise ValueError(backend.title() + ' Bash is available only inside Code-OSS')
                 command=None
                 if backend=='minecraft':
                     if self.server.bedrock is None:
@@ -2898,14 +3049,6 @@ class Handler(BaseHTTPRequestHandler):
                     if state.get('console_available') is False:
                         raise RuntimeError('Bedrock console attachment unavailable')
                     command=[sys.executable, str(ASSETS/'CinterForgeTerminal.py'),'--terminal-cli','minecraft']
-                elif self.server.system == 'mac' and backend in ('linux','win'):
-                    # Run the requested real guest shell in THIS Session's PTY.
-                    # The child checks the optional unified DevTools receipt,
-                    # obtains explicit consent if absent, streams progress,
-                    # and starts the verified Linux OCI or Windows MSYS2/Wine
-                    # backend. Never substitute macOS /bin/bash.
-                    command=[sys.executable, '-u', str(ASSETS/'CinterForgeTerminal.py'),'--guest-shell',backend]
-                    self.server.devtools_requested = True
                 elif backend in ('mac','linux','win') and backend!=self.server.system:
                     raise RuntimeError(backend+' Bash unavailable on '+self.server.system+'; refusing native-shell fallback')
                 with self.server.sessions_lock:
@@ -4970,6 +5113,18 @@ def _file_sha256(path):
     return h.hexdigest()
 
 
+def _devtools_download_partial(release: str, filename: str) -> Path:
+    """Store multi-GB resumable downloads outside installed Steam libraries.
+
+    Only the verified, unpacked DevTools distribution is an installed app;
+    incomplete ZIPs are disposable OS-cache content.
+    """
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', filename):
+        raise ValueError('Unsafe DevTools download filename')
+    return (_installed_cache_root(_real_login_home()) / 'Downloads' / release /
+            (filename + '.partial'))
+
+
 def _download_public_devtools(url: str, partial, *, length: int, digest: str):
     """Download a verified DevTools ZIP using bounded HTTPS ranges and retries.
 
@@ -5232,7 +5387,7 @@ def install_devtools() -> int:
     if input('Type INSTALL to confirm download and installation: ').strip() != 'INSTALL':
         print('[DEVTOOLS] canceled; nothing downloaded', flush=True)
         return 1
-    pending = destination.parent / 'Downloads' / release / (artifact['filename'] + '.partial')
+    pending = _devtools_download_partial(release, artifact['filename'])
     try:
         _download_public_devtools(url, pending, length=artifact['bytes'], digest=artifact['sha256'])
         _stage_devtools_zip(pending, destination, release, artifact)
@@ -5250,16 +5405,15 @@ def install_devtools() -> int:
         return 1
     pending.unlink(missing_ok=True)
     print(f'[DEVTOOLS] installed: {destination}', flush=True)
-    # Notify the current native HTTP owner; launch both reusable guests now,
-    # without waiting for a second application launch. The installer runs in
-    # its own shell process; the managed runtime belongs to the app worker.
+    # A completed optional install changes startup capabilities. Relaunch the
+    # existing native owner so its single boot supervisor checks both shells
+    # BEFORE it displays the normal UI. Do not boot Colima in this PTY worker.
     try:
-        result = _api('/api/lifecycle/guest-boot', body={})
-        if result.get('state') == 'failed':
-            print('[DEVTOOLS] Guest startup FAILED: ' + str(result.get('error', '')), flush=True)
+        _api('/api/lifecycle/reboot', body={'component': 'app'})
+        print('[DEVTOOLS] Relaunching CinterForge Terminal to initialize DevTools...', flush=True)
     except (OSError, RuntimeError, ValueError) as error:
-        print('[DEVTOOLS] Installed, but app-owned guest startup could not be requested: ' +
-              str(error), flush=True)
+        print('[DEVTOOLS] Installed, but automatic relaunch failed: ' + str(error) +
+              '; relaunch Terminal normally to initialize the guests.', flush=True)
         return 1
     return 0
 
@@ -5858,6 +6012,10 @@ def sdk_root() -> Path | None:
                 continue
             digest, sha, image = (data.get('dockerfile_sha256'),
                                   data.get('archive_sha256'), data.get('image'))
+            # An older DevTools archive may contain WineHQ instead of MSYS2's
+            # patched Wine. Never consider that Windows closure runtime-ready.
+            if kind == 'WindowsCross' and data.get('wine_version') != 'wine-11.15':
+                continue
             # LinuxSample's actual producer stores only the leading 16 hex
             # digits of its Dockerfile hash. WindowsCross stores all 64.
             # Requiring 64 for both rejects valid installed Linux images and
@@ -5875,22 +6033,25 @@ def sdk_root() -> Path | None:
 
 
 def _state_root() -> Path:
-    """Short, app-owned VM socket root: Builds in developer mode, Steam at runtime.
+    """VM scratch: sibling Builds for development, macOS cache when installed.
 
-    Never create ~/Builds when an installed app invokes optional DevTools.
-    The resolved Steam library is inherited from the authenticated PTY host.
+    Steam is strictly applications and persistent user data. No Lima/Colima
+    disks, Docker images, caches, or temporary files may be created there.
+    Installed apps must also never create a developer Builds directory.
     """
-    if os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'installed':
+    installed = os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'installed'
+    if installed:
         value = os.environ.get('CINTER_STEAMAPPS', '')
         if not value:
             raise RuntimeError('Installed DevTools require the real Steam library')
         steam = Path(value).expanduser()
-        if steam.name.lower() != 'steamapps' or not steam.is_dir():
-            raise RuntimeError('Installed DevTools require an existing steamapps directory')
-        # LIMA_HOME must be short enough for its own nested socket filename.
-        # Place the VM profile directly under the selected steamapps root;
-        # additional optional DevTools state goes in small named subfolders.
-        roots = [steam.resolve(strict=True)]
+        if steam.name.lower() != 'steamapps' or steam.is_symlink() or not steam.is_dir():
+            raise RuntimeError('Installed DevTools require an existing real steamapps directory')
+        if platform.system() != 'Darwin':
+            raise RuntimeError('Managed macOS guest VM requires a macOS runtime')
+        # A short Lima socket path is mandatory on macOS. Cache contains only
+        # disposable app-owned VM state; DevTools archives remain in Steam.
+        roots = [_real_login_home() / 'Library/Caches/CFTVM/T']
     else:
         configured = os.environ.get('CINTER_BUILDS_ROOT', '')
         if not configured:
@@ -5904,16 +6065,14 @@ def _state_root() -> Path:
         # shortest *containing* Builds, not a home-directory fallback.
         roots = [parent / 'CFTVM/T' for parent in reversed((source, *source.parents))
                  if parent.name == 'Builds' and parent.is_dir() and not parent.is_symlink()]
-    tail = ('/colima-t/ssh.sock.1234567890123456'
-            if os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'installed'
-            else '/l/colima-t/ssh.sock.1234567890123456')
+    tail = '/l/colima-t/ssh.sock.1234567890123456'
     for root in roots:
         if len(os.fsencode(str(root) + tail)) < 96:
             if root.is_symlink() or (root.exists() and not root.is_dir()):
                 raise RuntimeError('Unsafe managed VM state: ' + str(root))
             root.mkdir(parents=True, exist_ok=True)
             return root
-    raise RuntimeError('Managed VM socket root too long under permitted developer Builds / Steam library')
+    raise RuntimeError('Managed VM socket root too long under developer Builds or user cache')
 
 
 def _env(sdk: Path) -> dict[str, str]:
@@ -5924,11 +6083,10 @@ def _env(sdk: Path) -> dict[str, str]:
         if path.is_symlink() or (path.exists() and not path.is_dir()):
             raise RuntimeError('Unsafe managed VM directory: ' + str(path))
         path.mkdir(parents=True, exist_ok=True)
-    installed = os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'installed'
-    lima_home = root if installed else root / 'l'
+    lima_home = root / 'l'
     socket = lima_home / ('colima-' + PROFILE) / 'ssh.sock.1234567890123456'
     if len(os.fsencode(socket)) >= 100:
-        raise RuntimeError('Managed VM socket path too long within the permitted Steam / Builds tree: ' + str(socket))
+        raise RuntimeError('Managed VM socket path too long within developer Builds or user cache: ' + str(socket))
     env = dict(os.environ)
     for key in ('DOCKER_HOST', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
         env.pop(key, None)
@@ -5951,6 +6109,10 @@ def _image_archive(sdk: Path, kind: str) -> tuple[Path, str]:
         try:
             record = json.loads(receipt.read_text(encoding='utf-8'))
         except (OSError, ValueError):
+            continue
+        # Archive selection must not silently fall back to an old stock-Wine
+        # image when multiple valid hashes remain in installed DevTools.
+        if kind == 'win' and record.get('wine_version') != 'wine-11.15':
             continue
         digest = record.get('dockerfile_sha256', '')
         name = record.get('image') or (record.get('image_tag') if kind == 'win' else '')
@@ -5982,7 +6144,7 @@ def _managed_vm_lock(env: dict[str, str]):
     Linux and Windows guest shells start as independent children. A thread lock
     cannot protect against two concurrent `colima start` invocations, which can
     race for the same Lima host-agent PID/socket and leave a stale Docker context.
-    The lock resides in the permitted app-owned Steam/Builds VM state only.
+    The lock resides in the permitted app-owned cache/Builds VM state only.
     """
     home = Path(env['COLIMA_HOME'])
     lock_file = home / 'CinterForgeTerminalGuestVM.lock'
@@ -6138,6 +6300,39 @@ def _configure_colima_host_mounts(env: dict[str, str], mounts: list[tuple[Path, 
     return True
 
 
+def _configure_colima_runtime_emulation(env: dict[str, str], *, dry_run: bool = False) -> bool:
+    """Ensure the *runtime t profile* uses QEMU binfmt, never Rosetta.
+
+    Apple Silicon Rosetta can abort Wine/MSYS2 Bash during rt_sigreturn
+    (x86 AVX-state assertion, exit 133). Do not alter the working Setup w/c
+    profiles or the separate LinuxKit Bedrock appliance. For existing t
+    profiles, normalize only explicit stale flags; a new Colima profile is
+    configured by the matching flags on `colima start`.
+    """
+    profile = Path(env['COLIMA_HOME']) / PROFILE
+    config = profile / 'colima.yaml'
+    if profile.is_symlink() or config.is_symlink():
+        raise RuntimeError('Managed Terminal VM configuration must not be a symlink')
+    if not config.is_file():
+        return False
+    original = config.read_text(encoding='utf-8')
+    desired = {'rosetta': 'false', 'binfmt': 'true'}
+    updated = original
+    for key, value in desired.items():
+        pattern = r'(?m)^(' + re.escape(key) + r':)[^\n]*$'
+        updated = re.sub(pattern, lambda match: match.group(1) + ' ' + value, updated)
+    if updated == original:
+        return False
+    if dry_run:
+        return True
+    pending = config.with_name('colima.yaml.emulation.pending')
+    if pending.is_symlink():
+        raise RuntimeError('Unsafe managed Terminal VM pending configuration')
+    pending.write_text(updated, encoding='utf-8')
+    os.replace(pending, config)
+    return True
+
+
 def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None) -> str:
     colima = str(sdk / 'mac/env/bin/colima')
     docker = str(sdk / 'mac/env/bin/docker')
@@ -6185,7 +6380,9 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
     required = ['/host/mac', '/host/mac' + str(sdk)]
     if workspace is not None:
         required.append('/host/mac' + str(workspace))
-    config_changed = _configure_colima_host_mounts(env, mounts, dry_run=True)
+    mount_changed = _configure_colima_host_mounts(env, mounts, dry_run=True)
+    emulation_changed = _configure_colima_runtime_emulation(env, dry_run=True)
+    config_changed = mount_changed or emulation_changed
     ping = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=20)
     if ping.returncode == 0:
         missing = [path for path in required if not guest_directory(path)]
@@ -6193,8 +6390,10 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
             return docker  # One already-ready VM; every tab uses docker exec.
         if active_containers(via_guest=False):
             recover_stale_owned_guests()  # Verifies labels before stopping.
-        reason = ('outdated overlapping host mount configuration' if config_changed
-                  else 'inaccessible host paths: ' + ', '.join(missing))
+        reason = ('Rosetta translator disabled for real Wine/MSYS2 Bash'
+                  if emulation_changed else
+                  'outdated overlapping host mount configuration' if mount_changed else
+                  'inaccessible host paths: ' + ', '.join(missing))
         print('[DEVTOOLS] Reconfiguring owned Terminal VM: ' + reason, flush=True)
         _run_checked([colima, 'stop', PROFILE], env,
                      title='Stopping idle guest VM for corrected host mounts', timeout=120)
@@ -6208,10 +6407,14 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
                          title='Recovering idle VM with stale Docker socket', timeout=120)
 
     _configure_colima_host_mounts(env, mounts)
+    _configure_colima_runtime_emulation(env)
     print('[DEVTOOLS] Sharing accessible Mac filesystem under /host/mac', flush=True)
+    # Only the terminal-owned runtime profile t changes. Keep VZ ARM64 and
+    # virtiofs; use QEMU binfmt to execute linux/amd64 Wine/MSYS2 instead of
+    # the Rosetta x86 AVX signal-restoration path that exits with code 133.
     args = [colima, 'start', PROFILE, '--runtime', 'docker',
             '--vm-type', 'vz', '--mount-type', 'virtiofs',
-            '--vz-rosetta', '--arch', 'aarch64',
+            '--vz-rosetta=false', '--binfmt=true', '--arch', 'aarch64',
             '--cpus', '4', '--memory', '8', '--disk', '32', '--save-config']
     _run_checked(args, env, title='Starting managed guest VM with host volumes', timeout=1200)
     daemon = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=45)
@@ -6225,10 +6428,24 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
     return docker
 
 
+def _boot_splash_required(server: CinterShellServer, path: str, query: str) -> bool:
+    """Only with installed DevTools warming. Failure NEVER blocks Mac Bash."""
+    if path not in ('/', '/index.html') or server.system != 'mac':
+        return False
+    parameters = parse_qs(query)
+    # Acceptance and explicit splash completion must reach the normal UI.
+    if 'accept-ui' in parameters or 'devtools-boot-complete' in parameters:
+        return False
+    return _guest_boot_snapshot(server)['state'] == 'starting'
+
+
 def _guest_boot_snapshot(server: CinterShellServer) -> dict:
     with server.guest_start_lock:
-        return {'state': server.guest_start_state, 'error': server.guest_start_error,
-                'guests': ['linux', 'win'] if server.guest_start_state == 'ready' else []}
+        state = server.guest_start_state
+        return {'state': state, 'error': server.guest_start_error,
+                'guests': list(getattr(server, 'guest_ready',
+                                       ['linux', 'win'] if state == 'ready' else [])),
+                'errors': dict(getattr(server, 'guest_errors', {}))}
 
 
 def _schedule_guest_boot(server: CinterShellServer) -> dict:
@@ -6256,6 +6473,8 @@ def _schedule_guest_boot(server: CinterShellServer) -> dict:
             return {'state': 'not-installed', 'error': ''}
         server.guest_start_state = 'starting'
         server.guest_start_error = ''
+        server.guest_ready = []
+        server.guest_errors = {}
     try:
         # Startup runs off the HTTP/UI thread. The guest boot thread waits
         # until any previous native owner's crash watchdog releases the VM;
@@ -6287,10 +6506,20 @@ def _boot_guests_logged(server: CinterShellServer) -> None:
         result = boot_runtime_guests()
         if not result.get('installed'):
             raise RuntimeError('DevTools disappeared during managed guest startup')
+        ready = list(result.get('guests', []))
+        errors = dict(result.get('errors', {}))
         with server.guest_start_lock:
-            server.guest_start_state = 'ready'
-            server.guest_start_error = ''
-        server.log_event('Managed reusable guests ready: ' + json.dumps(result, sort_keys=True))
+            server.guest_ready = ready
+            server.guest_errors = errors
+            server.guest_start_state = 'ready' if not errors else 'failed'
+            server.guest_start_error = '; '.join(k + ': ' + v for k, v in errors.items())
+        if errors:
+            # A failed Wine guest must not destroy a working Linux guest.
+            # Splash closes on failure; Mac Bash is always available.
+            server.log_event('Managed reusable guests PARTIAL/FAILED: ' +
+                             json.dumps(result, sort_keys=True))
+        else:
+            server.log_event('Managed reusable guests ready: ' + json.dumps(result, sort_keys=True))
     except Exception as error:
         # Do not leave a half-booted Colima profile alive after a failed image
         # load / Bash verification. The guardian is already responsible for
@@ -6303,6 +6532,8 @@ def _boot_guests_logged(server: CinterShellServer) -> None:
         with server.guest_start_lock:
             server.guest_start_state = 'failed'
             server.guest_start_error = str(error)
+            server.guest_ready = []
+            server.guest_errors = {'linux': str(error), 'win': str(error)}
         server.log_event('Managed reusable guests FAILED: ' + str(error))
 
 
@@ -6313,8 +6544,10 @@ def _wait_for_app_guests(kind: str, *, timeout_seconds: float = 1800) -> None:
     while True:
         state = _api('/api/lifecycle/guest-status')
         current = state.get('state')
-        if current == 'ready':
+        if kind in state.get('guests', ['linux', 'win'] if current == 'ready' else []):
             return
+        if current == 'ready':
+            raise RuntimeError(kind + ' Bash was not verified at application startup')
         if current == 'failed':
             raise RuntimeError('App-owned Linux/Windows guest startup failed: ' +
                                str(state.get('error') or 'see Server log') +
@@ -6541,21 +6774,29 @@ def _start_guest_locked(sdk: Path, env: dict[str, str], docker: str,
             raise RuntimeError('Existing Docker container is not Terminal-owned: ' + name)
         if running == 'true':
             # A named running container is not proof Bash actually works.
-            # Verify the existing guest before advertising it as ready.
+            # Wine needs the guest display before it initializes its prefix.
+            if kind == 'win':
+                _ensure_wine_display(docker, env, name)
             _verify_guest_bash(docker, env, kind, name)
             return
         _stop_owned_guests_locked_one(docker, env, name)
     environment = (['-e', 'MSYSTEM=UCRT64', '-e', 'CHERE_INVOKING=1', '-e', 'HOME=/tmp',
                     '-e', 'TMPDIR=/tmp', '-e', 'TMP=/tmp', '-e', 'TEMP=/tmp']
                    if kind == 'win' else [])
+    # Port is guest-local to Colima's host loopback forwarding, not public LAN.
+    # Setup includes the VNC stack; it remains idle until Launcher is opened.
     args = [docker, 'run', '-d', '--restart', 'no', '--name', name,
             '--label', 'io.cinterforge.terminal=' + PROFILE,
-            '--platform', 'linux/amd64', *_guest_host_binds(sdk, kind, workspace),
+            '--platform', 'linux/amd64',
+            '--publish', f'127.0.0.1:{_LAUNCHER_PORTS[kind]}:6080',
+            *_guest_host_binds(sdk, kind, workspace),
             *environment, '--workdir', '/workspace' if workspace else '/',
             '--entrypoint', '/bin/sh', image,
             '-c', 'trap "exit 0" TERM INT; while :; do sleep 3600 & wait $!; done']
     _run_checked(args, env, title='Starting one reusable ' + kind + ' guest', timeout=120)
     try:
+        if kind == 'win':
+            _ensure_wine_display(docker, env, name)
         _verify_guest_bash(docker, env, kind, name)
     except BaseException:
         # Never mark a broken Wine/MSYS2 guest as reusable on the next tab.
@@ -6564,11 +6805,52 @@ def _start_guest_locked(sdk: Path, env: dict[str, str], docker: str,
         raise
 
 
+def _ensure_wine_display(docker: str, env: dict[str, str], name: str) -> None:
+    """Start the owned headless framebuffer *before* Wine first-run.
+
+    It stays in the same Windows guest container and is reused by Launcher.
+    No GUI is opened in the app until the Launcher tab is explicitly chosen.
+    """
+    script = r'''set -eu
+command -v Xvfb >/dev/null
+command -v xdpyinfo >/dev/null
+if ! DISPLAY=:99 xdpyinfo >/dev/null 2>&1; then
+  nohup Xvfb :99 -screen 0 1600x900x24 -nolisten tcp >/tmp/cinter-launcher-xvfb.log 2>&1 </dev/null &
+fi
+for n in 1 2 3 4 5 6 7 8 9 10; do
+  if DISPLAY=:99 xdpyinfo >/dev/null 2>&1; then exit 0; fi
+  sleep 1
+done
+cat /tmp/cinter-launcher-xvfb.log >&2 || true
+exit 18
+'''
+    result = _docker_call(docker, env, 'exec', name, '/bin/sh', '-c', script, timeout=35)
+    if result.returncode:
+        raise RuntimeError('Windows guest framebuffer failed before Wine: ' +
+                           (result.stderr or result.stdout or '').strip()[-700:])
+
+
 def _verify_guest_bash(docker: str, env: dict[str, str], kind: str, name: str) -> None:
-    command = ([docker, 'exec', name, '/bin/bash', '--version'] if kind == 'linux'
-               else [docker, 'exec', name, 'wine', r'Z:\msys2\usr\bin\bash.exe',
-                     '--noprofile', '-c', 'f=/tmp/cinterforge-bash-$$; : > "$f" && rm "$f"'])
-    _run_checked(command, env, title='Verifying reusable ' + kind + ' guest', timeout=150)
+    if kind == 'linux':
+        command = [docker, 'exec', name, '/bin/bash', '--version']
+    else:
+        # The base MSYS2 Bash starts without its PATH when --noprofile is
+        # specified. Test the *actual* shell and a coreutils executable, not
+        # just wine --version; the Wine build has Cygwin-specific patches.
+        command = [docker, 'exec', *_launcher_guest_env('win'), name,
+                   'wine', r'Z:\msys2\usr\bin\bash.exe', '--noprofile', '--norc',
+                   '-c', 'export PATH=/usr/bin:/ucrt64/bin:$PATH; '
+                         'test -x /usr/bin/rm.exe || exit 73; '
+                         'f=/tmp/cinterforge-bash-$$; : > "$f" && rm "$f" && '
+                         '/usr/bin/uname -s']
+    print('[DEVTOOLS] Verifying reusable ' + kind + ' guest', flush=True)
+    result = _docker_call(docker, env, *command[1:], timeout=150)
+    if result.returncode:
+        diagnostic = (result.stderr or result.stdout or '').strip()[-1200:]
+        raise RuntimeError(kind + ' guest Bash verification exited ' + str(result.returncode) +
+                           (': ' + diagnostic if diagnostic else '; no guest output'))
+    if kind == 'win' and 'msys' not in (result.stdout or '').lower():
+        raise RuntimeError('Windows guest Bash did not identify itself as real MSYS2')
 
 
 def _stop_owned_guests_locked_one(docker: str, env: dict[str, str], name: str) -> None:
@@ -6586,9 +6868,16 @@ def boot_runtime_guests() -> dict:
     workspace = _guest_workspace()
     with _managed_vm_lock(env):
         docker = _ensure_docker_locked(sdk, env, workspace)
+        ready, failures = [], {}
         for kind in ('linux', 'win'):
-            _start_guest_locked(sdk, env, docker, kind, workspace)
-    return {'installed': True, 'guests': ['linux', 'win'], 'docker': 'one-managed-engine'}
+            try:
+                _start_guest_locked(sdk, env, docker, kind, workspace)
+                ready.append(kind)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+                failures[kind] = str(error)
+                print('[DEVTOOLS] ' + kind + ' guest FAILED: ' + str(error), flush=True)
+    return {'installed': True, 'guests': ready, 'errors': failures,
+            'docker': 'one-managed-engine'}
 
 
 def stop_runtime_vm() -> None:
@@ -6695,6 +6984,215 @@ def reboot_runtime_guests(component: str) -> dict:
     return {'rebooted': component, 'guests': ['linux', 'win'], 'ready': True}
 
 
+
+# ============================================================================
+# SHARED GRAPHICAL LAUNCHERS: one runtime display per owned guest, never a KDE
+# image or another VM. Setup provisions these packages in existing OCI images.
+# The launcher is dormant until selected; guest Bash and Code share DISPLAY.
+# ============================================================================
+_LAUNCHER_PORTS = {'linux': 20601, 'win': 20602}
+_LAUNCHER_APPS = frozenset(('CinterForgeTerminal',))
+_launcher_lock = threading.RLock()
+
+
+def _launcher_guest_env(kind: str) -> list[str]:
+    result = ['-e', 'DISPLAY=:99', '-e', r'PS1=\u@\h \w \$ ']
+    if kind == 'win':
+        # Match the guest's existing MSYS2 Bash environment and prefix, not
+        # the separate builder-only Wine PREFIX or a second Windows image.
+        result += ['-e', 'HOME=/tmp', '-e', 'WINEPREFIX=/tmp/.wine']
+    return result
+
+
+def _launcher_container(kind: str, server=None) -> tuple[str, dict[str, str], str]:
+    if kind not in _LAUNCHER_PORTS or platform.system() != 'Darwin':
+        raise RuntimeError('Remote graphical launcher requires the managed macOS DevTools guest')
+    sdk = sdk_root()
+    if sdk is None:
+        raise RuntimeError('Optional unified DevTools is not installed')
+    if server is None:
+        _wait_for_app_guests(kind)  # CLI children carry a trusted shell token.
+    else:
+        # Browser requests are already authenticated by Handler. Check that
+        # native application's guest startup finished without a recursive HTTP
+        # request requiring shell-only credentials.
+        deadline = time.monotonic() + 120
+        while True:
+            with server.guest_start_lock:
+                state, error = server.guest_start_state, server.guest_start_error
+            if kind in getattr(server, 'guest_ready', ['linux', 'win'] if state == 'ready' else []):
+                break
+            if state != 'starting':
+                detail = getattr(server, 'guest_errors', {}).get(kind, error or state)
+                raise RuntimeError('Managed guest unavailable: ' + detail)
+            if server._stopping or time.monotonic() >= deadline:
+                raise RuntimeError('Managed guest startup timed out; check the Server log')
+            time.sleep(0.5)
+    env = _env(sdk)
+    return str(sdk / 'mac/env/bin/docker'), env, _guest_name(kind)
+
+
+def _launcher_start(kind: str, server=None) -> dict:
+    docker, env, name = _launcher_container(kind, server)
+    with _launcher_lock:
+        # Do not install/repair packages at runtime. All dependencies belong
+        # to Setup's existing pinned guest images and the unified SDK.
+        probe_script = ("for tool in Xvfb xdpyinfo openbox x11vnc websockify feh pgrep; do "
+                        "command -v '$tool' >/dev/null 2>&1 || echo missing:$tool; done; "
+                        "test -f /usr/share/novnc/vnc.html || echo missing:novnc; true")
+        probe = _docker_call(docker, env, 'exec', name, '/bin/sh', '-c', probe_script,
+                             timeout=30)
+        if probe.returncode or (probe.stdout or '').strip():
+            detail = (probe.stdout or probe.stderr or 'probe failed').strip()[-400:]
+            raise RuntimeError('Guest GUI tools missing from staged ' + kind + ' image (' + detail +
+                               '); rebuild DevTools in Setup, then Build/Stage')
+        # The guest and host display the SAME replaceable platform PNG. Copy
+        # the staged resource into the owned runtime container; never install
+        # packages or write to Builds from a downloaded application.
+        wallpaper_name = 'windows' if kind == 'win' else 'linux'
+        wallpaper = ASSETS / 'launcher/assets/backgrounds' / (wallpaper_name + '.png')
+        if not wallpaper.is_file() or wallpaper.is_symlink():
+            raise RuntimeError('Missing staged ' + kind + ' Launcher wallpaper')
+        copied = _docker_call(docker, env, 'cp', str(wallpaper),
+                              name + ':/tmp/cinterforge-launcher-wallpaper.png', timeout=30)
+        if copied.returncode:
+            raise RuntimeError('Unable to load ' + kind + ' Launcher wallpaper: ' + copied.stderr.strip()[:400])
+        # Exact one-off helper script is idempotent within this owned container.
+        # No root-level host agent, no additional VM; Docker container removal
+        # terminates every helper when the application exits.
+        script = r'''set -eu
+if ! pgrep -f '^Xvfb :99 ' >/dev/null 2>&1; then
+  nohup Xvfb :99 -screen 0 1600x900x24 -nolisten tcp >/tmp/cinter-launcher-xvfb.log 2>&1 </dev/null &
+fi
+for n in 1 2 3 4 5 6 7 8 9 10; do
+  DISPLAY=:99 xdpyinfo >/dev/null 2>&1 && break
+  sleep 1
+done
+DISPLAY=:99 xdpyinfo >/dev/null 2>&1 || exit 18
+if ! pgrep -x openbox >/dev/null 2>&1; then
+  DISPLAY=:99 nohup openbox --sm-disable >/tmp/cinter-launcher-openbox.log 2>&1 </dev/null &
+fi
+# Real guest windows and the host WebView both use this platform asset.
+# No KDE theme, background manager daemon, or embedded wallpaper artwork.
+DISPLAY=:99 feh --bg-fill /tmp/cinterforge-launcher-wallpaper.png
+if ! pgrep -x x11vnc >/dev/null 2>&1; then
+  DISPLAY=:99 nohup x11vnc -display :99 -rfbport 5900 -localhost -forever -shared -nopw >/tmp/cinter-launcher-vnc.log 2>&1 </dev/null &
+fi
+if ! pgrep -f 'websockify.*6080 ' >/dev/null 2>&1; then
+  nohup websockify --web /usr/share/novnc 6080 127.0.0.1:5900 >/tmp/cinter-launcher-web.log 2>&1 </dev/null &
+fi
+'''
+        result = _docker_call(docker, env, 'exec', *_launcher_guest_env(kind),
+                              name, '/bin/bash', '-c', script, timeout=45)
+        if result.returncode:
+            raise RuntimeError('Guest graphical display startup failed: ' +
+                               (result.stderr or result.stdout).strip()[-600:])
+        port = _LAUNCHER_PORTS[kind]
+        # A forwarded Colima localhost port is not an Internet service.
+        # Its browser frame appears only after an explicit Launcher action.
+        return {'platform': kind, 'viewer_url':
+                f'http://127.0.0.1:{port}/vnc.html?autoconnect=true&resize=scale&show_dot=true'}
+
+
+def _launcher_staged_app(kind: str) -> Path:
+    """Read-only resolution of the verified Steam Stage for one platform.
+
+    Never fall back to a developer binary, a source checkout, or an arbitrary
+    executable supplied by a WebView. A missing stage is a visible error.
+    """
+    if kind not in ('mac', 'linux', 'win'):
+        raise ValueError('Unknown CinterForge Terminal launcher platform')
+    steam = _steam_library_for_installed_root(ASSETS.parent)
+    if steam is None:
+        raise RuntimeError('No installed CinterForge Steam library for staged application')
+    release = _devtools_release()
+    platform_folder = {'mac': 'macOS', 'linux': 'Linux', 'win': 'Windows'}[kind]
+    root = (steam / 'common/CinterForge/Applications' / platform_folder /
+            'CinterForge Terminal' / release)
+    receipt = root / 'stage-receipt.json'
+    executable = root / ('CinterForge Terminal.app/Contents/MacOS/CinterForgeTerminal'
+                         if kind == 'mac' else 'CinterForge Terminal/' +
+                         ('Terminal.sh' if kind == 'linux' else 'Terminal.cmd'))
+    # Older installed payloads sometimes stored their receipt inside the
+    # application directory. Do not confuse that with a missing build; still
+    # require a valid stage receipt for the selected platform and release.
+    if not receipt.is_file() and kind in ('linux', 'win'):
+        receipt = executable.parent / 'stage-receipt.json'
+    # Verify the Stage marker and each path component. A signed staged app or
+    # immutable guest payload must not be swapped via an untrusted symlink.
+    for path in (root, receipt, executable, *executable.parents):
+        if path.is_symlink():
+            raise RuntimeError('Staged CinterForge Terminal contains a redirected path: ' + str(path))
+    if not receipt.is_file() or not executable.is_file():
+        raise RuntimeError('Missing staged ' + platform_folder + ' CinterForge Terminal build for release ' +
+                           release + '; run the normal Build/Stage lifecycle')
+    try:
+        record = json.loads(receipt.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('Cannot read staged ' + platform_folder + ' build receipt') from exc
+    if (record.get('schema') not in (FOUR_SCHEMA, 'cinterforge.terminal.unpacked-build.v1') or
+            record.get('target') != kind or record.get('release') != release):
+        raise RuntimeError('Staged ' + platform_folder + ' CinterForge Terminal receipt does not match ' + release)
+    if record['schema'] == 'cinterforge.terminal.unpacked-build.v1' and (
+            not isinstance(record.get('build_fingerprint'), str) or
+            not isinstance(record.get('installed_state'), str)):
+        raise RuntimeError('Staged ' + platform_folder + ' unpacked Build receipt is incomplete')
+    return executable
+
+
+def _launcher_launch(kind: str, app: str, server=None) -> dict:
+    if app not in _LAUNCHER_APPS or kind not in ('mac', 'linux', 'win'):
+        raise ValueError('Unknown CinterForge launcher application')
+    staged = _launcher_staged_app(kind)
+    if kind == 'mac':
+        # Launch/focus the real staged .app on the host, never in the WebView.
+        # In particular, do not redirect to the user's system Terminal.app.
+        if platform.system() != 'Darwin':
+            raise RuntimeError('The staged Mac application requires a macOS host')
+        app_bundle = staged.parents[2]   # .../CinterForge Terminal.app
+        started = subprocess.run(['/usr/bin/open', '-a', str(app_bundle)],
+                                 capture_output=True, text=True, timeout=20, check=False)
+        if started.returncode:
+            raise RuntimeError('Cannot open staged Mac CinterForge Terminal: ' +
+                               started.stderr.strip()[-400:])
+        return {'opened': True, 'platform': kind, 'external': True}
+
+    # Both graphical apps run inside their existing managed Docker guest and
+    # share DISPLAY=:99 with VSCode Bash/Debug. The X11/VNC framebuffer remains
+    # inside its one Launcher Session tab. No second VM or detached desktop.
+    _launcher_start(kind, server)
+    docker, env, name = _launcher_container(kind, server)
+    guest_executable = '/host/mac' + str(staged)
+    present = _docker_call(docker, env, 'exec', name, 'test', '-f', guest_executable,
+                           timeout=20)
+    if present.returncode:
+        raise RuntimeError('Staged ' + kind + ' build is not visible through the managed guest mount: ' +
+                           str(staged))
+    if kind == 'linux':
+        # Run the staged launcher script rather than its raw ELF executable:
+        # it owns runtime Python, worker, service and resource arguments.
+        command = ['/bin/sh', '-c',
+                   'cd "$(dirname "$1")" && exec /bin/sh "$1" >>/tmp/cinterforge-staged-app.log 2>&1',
+                   'cinterforge-launch', guest_executable]
+    else:
+        # Preserve the staged Windows .cmd wrapper, including its WebView2 and
+        # runtime setup, instead of invoking an incomplete bare PE executable.
+        # Wine's Z: drive maps to the Linux filesystem mounted at /host/mac.
+        win_path = 'Z:' + guest_executable.replace('/', '\\')
+        command = ['/bin/sh', '-c',
+                   'cd "$(dirname "$1")" && exec wine cmd.exe /c "$2" >>/tmp/cinterforge-staged-app.log 2>&1',
+                   'cinterforge-launch', guest_executable, win_path]
+    launched = _docker_call(docker, env, 'exec', '-d', *_launcher_guest_env(kind),
+                            name, *command, timeout=45)
+    if launched.returncode:
+        raise RuntimeError('Could not launch staged ' + kind + ' CinterForge Terminal: ' +
+                           (launched.stderr or launched.stdout).strip()[-400:])
+    # Docker's detached launch acknowledges submission, not an application
+    # readiness proof. The guest desktop will show its actual window if ready.
+    return {'opened': True, 'platform': kind, 'external': False,
+            'message': 'Staged application launch requested'}
+
+
 def guest_shell_main(kind: str) -> int:
     if kind not in ('win', 'linux') or platform.system() != 'Darwin':
         raise RuntimeError('DevTools shell bridge is only for Windows/Linux tabs on macOS')
@@ -6706,6 +7204,10 @@ def guest_shell_main(kind: str) -> int:
         sdk = sdk_root()
         if sdk is None:
             raise RuntimeError('DevTools installer completed without usable SDK')
+        # The verified installer already requested a native app relaunch.
+        # Do not open a PTY or race that owner's pending shutdown/restart.
+        print('[DEVTOOLS] The Terminal app is relaunching; reopen the guest Bash in Code-OSS.', flush=True)
+        return 0
     env = _env(sdk)
     docker = str(sdk / 'mac/env/bin/docker')
     # The app initializes its two reusable guests at launch. Session tabs
@@ -6714,11 +7216,11 @@ def guest_shell_main(kind: str) -> int:
     name = _guest_name(kind)
     workspace = _guest_workspace()
     cwd = '/host/mac' + str(workspace) if workspace else '/'
-    args = [docker, 'exec', '-it', '--workdir', cwd, name]
+    args = [docker, 'exec', '-it', *_launcher_guest_env(kind), '--workdir', cwd, name]
     if kind == 'linux':
         args += ['/bin/bash', '--noprofile', '-i']
     else:
-        args += ['wine', r'Z:\msys2\usr\bin\bash.exe', '--noprofile', '-i']
+        args += ['wine', r'Z:\msys2\usr\bin\bash.exe', '--login', '-i']
     print('[DEVTOOLS] Attaching ' + kind + ' Bash to shared guest', flush=True)
     process = subprocess.Popen(args, env=env)
     try:

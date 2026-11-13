@@ -136,8 +136,7 @@ async function verifyIFTabOwnership(){
     querySelectorAll(){return []},addEventListener(){},visibilityState:'visible'};
   const outerWindowListeners={};
   const codeFrameMessages=[];
-  const codeFrame=el('computer-frame');
-  codeFrame.contentWindow={postMessage(message,origin){codeFrameMessages.push({message,origin});}};
+  let codeFrame; // The persistent workbench is created inside terminal.js, not the museum iframe.
   const win={__CPH_TOKEN__:'fixture',location:{origin:'http://127.0.0.1:20380'},
     addEventListener(type,callback){(outerWindowListeners[type]??=[]).push(callback);}};
   const sandboxIF={window:win,document:doc,fetch:fetchIF,URL,URLSearchParams,TextDecoder,
@@ -148,6 +147,9 @@ async function verifyIFTabOwnership(){
     localStorage:{getItem(){return null},setItem(){}},
     setInterval:cb=>{intervals.push(cb)},setTimeout,atob:()=>''};
   vm.runInNewContext(fs.readFileSync(path.join(repo,'webapp/terminal.js'),'utf8'),sandboxIF);
+  codeFrame=el('computer-view').children.find(node=>node.id==='codeoss-frame');
+  assert.ok(codeFrame, 'persistent Code-OSS workbench must be allocated once');
+  codeFrame.contentWindow={postMessage(message,origin){codeFrameMessages.push({message,origin});}};
   await new Promise(resolve=>setTimeout(resolve,35));
   assert.equal(opened,1,'original Windows PTY opened');
   const pollIF=intervals.find(fn=>fn.toString().includes("api('/api/if/next')"));
@@ -160,8 +162,8 @@ async function verifyIFTabOwnership(){
   action={start:'zork1',launch_id:'1'.repeat(32),session_id:'a'.repeat(32)};
   await pollIF();
   assert.equal(tabs().length,2,'repeated Zork command reselects existing tab');
-  await win.CinterTerminalNewTab('mac');
-  assert.equal(opened,2,'File menu opens another native shell while Zork runs');
+  await win.CinterTerminalNewTab('native');
+  assert.equal(opened,2,'Windows native Session opens another local shell while Zork runs');
   assert.equal(tabs().length,3);
   await closes()[2].listeners.click[0](); // Close the NEW shell, not Zork.
   await new Promise(resolve=>setTimeout(resolve,5));
@@ -262,16 +264,18 @@ async function verifyIFTabOwnership(){
   // The very same outer menu must create Code-OSS integrated terminals when
   // Code is active; no extra host PTY or outer Session is allowed.
   const countBeforeCode=opened;
+  await win.CinterTerminalNewTab('linux');
+  assert.equal(opened,countBeforeCode,'off-platform Linux Bash is disabled on native Windows');
   await win.CinterTerminalNewTab('code');
   const outerTabs=tabs().length;
-  assert.ok(el('computer-frame').src.includes('/codeoss/'),'Code-OSS workbench is active');
+  assert.ok(codeFrame.src.includes('/codeoss/'), 'CodeOSS remains available on native Windows');
   await win.CinterTerminalNewTab('linux');
   await win.CinterTerminalNewTab('win');
   await win.CinterTerminalNewTab('server');
   assert.equal(opened,countBeforeCode,'Code Terminal actions must not start outer PTYs');
   assert.equal(tabs().length,outerTabs,'Code Terminal actions must not create outer tabs');
   assert.deepEqual(codeMenuRequests.filter(r=>r.type==='new-terminal').map(r=>r.backend),
-    ['linux','win','server'],'the existing Code-OSS extension receives all three backend choices');
+    ['win','server'], 'only the native Windows shell and supported Server Log are enabled');
   // Only actions supplied by the real Code-OSS menu service may be run.
   // An old fabricated command ID must not be sent to the editor.
   await win.CinterMenuDispatch('code:cmd:workbench.action.showCommands');
@@ -341,6 +345,22 @@ async function verifyIFTabOwnership(){
   await channel.onmessage({data:{type:'host-request',requestId:'host-123456789012346',
     path:'/host/code-shell-open',method:'POST',body:{id:'test-native'}}});
   assert.equal(codeMenuRequests.find(r=>r.type==='host-request-response')?.payload?.opened,true);
+  // Native Windows keeps every platform entry in the menu, but does not
+  // start a Mac/Linux/Windows Launcher (they belong to the Mac host only).
+  const codeSingletonSrc=codeFrame.src;
+  const countBeforeLauncher=tabs().length;
+  await win.CinterTerminalNewTab('launcher:mac');
+  await win.CinterTerminalNewTab('launcher:win');
+  await win.CinterTerminalNewTab('launcher:linux');
+  assert.equal(tabs().length,countBeforeLauncher,
+    'native Windows must not create Mac-managed Launcher tabs');
+  assert.equal(codeFrame.src,codeSingletonSrc);
+  await win.CinterTerminalNewTab('code');
+  await win.CinterTerminalNewTab('code');
+  assert.equal(tabs().length,countBeforeLauncher,'CodeOSS remains a singleton');
+  assert.equal(codeFrame.src,codeSingletonSrc,'returning to Code does not reload editor');
+  console.log('Code/Launcher acceptance: disabled cross-platform items, stable workbench');
+
   console.log('Code menu acceptance: New Terminal creates integrated Code-OSS tabs only');
 }
 verifyIFTabOwnership().catch(error=>{console.error(error);process.exitCode=1});

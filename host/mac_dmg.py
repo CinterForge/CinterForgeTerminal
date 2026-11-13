@@ -120,10 +120,12 @@ def _notarize_dmg(dmg: Path, profile: str) -> None:
     import json
     if not profile:
         raise RuntimeError('Public macOS DMG requires the notarytool keychain profile')
+    from host.xcode_signing import login_keychain_environment
     result = subprocess.run(['xcrun', 'notarytool', 'submit', str(dmg),
                              '--keychain-profile', profile, '--wait',
                              '--output-format', 'json'],
-                            capture_output=True, text=True, timeout=3600)
+                            capture_output=True, text=True, timeout=3600,
+                            env=login_keychain_environment())
     try:
         response = json.loads(result.stdout)
     except (ValueError, TypeError):

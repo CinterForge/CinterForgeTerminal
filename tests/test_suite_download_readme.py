@@ -24,6 +24,10 @@ from host import universal_package as release
 REPO = Path(__file__).resolve().parents[1]
 TEST_BUILDS = Path(os.environ.get('CINTER_BUILDS_ROOT', str(REPO.parent / 'Builds')))
 TEST_SCRATCH = TEST_BUILDS / 'Intermediates/CinterForgeTerminalTests'
+# CLI dispatch tests simulate an available signer; actual Xcode/Keychain
+# discovery and private-key rejection are verified separately.
+TEST_RELEASE_SIGNING = {'CINTER_MAC_SIGN_IDENTITY': 'Developer ID Application: fixture',
+                        'CINTER_MAC_NOTARY_PROFILE': ''}
 
 
 def verified_receipt(version: str = HOST_RELEASE) -> dict:
@@ -132,6 +136,11 @@ class CinterPublicationReadmeTests(unittest.TestCase):
     def test_public_publish_updates_readme_after_verified_upload(self):
         data = verified_receipt()
         with mock.patch.object(release, 'publish_four', return_value=data) as publisher, \
+             mock.patch('host.target_publish.publish_msi_addendum'), \
+             mock.patch.object(self.cli, '_prepare_windows_release_msi', return_value={'release': HOST_RELEASE}), \
+             mock.patch('host.xcode_signing.release_signing_environment', return_value=TEST_RELEASE_SIGNING), \
+              mock.patch('host.xcode_signing.ensure_public_notary_profile', return_value='fixture-notary-profile'), \
+             mock.patch.dict(os.environ, {'CINTER_MAC_SIGN_IDENTITY': 'Developer ID Application: fixture'}), \
              redirect_stdout(StringIO()):
             self.assertEqual(self.cli.main(['publish', 'public']), 0)
         publisher.assert_called_once_with(self.cli.BUILDS, channel='public')
@@ -141,8 +150,10 @@ class CinterPublicationReadmeTests(unittest.TestCase):
         report = {'bucket': 'cdn-assets-dev', 'prefix': 'Development'}
         original = (self.root / 'README.md').read_bytes()
         with mock.patch.object(release, 'publish_four', return_value=report) as publisher, \
+             mock.patch('host.target_publish.publish_msi_addendum'), \
+             mock.patch.object(self.cli, '_prepare_windows_release_msi', return_value={'release': HOST_RELEASE}), \
              redirect_stdout(StringIO()):
-            self.assertEqual(self.cli.main(['publish', 'all']), 0)
+            self.assertEqual(self.cli.main(['publish', 'cfterminal', 'internal']), 0)
         publisher.assert_called_once_with(self.cli.BUILDS, channel='dev')
         self.assertEqual((self.root / 'README.md').read_bytes(), original)
 
@@ -156,7 +167,12 @@ class CinterPublicationReadmeTests(unittest.TestCase):
 
     def test_publish_error_does_not_rewrite_readme(self):
         original = (self.root / 'README.md').read_bytes()
-        with mock.patch.object(release, 'publish_four', side_effect=RuntimeError('HTTP 403')):
+        with mock.patch.object(release, 'publish_four', side_effect=RuntimeError('HTTP 403')), \
+             mock.patch('host.target_publish.publish_msi_addendum'), \
+             mock.patch.object(self.cli, '_prepare_windows_release_msi', return_value={'release': HOST_RELEASE}), \
+             mock.patch('host.xcode_signing.release_signing_environment', return_value=TEST_RELEASE_SIGNING), \
+              mock.patch('host.xcode_signing.ensure_public_notary_profile', return_value='fixture-notary-profile'), \
+             mock.patch.dict(os.environ, {'CINTER_MAC_SIGN_IDENTITY': 'Developer ID Application: fixture'}):
             with self.assertRaisesRegex(RuntimeError, 'HTTP 403'):
                 self.cli.main(['publish', 'public'])
         self.assertEqual((self.root / 'README.md').read_bytes(), original)
@@ -348,6 +364,8 @@ class PublishChannelTests(unittest.TestCase):
               mock.patch.object(release, 'publish_four', return_value={
                   'channel': 'dryrun', 'bucket': 'n/a', 'prefix': 'n/a', 'release': HOST_RELEASE,
                   'connections': {}, 'uploaded': False}) as publish,
+              mock.patch('host.target_publish.publish_msi_addendum'),
+              mock.patch.object(cli, '_prepare_windows_release_msi', return_value={'release': HOST_RELEASE}),
               redirect_stdout(StringIO())):
             self.assertEqual(cli.main(['publish']), 0)
             self.assertEqual(cli.main(['publish', 'cfterminal']), 0)
@@ -368,11 +386,17 @@ class PublishChannelTests(unittest.TestCase):
               redirect_stdout(StringIO())):
             self.assertEqual(cli.main(['all', 'all', 'publish']), 0)
         self.assertEqual(invoke.call_count, 5)
-        self.assertEqual(invoke.call_args_list[-1].args[-3:], ('publish', 'cfterminal', 'dryrun'))
+        self.assertEqual(invoke.call_args_list[-1].args[-4:], ('publish', 'cfterminal', 'all', 'dryrun'))
+        # The lifecycle dispatcher is mocked here; a release-signing identity
+        # is fixture input, never a prerequisite on the developer's machine.
+        # The missing-key rejection has its own dedicated contract test.
         with (mock.patch.object(cli, 'invoke') as invoke,
+              mock.patch('host.xcode_signing.release_signing_environment', return_value=TEST_RELEASE_SIGNING), \
+              mock.patch('host.xcode_signing.ensure_public_notary_profile', return_value='fixture-notary-profile'),
+              mock.patch.dict(os.environ, {'CINTER_MAC_SIGN_IDENTITY': 'Developer ID Application: fixture'}),
               redirect_stdout(StringIO())):
             self.assertEqual(cli.main(['all', 'all', 'publish', 'beta']), 0)
-        self.assertEqual(invoke.call_args_list[-1].args[-3:], ('publish', 'cfterminal', 'beta'))
+        self.assertEqual(invoke.call_args_list[-1].args[-4:], ('publish', 'cfterminal', 'all', 'beta'))
 
     def test_cli_beta_and_internal_never_update_production_readme(self):
         cli = load_cinter()
@@ -382,6 +406,11 @@ class PublishChannelTests(unittest.TestCase):
               mock.patch.object(cli, 'BUILDS', self.builds),
               mock.patch.object(release, 'publish_four', return_value={
                   'channel': 'beta', 'bucket': 'cinterforge', 'prefix': 'CinterForgeTerminal/Distribution/beta'}) as publish,
+              mock.patch('host.target_publish.publish_msi_addendum'),
+              mock.patch.object(cli, '_prepare_windows_release_msi', return_value={'release': HOST_RELEASE}),
+              mock.patch('host.xcode_signing.release_signing_environment', return_value=TEST_RELEASE_SIGNING), \
+              mock.patch('host.xcode_signing.ensure_public_notary_profile', return_value='fixture-notary-profile'),
+              mock.patch.dict(os.environ, {'CINTER_MAC_SIGN_IDENTITY': 'Developer ID Application: fixture'}),
               redirect_stdout(StringIO())):
             self.assertEqual(cli.main(['publish', 'cfterminal', 'beta']), 0)
             self.assertEqual(cli.main(['publish', 'cfterminal', 'internal']), 0)

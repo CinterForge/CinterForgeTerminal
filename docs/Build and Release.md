@@ -5,6 +5,9 @@ If you want to get started right away:
 ```bash
 ./Cinter all all               # Setup -> Build -> Stage -> Test
 ./Cinter all all publish       # Same phases, then dryrun Publish; never uploads
+./Cinter all win publish internal  # Only Windows: ZIP + MSI to private R2
+./Cinter all mac publish beta     # macOS only to beta
+./Cinter all linux publish internal  # Linux only to private R2
 ```
 
 CinterForge Terminal is a reproducibly source-built product for **macOS, Windows and Linux**, with a separate optional unified DevTools distribution. A clean developer producer can regenerate its required outputs from an authored checkout and an empty sibling `Builds` tree; a consumer who installs the app does **not** run developer Setup.
@@ -24,6 +27,28 @@ packages a **dry run** without uploading. To upload explicitly, add `internal`,
 `beta` or `release` after `publish`. A failed phase stops the sequence before
 publication.
 
+Windows Setup also prints START/PASS/FAIL lines and an elapsed-time heartbeat
+every 15 seconds during blocking dependency checks, Wine initialization,
+and native MSI compilation. These lines appear in the same lifecycle log; they are
+not guessed completion percentages; the initial Wine boot now fails after 180 seconds if it cannot complete.
+
+**Setup graphical preflight (both Linux and Windows):** After provisioning the
+existing Linux sample and Windows cross images, and **before the first Wine
+process**, Setup starts a temporary `Xvfb :99` screen in each isolated guest,
+uses `xdpyinfo` to verify an actual 1280×800/24-bit X11 connection, connects
+to `x11vnc` over loopback TCP and validates the RFB protocol banner, then
+fetches `/vnc.html` from the guest's `websockify`/noVNC endpoint.  These are
+real connection checks, not `--help` or executable-presence checks. Any
+failure aborts Setup with the service logs and durable results at
+`Builds/Logs/CinterForgeTerminal/{linux,windows}-gui-preflight.{log,json}`.
+The checks run without published ports or external network access; all
+preflight servers stop afterward. Every graphical Windows execution, including
+`wineboot --init`, performs the same checks **inside its own container** and
+runs Wine on the *verified live display* rather than another Xvfb instance.
+This does not certify Windows PE or native GUI behavior; those are separate
+acceptance gates. Build, Stage, Test and runtime never provision/repair these
+services.
+
 Each lifecycle command streams its output to the console **and** writes a
 UTC timestamped `.log` plus a PASS/FAIL `.json` summary under
 `<workspace>/Builds/Logs/CinterForgeTerminal/Lifecycle/`. Stable
@@ -36,14 +61,14 @@ remains read-only and does not create logs. See [Lifecycle Testing](Lifecycle%20
 | Phase | Responsibility | Must not do |
 |---|---|---|
 | **Inspect** | Identify source, platform/ABI, rights and licenses, required inputs and hashes; report readiness | Change an installed user environment as an implicit side effect |
-| **Setup** | Download/verify and **extract verified published ZIPs/DMGs only here**, into canonical sibling `Builds` when needed; provision pinned toolchains and run required acceptance | Leave Setup VMs running; shift extraction to Build or Stage |
+| **Setup** | Download/verify and **extract verified published ZIPs/DMGs only here**, into canonical sibling `Builds` when needed; provision pinned toolchains, **native Debian wixl/msitools and a real tiny README MSI smoke**, and run required acceptance | Leave Setup VMs running; shift extraction to Build or Stage |
 | **Build** | Compile and sign three unpacked native apps; record the unified DevTools input inventory directly in `Builds` | ZIP/UnZIP, download, Stage or restart |
 | **Stage** | Copy already-built unpacked files straight to `steamapps` and validate receipts; skip unchanged DevTools | ZIP/UnZIP, provision, download or rebuild |
 | **Test** | Validate staged product offline and record evidence | ZIP/UnZIP, provision or download |
-| **Publish** | Create the **Mac drag-to-Applications DMG and three ZIPs only here**; notarize beta/release Mac DMGs; perform a read-only CDN check on dryrun, otherwise upload and verify | Run during ordinary `all all`, upload without an explicit destination |
+| **Publish** | Create the **Mac DMG, three ZIPs and Windows enterprise MSI only here**; notarize beta/release Mac DMGs; perform read-only CDN checks on dryrun, otherwise upload and verify | Run during ordinary `all all`, upload without an explicit destination or provision toolchains |
 | **Reboot** | Restart only named running component: `server`, `docker`, `colima` or `app` | Build, Setup, Stage, ZIP/UnZIP or Publish |
 
-Setup owns first-time toolchain provisioning and all extraction of verified published release ZIPs and Mac DMGs. Build produces an uncompressed four-target `four-built.json` inventory under `Builds/CinterForgeTerminal/Distribution/`; large DevTools source files stay in their canonical `Builds` locations without an extra 7 GB copy. Stage copies those files directly to Steam and verifies them, using fast unchanged-file receipts. Publish alone generates the Mac DMG and the remaining three distribution ZIPs. Reboot never compiles or packages.
+Setup owns first-time toolchain provisioning and all extraction of verified published release ZIPs and Mac DMGs. Build produces an uncompressed four-target `four-built.json` inventory under `Builds/CinterForgeTerminal/Distribution/`; large DevTools source files stay in their canonical `Builds` locations without an extra 7 GB copy. Stage copies those files directly to Steam and verifies them, using fast unchanged-file receipts. Publish alone generates the Mac DMG, three distribution ZIPs, and an independently verified Windows x64 MSI. Reboot never compiles or packages.
 
 ## Publish channels (explicit upload authorization)
 
@@ -60,6 +85,65 @@ archives rather than recompressing unchanged DevTools.
 | `internal` | `cdn-assets-dev` / `CinterForgeTerminal/Distribution/` | Internal developer/test builds |
 | `beta` | `cinterforge` / `CinterForgeTerminal/Distribution/beta/` | Externally accessible test builds; verified unsigned HTTP |
 | `release` | `cinterforge` / `CinterForgeTerminal/Distribution/` | Production/public release, unchanged stable URLs |
+
+### Target-scoped lifecycle and Windows MSI
+
+Every target selector is accepted in the same lifecycle form:
+
+```bash
+./Cinter all mac
+./Cinter all win publish internal
+./Cinter all linux publish beta
+./Cinter all all publish release
+```
+
+`mac`, `win`, `linux` and `all` each run Setup → Build → Stage → Test,
+with optional explicit Publish mode (`dryrun` if omitted). Targeted Build,
+Stage, Test and Publish never package or upload other application platforms
+or the optional **DevTools** archive. A Windows-only Setup provisions the
+pinned Windows cross-build tools and MSI toolchain without LinuxKit/Bedrock
+or Lagomorph Setup. The macOS/Linux Setup commands currently reuse the broader
+common toolchain Setup, but still Build/Stage/Test/Publish their selected target.
+
+**Native Debian `wixl` + `msitools`** are provisioned in the pinned Windows-cross
+image **only during Setup**. Both are native Linux executables. WiX 3 Windows
+binaries, Wine Mono and a PE32 Wine loader probe are not MSI compiler dependencies.
+Setup compiles a *real tiny x64 MSI* from `README.txt`, checks Windows Installer
+tables with `msiinfo`, and extracts the embedded README with `msiextract`. It also
+compiles the identical minimal installer schema with the actual application
+launcher filenames. No unsupported WiX UI extension or branding elements are used.
+Results are recorded in
+`Builds/Logs/CinterForgeTerminal/windows-msi-preflight.json` and
+`Builds/CinterForgeTerminal/Toolchains/WindowsMSI/msi-preflight.json`.
+Setup fails if those real acceptance checks fail; a tool version probe alone
+cannot pass. Only Setup provisions or changes the OCI image; Publish checks the
+existing staged image and Setup acceptance receipt. The other patched Wine 11.15
+MSYS2 shell/runtime verification remains separate and unchanged, as do the
+Setup-managed `Builds/CFTVM` Colima/Wine guest-native volume paths and the
+180-second Wine prefix initialization timeout.
+
+Publish consumes the **existing unpacked Windows Build receipt** to create
+`Builds/CinterForgeTerminal/Distribution/CinterForgeTerminal-win.msi`.
+The deliberately simple MSI installs the application files to the per-machine
+Program Files location, supports standard uninstall, and uses a stable
+`UpgradeCode` for major upgrades. It has no custom installer UI, artwork, or
+Start Menu shortcut; launch `Terminal.cmd` from the installed application folder. It does **not** contain
+optional DevTools. The old Windows ZIP remains available for compatibility.
+This native `wixl` compilation uses the Setup-verified Debian OCI environment on Mac;
+native Windows installation, upgrade and uninstall acceptance remain required
+before production deployment. These packages are not Windows code-signed
+unless a separate signing identity is configured and verified.
+
+Target-only publishing writes `mac-artifacts.json`, `linux-artifacts.json`, or
+`win-artifacts.json` to the existing channel root; separate local
+`<target>-packages.json` receipts cache unchanged archives without modifying the
+original all-platform `four-artifacts.json`. Windows `win-artifacts.json`
+covers the ZIP and MSI. Full publishing retains `four-artifacts.json` for the
+original four products and publishes the MSI with an auxiliary scoped
+manifest; it verifies the MSI **before uploading any full-release artifacts**.
+Only changed scoped artifacts need R2 transfer/round-trip checks, and DevTools
+are not consulted in a scoped run. Internal testing publishes to private
+`cdn-assets-dev/CinterForgeTerminal/Distribution/`.
 
 Only `beta` and `release` demand public notarization/Gatekeeper verification
 of the Mac DMG. Only `release` can update the managed public README download
@@ -88,19 +172,36 @@ explicit uploads, and execute only after all earlier phases pass.
 
 ## macOS direct distribution: signed drag-to-Applications DMG
 
-Local `./Cinter all all` uses the existing ad-hoc macOS signature if no
-Developer ID is configured; this remains appropriate for local development,
-**not** for public downloads. To produce an installable public Mac DMG, the Mac
-builder must have an Apple **Developer ID Application** certificate with its
-private key in the signing keychain and an authenticated `xcrun notarytool`
-keychain profile. Configure these in the builder process (not in source or
-release files):
+Local `./Cinter all all` may use an ad-hoc macOS signature if no
+Developer ID is configured; this is appropriate for local development,
+**not** for public downloads. The Xcode project's **Release** Signing &
+Capabilities configuration selects the Developer ID Application certificate
+and Team for both Xcode and `./Cinter` publication, including in the embedded
+Mac Bash shell. The CLI resolves Xcode's macOS SDK-specific signing settings
+against valid identities in the host user's Keychain; no duplicate certificate
+or manually exported signing-identity variable is required. The private key
+never leaves Keychain.
+
+Apple notarization separately requires an authenticated `xcrun notarytool`
+Keychain profile. The Xcode Release `CINTER_MAC_NOTARY_PROFILE` setting names
+that profile; it is **not** the app provisioning profile. On an explicit public
+beta/release Publish, the pipeline checks Xcode's selected profile first, then
+its previously validated per-machine profile name under sibling
+`Builds/CinterForgeTerminal/Configuration/notary-profile.json`, then the
+standard `CinterForgeTerminal` profile name. It validates access to Apple's
+notary service **before any MSI packaging or CDN upload**. If the profile is
+missing, interactive Mac Bash offers to reuse another stored profile or runs
+Apple's own password-masked `notarytool store-credentials` prompt once for the
+Xcode-selected Team. The private key and notarization credentials remain in
+the user's macOS Keychain; only a nonsecret profile name is remembered in
+Builds. A noninteractive builder with no profile fails before packaging. A
+network/authentication failure never overwrites stored credentials or causes
+an unnotarized public upload. No standalone shell setup command is required;
+`./Cinter publish beta` completes this flow inside CinterForgeTerminal.
 
 ```sh
-export CINTER_MAC_SIGN_IDENTITY='Developer ID Application: <organization> (<team-id>)'
-export CINTER_MAC_NOTARY_PROFILE='<notarytool-keychain-profile>'
-./Cinter all all publish release  # opt-in full lifecycle through public Release
-# Or, separately:
+./Cinter all all publish release  # explicit full lifecycle and public Release
+# Or, separately, from the same integrated Mac Bash shell:
 # ./Cinter all all
 # ./Cinter publish cfterminal release
 ```
@@ -137,7 +238,10 @@ substitute for native interactive acceptance.
 ./Cinter all all publish        # Setup -> Build -> Stage -> Test -> local dryrun only
 ./Cinter all all publish beta   # explicit beta upload after Test PASS
 ./Cinter all all publish release # explicit production upload after Test PASS
-./Cinter all mac                # macOS-focused local lifecycle
+./Cinter all mac                # macOS-only Build / Stage / Test after shared Setup
+./Cinter all win publish internal   # Windows ZIP + MSI only, private Cloudflare
+./Cinter all linux publish internal # Linux ZIP only, private Cloudflare
+./Cinter all mac publish beta       # Mac DMG only, public beta
 ./Cinter windows cross-test     # Windows PE / Wine cross-compatibility evidence
 ./Cinter publish                # default dryrun: package + read-only test of both CDNs
 ./Cinter publish cfterminal dryrun  # same explicit dryrun
@@ -160,7 +264,7 @@ The producer assumes the authored Terminal repository and documented external in
 2. Provision managed macOS builders independently: **`w`** (Windows cross-build/Docker, including the LinuxKit kernel image producer) and **`c`** (ARM64 Ubuntu guest-runtime inputs). Use short Lima/Colima paths under `Builds/CFTVM`, exact configured tools, and signed/entitled VM-host processes. No host-global Docker/Homebrew environment is required.
 3. Compile/verify the **custom ARM64 LinuxKit kernel with VirtioFS enabled**, package its kernel/initrd/cmdline and Mac LAN relayd launcher, and refresh its generated guest manifest when inputs change. Cache hits require hash/receipt validation; clean state builds from pinned source.
 4. Release `w` before starting `c` where the sequence requires it. Build/verify the guest glibc and native ARM64 NetherNet probe through `c`; release `c` before launching the actual LinuxKit guest. Do not combine the two builder VM profiles or substitute CFOS's comprehensive Ubuntu image.
-5. Provision/check portable Python and native runtime closures for each release target, the Code-OSS web workbench and extensions, JS Z-machine, game/IF catalogs and native WebView dependencies. For Lagomorph, **pull the complete authored `Builds/Lagomorph` tree from the authenticated internal CDN before generating its HFS disks**. Download a single `Builds-Lagomorph.zip` snapshot from the internal `cdn-assets-dev` R2 bucket; verify its committed manifest, whole-ZIP SHA-256, each file hash and empty directories before updating the local source. Previously published per-file snapshots remain readable for migration. A missing snapshot is a Setup error; the source pull must not contact public release media. Respect independent licensed media inputs rather than fabricating substitutes.
+5. Provision/check portable Python and native runtime closures for each release target, the Code-OSS web workbench and extensions, JS Z-machine, game/IF catalogs and native WebView dependencies. The pinned Code-OSS browser producer skips upstream `extensions/copilot` during its nested npm dependency pass: that GitHub-only extension is excluded from the web product, and its optional platform-specific SDK is not a Setup prerequisite. All other pinned extension dependencies and the CinterForge-owned browser extension remain intact. Connecting a local AI provider (including Pleias) is separate from provisioning the editor; this does not claim that chat inference is configured. For Lagomorph, **pull the complete authored `Builds/Lagomorph` tree from the authenticated internal CDN before generating its HFS disks**. Download a single `Builds-Lagomorph.zip` snapshot from the internal `cdn-assets-dev` R2 bucket; verify its committed manifest, whole-ZIP SHA-256, each file hash and empty directories before updating the local source. Previously published per-file snapshots remain readable for migration. A missing snapshot is a Setup error; the source pull must not contact public release media. Respect independent licensed media inputs rather than fabricating substitutes.
 6. With **explicit official Bedrock EULA acceptance**, download/verify the official test archive, start a disposable isolated Bedrock server through the signed LinuxKit guest, inspect readiness, console and LAN behavior, stop the server/guest, and record evidence. Never touch the player's worlds during this producer test.
 7. Write versioned setup manifests and logs. On success, error, interrupt or owning-process death, stop the owned `w`/`c` profiles and temporary children; leave unrelated VMs untouched. Persistent managed caches may be retained for the next validated build.
 

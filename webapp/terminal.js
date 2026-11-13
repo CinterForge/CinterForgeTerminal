@@ -380,6 +380,7 @@
   // ===========================================================================
 
   let session = null, generation = 0, platform = 'linux', selected = '', profiles = [], waiting = false;
+  let devtoolsInstalled = false;
   const queuedSessionOpens = [];
   let macCatalog = new Map();
   /**
@@ -424,6 +425,15 @@
   // ===========================================================================
 
   const frame = $('computer-frame'), computerView = $('computer-view');
+  // One persistent Code-OSS document/worker/PTY owner. The ordinary museum
+  // frame is deliberately reusable; switching to a Launcher must never
+  // navigate the Code workbench to about:blank and leak its host-side PTYs.
+  const codeFrame = document.createElement('iframe');
+  codeFrame.id = 'codeoss-frame';
+  codeFrame.title = 'CinterForge Code-OSS workbench';
+  codeFrame.referrerPolicy = 'no-referrer';
+  codeFrame.hidden = true;
+  computerView.append(codeFrame);
   // Older staged HTML lacked this diagnostic node even when terminal.js was
   // newer. Repair that mixed-version presentation rather than crashing the
   // entire Terminal before its native UI/PTY acceptance callbacks can run.
@@ -445,7 +455,7 @@
     ? new BroadcastChannel(CODE_COMMAND_CHANNEL) : null;
   let codeCommandSerial = 0;
   const codeIsActive = () => activeTab?.profileId === 'codeoss' &&
-    !computerView.hidden && frame.src.includes('/codeoss/');
+    !computerView.hidden && !codeFrame.hidden && codeFrame.src.includes('/codeoss/');
 
   // The CinterForge activity-bar button controls the existing outer wrapper,
   // not an IFPlayer game menu. The Code iframe and its PTYs remain mounted.
@@ -453,11 +463,11 @@
   function setCodeWrapperHidden(hidden) {
     terminalOverlay.dataset.codeWrapperHidden = hidden ? 'true' : 'false';
     if (hidden) document.querySelectorAll('.terminal-menu[open]').forEach(menu => { menu.open = false; });
-    frame.contentWindow?.postMessage({type: 'cinterforge-terminal-wrapper-state', hidden},
+    codeFrame.contentWindow?.postMessage({type: 'cinterforge-terminal-wrapper-state', hidden},
       window.location.origin);
   }
   window.addEventListener('message', event => {
-    if (event.source !== frame.contentWindow || event.origin !== window.location.origin ||
+    if (event.source !== codeFrame.contentWindow || event.origin !== window.location.origin ||
         event.data?.type !== 'cinterforge-terminal-wrapper-toggle' || !codeIsActive()) return;
     setCodeWrapperHidden(terminalOverlay.dataset.codeWrapperHidden !== 'true');
   });
@@ -479,10 +489,22 @@
   // the extension must never guess 127.0.0.1 or inherit an IFPlayer control URL.
   if (codeCommands) codeCommands.onmessage = async event => {
     const message = event.data || {};
+    if (message.type === 'open-launcher') {
+      if (['mac', 'win', 'linux'].includes(message.platform) &&
+          codeFrame.dataset.loaded === 'true')
+        void openLauncherTab(message.platform);
+      return;
+    }
+    if (message.type === 'code-workbench-owner') {
+      if (codeFrame.dataset.loaded === 'true' &&
+          typeof message.owner === 'string' && /^[a-z0-9]{1,24}$/.test(message.owner))
+        codeOwnerId = message.owner;
+      return;
+    }
     if (message.type !== 'host-probe' && message.type !== 'host-request') return;
     if (typeof message.requestId !== 'string' ||
         !/^host-[A-Za-z0-9-]{12,100}$/.test(message.requestId) ||
-        !frame.src.includes('/codeoss/')) return;
+        !codeFrame.src.includes('/codeoss/')) return;
 
     const replyType = message.type === 'host-probe' ? 'host-probe-response' : 'host-request-response';
     try {
@@ -495,7 +517,7 @@
       // Only the existing Code-OSS filesystem and shell contracts can cross
       // this UI bridge; it is not an arbitrary privileged HTTP proxy.
       if (path !== '/code/command' &&
-          !/^\/host\/code-shell-(open|close|write|resize|output)(?:\?[^#]*)?$/.test(path))
+          !/^\/host\/code-shell-(open|close|close-owner|write|resize|output)(?:\?[^#]*)?$/.test(path))
         throw new Error('Unsupported Code-OSS host operation');
       const payload = message.method === 'GET' ? await api(path) : await api(path, message.body || {});
       codeCommands.postMessage({type: replyType, requestId: message.requestId, ok: true, payload});
@@ -506,12 +528,12 @@
   };
 
   const codeUrl = '/codeoss/out/vs/code/browser/workbench/workbench.html';
-  let codeLoad = 0, codeReady = false, codeLastError = '';
+  let codeLoad = 0, codeReady = false, codeLastError = '', codeOwnerId = null;
   /**
    * Report a Code-OSS workbench failure only if the affected iframe is still the selected view.
    */
   const codeFailure = message => {
-    if (computerView.hidden || !frame.src.includes(codeUrl) || codeReady) return;
+    if (!codeIsActive() || !codeFrame.src.includes(codeUrl) || codeReady) return;
     codeLastError = String(message).slice(0, 450);
     codeError.textContent = 'VS Code did not start.\n' + codeLastError + '\nOpen Debugger for WebKit details.';
     codeError.hidden = false;
@@ -521,8 +543,8 @@
   // Require a real workbench DOM, not merely a successful HTML response.
   // Staged Code-OSS sends early resource/script errors from its HTTP response.
   window.addEventListener('message', event => {
-    if (event.origin !== new URL(location.href).origin || event.source !== frame.contentWindow ||
-      computerView.hidden || !frame.src.includes(codeUrl)) return;
+    if (event.origin !== new URL(location.href).origin || event.source !== codeFrame.contentWindow ||
+      computerView.hidden || !codeFrame.src.includes(codeUrl)) return;
     const data = event.data;
     if (!data || data.type !== 'cinterforge-codeoss-health') return;
     if (data.status === 'ready') {
@@ -764,10 +786,13 @@
       clearTimeout(lagWelcomeTimer);
       lagWelcomeTimer = null;
     }
-    codeLoad++;
-    codeReady = false;
-    codeError.hidden = true;
+    // Only the recyclable emulator frame is disposed. The Code-OSS iframe
+    // retains its workbench, editor state and all legitimate PTYs.
+    codeFrame.hidden = true;
+    frame.hidden = false;
     frame.src = 'about:blank';
+    delete frame.dataset.launcher;
+    codeError.hidden = true;
     computerView.hidden = true;
     $('terminal-keys').hidden = false;
     $('terminal-screen').hidden = false;
@@ -791,25 +816,34 @@
     $('terminal-input').disabled = true;
     computerView.hidden = false;
     $('terminal-keys').hidden = true;
-    codeLoad++;
-    codeReady = false;
-    codeLastError = '';
     codeError.hidden = true;
+    if (museumKind(profile) !== 'codeoss') {
+      codeFrame.hidden = true;
+      frame.hidden = false;
+      delete frame.dataset.launcher;
+    }
     if (museumKind(profile) === 'joshua') {
       // The actual standalone WarGames application, loaded from the staged
       // same-origin source, owns its game screen and keyboard in this Session.
       frame.src = '/joshua/index.html';
     } else if (museumKind(profile) === 'codeoss') {
-      // A reloaded workbench starts with its outer wrapper visible again.
-      if (terminalOverlay.dataset.codeWrapperHidden === 'true')
-        setCodeWrapperHidden(false);
-      const stamp = codeLoad;
-      frame.src = codeUrl;
-      void checkCodeAssets(stamp);
-      setTimeout(() => {
-        if (stamp === codeLoad && !codeReady)
-          codeFailure(codeLastError || 'No ready signal from staged Code-OSS after 12 seconds');
-      }, 12500);
+      frame.hidden = true;
+      codeFrame.hidden = false;
+      if (!codeFrame.dataset.loaded) {
+        // Initialize exactly once until the user explicitly closes Code-OSS.
+        if (terminalOverlay.dataset.codeWrapperHidden === 'true')
+          setCodeWrapperHidden(false);
+        const stamp = ++codeLoad;
+        codeReady = false;
+        codeLastError = '';
+        codeFrame.dataset.loaded = 'true';
+        codeFrame.src = codeUrl;
+        void checkCodeAssets(stamp);
+        setTimeout(() => {
+          if (stamp === codeLoad && !codeReady)
+            codeFailure(codeLastError || 'No ready signal from staged Code-OSS after 12 seconds');
+        }, 12500);
+      }
     } else {
       const url = new URL('https://infinitemac.org/embed');
       url.searchParams.set('machine', profile.machine);
@@ -921,6 +955,26 @@
     session = tab.session;
     selected = tab.profileId;
     display = tab.display;
+    if (tab.kind === 'launcher') {
+      if (terminalOverlay.dataset.codeWrapperHidden === 'true') setCodeWrapperHidden(false);
+      $('terminal-screen').hidden = true;
+      $('terminal-input').disabled = true;
+      $('terminal-keys').hidden = true;
+      computerView.hidden = false;
+      $('terminal-shell').textContent = tab.label;
+      $('terminal-machine-title').textContent = tab.label.toUpperCase();
+      codeFrame.hidden = true;
+      frame.hidden = false;
+      if (frame.dataset.launcher !== tab.backend) {
+        frame.src = '/launcher/index.html?platform=' + tab.backend;
+        frame.dataset.launcher = tab.backend;
+      } else if (tab.launcherResult) {
+        sendLauncherState(tab, tab.launcherResult);
+      }
+      notice(tab.launcherResult ? tab.label + ' ready' : 'Opening ' + tab.label + '…');
+      renderTabs();
+      return;
+    }
     if (tab.kind === 'if') {
       showTerminal();
       applyProfile(profiles.find(p => p.id === tab.profileId) || profiles[0]);
@@ -986,9 +1040,25 @@
    */
   async function closeTab(tab) {
     if (!tabs.includes(tab) || tab.closed) return;
-    // Mark closed before awaiting network I/O. A late PTY connection or IF
-    // download must never resurrect a closed tab or take over another tab.
+    // Mark closed before any cleanup request. A late worker response must
+    // never reselect or resurrect this workbench's tabs or PTYs.
     tab.closed = true;
+    // CodeOSS is a singleton until explicitly closed; release its owned
+    // worker and backend sessions only on that explicit close, never tab switch.
+    if (tab.profileId === 'codeoss') {
+      codeFrame.src = 'about:blank';
+      codeFrame.hidden = true;
+      delete codeFrame.dataset.loaded;
+      codeLoad++;
+      codeReady = false;
+      const owner = codeOwnerId;
+      codeOwnerId = null;
+      if (owner) {
+        try { await api('/host/code-shell-close-owner', {owner}); }
+        catch (e) { console.error('Code-OSS PTY cleanup:', e); }
+      }
+    }
+    // Late PTY connections and IF downloads cannot revive a closed tab.
     tab.pollGeneration = (tab.pollGeneration || 0) + 1;
     if (tab.game) void stopGame(tab).catch(error => console.error('IF close:', error));
     const closingSession = tab.session;
@@ -1066,6 +1136,63 @@
     void pollServerTab(tab);
     return tab;
   }
+
+  // ===========================================================================
+  // OPTIONAL CFOS LAUNCHERS — one per platform, never opened at startup
+  // ===========================================================================
+  const launcherKinds = Object.freeze({mac: 'Mac Launcher', win: 'Windows Launcher', linux: 'Linux Launcher'});
+  const launcherApps = new Set(['CinterForgeTerminal']);
+  function sendLauncherState(tab, data) {
+    if (tab.closed || activeTab !== tab || frame.dataset.launcher !== tab.backend) return;
+    frame.contentWindow?.postMessage({type: 'cinter-launcher-session', platform: tab.backend,
+      ...data}, location.origin);
+  }
+  frame.addEventListener('load', () => {
+    if (activeTab?.kind === 'launcher' && activeTab.launcherResult)
+      sendLauncherState(activeTab, activeTab.launcherResult);
+  });
+  async function openLauncherTab(kind) {
+    if (!Object.hasOwn(launcherKinds, kind) || !terminalActionEnabled('launcher:' + kind)) return;
+    const previous = tabs.find(tab => !tab.closed && tab.kind === 'launcher' && tab.backend === kind);
+    if (previous) { await activateTab(previous); return previous; }
+    const buffer = makeBuffer();
+    const tab = {
+      key: ++tabSerial, label: launcherKinds[kind], backend: kind,
+      kind: 'launcher', profileId: 'modern', session: null, closed: false,
+      display: new VTOutput(buffer), buffer, launcherResult: null
+    };
+    tab.display.target = tab.buffer;
+    tabs.push(tab);
+    await activateTab(tab);
+    try {
+      const result = await api('/api/launcher/start', {platform: kind});
+      if (tab.closed) return tab;
+      tab.launcherResult = result;
+      sendLauncherState(tab, result);
+      if (activeTab === tab) notice(tab.label + ' ready');
+    } catch (error) {
+      if (tab.closed) return tab;
+      tab.launcherResult = {error: error.message};
+      sendLauncherState(tab, tab.launcherResult);
+      if (activeTab === tab) notice(tab.label + ': ' + error.message);
+    }
+    return tab;
+  }
+  window.addEventListener('message', event => {
+    const message = event.data;
+    if (event.origin !== location.origin || event.source !== frame.contentWindow ||
+        message?.type !== 'cinter-launcher') return;
+    if (message.action === 'open' && Object.hasOwn(launcherKinds, message.platform)) {
+      void openLauncherTab(message.platform);
+      return;
+    }
+    if (message.action !== 'launch' || !launcherApps.has(message.app) ||
+        activeTab?.kind !== 'launcher' || activeTab.backend !== message.platform) return;
+    const tab = activeTab;
+    void api('/api/launcher/launch', {platform: tab.backend, app: message.app})
+      .then(() => sendLauncherState(tab, {message: message.app + ' launched'}))
+      .catch(error => sendLauncherState(tab, {error: error.message}));
+  });
 
   // ===========================================================================
   // DISCORD: MESSAGE HISTORY, POLLING, AND DRAFTS
@@ -1204,6 +1331,22 @@
    * modes.
    */
   window.CinterTerminalNewTab = async (kind = 'mac') => {
+    // Launchers are singleton graphical Sessions, never Code-OSS shell PTYs.
+    if (typeof kind === 'string' && !terminalActionEnabled(kind)) return;
+    if (typeof kind === 'string' && kind.startsWith('launcher:'))
+      return openLauncherTab(kind.slice('launcher:'.length));
+    if (kind === 'code') {
+      const existing = tabs.find(tab => !tab.closed && tab.profileId === 'codeoss');
+      return existing ? activateTab(existing) : openSession('codeoss');
+    }
+    // Guest Bash belongs EXCLUSIVELY inside Code-OSS, never an outer Session.
+    // Opening it outside Code focuses the workbench; its extension owns the
+    // single Linux/Windows shell and creates no duplicate on repeated requests.
+    if (kind === 'linux' || kind === 'win') {
+      if (codeIsActive()) return sendCodeCommand('new-terminal', {backend: kind});
+      const existing = tabs.find(tab => !tab.closed && tab.profileId === 'codeoss');
+      return existing ? activateTab(existing) : openSession('codeoss');
+    }
     // The same menu always has the same label. Its destination depends on mode.
     // In Code: create a VS Code integrated terminal tab. Else: outer Session tab.
     if (codeIsActive() && !String(kind).startsWith('profile:')) {
@@ -1217,11 +1360,8 @@
       notice('Unknown museum machine');
       return;
     }
-    if (kind === 'code') return openSession('codeoss');
     if (kind === 'server') return openServerTab();
-    if (kind === 'mac') return openSession('modern');
-    if (kind === 'linux') return openSession('vt100-terminal', 'linux');
-    if (kind === 'win') return openSession('ibm-pc-vga', 'win');
+    if (kind === 'mac' || kind === 'native') return openSession('modern');
     if (kind === 'minecraft') return openSession('modern', 'minecraft');
     notice('Unknown Terminal mode: ' + String(kind));
   };
@@ -1832,6 +1972,12 @@ method: 'POST', headers: {
    * Create a new independent tab and open its selected shell, emulator, or Bedrock backend.
    */
   async function openSession(profileId, backend = 'native') {
+    // CodeOSS owns a single workbench and guest terminal set. A second
+    // click or restored layout MUST focus, not allocate a second worker.
+    if (profileId === 'codeoss') {
+      const current = tabs.find(tab => !tab.closed && tab.profileId === 'codeoss');
+      if (current) return activateTab(current);
+    }
     // Do not drop a native/File-menu request while the initial PTY is still
     // connecting. Windows WebView2 can deliver the click during first startup.
     if (waiting) {
@@ -2002,6 +2148,8 @@ method: 'POST', headers: {
       return;
     }
     if (tab.kind !== 'terminal') {
+      // Reconnect is not permission to reconstruct a live Code-OSS workbench.
+      if (tab.profileId === 'codeoss') return;
       await showComputer(profiles.find(p => p.id === tab.profileId));
       return;
     }
@@ -2290,9 +2438,12 @@ method: 'POST', headers: {
   const codeMenuNames = CODE_MENU_NAMES;
   const cinterTerminalActions = [
     ['code', 'New CinterForge Code Terminal'],
-    ['mac', 'New Mac Terminal'],
-    ['linux', 'New Linux Terminal'],
-    ['win', 'New Windows Terminal'],
+    ['mac', 'New Mac Bash'],
+    ['linux', 'Open Linux Bash in Code-OSS'],
+    ['win', 'Open Windows Bash in Code-OSS'],
+    ['launcher:mac', 'Mac Launcher'],
+    ['launcher:win', 'Windows Launcher'],
+    ['launcher:linux', 'Linux Launcher'],
     ['server', 'New Server Log Terminal'],
     ['if', 'New Z-Machine Terminal'],
     ['minecraft', 'New Minecraft Terminal']
@@ -2307,35 +2458,90 @@ method: 'POST', headers: {
   // toolbar. Request the same live model when a menu is opened; never fabricate
   // editor actions when the actual workbench has not answered yet.
   function requestCodeServiceMenus() {
-    if (!codeIsActive() || !frame.contentWindow) return;
-    frame.contentWindow.postMessage({
+    if (!codeIsActive() || !codeFrame.contentWindow) return;
+    codeFrame.contentWindow.postMessage({
       type: 'cinterforge-codeoss-menu-request'
     }, window.location.origin);
   }
+  // All command labels stay in every menu. Unsupported targets are disabled,
+  // not hidden. Guest actions run only from the Mac host with verified DevTools.
+  // Windows/Linux native apps offer their own native integrated shell only.
+  function terminalActionEnabled(kind) {
+    if (kind === 'mac') return platform === 'mac';
+    if (kind === 'win') return platform === 'win' || (platform === 'mac' && devtoolsInstalled);
+    if (kind === 'linux') return platform === 'linux' || (platform === 'mac' && devtoolsInstalled);
+    if (kind === 'launcher:mac') return platform === 'mac';
+    if (kind === 'launcher:win' || kind === 'launcher:linux')
+      return platform === 'mac' && devtoolsInstalled;
+    if (kind === 'minecraft') return Boolean(minecraftMenuState);
+    return true; // Existing working non-platform actions retain their behavior.
+  }
+  const codeTerminalKinds = Object.freeze({
+    'cinterforge.newMacTerminal': 'mac',
+    'cinterforge.newWindowsTerminal': 'win',
+    'cinterforge.newLinuxTerminal': 'linux',
+    'cinterforge.openMacLauncher': 'launcher:mac',
+    'cinterforge.openWindowsLauncher': 'launcher:win',
+    'cinterforge.openLinuxLauncher': 'launcher:linux'
+  });
   function terminalItems() {
     // The EXISTING CinterForge application commands, used outside Code mode.
     // Code mode uses the real Code-OSS menu without overriding any of its items.
     return cinterTerminalActions.map(([kind, title]) => ({
       title, action: `terminal:${kind}`,
-      enabled: (kind !== 'minecraft' || Boolean(minecraftMenuState)) &&
-        (kind !== 'mac' || platform === 'mac') &&
-        (kind !== 'win' || platform === 'mac' || platform === 'win') &&
-        (kind !== 'linux' || platform === 'mac' || platform === 'linux')
+      enabled: terminalActionEnabled(kind)
     }));
   }
 
   function codeMenuSnapshot(name) {
-    if (codeIsActive()) return codeServiceMenus.get(name) || [];
-    if (name === 'File') return [
+    const active = codeIsActive();
+    // Code-OSS owns the editor menu definitions. Keep the SAME live labels
+    // outside Code, but disable actions that need the Code workbench. No
+    // second hard-coded editor command catalog and no disappearing menus.
+    const editorItems = (codeServiceMenus.get(name) || []).map(function clone(item) {
+      if (item.separator) return {separator: true};
+      return {...item, enabled: active && item.enabled !== false,
+        ...(Array.isArray(item.children) ? {children: item.children.map(clone)} : {})};
+    });
+    if (name === 'Terminal') {
+      // Real CodeOSS MenuRegistry commands may have their own enable state.
+      // Never let one enable a platform action forbidden by this host.
+      for (const item of editorItems) {
+        const kind = codeTerminalKinds[String(item.action || '').replace(/^code:/, '')];
+        if (kind && !terminalActionEnabled(kind)) item.enabled = false;
+      }
+    }
+    // Before the first Code workbench has supplied its real menu model,
+    // show a disabled editor placeholder instead of an apparently missing
+    // or differently structured menu. Never invent runnable editor actions.
+    if (!editorItems.length && name !== 'Terminal')
+      editorItems.push({title: 'Code-OSS commands (open the workbench to populate)',
+        action: 'code:unavailable', enabled: false});
+    const result = [...editorItems];
+    const append = items => {
+      if (items.length && result.length) result.push({separator: true});
+      result.push(...items);
+    };
+    if (name === 'File') append([
       {title: 'Relaunch CinterForge Terminal', action: 'app:relaunch', enabled: true},
       {title: 'Quit CinterForge Terminal', action: 'app:quit', enabled: true}
-    ];
-    if (name === 'Edit') return [
-      {title: 'Copy', action: 'edit:copy', enabled: true},
-      {title: 'Paste', action: 'edit:paste', enabled: true}
-    ];
-    if (name === 'Terminal') return terminalItems();
-    return [];
+    ]);
+    if (name === 'Edit') {
+      // Outside Code the standard Copy/Paste labels keep their native actions.
+      for (const [title, action] of [['Copy', 'edit:copy'], ['Paste', 'edit:paste']]) {
+        const item = result.find(value => value.title === title);
+        if (item && !active) Object.assign(item, {action, enabled: true});
+        if (!item) result.push({title, action, enabled: true});
+      }
+    }
+    if (name === 'Terminal') {
+      // Add the complete Terminal action catalog in both modes. The pinned
+      // Code workbench contributes the same Launcher commands natively;
+      // avoid duplicate entries if its live model already supplies them.
+      const existingTitles = new Set(editorItems.map(item => item.title));
+      append(terminalItems().filter(item => !existingTitles.has(item.title)));
+    }
+    return result;
   }
 
   function paintCodeMenuList(container, items) {
@@ -2383,7 +2589,9 @@ method: 'POST', headers: {
   function updateCodeMenuMode() {
     const enabled = codeIsActive();
     for (const [name, entry] of codeMenuRoots) {
-      const disabled = enabled && !codeServiceMenus.has(name);
+      // Menus stay present and selectable in both modes. Individual
+      // unsupported commands are visibly disabled by codeMenuSnapshot().
+      const disabled = false;
       entry.classList?.toggle?.('code-menu-disabled', disabled);
       entry.querySelector?.('summary')?.setAttribute?.('aria-disabled', String(disabled));
       if (!enabled) entry.open = false;
@@ -2407,9 +2615,13 @@ method: 'POST', headers: {
     }
     if (action === 'edit:copy') return copyTranscript();
     if (action === 'edit:paste') return pasteClipboard();
-    if (action.startsWith('terminal:')) return window.CinterTerminalNewTab(action.slice(9));
+    if (action.startsWith('terminal:')) {
+      const kind = action.slice(9);
+      if (!terminalActionEnabled(kind)) return;
+      return window.CinterTerminalNewTab(kind);
+    }
     if (!codeIsActive() || !action.startsWith('code:') || !codeServiceActions.has(action)) return;
-    frame.contentWindow?.postMessage({
+    codeFrame.contentWindow?.postMessage({
       type: 'cinterforge-codeoss-menu-run', action: action.slice(5)
     }, window.location.origin);
   };
@@ -2436,7 +2648,7 @@ method: 'POST', headers: {
   // Message origin AND iframe identity are checked. The workbench service
   // publishes menu updates; no periodic DOM probing and no positional guesses.
   window.addEventListener('message', event => {
-    if (event.source !== frame.contentWindow || event.origin !== window.location.origin ||
+    if (event.source !== codeFrame.contentWindow || event.origin !== window.location.origin ||
         event.data?.type !== 'cinterforge-codeoss-menu-model') return;
     const groups = event.data.groups;
     if (!Array.isArray(groups)) return;
@@ -2451,7 +2663,9 @@ method: 'POST', headers: {
     codeServiceActions.clear();
     for (const [name, items] of updated) codeServiceMenus.set(name, items);
     for (const action of sourceActions) codeServiceActions.add(action);
-    if (codeIsActive()) updateCodeMenuMode();
+    // The menu model is retained for all other Sessions. Refresh inactive
+    // native/HTML menu entries as disabled stubs, without changing titles.
+    updateCodeMenuMode();
   });
 
   for (const name of codeMenuNames) {
@@ -2872,6 +3086,18 @@ method: 'POST', headers: {
       } else await openSession('codeoss');
     } catch (_) { /* Service may be closing. */ }
   }, 850);
+  setInterval(async () => {
+    if (platform !== 'mac' || document.visibilityState === 'hidden') return;
+    try {
+      const status = await api('/api/status');
+      const installed = status.devtools_installed === true;
+      if (installed !== devtoolsInstalled) {
+        devtoolsInstalled = installed;
+        updateCodeMenuMode();
+        codeCommands.postMessage({type: 'devtools-capabilities', installed});
+      }
+    } catch (_) { /* Installed service can be closed while a tab is open. */ }
+  }, 10000);
   // Development-only HTML menu inspection on macOS. The native menu remains
   // authoritative; the command only controls visibility of the existing row.
   setInterval(async () => {
@@ -2896,6 +3122,8 @@ method: 'POST', headers: {
     try {
       const status = await api('/api/status');
       platform = status.platform;
+      devtoolsInstalled = status.devtools_installed === true;
+      updateCodeMenuMode();
       document.documentElement?.setAttribute?.('data-cinter-platform', platform);
       setWindowsApplicationMenus();
 

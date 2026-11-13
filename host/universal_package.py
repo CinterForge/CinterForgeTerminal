@@ -297,7 +297,7 @@ def _progress(label: str, done: int, total: int) -> None:
           f'({done / 1048576:.1f}/{total / 1048576:.1f} MiB)', flush=True)
 
 HOST_ASSETS = ('CinterForgeTerminal.py', 'if_titles.json', 'mac_games.json', 'index.html',
-               'terminal_styles.json', 'terminal.js', 'terminal.css')
+               'terminal_styles.json', 'terminal.js', 'terminal.css', 'startup.html', 'startup.js')
 
 
 def _files_under(source: Path, prefix: str, *, require: bool = True) -> dict[str, Path]:
@@ -556,10 +556,10 @@ def _app_assets(builds: Path, target: str, release: str) -> dict[str, Path | byt
                                                require=False))
             # MSYS2 checks that /tmp exists before executing Bash. This
             # immutable placeholder materializes the directory in the release;
-            # TMP/TEMP/TMPDIR still point to writable steamapps TerminalState.
+            # TMP/TEMP/TMPDIR point to the user's OS runtime cache, not Steam.
             assets[shell_prefix + '/tmp/README.txt'] = (
                 b'MSYS2 startup directory only. Writable temp is redirected to '
-                b'the CinterForge Steam runtime state via TMPDIR.\n')
+                b'the per-user OS runtime cache via TMPDIR.\n')
             # All recursive non-system DLLs were resolved by cross_build.
             for dll in binary.parent.glob('*.dll'):
                 assets[prefix + '/' + dll.name] = dll
@@ -609,6 +609,8 @@ exec "$HERE/CinterForge Terminal" --builds "$BUILDS" --python "$BUILDS/Python/En
             assets[host_root + '/webapp/' + name] = repo / 'webapp' / name
         assets.update(_files_under(repo / 'webapp/joshua',
                                    host_root + '/webapp/joshua'))
+        assets.update(_files_under(repo / 'webapp/launcher',
+                                   host_root + '/webapp/launcher'))
     if any('/Servers/Bedrock/' in k or k.endswith('/bedrock_server') or k.endswith('/bedrock_server.exe')
            for k in assets):
         raise RuntimeError('Bedrock server must never ship in Setup/Build/Stage')
@@ -628,6 +630,11 @@ def _devtools_assets(builds: Path) -> dict[str, Path | bytes]:
     assets: dict[str, Path | bytes] = {}
     for rel in required:
         assets.update(_files_under(builds / rel, 'DevTools/Builds/' + rel))
+    # The installer builder is provisioned by Setup; legacy SDK fixtures
+    # predate the MSI addition and still exercise unchanged SDK behavior.
+    msi_root = 'CinterForgeTerminal/Toolchains/WindowsMSI'
+    assets.update(_files_under(builds / msi_root, 'DevTools/Builds/' + msi_root,
+                               require=False))
     # An empty MSYS2 /tmp disappears when the SDK is archived. The Windows
     # guest overlays this directory with writable tmpfs; preserve the mount
     # point without making the SDK tree itself writable at runtime.
@@ -705,10 +712,12 @@ def _notarize_mac_app(app: Path, staging: Path) -> None:
     subprocess.run(['/usr/bin/ditto', '-c', '-k', '--keepParent', str(app),
                     str(submission)], check=True)
     try:
+        from host.xcode_signing import login_keychain_environment
         completed = subprocess.run(['xcrun', 'notarytool', 'submit', str(submission),
                                     '--keychain-profile', profile, '--wait',
                                     '--output-format', 'json'],
-                                   capture_output=True, text=True, check=False)
+                                   capture_output=True, text=True, check=False,
+                                   env=login_keychain_environment())
         response = {}
         try:
             response = json.loads(completed.stdout)
@@ -720,7 +729,8 @@ def _notarize_mac_app(app: Path, staging: Path) -> None:
             if isinstance(job, str) and job:
                 log = subprocess.run(['xcrun', 'notarytool', 'log', job,
                                       '--keychain-profile', profile],
-                                     capture_output=True, text=True, check=False)
+                                     capture_output=True, text=True, check=False,
+                                     env=login_keychain_environment())
                 details = (log.stdout or log.stderr)[-12000:]
             raise RuntimeError('Apple notarization failed: ' +
                                (completed.stderr or completed.stdout)[-4000:] + '\n' + details)

@@ -39,11 +39,25 @@ flowchart TB
 |---|---|---|
 | **WarGames / JOSHUA** | Type `wargames` in a shell Session | The original JOSHUA application is game #1 of the 68-game list and opens in a new Session tab; there is no Game-mode menu option. |
 | **Minecraft** | `minecraft`; native **New Minecraft Terminal** | A live, reconnectable, interactive console attached to the **existing running** managed Bedrock server. Does not silently create another server. |
-| **Mac** | Native **New Mac Terminal**; Code-OSS default on macOS | Real macOS POSIX PTY inside the Code-OSS workbench. |
-| **Win** | Native **New Win Terminal**; Code-OSS default on macOS when installed | Real installed Windows execution environment and shell, with required MSYS2 Bash runtime; a theme is not a substitute. |
-| **Linux** | Native **New Linux Terminal**; Code-OSS default on macOS when installed | Real installed Linux execution environment and POSIX shell; a fake prompt is not a substitute. |
+| **Mac** | Native **New Mac Bash** Session (unlimited); Code-OSS Mac shell | Real macOS POSIX PTY. Mac shells do not require DevTools. |
+| **Win** | Code-OSS **Open Windows Bash** only (one integrated terminal) | Real guest MSYS2 Bash under Wine, never a Session Bash tab. |
+| **Linux** | Code-OSS **Open Linux Bash** only (one integrated terminal) | Real managed Linux Bash, never a Session Bash tab. |
 
-The default Code-OSS terminal layout is **Mac + Win + Linux on macOS** and **one native terminal on Windows or Linux**. A missing platform environment is reported and can be provisioned through the documented toolchain flow; it is never simulated or silently labeled "installed." Terminal requests create separate Sessions in the **existing app window**, not new application windows. Typing a game name opens the relevant existing game/player in a new Session rather than a separate app window. **Mac Bash uses the native PTY directly and never requires DevTools.** Selecting Win/Linux Bash on macOS checks the separately installed unified DevTools receipt, offers explicit opt-in download with actual size, installation destination and progress only if absent, and connects a real guest shell from that SDK; it never uses a relabeled Mac Bash. The terminal-owned runtime VM is separate from the managed Setup VMs.
+**Native launch / DevTools readiness.** Without verified DevTools the normal Mac Bash
+Session appears immediately. With DevTools, a lightweight **Initializing DevTools...**
+splash is the only initial WebView page while the app-owned supervisor starts
+Colima and verifies both Linux and Windows Bash guests. It does not provision
+or download anything and does not create guest Session tabs. Success opens the
+normal Mac Bash Session; failure or an unresponsive supervisor also opens Mac
+Bash with the error retained in the Server log. One failing guest does not
+invalidate a verified other guest: the Linux Code-OSS Bash can stay operational
+when Wine/MSYS2 Windows Bash fails. The splash is bounded and never blocks
+local Mac Bash indefinitely. Completing an explicitly authorized DevTools
+installation requests one native app relaunch to enter the same startup check;
+the installer never spins up another VM in its own PTY. All Bash shells identify
+the real interactive user, host and working directory in the prompt.
+
+The default Code-OSS terminal layout on macOS is **Mac Bash + Server Log**, plus **one Linux and one Windows Bash only when verified DevTools is installed**; Windows and Linux app builds start with **one native terminal only**. A missing platform environment is reported and can be provisioned through the documented toolchain flow; it is never simulated or silently labeled "installed." Mac Bash and Launcher requests create or focus Sessions in the **existing app window**, not new application windows. Windows/Linux Bash exist only inside Code-OSS and each reopens/focuses its single integrated terminal. Typing a game name opens the relevant existing game/player in a new Session rather than a separate app window. **Mac Bash uses the native PTY directly and never requires DevTools.** Selecting Win/Linux Bash on macOS checks the separately installed unified DevTools receipt, offers explicit opt-in download with actual size, installation destination and progress only if absent, and connects a real guest shell from that SDK; it never uses a relabeled Mac Bash. The terminal-owned runtime VM is separate from the managed Setup VMs.
 
 ## LAN remote development and Discord
 
@@ -86,9 +100,19 @@ and cannot overwrite the command's shell or another IF/game interpreter.
 
 ## Native system menus, not HTML menus
 
-The operating-system menu bar owns **File**, **Edit**, and the **New … Terminal** commands. Native **New Minecraft / Mac / Win / Linux Terminal** entries are driven from the application's verified installed terminal capabilities. The set remains stable across page transitions, embedded game views, focus changes, and Code-OSS launches. A requested but unavailable platform receives an actionable installation explanation rather than a temporary menu entry that later disappears.
+The macOS system menu and Code-OSS menu show the same **File / Edit / Selection / View / Go / Run / Terminal / Help** headings and command labels in both modes. Code-OSS-only actions remain **visible but disabled** outside the workbench, never silently disappearing; valid Terminal commands stay active. The Terminal menu opens Mac Bash Sessions, one Code-OSS integrated Windows/Linux Bash per platform, and the singleton Mac/Windows/Linux Launcher Sessions. Only one Code-OSS Session can exist. Reopening it focuses the existing workbench without reloading or reallocating its PTYs.
 
-The web UI contains **no competing JavaScript Terminal or Edit menu**. Game catalog and museum navigation are content controls, not a shadow copy of the native system menu. Native copy, paste, focus, keyboard, selection, dialog, and debugger behaviors remain available when embedded emulators take focus.
+On a Mac host, Mac Bash and Mac Launcher work without DevTools. Windows/Linux Bash
+and graphical Launchers appear in the menus as disabled until the verified
+optional DevTools receipt is installed. On native Windows/Linux installs, only
+that host's own shell is enabled; off-platform Bash and all three graphical
+Launcher entries remain visible but disabled. Native Windows/Linux applications
+do not start macOS-managed Colima sessions or offer fake remote terminals.
+The common Launcher tabs within a Mac host still have one staged product icon:
+Mac opens the staged .app externally; Linux and Windows open their respective
+staged applications inside their existing managed guest windows.
+
+The web UI mirrors the same menu model for platforms without native menus; it is not a second independent command list. Game catalog and museum navigation remain content controls. Native copy, paste, focus, keyboard, selection, dialog, and debugger behaviors remain available when embedded emulators take focus.
 
 ## Game and museum runtime
 
@@ -104,7 +128,7 @@ Interactive fiction runs in the staged JavaScript Z-machine with externally acqu
 
 When **CinterForgeTerminal** is the loaded folder/workspace, Code-OSS recognizes that repository through its verified root/manifest and exposes the repository's **real `./Cinter` lifecycle** in its integrated terminals: inspect/status, Setup, Build, Stage, Test, `all all`, explicit Publish, and fetch as supported. On a macOS producer, the lifecycle can produce all **three native targets** and the unified DevTools release. `./Cinter all all` never implicitly publishes. The editor, workspace and installed Terminal use the same staged Host/CLI contracts; they do not fork a second implementation of build operations.
 
-The `devtools install|uninstall|list|report` command family is available in developer integrated terminals. It manages the optional verified **single unified three-platform** DevTools distribution. `report` produces a Markdown toolchain and version report under `Builds/Logs`, and can be opened in Code-OSS. General Bash/PowerShell, compilers, debuggers and `./Cinter` commands belong to real shell Sessions, not to JOSHUA's game input.
+The `devtools install|uninstall|list|report` command family is available in developer integrated terminals. It manages the optional verified **single unified three-platform** DevTools distribution. `report` produces a Markdown toolchain and version report under `Builds/Logs`, and can be opened in Code-OSS. General Bash/PowerShell, compilers, debuggers and `./Cinter` commands belong to the native Mac Bash Session or real Code-OSS integrated shells, not to JOSHUA's game input. Mac, Windows and Linux Launchers are closed by default and created on demand; one per platform, sharing a lightweight guest graphical session (Windows via Wine), not KDE. Each Launcher has one CinterForge Terminal icon and its own replaceable background PNG. The icon launches only the matching verified Steam Stage: macOS `.app` outside the WebView, Linux `Terminal.sh` inside the Linux guest, Windows `Terminal.cmd` under Wine inside the Windows guest. No additional app catalog or launcher mode badge is shown. Graphical applications launched from Code-OSS Bash or Debug use their platform Launcher display.
 
 ## Native application shell and reusable Host
 

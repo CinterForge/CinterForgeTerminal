@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CinterForge Terminal — Launcher</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="stage" aria-label="Platform launcher desktop">
+    <div class="screen" id="screen">
+      <!-- The wallpaper is an independent replaceable PNG per platform.
+           The taskbar and dock are real HTML, not baked into any wallpaper. -->
+      <img class="wallpaper" id="wallpaper" alt="" draggable="false">
+      <header class="topbar" aria-label="Launcher platform toolbar">
+        <!-- Platform switching belongs to CinterForge Terminal's existing Session tabs. -->
+        <button class="topbar-tray" id="tray" type="button" aria-label="Session and clock"><span id="launcher-clock"></span></button>
+      </header>
+      <!-- Minimal guest WM: native application windows, no KDE/Plasma. -->
+      <section id="guest-surface" class="guest-surface" hidden aria-label="Live guest application windows">
+        <iframe id="remote-desktop" title="Remote graphical session" referrerpolicy="no-referrer" allow="clipboard-read; clipboard-write"></iframe>
+      </section>
+      <nav class="dock" aria-label="Platform application launcher">
+        <div class="dock-items">
+          <button class="app" type="button" data-app="CinterForgeTerminal"
+                  title="Launch staged CinterForge Terminal" aria-label="Launch staged CinterForge Terminal">
+            <img src="assets/cinterforge-logo.png" alt="" draggable="false">
+            <span>CinterForge Terminal</span>
+          </button>
+        </div>
+      </nav>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </div>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -38,7 +38,10 @@
     "onCommand:cinterforge.newMacTerminal",
     "onCommand:cinterforge.newLinuxTerminal",
     "onCommand:cinterforge.newWindowsTerminal",
-    "onCommand:cinterforge.newServerLogTerminal"
+    "onCommand:cinterforge.newServerLogTerminal",
+    "onCommand:cinterforge.openMacLauncher",
+    "onCommand:cinterforge.openWindowsLauncher",
+    "onCommand:cinterforge.openLinuxLauncher"
   ],
   "contributes": {
     "commands": [
@@ -105,6 +108,18 @@
       {
         "command": "cinterforge.revealInHostOS",
         "title": "CinterForge: Reveal in Host File Manager"
+      },
+      {
+        "command": "cinterforge.openMacLauncher",
+        "title": "Mac Launcher"
+      },
+      {
+        "command": "cinterforge.openWindowsLauncher",
+        "title": "Windows Launcher"
+      },
+      {
+        "command": "cinterforge.openLinuxLauncher",
+        "title": "Linux Launcher"
       }
     ],
     "configuration": {

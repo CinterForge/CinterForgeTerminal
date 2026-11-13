@@ -76,7 +76,8 @@ def _load(builds: Path, release: str) -> dict:
         raise FileNotFoundError('Run ./Cinter build cfterminal all before Stage or Publish: ' + str(path))
     record = json.loads(path.read_text('utf-8'))
     if (record.get('schema') != BUILT_SCHEMA or record.get('release') != release or
-            set(record.get('targets', {})) != set(up.FOUR_TARGETS)):
+            (not record.get('targets') or
+             not set(record['targets']) <= set(up.FOUR_TARGETS))):
         raise RuntimeError('Incomplete four-target unpacked Build receipt')
     return record
 
@@ -142,20 +143,27 @@ def _input_identity(assets: dict[str, Path | bytes], target: str) -> dict:
     return identity
 
 
-def build_four(builds: Path, *, release: str | None = None) -> dict:
+def build_four(builds: Path, *, release: str | None = None,
+               targets: tuple[str, ...] | None = None) -> dict:
     """Capture verified unpacked Build outputs; never ZIP or unzip."""
     up = _up()
     release = release or up.HOST_RELEASE
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', release):
         raise ValueError('Invalid release identifier')
     builds = _safe_builds(builds)
+    selected = targets or up.FOUR_TARGETS
+    if not selected or len(set(selected)) != len(selected) or not set(selected) <= set(up.FOUR_TARGETS):
+        raise ValueError('Invalid unpacked Build target selection')
     previous = {}
     try:
         previous = _load(builds, release)
     except (FileNotFoundError, ValueError, RuntimeError, KeyError):
         pass
-    targets: dict[str, dict] = {}
-    for target in up.FOUR_TARGETS:
+    # Rebuild only requested targets; a partial Build must not invalidate
+    # another target's valid prior receipt or fabricate that target's result.
+    target_records: dict[str, dict] = (dict(previous.get('targets', {}))
+                                      if set(selected) != set(up.FOUR_TARGETS) else {})
+    for target in selected:
         print(f'[TERMINAL BUILD] Gathering unpacked {target} inputs...', flush=True)
         assets = up._devtools_assets(builds) if target == 'devtools' else up._app_assets(builds, target, release)
         identity = _fingerprint(_input_identity(assets, target))
@@ -164,7 +172,7 @@ def build_four(builds: Path, *, release: str | None = None) -> dict:
             try:
                 for name, detail in old['files'].items():
                     _source(builds, name, detail, target)
-                targets[target] = old
+                target_records[target] = old
                 print(f'[TERMINAL BUILD] {target} unchanged; reusing unpacked Build inputs', flush=True)
                 continue
             except (OSError, RuntimeError, ValueError, KeyError):
@@ -191,18 +199,18 @@ def build_four(builds: Path, *, release: str | None = None) -> dict:
                              'mode': up._release_file_mode(name, value),
                              'stat': _stat(source)}
         fingerprint = _fingerprint({k: [v['sha256'], v['mode']] for k,v in entries.items()})
-        targets[target] = {'input_identity': identity, 'fingerprint': fingerprint,
+        target_records[target] = {'input_identity': identity, 'fingerprint': fingerprint,
                            'bytes': sum(item['bytes'] for item in entries.values()),
                            'file_count': len(entries), 'files': entries}
         print(f'[TERMINAL BUILD] {target}: {len(entries)} unpacked files; '
-              f'{targets[target]["bytes"] / 1048576:.1f} MiB, no ZIP', flush=True)
-    output = {'schema': BUILT_SCHEMA, 'release': release, 'targets': targets,
+              f'{target_records[target]["bytes"] / 1048576:.1f} MiB, no ZIP', flush=True)
+    output = {'schema': BUILT_SCHEMA, 'release': release, 'targets': target_records,
               'bedrock': 'excluded-until-app-eula-acceptance'}
     _atomic_json(_built_receipt(builds, release), output)
     return {'schema': BUILT_SCHEMA, 'release': release,
             'artifacts': {target: {'bytes': data['bytes'], 'files': data['file_count'],
                                    'fingerprint': data['fingerprint']}
-                          for target, data in targets.items()}}
+                          for target, data in target_records.items()}}
 
 
 def _installed_state(root: Path, files: dict) -> str | None:
@@ -372,20 +380,33 @@ def status_four(builds: Path, *, release: str | None = None, steamapps: Path | N
 
 
 def prepare_publish_packages(builds: Path, *, release: str | None = None,
-                             notarize: bool = True,
-                             reuse_remote_devtools: dict | None = None) -> dict:
+                             notarize: bool = False,
+                             reuse_remote_devtools: dict | None = None,
+                             targets: tuple[str, ...] | None = None,
+                             receipt_name: str = 'four-artifacts.json') -> dict:
     """Only Publish calls this. No Stage and no Setup dependency."""
     up = _up()
     release = release or up.HOST_RELEASE
     builds = _safe_builds(builds)
     record = _load(builds, release)
+    selected = targets or up.FOUR_TARGETS
+    if (not selected or len(set(selected)) != len(selected) or
+            not set(selected) <= set(record['targets']) or
+            (receipt_name != 'four-artifacts.json' and
+             not re.fullmatch(r'(mac|win|linux)-(artifacts|packages)\.json', receipt_name))):
+        raise ValueError('Publish target(s) missing from unpacked Build receipt')
+    # Public channels must never silently fall back to an ad-hoc DMG.
+    if notarize and 'mac' in selected and not os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip():
+        raise RuntimeError('Public Mac Publish requires a Developer ID Application signing identity '
+                           'with its paired private key; configure BUILDER Keychain before Publish')
     root = builds / 'CinterForgeTerminal/Distribution'
     try:
-        previous = json.loads((root / 'four-artifacts.json').read_text())
+        previous = json.loads((root / receipt_name).read_text())
     except (OSError, ValueError, TypeError):
         previous = {}
     artifacts = {}
-    for target, info in record['targets'].items():
+    for target in selected:
+        info = record['targets'][target]
         name = up.artifact_filename(target)
         old = previous.get('artifacts', {}).get(target, {})
         path = root / name
@@ -454,7 +475,7 @@ def prepare_publish_packages(builds: Path, *, release: str | None = None,
     receipt = {'schema': up.FOUR_SCHEMA, 'release': release, 'artifacts': artifacts,
                'bedrock': 'excluded-until-app-eula-acceptance',
                'native_acceptance': 'separate-target-tests-required'}
-    _atomic_json(root / 'four-artifacts.json', receipt)
+    _atomic_json(root / receipt_name, receipt)
     return receipt
 
 

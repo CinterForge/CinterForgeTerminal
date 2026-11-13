@@ -27,6 +27,14 @@ LINUX_DOCKERFILE = HERE / 'docker/linux-sample.Dockerfile'
 LINUX_NAME = 'cinterforge-terminal-linux-sample'
 
 
+def linux_recipe_sha256() -> str:
+    # Docker COPY inputs must invalidate images even when Dockerfile is fixed.
+    checksum = hashlib.sha256(LINUX_DOCKERFILE.read_bytes())
+    checksum.update(b'\0')
+    checksum.update((LINUX_DOCKERFILE.parent / 'gui_preflight.py').read_bytes())
+    return checksum.hexdigest()
+
+
 def _exec(command: list[str], *, cwd: Path, logfile: Path, env=None,
           timeout: int = 1800) -> str:
     """Stream evidence as it arrives, but never hang indefinitely on a WebView.
@@ -97,7 +105,7 @@ def _sha_file(path: Path) -> str:
 
 
 def _docker_image(builds: Path, docker: str, logfile: Path) -> str:
-    digest = hashlib.sha256(LINUX_DOCKERFILE.read_bytes()).hexdigest()[:16]
+    digest = linux_recipe_sha256()[:16]
     image = f'{LINUX_NAME}:{digest}'
     staged = builds / 'CinterForgeTerminal/Toolchains/LinuxSample'
     tar = staged / f'{digest}.tar'

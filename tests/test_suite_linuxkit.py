@@ -174,7 +174,9 @@ class ManagedMacSocketPaths(unittest.TestCase):
                  mock.patch.object(mac, 'SOCKET_PATH_LIMIT', 255), \
                  mock.patch.object(mac, '_stage_lima'), \
                  mock.patch.object(mac, '_probe', side_effect=probe), \
-                 mock.patch.object(mac, '_run', side_effect=run):
+                 mock.patch.object(mac, '_run', side_effect=run), \
+                 mock.patch.object(mac, '_start_colima_checked',
+                                   side_effect=lambda command, **kwargs: run(command)):
                 mac.ensure_docker(builds)
 
             self.assertEqual([cmd[1] for cmd in calls if cmd[1] in ('stop', 'start')],
@@ -212,7 +214,9 @@ class ManagedMacSocketPaths(unittest.TestCase):
                  mock.patch.object(mac, 'SOCKET_PATH_LIMIT', 255), \
                  mock.patch.object(mac, '_stage_lima'), \
                  mock.patch.object(mac, '_probe', side_effect=probe), \
-                 mock.patch.object(mac, '_run', side_effect=run):
+                 mock.patch.object(mac, '_run', side_effect=run), \
+                 mock.patch.object(mac, '_start_colima_checked',
+                                   side_effect=lambda command, **kwargs: run(command)):
                 mac.ensure_docker(builds)
                 # Once fixed, the next Setup must reuse the running VM.
                 mac.ensure_docker(builds)
@@ -694,3 +698,37 @@ class ProcessLifetimeTests(unittest.TestCase):
 
 
 
+
+class LinuxKitColimaBootReportingTests(unittest.TestCase):
+    """The c guest must never silently wait through a full VM boot timeout."""
+
+    def test_boot_streams_output_and_saves_builds_log(self):
+        from linuxos.managed_backend import _run_colima_start_live
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'Builds/Logs/CinterForgeTerminal/linuxkit-colima-c-start.log'
+            cmd = [sys.executable, '-u', '-c',
+                   "import time; print('COLIMA_BOOT_START'); time.sleep(0.35); print('COLIMA_BOOT_READY')"]
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = _run_colima_start_live(cmd, os.environ.copy(), log,
+                                                timeout=3, heartbeat=0.1)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn('COLIMA_BOOT_START', output.getvalue())
+            self.assertIn('COLIMA_BOOT_READY', output.getvalue())
+            self.assertIn('Waiting for Colima c boot', output.getvalue())
+            self.assertIn('COLIMA_BOOT_READY', log.read_text())
+            self.assertIn('COLIMA_BOOT_START', result.stdout)
+
+    def test_boot_timeout_stops_owned_start_process_and_preserves_log(self):
+        from linuxos.managed_backend import _run_colima_start_live
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'Builds/Logs/CinterForgeTerminal/linuxkit-colima-c-start.log'
+            cmd = [sys.executable, '-u', '-c',
+                   "import time; print('COLIMA_BOOT_BLOCKED'); time.sleep(30)"]
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    _run_colima_start_live(cmd, os.environ.copy(), log,
+                                           timeout=4, heartbeat=0.25)
+            self.assertIn('COLIMA_BOOT_BLOCKED', log.read_text())
+            self.assertIn('Waiting for Colima c boot', output.getvalue())

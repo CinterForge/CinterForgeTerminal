@@ -394,6 +394,13 @@ class ReconnectTests(unittest.TestCase):
             with mock.patch.object(first, '_run_command', return_value=([sys.executable, '-u', '-c', fixture], {})):
                 first.start()
             pid = first._process.pid
+            # Wait for the fixture server to reach its actual ready marker
+            # before exercising reconnect, rather than racing its Python boot.
+            log = first._log_path()
+            started_deadline = time.monotonic() + 8
+            while time.monotonic() < started_deadline and 'Server started.' not in log.read_text(errors='replace'):
+                time.sleep(.05)
+            self.assertIn('Server started.', log.read_text(errors='replace'))
             second = BedrockManager(builds, 'mac')
             # The fixture stands in for the actual run-mac-bds.sh VM process.
             def valid_pid(value):

@@ -55,24 +55,42 @@ def _project_release_settings() -> dict[str, str]:
     return settings
 
 
+def _macos_release_setting(settings: dict[str, str], name: str) -> str:
+    """Resolve the macOS SDK-specific Xcode setting before its generic value.
+
+    The existing Xcode target uses a generic, empty DEVELOPMENT_TEAM and
+    Apple Development identity, with the actual Release Developer ID/team in
+    [sdk=macosx*] settings. Reading only the generic keys loses that choice.
+    """
+    for suffix in ('[sdk=macosx*]', '[sdk=macosx]'):
+        key = name + suffix
+        if key in settings:
+            return str(settings[key]).strip()
+    return str(settings.get(name, '')).strip()
+
+
 def _developer_id_identity(team: str) -> str:
     result = subprocess.run(['/usr/bin/security', 'find-identity', '-v', '-p', 'codesigning'],
                             capture_output=True, text=True, check=False, timeout=20)
     if result.returncode:
         raise RuntimeError('Cannot inspect installed macOS signing certificates: ' +
                            (result.stderr or result.stdout).strip())
-    matches = []
+    # Resolve the Xcode-selected Developer ID to its certificate SHA-1. Apple's
+    # codesign accepts this fingerprint as --sign and avoids a second lookup
+    # by a display name that may be duplicated across user keychains.
+    # A duplicate listing of the *same* fingerprint is one identity.
+    matches: dict[str, str] = {}
     for line in result.stdout.splitlines():
-        parsed = re.search(r'\"(Developer ID Application: [^\"]+)\"', line)
-        if parsed and parsed.group(1).endswith(f'({team})'):
-            matches.append(parsed.group(1))
+        parsed = re.search(r'\b([0-9A-Fa-f]{40})\s+"(Developer ID Application: [^"]+)"', line)
+        if parsed and parsed.group(2).endswith(f'({team})'):
+            matches[parsed.group(1).upper()] = parsed.group(2)
     if not matches:
         raise RuntimeError('Xcode Release Team ' + team +
                            ' has no usable Developer ID Application certificate in Keychain')
     if len(matches) != 1:
-        raise RuntimeError('Multiple Developer ID Application certificates for Team ' + team +
-                           '; choose a unique signing identity before publishing')
-    return matches[0]
+        raise RuntimeError('Multiple distinct Developer ID Application certificates for Team ' + team +
+                           '; choose the exact certificate in Xcode before publishing')
+    return next(iter(matches))
 
 
 def release_signing_environment() -> dict[str, str]:
@@ -88,7 +106,7 @@ def release_signing_environment() -> dict[str, str]:
         return {}
     if str(settings.get('PRODUCT_BUNDLE_IDENTIFIER', '')).strip() != BUNDLE_ID:
         raise RuntimeError('Xcode Release bundle ID differs from packaged CinterForgeTerminal identity')
-    team = str(settings.get('DEVELOPMENT_TEAM', '')).strip()
+    team = _macos_release_setting(settings, 'DEVELOPMENT_TEAM')
     profile = str(settings.get('CINTER_MAC_NOTARY_PROFILE', '')).strip()
     if not team:
         if profile:
@@ -96,7 +114,7 @@ def release_signing_environment() -> dict[str, str]:
         return {}
     if not re.fullmatch(r'[A-Z0-9]{10}', team):
         raise RuntimeError('Xcode Release DEVELOPMENT_TEAM must be a 10-character Apple Team ID')
-    kind = str(settings.get('CODE_SIGN_IDENTITY', '')).strip()
+    kind = _macos_release_setting(settings, 'CODE_SIGN_IDENTITY')
     if not kind.startswith('Developer ID Application'):
         raise RuntimeError('Xcode Release must select Developer ID Application for direct distribution')
     identity = _developer_id_identity(team)
@@ -104,6 +122,155 @@ def release_signing_environment() -> dict[str, str]:
     return {'CINTER_MAC_SIGN_IDENTITY': identity,
             'CINTER_MAC_NOTARY_PROFILE': profile}
 
+
+
+# This is a *reference* to credentials in the user's macOS Keychain, never
+# a credential itself. Xcode's explicit Release setting takes precedence.
+DEFAULT_NOTARY_PROFILE = 'CinterForgeTerminal'
+NOTARY_PROFILE_RECEIPT = 'CinterForgeTerminal/Configuration/notary-profile.json'
+
+
+def login_keychain_environment() -> dict[str, str]:
+    """Run Apple's signing/notary tools as the login user, not Colima HOME."""
+    result = dict(os.environ)
+    if sys.platform == 'darwin':
+        import pwd
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        if not home.is_dir():
+            raise RuntimeError('macOS login home is unavailable for notarytool Keychain access')
+        result['HOME'] = str(home)
+    return result
+
+
+def _notary_history(profile: str) -> tuple[bool, str]:
+    """Validate an actual saved notarytool profile with Apple's service."""
+    try:
+        result = subprocess.run(
+            ['xcrun', 'notarytool', 'history', '--keychain-profile', profile,
+             '--output-format', 'json'],
+            capture_output=True, text=True, timeout=90, check=False,
+            env=login_keychain_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f'Cannot verify Apple notarization credentials: {error}') from error
+    if result.returncode == 0:
+        return True, ''
+    return False, (result.stderr or result.stdout or 'notarytool exited nonzero').strip()[-1200:]
+
+
+def _profile_receipt(builds: Path) -> Path:
+    return builds.resolve() / NOTARY_PROFILE_RECEIPT
+
+
+def _remember_notary_profile(builds: Path, profile: str) -> None:
+    """Persist only a profile *name*, under Builds; never a password or key."""
+    receipt = _profile_receipt(builds)
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    temporary = receipt.with_suffix('.json.tmp')
+    try:
+        temporary.write_text(json.dumps({'profile': profile}, indent=2) + '\n', encoding='utf-8')
+        temporary.replace(receipt)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _remembered_notary_profile(builds: Path) -> str:
+    try:
+        content = json.loads(_profile_receipt(builds).read_text(encoding='utf-8'))
+        value = content.get('profile', '')
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return ''
+
+
+def _missing_notary_item(error: str) -> bool:
+    lowered = error.lower()
+    return any(phrase in lowered for phrase in (
+        'no keychain password item found', 'keychain item not found',
+        'profile not found', 'not found in keychain',
+    ))
+
+
+def ensure_public_notary_profile(builds: Path) -> str:
+    """Resolve Xcode's notary identity or enroll it once inside Cinter Publish.
+
+    The Developer ID certificate used for codesign is NOT a notarization
+    credential. Beta/Release must be able to authenticate to Apple's notary
+    service before expensive MSI packaging or any public CDN upload.
+    Existing profiles are reused. On an interactive Mac Bash session, a
+    missing profile may be enrolled via Apple's own password-masked prompt.
+    No credentials, passwords or private keys are written to Builds/logs.
+    """
+    if sys.platform != 'darwin':
+        raise RuntimeError('Apple notarization profile setup requires macOS')
+    settings = _project_release_settings()
+    team = _macos_release_setting(settings, 'DEVELOPMENT_TEAM')
+    if not re.fullmatch(r'[A-Z0-9]{10}', team):
+        raise RuntimeError('Xcode Release needs a valid macOS DEVELOPMENT_TEAM for notarization')
+    from_xcode = str(settings.get('CINTER_MAC_NOTARY_PROFILE', '')).strip()
+    from_env = os.environ.get('CINTER_MAC_NOTARY_PROFILE', '').strip()
+    chosen = from_env or from_xcode or _remembered_notary_profile(builds) or DEFAULT_NOTARY_PROFILE
+    if any(char.isspace() for char in chosen) and ('\n' in chosen or '\r' in chosen):
+        raise RuntimeError('Invalid multiline notarytool profile name')
+
+    ok, issue = _notary_history(chosen)
+    if ok:
+        os.environ['CINTER_MAC_NOTARY_PROFILE'] = chosen
+        _remember_notary_profile(builds, chosen)
+        print(f'[MAC NOTARY] Existing Apple notarytool profile verified: {chosen}', flush=True)
+        return chosen
+    if not _missing_notary_item(issue):
+        # Network/authentication failures are NOT missing credentials. Never
+        # overwrite a profile just because Apple's service is unavailable.
+        raise RuntimeError(f'Apple notarytool profile {chosen!r} could not be verified: {issue}')
+    if not sys.stdin.isatty():
+        raise RuntimeError(f'Apple notarytool profile {chosen!r} is missing from the login Keychain. '
+                           'Run public Publish interactively in CinterForge Mac Bash to '
+                           'enroll notarization credentials once; no build or upload occurred.')
+
+    print('[MAC NOTARY] The Developer ID signing certificate is ready, but Apple '
+          'notarization requires a separate Keychain credential.', flush=True)
+    if not from_xcode and not from_env:
+        existing = input('[MAC NOTARY] Existing notarytool profile name '
+                         f'(Enter to create {DEFAULT_NOTARY_PROFILE}): ').strip()
+        if existing:
+            if '\n' in existing or '\r' in existing:
+                raise RuntimeError('Invalid multiline notarytool profile name')
+            ok, issue = _notary_history(existing)
+            if ok:
+                os.environ['CINTER_MAC_NOTARY_PROFILE'] = existing
+                _remember_notary_profile(builds, existing)
+                print(f'[MAC NOTARY] Existing Apple notarytool profile verified: {existing}', flush=True)
+                return existing
+            if not _missing_notary_item(issue):
+                raise RuntimeError(f'Apple notarytool profile {existing!r} cannot authenticate: {issue}')
+            chosen = existing
+
+    apple_id = input(f'[MAC NOTARY] Apple Account email for Team {team}: ').strip()
+    if not apple_id or '\n' in apple_id or '\r' in apple_id:
+        raise RuntimeError('Apple Account email required to set up Keychain notarization')
+    print('[MAC NOTARY] Apple notarytool will prompt securely for an app-specific '
+          'password. CinterForge does not read or log that password.', flush=True)
+    # Do NOT pass --password: notarytool obtains it directly from stdin/TTY,
+    # avoiding argv, process listings, logs and Cinter's source tree.
+    result = subprocess.run(
+        ['xcrun', 'notarytool', 'store-credentials', chosen,
+         '--apple-id', apple_id, '--team-id', team],
+        env=login_keychain_environment(), check=False,
+    )
+    if result.returncode:
+        raise RuntimeError('Apple notarytool did not save/validate a Keychain profile; '
+                           'Publish remains blocked (no CDN upload).')
+    ok, issue = _notary_history(chosen)
+    if not ok:
+        raise RuntimeError(f'Apple notarytool profile {chosen!r} could not be verified '
+                           f'after enrollment: {issue}')
+    os.environ['CINTER_MAC_NOTARY_PROFILE'] = chosen
+    _remember_notary_profile(builds, chosen)
+    print(f'[MAC NOTARY] Saved and validated Keychain profile: {chosen}', flush=True)
+    return chosen
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)

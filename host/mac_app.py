@@ -184,7 +184,7 @@ def _stage_complete_resources(builds: Path, app: Path) -> None:
     # the embedded Host manifest consistent with the exact bytes shipped.
     authored = Path(__file__).resolve().parents[1] / 'webapp'
     required = ('CinterForgeTerminal.py', 'if_titles.json', 'mac_games.json',
-                'index.html', 'terminal.js', 'terminal.css', 'terminal_styles.json')
+                'index.html', 'terminal.js', 'terminal.css', 'terminal_styles.json', 'startup.html', 'startup.js')
     for name in required:
         if not (authored / name).is_file():
             raise RuntimeError('Missing authored Terminal shell asset in repository: ' + name)
@@ -228,6 +228,21 @@ def _stage_complete_resources(builds: Path, app: Path) -> None:
             rel=source.relative_to(authored)
             digest=hashlib.sha256(source.read_bytes()).hexdigest()
             receipt['files']['webapp/' + rel.as_posix()]=digest
+    # Keep all launcher HTML/icons/three independent wallpapers synchronized
+    # with authored repository source before sealing the Mac application.
+    launcher_source = authored / 'launcher'
+    if not all((launcher_source / ('assets/backgrounds/' + name + '.png')).is_file()
+               for name in ('mac', 'windows', 'linux')):
+        raise RuntimeError('Missing separate Mac/Windows/Linux Launcher backgrounds')
+    launcher_dest = embedded / 'launcher'
+    if launcher_dest.is_dir():
+        shutil.rmtree(launcher_dest)
+    shutil.copytree(launcher_source, launcher_dest,
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store'))
+    for source in sorted(launcher_source.rglob('*')):
+        if source.is_file() and not source.is_symlink():
+            rel = source.relative_to(authored)
+            receipt['files']['webapp/' + rel.as_posix()] = hashlib.sha256(source.read_bytes()).hexdigest()
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n', encoding='utf-8')
     # The guest probe and loader are required by Bedrock when users install
     # it later. Neither LinuxKit Setup nor the app includes a BDS executable.
@@ -240,6 +255,34 @@ def _stage_complete_resources(builds: Path, app: Path) -> None:
 
 
 def _sign_and_verify(app: Path) -> None:
+    """Sign in the real login user's Keychain context, never Colima's HOME.
+
+    The build orchestrator uses managed_environment() to keep Colima/Lima
+    state under sibling Builds. That environment changes HOME to a temporary
+    managed directory. Xcode's Developer ID lookup runs before this change,
+    but codesign runs afterwards and then cannot find the same identity.
+    Restore only HOME for the duration of signing and always put it back.
+    """
+    if os.uname().sysname != 'Darwin':
+        raise RuntimeError('macOS application signing requires the macOS host')
+    import pwd
+    login_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    if not login_home.is_dir():
+        raise RuntimeError('Cannot locate the current macOS login home for Keychain signing')
+    managed_home = os.environ.get('HOME')
+    try:
+        os.environ['HOME'] = str(login_home)
+        if managed_home != str(login_home) and os.environ.get('CINTER_MAC_SIGN_IDENTITY'):
+            print('[MAC SIGN] Using login Keychain context; Colima HOME kept separate', flush=True)
+        _sign_and_verify_with_login_keychain(app)
+    finally:
+        if managed_home is None:
+            os.environ.pop('HOME', None)
+        else:
+            os.environ['HOME'] = managed_home
+
+
+def _sign_and_verify_with_login_keychain(app: Path) -> None:
     """Seal the *finished* app, after the executable, icon and plist are written.
 
     Copying a Mach-O or changing Info.plist after signing invalidates the seal.
@@ -259,8 +302,12 @@ def _sign_and_verify(app: Path) -> None:
     if not vm.is_file():
         raise RuntimeError(f'Packaged VM launcher missing: {vm}')
     identity = os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip()
-    if identity and not identity.startswith('Developer ID Application: '):
-        raise RuntimeError('CINTER_MAC_SIGN_IDENTITY must be an installed Developer ID Application identity')
+    # The Xcode Release resolver passes the exact Developer ID certificate
+    # SHA-1, not its display name. Preserve the preexisting named-identity
+    # override while allowing this fingerprint through to codesign unchanged.
+    if identity and not (identity.startswith('Developer ID Application: ') or
+                         re.fullmatch(r'[0-9A-Fa-f]{40}', identity)):
+        raise RuntimeError('CINTER_MAC_SIGN_IDENTITY must be a Developer ID Application name or SHA-1')
     if identity:
         sign_launcher(vm, identity=identity)
     else:

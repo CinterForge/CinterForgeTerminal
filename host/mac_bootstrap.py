@@ -13,6 +13,7 @@ import json
 import hashlib
 import os
 import plistlib
+import shlex
 from pathlib import Path
 import platform
 import shutil
@@ -366,6 +367,160 @@ def _stop_colima_profile(colima: Path, profile: str, env: dict[str, str],
     _run(command + ['--force'], env=env, timeout=45)
 
 
+# SSH readiness is only Lima step 1/5. Do not let Colima wait 30 minutes if
+# provisioning never writes /run/lima-boot-done (observed in clean Setup).
+COLIMA_START_TOTAL_SECONDS = 900
+COLIMA_BOOT_AFTER_SSH_SECONDS = 300
+
+
+def _guest_ssh(state: Path, script: str, *, timeout: int = 20) -> str:
+    """Read the booting VM through Lima's generated SSH config (steps 1-4).
+
+    limactl shell can reject an instance that has not finished step 5. Keep
+    host-key checking and authentication from the managed Lima SSH config.
+    """
+    config = state / 'lima' / ('colima-' + COLIMA_PROFILE) / 'ssh.config'
+    if not config.is_file():
+        return 'SSH config not available yet\n'
+    command = ['/usr/bin/ssh', '-F', str(config), '-T',
+               '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+               'lima-colima-' + COLIMA_PROFILE,
+               'sudo -n /bin/sh -c ' + shlex.quote(script)]
+    try:
+        result = _probe(command, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 'Guest SSH command timed out\n'
+    return f'rc={result.returncode}\n{result.stdout}'
+
+
+def _colima_boot_diagnostics(builds: Path, reason: str) -> tuple[Path, str]:
+    """Capture guest cloud-init and Lima boot failures before stopping our VM."""
+    state = managed_state_root(builds)
+    folder = builds.resolve() / 'Logs/CinterForgeTerminal'
+    folder.mkdir(parents=True, exist_ok=True)
+    logfile = folder / 'mac-colima-w-boot.log'
+    pieces = [f'profile={COLIMA_PROFILE}; reason={reason}\n']
+    guest_cmd = '''set +e
+printf '\\n=== Lima markers ===\\n'
+for f in /run/lima-boot-done /run/lima-ssh-ready /run/lima-reboot-required; do
+  printf '%s: ' "$f"; if test -f "$f"; then cat "$f"; else echo ABSENT; fi
+done
+printf '\\n=== cloud-init ===\\n'; cloud-init status --long 2>&1
+printf '\\n=== failed services ===\\n'; systemctl --failed --no-pager 2>&1
+printf '\\n=== cloud-final ===\\n'; systemctl status cloud-final.service --no-pager -l 2>&1
+printf '\\n=== cloud-final journal ===\\n'; journalctl -b -u cloud-final.service --no-pager -n 60 2>&1
+printf '\\n=== guest logs ===\\n'
+for f in /var/log/lima-init.log /var/log/cloud-init-output.log; do
+  if test -r "$f"; then echo "--- $f"; tail -n 90 "$f"; fi
+done
+printf '\\n=== boot processes ===\\n'
+ps -eo pid,ppid,stat,etime,args | grep -E 'cloud-init|lima.*boot|dockerd|containerd|apt-get|dpkg' | head -n 40
+'''
+    guest = _guest_ssh(state, guest_cmd, timeout=24)
+    pieces.append('===== Guest boot diagnostics =====\n' + guest)
+    for name in ('ha.stderr.log', 'serial.log', 'serialv.log'):
+        path = state / 'lima' / ('colima-' + COLIMA_PROFILE) / name
+        if path.is_file():
+            pieces.append(f'===== {name}: last 60 lines =====\n'
+                          + '\n'.join(path.read_text(encoding='utf-8', errors='replace')
+                                      .splitlines()[-60:]))
+    logfile.write_text('\n'.join(pieces) + '\n', encoding='utf-8')
+    return logfile, guest
+
+
+def _retry_failed_cloud_final(state: Path, diagnostics: str) -> bool:
+    """Retry a failed (never active) guest provisioning service just once."""
+    if ('cloud-final.service' not in diagnostics or 'Active: failed' not in diagnostics
+            or '/run/lima-reboot-required: ABSENT' not in diagnostics):
+        return False
+    print('[MAC BOOTSTRAP] cloud-final failed; retrying once inside managed VM', flush=True)
+    result = _guest_ssh(state,
+        'systemctl reset-failed cloud-final.service; '
+        'systemctl restart cloud-final.service', timeout=60)
+    print('[MAC BOOTSTRAP] cloud-final retry result: ' + result[-800:], flush=True)
+    return True
+
+
+def _start_docker_after_lima_boot(state: Path) -> bool:
+    """Recover Colima's known persistent-disk case where Docker stays stopped.
+
+    Never start the daemon before Lima has completed the *current* boot, or
+    during a required reboot. This is only a Setup-owned Linux VM service.
+    """
+    result = _guest_ssh(state, """if test -s /run/lima-boot-done && test -s /run/lima-ssh-ready \
+    && cmp -s /run/lima-boot-done /run/lima-ssh-ready \
+    && ! test -e /run/lima-reboot-required \
+    && ! systemctl is-active --quiet docker.service; then
+  systemctl start docker.service && echo CINTER_DOCKER_STARTED
+fi
+""", timeout=30)
+    if 'CINTER_DOCKER_STARTED' in result:
+        print('[MAC BOOTSTRAP] Lima boot complete; restarted stopped Docker service',
+              flush=True)
+        return True
+    return False
+
+
+def _start_colima_checked(command: list[str], *, builds: Path,
+                          env: dict[str, str],
+                          total_timeout: float = COLIMA_START_TOTAL_SECONDS,
+                          boot_timeout: float = COLIMA_BOOT_AFTER_SSH_SECONDS,
+                          poll_interval: float = 10) -> None:
+    """Run Colima with a bound on Lima's boot scripts, not only the VM process."""
+    print('[MAC BOOTSTRAP] $ ' + ' '.join(map(str, command)), flush=True)
+    process = subprocess.Popen([str(c) for c in command], env=env)
+    started = time.monotonic()
+    ssh_at = None
+    last_report = None
+    retried_cloud_final = False
+    state = managed_state_root(builds)
+    try:
+        while True:
+            try:
+                result = process.wait(timeout=poll_interval)
+            except subprocess.TimeoutExpired:
+                result = None
+            if result is not None:
+                if result:
+                    report, _ = _colima_boot_diagnostics(builds, f'start exit={result}')
+                    raise RuntimeError(f'Managed Colima startup failed (exit {result}); '
+                                       f'guest diagnostic log: {report}')
+                return
+            now = time.monotonic()
+            if ssh_at is None:
+                probe = _guest_ssh(state, 'echo CINTER_SSH_READY', timeout=7)
+                if 'CINTER_SSH_READY' in probe:
+                    ssh_at = now
+                    print('[MAC BOOTSTRAP] Lima SSH ready; awaiting boot scripts (5/5)', flush=True)
+            age = now - started
+            boot_age = now - ssh_at if ssh_at is not None else 0
+            if (ssh_at is not None and boot_age >= 60
+                    and (last_report is None or now - last_report >= 60)):
+                report, guest = _colima_boot_diagnostics(
+                    builds, f'boot step 5 incomplete after {int(boot_age)}s')
+                last_report = now
+                print('[MAC BOOTSTRAP] Lima boot incomplete; diagnostics: '
+                      + str(report), flush=True)
+                if not retried_cloud_final and _retry_failed_cloud_final(state, guest):
+                    retried_cloud_final = True
+                # Colima's persistent data-disk provisioning may leave Docker
+                # stopped even after an otherwise complete Lima boot.
+                _start_docker_after_lima_boot(state)
+            if age >= total_timeout or (ssh_at is not None and boot_age >= boot_timeout):
+                report, _ = _colima_boot_diagnostics(
+                    builds, f'boot timeout total={int(age)}s post-SSH={int(boot_age)}s')
+                raise RuntimeError('Managed Colima guest did not complete Lima boot scripts '
+                                   '(5/5). Setup stopped the owned VM. '
+                                   f'Cloud-init/Lima diagnostics: {report}')
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=8)
+
 def ensure_docker(builds: Path) -> str:
     """Provision Colima + Lima VM and Docker daemon without Docker Desktop.
 
@@ -421,7 +576,15 @@ def ensure_docker(builds: Path) -> str:
                    '--mount', str(source), '--mount', str(builds.resolve()) + ':w',
                    '--save-config']
         print('[MAC BOOTSTRAP] Starting managed Windows-cross container VM', flush=True)
-        _run(command, env=env, timeout=1800)
+        try:
+            _start_colima_checked(command, builds=builds, env=env)
+        except BaseException:
+            # Failed or interrupted Setup must stop its owned VM after logging.
+            try:
+                _stop_colima_profile(colima, COLIMA_PROFILE, env, unhealthy=True)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                print('[MAC BOOTSTRAP] Incomplete VM cleanup failed: ' + str(error), flush=True)
+            raise
         health = _probe([str(docker), 'info', '--format', '{{.ServerVersion}}'],
                         env=env, timeout=45)
     if health.returncode:

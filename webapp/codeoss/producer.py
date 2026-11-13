@@ -31,7 +31,7 @@ CODEOSS_REPOSITORY = "https://github.com/microsoft/vscode.git"
 # commit rather than tracking main so every maintainer produces the same tree.
 CODEOSS_REF = "645f29cc3176500b4b5762ba887cf2a7f0ffdf2c"
 CODEOSS_VERSION = "1.137.0"
-CODEOSS_SCHEMA = "cinterforge.codeoss-web.v42"
+CODEOSS_SCHEMA = "cinterforge.codeoss-web.v43"
 CODEOSS_BUILD_CACHE_SCHEMA = "cinterforge.codeoss-build-cache.v10"
 CODEOSS_TEST_WEB_VERSION = "0.0.81"
 
@@ -363,29 +363,59 @@ def _patch_codeoss_terminal_menus(source: Path) -> None:
     """
     target = source / 'src/vs/workbench/contrib/terminal/browser/terminalMenus.ts'
     text = target.read_text(encoding='utf-8')
-    marker = 'CINTERFORGE_REAL_CODEOSS_TERMINAL_COMMANDS_V1'
+    marker = 'CINTERFORGE_REAL_CODEOSS_TERMINAL_COMMANDS_V3'
     if marker in text:
         return
+    old_installed = 'CINTERFORGE_REAL_CODEOSS_TERMINAL_COMMANDS_V1' in text
+    # Upgrade a provisioned V2 CodeOSS tree in place. Strip only the exact
+    # CinterForge-generated V2 lines and preserve all unrelated pinned menus.
+    previous = 'CINTERFORGE_REAL_CODEOSS_TERMINAL_COMMANDS_V2'
+    if previous in text:
+        lines = text.splitlines(keepends=True)
+        rebuilt = []
+        skipping = False
+        removed = 0
+        for line in lines:
+            if previous in line:
+                skipping = True
+                continue
+            if skipping and line.startswith('\t\t\t{ id: MenuId.MenubarTerminalMenu, item: { group: TerminalMenuBarGroup.Create, order: ') and "id: 'cinterforge." in line:
+                removed += 1
+                continue
+            skipping = False
+            rebuilt.append(line)
+        if removed not in (3, 7):
+            raise RuntimeError('Existing CinterForge CodeOSS Terminal menu V2 is incomplete; cannot upgrade safely')
+        text = ''.join(rebuilt)
     anchor = "export function setupTerminalMenus(): void {\n\tMenuRegistry.appendMenuItems(\n\t\t["
     if text.count(anchor) != 1 or 'MenuId.MenubarTerminalMenu' not in text or 'TerminalMenuBarGroup.Create' not in text:
         raise RuntimeError('Pinned Code-OSS Terminal menu registry changed; refusing fake fallback commands')
     entries = [
-        ('cinterforge.newMacTerminal', 'New Mac Terminal', 'cinterforge.hostMac'),
-        ('cinterforge.newLinuxTerminal', 'New Linux Terminal', 'cinterforge.hostLinux'),
-        ('cinterforge.newWindowsTerminal', 'New Windows Terminal', 'cinterforge.hostWindows'),
-        ('cinterforge.newServerLogTerminal', 'New Server Log Terminal', 'cinterforge.hostTerminal'),
+        ('cinterforge.newMacTerminal', 'New Mac Bash', "ContextKeyExpr.has('cinterforge.hostMac')"),
+        ('cinterforge.newLinuxTerminal', 'Open Linux Bash in Code-OSS',
+         "ContextKeyExpr.or(ContextKeyExpr.has('cinterforge.hostLinux'), ContextKeyExpr.and(ContextKeyExpr.has('cinterforge.hostMac'), ContextKeyExpr.has('cinterforge.devtoolsInstalled')))"),
+        ('cinterforge.newWindowsTerminal', 'Open Windows Bash in Code-OSS',
+         "ContextKeyExpr.or(ContextKeyExpr.has('cinterforge.hostWindows'), ContextKeyExpr.and(ContextKeyExpr.has('cinterforge.hostMac'), ContextKeyExpr.has('cinterforge.devtoolsInstalled')))"),
+        ('cinterforge.newServerLogTerminal', 'New Server Log Terminal', "ContextKeyExpr.has('cinterforge.hostTerminal')"),
+        ('cinterforge.openMacLauncher', 'Mac Launcher', "ContextKeyExpr.has('cinterforge.hostMac')"),
+        ('cinterforge.openWindowsLauncher', 'Windows Launcher',
+         "ContextKeyExpr.and(ContextKeyExpr.has('cinterforge.hostMac'), ContextKeyExpr.has('cinterforge.devtoolsInstalled'))"),
+        ('cinterforge.openLinuxLauncher', 'Linux Launcher',
+         "ContextKeyExpr.and(ContextKeyExpr.has('cinterforge.hostMac'), ContextKeyExpr.has('cinterforge.devtoolsInstalled'))"),
     ]
+    if old_installed:
+        # Update an already-provisioned canonical CodeOSS source in place.
+        # Repeating the old four menu actions would create duplicate entries.
+        entries = entries[4:]
     source_items = []
-    for index, (command, label, condition) in enumerate(entries, start=10):
-        when = (f"ContextKeyExpr.or(ContextKeyExpr.has('cinterforge.hostMac'), "
-                f"ContextKeyExpr.has('{condition}'))" if condition in
-                ('cinterforge.hostLinux', 'cinterforge.hostWindows') else
-                f"ContextKeyExpr.has('{condition}')")
+    for index, (command, label, precondition) in enumerate(entries, start=14 if old_installed else 10):
+        # A MenuRegistry `when` clause hides unavailable items. Command
+        # preconditions preserve the menu position and render them disabled.
         source_items.append(
             "\n\t\t\t{ id: MenuId.MenubarTerminalMenu, item: { "
             f"group: TerminalMenuBarGroup.Create, order: {index}, "
-            f"command: {{ id: '{command}', title: localize('{command}', '{label}') }}, "
-            f"when: {when} }} }},")
+            f"command: {{ id: '{command}', title: localize('{command}', '{label}'), "
+            f"precondition: {precondition} }} }} }},")
     insertion = "\n\t\t\t// " + marker + "\n" + ''.join(source_items)
     text = text.replace(anchor, anchor + insertion, 1)
     target.write_text(text, encoding='utf-8')
@@ -701,6 +731,39 @@ def _audit_ascii_javascript_tree(root: Path, *, label: str) -> None:
     _log(f"{label} JavaScript ASCII audit passed")
 
 
+def _skip_upstream_copilot_install(source: Path) -> None:
+    """Exclude upstream's non-shipped Copilot SDK from maintainer npm ci.
+
+    The pinned Code-OSS root postinstall installs every entry from
+    build/npm/dirs.ts.  Its Copilot extension has a separate postinstall that
+    requires an optional host-specific GitHub SDK, even though upstream's
+    packageAllLocalExtensionsStream explicitly excludes the Copilot extension.
+    CinterForge's browser package provides its own extension instead.
+
+    Patch only the one pinned npm directory entry, never the user's checkout,
+    package manifests, lockfiles, or installed consumer application.
+    """
+    target = source / "build" / "npm" / "dirs.ts"
+    if not target.is_file():
+        raise RuntimeError(f"Pinned Code-OSS npm directory list is missing: {target}")
+    content = target.read_text(encoding="utf-8")
+    anchor = "\t'extensions/copilot',\n"
+    marker = "// CINTERFORGE_SKIP_OPTIONAL_COPILOT_NPM_V1"
+    if marker in content:
+        if anchor in content:
+            raise RuntimeError("Code-OSS Copilot npm patch is inconsistent")
+        return
+    if content.count(anchor) != 1:
+        raise RuntimeError("Pinned Code-OSS npm directory list changed; cannot exclude optional Copilot safely")
+    content = content.replace(
+        anchor,
+        "\t" + marker + " (not shipped in browser runtime)\n",
+        1,
+    )
+    target.write_text(content, encoding="utf-8")
+    _log("excluded non-shipped upstream Copilot SDK from nested npm ci; other pinned extensions unchanged")
+
+
 def _codeoss_npm_environment(inherited: dict[str, str]) -> dict[str, str]:
     """Use the build host's npm platform and retain platform optional packages.
 
@@ -729,53 +792,10 @@ def _codeoss_npm_environment(inherited: dict[str, str]) -> dict[str, str]:
     return environment
 
 
-def _verify_locked_copilot_sdk_platform(source: Path) -> None:
-    """Fail before npm ci if upstream's platform SDK is missing from the lock.
-
-    This checks the pinned dependency *declaration*, not the downloaded SDK.
-    npm ci verifies package integrity against the lock and Copilot's upstream
-    postinstall checks for the actual sdk/index.js after installation.
-    """
-    os_name = platform.system().lower()
-    machine_name = platform.machine().lower()
-    architecture = {"arm64": "arm64", "aarch64": "arm64", "amd64": "x64", "x86_64": "x64"}.get(machine_name)
-    if not architecture:
-        raise RuntimeError(f"Unsupported host CPU for Code-OSS Copilot SDK: {machine_name}")
-    if os_name == "darwin":
-        platform_suffix = f"darwin-{architecture}"
-    elif os_name == "windows":
-        platform_suffix = f"win32-{architecture}"
-    elif os_name == "linux":
-        libc_kind = "linux" if platform.libc_ver()[0].lower() == "glibc" else "linuxmusl"
-        platform_suffix = f"{libc_kind}-{architecture}"
-    else:
-        raise RuntimeError(f"Unsupported host OS for Code-OSS Copilot SDK: {os_name}")
-
-    lock_path = source / "extensions" / "copilot" / "package-lock.json"
-    if not lock_path.is_file():
-        raise RuntimeError(f"Pinned Code-OSS Copilot lockfile is missing: {lock_path}")
-    try:
-        locked_packages = json.loads(lock_path.read_text(encoding="utf-8"))["packages"]
-        copilot_version = locked_packages["node_modules/@github/copilot"]["version"]
-        package_name = f"node_modules/@github/copilot-{platform_suffix}"
-        platform_entry = locked_packages[package_name]
-    except (KeyError, TypeError, ValueError) as error:
-        raise RuntimeError(f"Code-OSS Copilot platform SDK is absent from lockfile: {lock_path} ({platform_suffix})") from error
-    if (platform_entry.get("version") != copilot_version
-            or platform_entry.get("optional") is not True
-            or not str(platform_entry.get("integrity", "")).startswith("sha512-")):
-        raise RuntimeError(
-            f"Code-OSS Copilot platform SDK lock mismatch: {package_name}; "
-            f"expected optional version {copilot_version} with sha512 integrity"
-        )
-    _log(f"Copilot SDK optional package locked for build host: @github/copilot-{platform_suffix}@{copilot_version}")
-
-
 def _build_web(source: Path) -> None:
     if not (source / "package.json").is_file() or not (source / "package-lock.json").is_file():
         raise RuntimeError(f"Code - OSS checkout is incomplete: {source}")
     root = source.parent
-    _verify_locked_copilot_sdk_platform(source)
     node, npm_cli, version = _ensure_pinned_node(source, root)
     env = _codeoss_npm_environment(dict(os.environ))
     path_parts = [str(node.parent)]
@@ -812,7 +832,7 @@ def _build_web(source: Path) -> None:
         )
     if install_trees:
         _log(f"removed {len(install_trees)} stale node_modules tree(s) before npm ci")
-    _log("npm ci: preserving locked host-platform optional dependencies (including Copilot SDK)")
+    _log("npm ci: preserving host-platform optional dependencies; non-shipped Copilot SDK excluded")
     _run_checked([*npm, "ci", "--include=optional"], cwd=source, timeout=3600, env=env)
     # The build-next server-web bundle resolves codicon.css from the source tree,
     # but a clean checkout does not carry the generated font beside that CSS.
@@ -859,7 +879,7 @@ def _build_web(source: Path) -> None:
 
 
 
-CODEOSS_NONPRODUCTION_EXTENSIONS = frozenset({"vscode-test-resolver"})
+CODEOSS_NONPRODUCTION_EXTENSIONS = frozenset({"vscode-test-resolver", "copilot"})
 CODEOSS_REQUIRED_BROWSER_EXTENSIONS = ("github-authentication", "emmet", "merge-conflict")
 
 
@@ -1833,6 +1853,7 @@ def ensure_codeoss(repo_root: Path | None = None, *, refresh: bool = False, forc
     root.mkdir(parents=True, exist_ok=True)
     _log(f"maintainer build ref={ref} source={source} web={web}")
     commit = _sync_checkout(source, refresh=True, ref=ref)
+    _skip_upstream_copilot_install(source)
     _patch_cinterforge_bootstrap_provider(source)
     _patch_codeoss_menubar_bridge(source)
     _patch_codeoss_terminal_menus(source)

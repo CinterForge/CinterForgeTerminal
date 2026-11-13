@@ -339,8 +339,9 @@ class OptionalGuestBashTests(unittest.TestCase):
         boot.assert_called_once_with('linux')
         image.assert_not_called()  # Image lifecycle belongs to app bootstrap
         installer.assert_not_called()
-        self.assertEqual(args[:6], ['/sdk/mac/env/bin/docker', 'exec', '-it',
-                                    '--workdir', '/host/mac/Source', 'cinterforge-terminal-t-linux'])
+        self.assertEqual(args[:5], ['/sdk/mac/env/bin/docker', 'exec', '-it', '-e', 'DISPLAY=:99'])
+        self.assertIn(r'PS1=\u@\h \w \$ ', args)
+        self.assertEqual(args[-6:-3], ['--workdir', '/host/mac/Source', 'cinterforge-terminal-t-linux'])
         self.assertEqual(args[-3:], ['/bin/bash','--noprofile','-i'])
         self.assertNotIn('run',args)
 
@@ -355,9 +356,11 @@ class OptionalGuestBashTests(unittest.TestCase):
             self.assertEqual(self.adapter.guest_shell_main('win'),0)
             args=popen.call_args.args[0]
         boot.assert_called_once_with('win')
-        self.assertEqual(args[:6], ['/sdk/mac/env/bin/docker', 'exec', '-it',
-                                    '--workdir', '/host/mac/Source', 'cinterforge-terminal-t-win'])
-        self.assertEqual(args[-4:], ['wine', r'Z:\msys2\usr\bin\bash.exe', '--noprofile', '-i'])
+        self.assertEqual(args[:5], ['/sdk/mac/env/bin/docker', 'exec', '-it', '-e', 'DISPLAY=:99'])
+        self.assertIn(r'PS1=\u@\h \w \$ ', args)
+        self.assertIn('WINEPREFIX=/tmp/.wine', args)
+        self.assertEqual(args[-7:-4], ['--workdir', '/host/mac/Source', 'cinterforge-terminal-t-win'])
+        self.assertEqual(args[-4:], ['wine', r'Z:\msys2\usr\bin\bash.exe', '--login', '-i'])
         self.assertNotIn('/bin/bash',args)
         self.assertNotIn('run',args)
 
@@ -370,22 +373,25 @@ class OptionalGuestBashTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0,stdout='',stderr='')
             if args[:2] == ('container','inspect'):
                 return SimpleNamespace(returncode=1,stdout='',stderr='not present')
+            if 'wine' in args:
+                return SimpleNamespace(returncode=0, stdout='MSYS_NT-10.0\n', stderr='')
             return SimpleNamespace(returncode=0,stdout='',stderr='')
         with mock.patch.object(self.adapter,'_docker_call',side_effect=docker_call), \
              mock.patch.object(self.adapter,'_run_checked') as checked, \
              mock.patch.object(self.adapter,'_guest_host_binds',return_value=[]), \
              mock.patch.object(self.adapter,'_image_archive',return_value=(Path('/image.tar'),'image:123')):
             self.adapter._start_guest_locked(sdk,{},'/docker','win',Path('/Source'))
-        self.assertEqual(checked.call_count,2)
+        self.assertEqual(checked.call_count,1)
         run=checked.call_args_list[0].args[0]
-        probe=checked.call_args_list[1].args[0]
+        probe=['/docker', *calls[-1]]
         self.assertEqual(run[:3],['/docker','run','-d'])
         self.assertIn('--restart',run)
         self.assertIn('no',run)
         self.assertIn('CHERE_INVOKING=1',run)
         self.assertIn('TMPDIR=/tmp',run)
-        self.assertEqual(probe[:4],['/docker','exec','cinterforge-terminal-t-win','wine'])
-        self.assertIn('bash.exe', probe[4])
+        self.assertEqual(probe[:2], ['/docker', 'exec'])
+        self.assertIn('wine', probe)
+        self.assertIn('bash.exe', ' '.join(probe))
         self.assertIn('/tmp/cinterforge-bash-',probe[-1])
         self.assertIn('rm "$f"',probe[-1])
 
@@ -397,8 +403,8 @@ class OptionalGuestBashTests(unittest.TestCase):
         with mock.patch.object(self.adapter,'_docker_call',side_effect=docker_call), \
              mock.patch.object(self.adapter,'_guest_host_binds',return_value=[]), \
              mock.patch.object(self.adapter,'_image_archive',return_value=(Path('/image.tar'),'image:123')), \
-             mock.patch.object(self.adapter,'_run_checked',side_effect=[None,RuntimeError('MSYS2 /tmp unavailable')]):
-            with self.assertRaisesRegex(RuntimeError,'MSYS2 /tmp unavailable'):
+             mock.patch.object(self.adapter,'_run_checked',return_value=None):
+            with self.assertRaisesRegex(RuntimeError, 'Windows guest framebuffer failed before Wine'):
                 self.adapter._start_guest_locked(Path('/sdk'),{},'/docker','win',Path('/Source'))
 
     def test_unified_devtools_preserves_msys2_tmp_mount_point(self):
@@ -422,6 +428,13 @@ class WorkspaceGuestAndHtmlMenuTests(unittest.TestCase):
         config_patcher = mock.patch.object(self.app, '_configure_colima_host_mounts')
         config_patcher.start()
         self.addCleanup(config_patcher.stop)
+        # Runtime Rosetta->QEMU YAML mutation is tested independently by
+        # test_suite_guest_vm_runtime. These argument tests pass env={} and
+        # must not inspect a real host-managed Colima profile.
+        emulation_patcher = mock.patch.object(self.app, '_configure_colima_runtime_emulation',
+                                              return_value=False)
+        emulation_patcher.start()
+        self.addCleanup(emulation_patcher.stop)
         # Guest startup tests fake subprocess.run, so real macOS mount discovery
         # must be provided separately. Actual discovery is tested in the VM
         # runtime suite; otherwise /sbin/mount is an unexpected subprocess.
@@ -571,7 +584,7 @@ class WorkspaceGuestAndHtmlMenuTests(unittest.TestCase):
             args=popen.call_args.args[0]
             self.assertIn('/host/mac'+str(source),args)
             self.assertIn('cinterforge-terminal-t-win',args)
-            self.assertEqual(args[-4:],['wine',r'Z:\msys2\usr\bin\bash.exe','--noprofile','-i'])
+            self.assertEqual(args[-4:],['wine',r'Z:\msys2\usr\bin\bash.exe','--login','-i'])
             self.assertNotIn('run',args)
 
     def test_htmlmenus_command_uses_authenticated_host_request(self):
@@ -600,9 +613,9 @@ class WorkspaceGuestAndHtmlMenuTests(unittest.TestCase):
         self.assertIn('html[data-cinter-platform="mac"]',css)
         self.assertIn('.terminal-titlebar #terminal-mode-title { display: none; }',css)
 
-    def test_real_codeoss_menu_registry_wires_when_inside_item(self):
-        # Validate MenuRegistry.appendMenuItems's actual IMenuItem shape, not
-        # merely TypeScript syntax. `when` belongs to item, not the outer tuple.
+    def test_real_codeoss_menu_registry_keeps_unavailable_items_visible(self):
+        # The CinterForge menu entries stay visible: only their commands have
+        # preconditions, rather than a `when` clause that hides the entry.
         from webapp.codeoss.producer import _patch_codeoss_terminal_menus
         TOOLCHAIN_SIGN_OF_LIFE_ROOT.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TOOLCHAIN_SIGN_OF_LIFE_ROOT) as temp:
@@ -625,8 +638,8 @@ export function setupTerminalMenus(): void {
                 self.assertIn('cinterforge.'+command,updated)
             for entry in updated.splitlines():
                 if "id: 'cinterforge.new" in entry:
-                    self.assertIn('when: ContextKeyExpr.',entry)
-                    self.assertNotIn('} }, when: ContextKeyExpr.',entry)
+                    self.assertIn('precondition: ContextKeyExpr.', entry)
+                    self.assertNotIn('when: ContextKeyExpr.', entry)
             _patch_codeoss_terminal_menus(source)
             self.assertEqual(target.read_text('utf8'),updated)
 

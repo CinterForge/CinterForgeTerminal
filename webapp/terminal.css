@@ -416,6 +416,10 @@ a {
    z-index: 6
 }
 
+.computer-view iframe[hidden] {
+   display: none;
+}
+
 .computer-view iframe {
    width: 100%;
    height: 100%;

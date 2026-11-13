@@ -18,6 +18,23 @@ class SharedGuestVMTests(unittest.TestCase):
         self.workspace = self.root / 'Source'
         self.workspace.mkdir()
 
+    def test_windows_guest_ignores_old_stock_wine_archive(self):
+        import hashlib
+        folder = self.sdk / 'WindowsCross'
+        folder.mkdir(parents=True)
+        for suffix, version in (('0' * 16, 'wine-11.0'), ('f' * 16, 'wine-11.15')):
+            archive = folder / (suffix + '.tar')
+            archive.write_bytes(('image-' + version).encode())
+            (folder / (suffix + '.json')).write_text(json.dumps({
+                'dockerfile_sha256': suffix * 4,
+                'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
+                'image': 'cinterforge-terminal-windows-cross:' + suffix,
+                'wine_version': version,
+            }))
+        archive, image = terminal._image_archive(self.sdk, 'win')
+        self.assertEqual(archive.name, 'f' * 16 + '.tar')
+        self.assertTrue(image.endswith('f' * 16))
+
     def test_linux_and_windows_requests_cannot_start_colima_concurrently(self):
         max_active = [0]
         active = [0]
@@ -89,6 +106,58 @@ class SharedGuestVMTests(unittest.TestCase):
         terminal._configure_colima_host_mounts(self.env, mounts)
         self.assertEqual(config.read_text(), actual)
 
+    def test_runtime_emulation_converts_existing_rosetta_config_in_place(self):
+        config = self.colima / terminal.PROFILE / 'colima.yaml'
+        config.parent.mkdir()
+        config.write_text('cpus: 4\nrosetta: true\nbinfmt: false\n'
+                          'mounts:\n  - location: "/"\n'
+                          '    mountPoint: "/host/mac"\n    writable: true\n')
+        self.assertTrue(terminal._configure_colima_runtime_emulation(self.env, dry_run=True))
+        self.assertIn('rosetta: true', config.read_text())
+        self.assertTrue(terminal._configure_colima_runtime_emulation(self.env))
+        actual = config.read_text()
+        self.assertIn('rosetta: false', actual)
+        self.assertIn('binfmt: true', actual)
+        self.assertIn('mountPoint: "/host/mac"', actual)
+        self.assertFalse(terminal._configure_colima_runtime_emulation(self.env, dry_run=True))
+        self.assertFalse(terminal._configure_colima_runtime_emulation(self.env))
+
+    def test_old_runtime_rosetta_profile_is_restarted_for_qemu(self):
+        config = self.colima / terminal.PROFILE / 'colima.yaml'
+        config.parent.mkdir()
+        config.write_text('rosetta: true\nbinfmt: false\n'
+                          'mounts:\n  - location: "/"\n'
+                          '    mountPoint: "/host/mac"\n    writable: true\n')
+        seen = []
+        def run(argv, **kwargs):
+            if argv[1] == 'info':
+                return subprocess.CompletedProcess(argv, 0, '29.5.2', '')
+            if argv[1] == 'ssh':
+                return subprocess.CompletedProcess(argv, 0, '', '')
+            if argv[1] == 'ps':
+                return subprocess.CompletedProcess(argv, 0, '', '')
+            raise AssertionError(argv)
+        def checked(argv, env, **kwargs):
+            seen.append(argv)
+        with (mock.patch.object(terminal, '_mac_host_mounts', return_value=[(Path('/'), '/host/mac')]),
+              mock.patch.object(terminal.subprocess, 'run', side_effect=run),
+              mock.patch.object(terminal, '_run_checked', side_effect=checked)):
+            terminal._ensure_docker(self.sdk, self.env, self.workspace)
+        self.assertEqual([cmd[1] for cmd in seen], ['stop', 'start'])
+        self.assertIn('--vz-rosetta=false', seen[1])
+        self.assertIn('--binfmt=true', seen[1])
+        self.assertNotIn('--vz-rosetta', seen[1])
+        self.assertIn('rosetta: false', config.read_text())
+        self.assertIn('binfmt: true', config.read_text())
+
+    def test_runtime_emulation_refuses_symlinked_profile(self):
+        other = self.root / 'other'
+        other.mkdir()
+        (other / 'colima.yaml').write_text('rosetta: true\n')
+        (self.colima / terminal.PROFILE).symlink_to(other, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, 'symlink'):
+            terminal._configure_colima_runtime_emulation(self.env)
+
     def test_cold_boot_mounts_mac_tree_without_overwriting_guest_root(self):
         state = {'started': False, 'start_args': None}
 
@@ -115,6 +184,8 @@ class SharedGuestVMTests(unittest.TestCase):
         args = state['start_args']
         self.assertIn('--mount-type', args)
         self.assertIn('virtiofs', args)
+        self.assertIn('--vz-rosetta=false', args)
+        self.assertIn('--binfmt=true', args)
         self.assertNotIn('--mount', args)  # custom mountPoint comes from profile YAML
         config = (self.colima / terminal.PROFILE / 'colima.yaml').read_text()
         self.assertIn('mountPoint: "/host/mac"', config)
