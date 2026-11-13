@@ -7,10 +7,12 @@
 `[x]` = Source implementation or source-level verification observed; 
 `[ ]` = Pending or native acceptance not yet established. 
 ```
-# Critical CodeOSS issues
-- Cut is Broken - whiiole menuis messed up.  We are damaging teh CodeOSS Edit menu
-- Preview is broken
-- 
+
+## 0. CRITICAL BLOCKERS
+
+- [ ] MAC-BUILDER missing tools
+- [ ] Installed Mac build does not launch
+- [ ] Installed Windows build does not register in Add/Remove Programs
 
 ## 1. Windows/Linux — MSYS2 Bash startup — BUG
 
