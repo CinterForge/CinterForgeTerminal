@@ -10,9 +10,11 @@
 
 ## 0. CRITICAL BLOCKERS
 
-- [ ] MAC-BUILDER missing tools
+- [ ] MAC-BUILDER missing tools - setup is not installing all needed tools
 - [ ] Installed Mac build does not launch
 - [ ] Installed Windows build does not register in Add/Remove Programs
+- [ ] Installed Windows build does not add to start menu
+- [ ] Installed Windows build installer defaults to the Downloads folder
 
 ## 1. Windows/Linux — MSYS2 Bash startup — BUG
 
