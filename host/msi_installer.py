@@ -420,6 +420,14 @@ def setup(builds: Path) -> dict:
 
 
 def publish(builds: Path, *, release: str, entries: dict[str, dict]) -> dict:
+    """Compile MSI in the existing provisioned AMD64 guest, owned by Publish."""
+    from host.amd64_backend import managed_amd64_backend
+    with managed_amd64_backend(builds, setup=False):
+        return _publish_with_backend(builds, release=release, entries=entries)
+
+
+def _publish_with_backend(builds: Path, *, release: str,
+                          entries: dict[str, dict]) -> dict:
     """Publish-only: produce MSI from immutable Windows Build inputs."""
     builds = _builds(builds)
     _check_tools(builds)  # validate Setup receipts, do not provision
