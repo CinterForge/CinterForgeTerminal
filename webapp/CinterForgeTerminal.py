@@ -1929,6 +1929,10 @@ class CinterShellServer(ThreadingHTTPServer):
             if self._stopping:
                 return
             self._stopping = True
+        # Signal the guest startup thread immediately. The native quit and
+        # independent watchdog both need it to release the Colima lock before
+        # attempting their own owned-VM shutdown.
+        _guest_boot_cancel.set()
         # Release the listener FIRST. Slow PTY/Bedrock cleanup must not hold
         # 20300 after a native Quit, Xcode Stop, or an authenticated recovery.
         try:
@@ -3289,6 +3293,9 @@ class Handler(BaseHTTPRequestHandler):
 
 _server = None
 _server_thread = None
+# Native exit cancels in-flight Colima startup before the shutdown owner waits
+# for its VM lock. Clearing happens only when a new native HTTP owner starts.
+_guest_boot_cancel = threading.Event()
 
 
 def _watch_native_http_parent(server: CinterShellServer, parent_pid: int) -> None:
@@ -3320,6 +3327,7 @@ def handle(method: str, params: dict) -> dict:
     if method == 'start':
         if _server is not None:
             raise RuntimeError('CinterForgeTerminal HTTP server already started')
+        _guest_boot_cancel.clear()
         builds = Path(params['builds']).resolve(strict=True)
         if builds.name != 'Builds' or not ASSETS.is_relative_to(builds):
             raise ValueError('Shell resources must be staged inside the shared Builds directory')
@@ -3420,6 +3428,7 @@ def handle(method: str, params: dict) -> dict:
     if method == 'shutdown_runtime':
         # Called after HTTP stop by the native application, NOT for server
         # reload. An independent watcher performs the same action on a crash.
+        _guest_boot_cancel.set()
         stop_runtime_vm()
         return {'stopped': True, 'guests': ['linux', 'win'], 'vm': PROFILE}
     if method == 'stop':
@@ -6304,7 +6313,8 @@ def _image_archive(sdk: Path, kind: str) -> tuple[Path, str]:
     raise RuntimeError(f'Unified DevTools has no verified {kind} container image')
 
 
-def _run_checked(command: list[str], env: dict[str, str], *, title: str, timeout: int = 600) -> None:
+def _run_checked(command: list[str], env: dict[str, str], *, title: str,
+                 timeout: int = 600, cancel_event: threading.Event | None = None) -> None:
     """Stream real guest process output and retain its error in the Server Log.
 
     Previously Colima's entire diagnostic disappeared behind CalledProcessError,
@@ -6313,8 +6323,19 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str, timeout
     """
     import selectors
     print('[DEVTOOLS] ' + title, flush=True)
+    app = globals().get('_server')
+    def report(message: str) -> None:
+        if app is not None and not app._stopping:
+            try:
+                app.log_event(message)
+            except (OSError, RuntimeError, ValueError):
+                # HTTP shutdown may close its log concurrently with a Colima
+                # output chunk. Never convert a log race into a VM boot error.
+                pass
+    report('[DEVTOOLS] ' + title)
     tail = bytearray()
     started = time.monotonic()
+    last_heartbeat = started
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           env=env, bufsize=0) as process:
         assert process.stdout is not None
@@ -6322,6 +6343,10 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str, timeout
             selector.register(process.stdout, selectors.EVENT_READ)
             try:
                 while selector.get_map() or process.poll() is None:
+                    if cancel_event is not None and cancel_event.is_set():
+                        # Stop the CLI promptly; its Lima hostagent may be a
+                        # separate process and is stopped by stop_runtime_vm.
+                        raise RuntimeError(title + ' cancelled: native app is closing')
                     remaining = timeout - (time.monotonic() - started)
                     if remaining <= 0:
                         raise subprocess.TimeoutExpired(command, timeout)
@@ -6333,7 +6358,19 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str, timeout
                         tail.extend(chunk)
                         if len(tail) > 8192:
                             del tail[:-8192]
-                        print(chunk.decode('utf-8', errors='replace'), end='', flush=True)
+                        message = chunk.decode('utf-8', errors='replace')
+                        print(message, end='', flush=True)
+                        # The native worker's stdout is not the persistent
+                        # Server Log. Mirror Colima errors there so a stuck
+                        # splash is diagnosable from the installed app.
+                        for line in message.splitlines():
+                            report('[DEVTOOLS VM] ' + line[:1200])
+                    if time.monotonic() - last_heartbeat >= 15:
+                        elapsed = int(time.monotonic() - started)
+                        heartbeat = '[DEVTOOLS] WORKING ' + title + ' (' + str(elapsed) + 's)'
+                        print(heartbeat, flush=True)
+                        report(heartbeat)
+                        last_heartbeat = time.monotonic()
                 returncode = process.wait(timeout=max(1, remaining))
             except subprocess.TimeoutExpired as error:
                 if process.poll() is None:
@@ -6555,7 +6592,8 @@ def _configure_colima_runtime_emulation(env: dict[str, str], *, dry_run: bool = 
     return True
 
 
-def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None) -> str:
+def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None,
+                          cancel_event: threading.Event | None = None) -> str:
     colima = str(sdk / 'mac/env/bin/colima')
     docker = str(sdk / 'mac/env/bin/docker')
     mounts = _mac_host_mounts()
@@ -6689,7 +6727,8 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
     if installed and not installed_profile:
         print('[DEVTOOLS] Initializing new x86-64 t profile (no existing VM to replace)',
               flush=True)
-    _run_checked(args, env, title='Starting managed guest VM with host volumes', timeout=1200)
+    _run_checked(args, env, title='Starting managed guest VM with host volumes',
+                 timeout=1200, cancel_event=cancel_event)
     daemon = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=45)
     if daemon.returncode:
         raise RuntimeError('Managed Terminal Docker socket still unavailable after VM start: ' +
@@ -6970,11 +7009,19 @@ def _boot_guests_logged(server: CinterShellServer) -> None:
         watchdog_ready = True
         if server._stopping:
             raise RuntimeError('Native Terminal shut down before guest startup completed')
-        result = boot_runtime_guests()
+        result = boot_runtime_guests(cancel_event=_guest_boot_cancel)
         if not result.get('installed'):
             raise RuntimeError('DevTools disappeared during managed guest startup')
         ready = list(result.get('guests', []))
         errors = dict(result.get('errors', {}))
+        if not ready:
+            # Both real guest checks failed. Leaving their QEMU running is not
+            # a usable warm state and is precisely the stranded-VM symptom.
+            try:
+                stop_runtime_vm()
+            except Exception as cleanup_error:
+                errors['cleanup'] = str(cleanup_error)
+                server.log_event('Unusable guest VM cleanup FAILED: ' + str(cleanup_error))
         sdk = sdk_root()
         if sdk is None:
             raise RuntimeError('Verified DevTools disappeared while connecting Bash')
@@ -7012,7 +7059,7 @@ def _boot_guests_logged(server: CinterShellServer) -> None:
         # Do not leave a half-booted Colima profile alive after a failed image
         # load / Bash verification. The guardian is already responsible for
         # abnormal native exits; cleanup here handles failure while it lives.
-        if watchdog_ready and not server._stopping:
+        if watchdog_ready:
             _close_owned_guest_shells(server)
             try:
                 stop_runtime_vm()
@@ -7462,7 +7509,7 @@ def _stop_owned_guests_locked_one(docker: str, env: dict[str, str], name: str) -
     _docker_call(docker, env, 'rm', '-f', name)
 
 
-def boot_runtime_guests() -> dict:
+def boot_runtime_guests(*, cancel_event: threading.Event | None = None) -> dict:
     """On app startup: one VM, one persistent Debian guest, two desktops."""
     if platform.system() != 'Darwin':
         return {'platform': platform.system(), 'guests': 'native'}
@@ -7472,9 +7519,13 @@ def boot_runtime_guests() -> dict:
     env = _env(sdk)
     workspace = _guest_workspace()
     with _managed_vm_lock(env):
-        docker = _ensure_docker_locked(sdk, env, workspace)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError('Guest boot cancelled: native app exited')
+        docker = _ensure_docker_locked(sdk, env, workspace, cancel_event=cancel_event)
         ready, failures = [], {}
         for kind in ('linux', 'win'):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError('Guest boot cancelled: native app exited')
             try:
                 _start_guest_locked(sdk, env, docker, kind, workspace)
                 ready.append(kind)
@@ -7496,12 +7547,80 @@ def boot_runtime_guests() -> dict:
             'docker': 'one-managed-engine'}
 
 
-def stop_runtime_vm(*, setup_sdk: Path | None = None) -> None:
-    """Stop the app-owned VM on normal quit or watchdog-detected native exit.
+def _owned_qemu_pids(env: dict[str, str], sdk: Path) -> list[int]:
+    """Find ONLY QEMU belonging to our named Lima t VM, never host QEMU jobs.
 
-    If the host Docker context has broken, inspect the same t profile through
-    Colima SSH before deciding it is safe to stop. Never take down an unrelated
-    container just because the host socket failed during application exit.
+    Require both the bundled binary and the app's private Lima state path in
+    the full command line. Inconclusive or failed inspection must not be
+    treated as evidence that a VM has stopped.
+    """
+    binary = str(sdk / 'mac/qemu/bin/qemu-system-x86_64')
+    state = str(Path(env['LIMA_HOME']) / ('colima-' + PROFILE))
+    listing = subprocess.run(['/bin/ps', '-ww', '-axo', 'pid=,command='],
+                             check=False, text=True, capture_output=True, timeout=15)
+    if listing.returncode:
+        raise RuntimeError('Cannot inspect owned QEMU processes: ' + listing.stderr[-300:])
+    found = []
+    for row in listing.stdout.splitlines():
+        pid, sep, command = row.strip().partition(' ')
+        if sep and pid.isdigit() and command.lstrip().startswith(binary + " ") and state in command:
+            found.append(int(pid))
+    return found
+
+
+def _verify_owned_qemu_stopped(env: dict[str, str], sdk: Path) -> None:
+    """Stop a still-live, positively identified t QEMU after Colima exits.
+
+    A normal `colima stop` is preferred. Its status can be wrong during an
+    interrupted `colima start`; then use the owned Lima instance's force stop.
+    If Lima also fails, terminate ONLY the exact bundled QEMU whose command
+    references this private t-profile state. Never use pkill/qemu-wide kills.
+    """
+    pids = _owned_qemu_pids(env, sdk)
+    if not pids:
+        return
+    lima = str(sdk / 'mac/lima/bin/limactl')
+    result = subprocess.run([lima, 'stop', '--force', 'colima-' + PROFILE],
+                            env=env, check=False, text=True, capture_output=True, timeout=60)
+    if result.returncode:
+        print('[DEVTOOLS] Lima force-stop t returned ' + str(result.returncode) + ': ' +
+              (result.stderr or result.stdout).strip()[-500:], flush=True)
+    for _ in range(10):
+        if not _owned_qemu_pids(env, sdk):
+            return
+        time.sleep(0.5)
+    # The VM is known by BOTH its bundled executable and its private state.
+    # Revalidate each PID immediately before signalling; never kill other VMs.
+    for pid in set(pids).intersection(_owned_qemu_pids(env, sdk)):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    for _ in range(16):
+        if not _owned_qemu_pids(env, sdk):
+            return
+        time.sleep(0.5)
+    for pid in _owned_qemu_pids(env, sdk):
+        if pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    for _ in range(10):
+        if not _owned_qemu_pids(env, sdk):
+            return
+        time.sleep(0.5)
+    raise RuntimeError('Owned t-profile QEMU is still alive after Colima/Lima cleanup: ' +
+                       ', '.join(map(str, _owned_qemu_pids(env, sdk))))
+
+
+def stop_runtime_vm(*, setup_sdk: Path | None = None) -> None:
+    """Shut down only the managed t VM, including interrupted startup.
+
+    Colima `status` returning nonzero DOES NOT mean QEMU is gone: the status
+    command fails during some VM starts/crashes. Do not return on that error.
+    Preserve any foreign Docker workloads when they can be inspected, and
+    never delete a VM disk or unrelated Lima/QEMU process.
     """
     if platform.system() != 'Darwin':
         return
@@ -7515,40 +7634,53 @@ def stop_runtime_vm(*, setup_sdk: Path | None = None) -> None:
         status = subprocess.run([colima, 'status', PROFILE], env=env,
                                 check=False, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, timeout=25)
-        if status.returncode != 0:
+        if status.returncode == 0:
+            engine = _docker_call(docker, env, 'info', '--format', '{{.ServerVersion}}', timeout=20)
+            if engine.returncode == 0:
+                _stop_owned_guests_locked(docker, env)
+                foreign = _docker_call(docker, env, 'ps', '--quiet', timeout=25)
+                if foreign.returncode or foreign.stdout.strip():
+                    raise RuntimeError('Leaving VM running: unowned Docker containers may be active')
+            else:
+                # Before stopping a running VM with an unavailable host socket,
+                # check its Docker containers through the dedicated Lima SSH.
+                listing = subprocess.run(
+                    [colima, 'ssh', '--profile', PROFILE, '--', 'docker', 'ps',
+                     '--format', '{{.Names}}|{{.Label "io.cinterforge.terminal"}}'],
+                    env=env, check=False, text=True, capture_output=True, timeout=35)
+                if listing.returncode == 0:
+                    for row in listing.stdout.splitlines():
+                        name, sep, owner = row.partition('|')
+                        if not sep or name != _guest_name('linux') or owner != PROFILE:
+                            raise RuntimeError('Leaving VM running: unowned Docker container ' + name)
+                    for row in listing.stdout.splitlines():
+                        name = row.partition('|')[0]
+                        removed = subprocess.run(
+                            [colima, 'ssh', '--profile', PROFILE, '--',
+                             'docker', 'stop', '--time', '5', name],
+                            env=env, check=False, text=True, capture_output=True, timeout=45)
+                        if removed.returncode:
+                            raise RuntimeError('Cannot stop owned container ' + name +
+                                               ': ' + (removed.stderr or removed.stdout).strip()[:240])
+                elif not _owned_qemu_pids(env, sdk):
+                    # Docker and SSH are both unavailable, but no QEMU has a
+                    # confirmed owner. Do not interfere with another runtime.
+                    return
+                else:
+                    print('[DEVTOOLS] Owned t QEMU is running with unavailable Docker/SSH; '
+                          'stopping private t profile rather than orphaning it', flush=True)
+        elif not _owned_qemu_pids(env, sdk) and not (
+                Path(env['COLIMA_HOME']) / PROFILE / 'colima.yaml').is_file():
+            # No named profile and no QEMU belongs to us. Nothing to stop.
             return
-        engine = _docker_call(docker, env, 'info', '--format', '{{.ServerVersion}}', timeout=20)
-        if engine.returncode == 0:
-            _stop_owned_guests_locked(docker, env)
-            foreign = _docker_call(docker, env, 'ps', '--quiet', timeout=25)
-            if foreign.returncode or foreign.stdout.strip():
-                raise RuntimeError('Leaving VM running: unowned Docker containers may be active')
-        else:
-            # A stale Docker context can coexist with a healthy daemon *inside*
-            # Colima. Use the named VM's SSH connection; never guess from an
-            # unavailable host socket that the VM has no running workloads.
-            listing = subprocess.run(
-                [colima, 'ssh', '--profile', PROFILE, '--', 'docker', 'ps',
-                 '--format', '{{.Names}}|{{.Label "io.cinterforge.terminal"}}'],
-                env=env, check=False, text=True, capture_output=True, timeout=35)
-            if listing.returncode:
-                raise RuntimeError('Cannot inspect the owned Colima Docker engine during shutdown; '
-                                   'refusing to stop potentially unrelated containers: ' +
-                                   (listing.stderr or listing.stdout).strip()[:240])
-            for row in listing.stdout.splitlines():
-                name, sep, owner = row.partition('|')
-                if not sep or name not in (_guest_name('linux'), _guest_name('win')) or owner != PROFILE:
-                    raise RuntimeError('Leaving VM running: unowned Docker container ' + name)
-            for row in listing.stdout.splitlines():
-                name = row.partition('|')[0]
-                removed = subprocess.run([colima, 'ssh', '--profile', PROFILE, '--',
-                                          'docker', 'rm', '-f', name], env=env, check=False,
-                                         text=True, capture_output=True, timeout=45)
-                if removed.returncode:
-                    raise RuntimeError('Cannot stop owned container ' + name +
-                                       ': ' + (removed.stderr or removed.stdout).strip()[:240])
-        _run_checked([colima, 'stop', PROFILE], env,
-                     title='Stopping app-owned guest VM', timeout=120)
+        # Colima can report status=1 while its child QEMU is still starting.
+        # Always ask the named profile to stop, then verify the OWNED process.
+        try:
+            _run_checked([colima, 'stop', PROFILE], env,
+                         title='Stopping app-owned guest VM', timeout=120)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+            print('[DEVTOOLS] Colima t stop incomplete: ' + str(error), flush=True)
+        _verify_owned_qemu_stopped(env, sdk)
 
 
 def reboot_runtime_guests(component: str) -> dict:

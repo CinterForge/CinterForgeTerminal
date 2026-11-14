@@ -17,8 +17,8 @@
   const check = async () => {
     if (finished) return;
     // A wedged Colima supervisor must not make Mac Bash inaccessible.
-    if (Date.now() - started > 5 * 60 * 1000) {
-      enterTerminal('DevTools startup exceeded five minutes. Opening Mac Bash.');
+    if (Date.now() - started > 3 * 60 * 1000) {
+      enterTerminal('DevTools startup exceeded three minutes. Opening Mac Bash.');
       return;
     }
     try {
