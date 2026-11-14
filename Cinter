@@ -515,6 +515,12 @@ def main(argv: list[str]) -> int:
             if value and not os.environ.get(name):
                 os.environ[name] = value
         from host.amd64_backend import managed_amd64_backend
+        # `all all` invokes Setup and Build in separate processes. Restore the
+        # Setup-provisioned, Build-owned environment explicitly; do not depend
+        # on the builder's shell PATH or run Setup again here.
+        from host.mac_bootstrap import managed_environment
+        os.environ.pop('DOCKER_CONTEXT', None)
+        os.environ.update(managed_environment(BUILDS))
         invoke(sys.executable, '-B', '-m', 'host.toolchain', '--builds', str(BUILDS))
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'build', '--application-shell')
         invoke(sys.executable, '-B', str(REPO / 'linuxos/lifecycle.py'), 'verify')

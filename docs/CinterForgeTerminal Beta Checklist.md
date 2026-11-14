@@ -4,16 +4,18 @@
 **Checklist legend:** 
 
 ```
-[x] = Source implementation or source-level verification observed; 
-[ ] = Pending or native acceptance not yet established. 
+[x] = Source implementation or source-level verification observed 
+[-] = Fix pending 
+[ ] = Known issue or not started 
 ```
 
 ## 0. CRITICAL BLOCKERS
 
-- [ ] Installed Mac build does not launch.  No idea how to debug this.
-- [ ] Installed Windows build does not register in Add/Remove Programs
-- [ ] Installed Windows build does not add to start menu
-- [ ] Installed Windows build installer defaults to the Downloads folder
+- [-] MAC-BUILDER missing tools - setup is not installing all needed tools
+- [-] Installed Mac build does not launch.  No idea how to debug this.
+- [-] Installed Windows build does not register in Add/Remove Programs
+- [-] Installed Windows build does not add to start menu
+- [-] Installed Windows build installer defaults to the Downloads folder
 
 ## 1. Windows/Linux — MSYS2 Bash startup — BUG
 
@@ -21,11 +23,11 @@
 - [X] Verify the MSYS2 package closure copied into the Windows release.
 - [X] Make package contents relocatable.
 - [X] Confirm Windows GUI application launch without an extra console window.
-- [ ] Add a real Bash startup smoke test to the Linux and Windows release checks.
-- [ ] Real Linux/Win Bash prompt appears inside Terminal.
-- [ ] Provide writable temporary runtime state.
-- [ ] Check Bash executable paths and argument construction.
-- [ ] Confirm tab close/reopen/reconnect behavior using native WebView2/ConPTY.
+- [-] Add a real Bash startup smoke test to the Linux and Windows release checks.
+- [-] Real Linux/Win Bash prompt appears inside Terminal.
+- [-] Provide writable temporary runtime state.
+- [-] Check Bash executable paths and argument construction.
+- [-] Confirm tab close/reopen/reconnect behavior using native WebView2/ConPTY.
 
 ## 2. Critical CodeOSS issues
 - [ ] Cut is Broken - The whole Edit menu is messed up.  We are damaging the CodeOSS Edit menu

@@ -473,7 +473,9 @@ class ToolchainProbeTests(unittest.TestCase):
             self.skipTest('POSIX Bash test only')
         actual = toolchain._probe
         def fake_webkit(name, command, *, cwd, env):
-            if name == 'python' and toolchain.target()[0] == 'mac':
+            if name in ('cmake', 'ninja', 'python', 'node') and toolchain.target()[0] == 'mac':
+                # This generic test uses a disposable Builds, not a Setup
+                # provisioned Mac SDK. A separate regression checks its paths.
                 return actual(name, [sys.executable, '--version'], cwd=cwd, env=env)
             if name == 'webkitgtk':
                 return {'executable': '/usr/bin/pkg-config', 'command': command,
@@ -490,6 +492,43 @@ class ToolchainProbeTests(unittest.TestCase):
         self.assertIn('CINTER_TERMINAL_DIRECTORY_BEGIN', listing)
         self.assertTrue((self.builds / 'Logs/CinterForgeTerminal/toolchain-linux-x64.log').is_file()
                         or (self.builds / 'Logs/CinterForgeTerminal/toolchain-mac-arm64.log').is_file())
+
+    def test_mac_build_uses_setup_managed_tools_even_when_not_on_path(self):
+        managed = self.builds / 'CinterForgeTerminal/Toolchains/mac/env/bin'
+        managed.mkdir(parents=True)
+        for name in ('cmake', 'ninja', 'python3', 'node'):
+            executable = managed / name
+            executable.write_text('#!/bin/sh\nprintf "%s\\n" "managed-' + name + '"\n')
+            executable.chmod(0o755)
+        actual = toolchain._probe
+        def probe(name, command, *, cwd, env):
+            if name in ('bash', 'cc', 'cxx'):
+                return actual(name, [sys.executable, '--version'], cwd=cwd, env=env)
+            if name == 'native-shell-directory':
+                return {'executable': '/bin/bash', 'command': command, 'exit_code': 0,
+                        'output': 'CINTER_TERMINAL_DIRECTORY_BEGIN\nacceptance-marker.txt\nCINTER_TERMINAL_DIRECTORY_END'}
+            return actual(name, command, cwd=cwd, env=env)
+        with (mock.patch.object(toolchain, 'target', return_value=('mac', 'arm64')),
+              mock.patch.object(toolchain, '_probe', side_effect=probe),
+              mock.patch.dict(os.environ, {'PATH': '/usr/bin:/bin'})):
+            report = toolchain.probe_local(self.builds)
+        self.assertEqual(report['status'], 'passed')
+        for name in ('cmake', 'ninja', 'python', 'node'):
+            expected = managed / ('python3' if name == 'python' else name)
+            self.assertEqual(report['tools'][name]['executable'], str(expected))
+            self.assertIn('managed-', report['tools'][name]['output'])
+
+    def test_mac_missing_managed_cmake_never_falls_back_to_host_path(self):
+        actual = toolchain._probe
+        def probe(name, command, *, cwd, env):
+            if name == 'cmake':
+                return actual(name, command, cwd=cwd, env=env)
+            return {'executable': str(command[0]), 'command': command,
+                    'exit_code': 0, 'output': 'CINTER_TERMINAL_DIRECTORY_BEGIN\nacceptance-marker.txt\nCINTER_TERMINAL_DIRECTORY_END'}
+        with (mock.patch.object(toolchain, 'target', return_value=('mac', 'arm64')),
+              mock.patch.object(toolchain, '_probe', side_effect=probe)):
+            with self.assertRaisesRegex(RuntimeError, 'cmake:.*missing executable'):
+                toolchain.probe_local(self.builds)
 
     def test_missing_required_tool_logs_failure_not_success(self):
         actual = toolchain._probe

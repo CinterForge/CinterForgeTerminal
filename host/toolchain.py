@@ -150,15 +150,19 @@ def probe_local(builds: Path, *, require_cross: bool = False) -> dict:
             command = None
     else:
         env = dict(os.environ)
+        # The Mac toolchain is provisioned exclusively by Setup in sibling
+        # Builds. Resolve it directly so a new Build process does not require
+        # Homebrew/system installs or an inherited Setup-only PATH.
+        managed_mac_bin = builds / 'CinterForgeTerminal/Toolchains/mac/env/bin'
         bash = shutil.which('bash') or '/bin/bash'
         cc = shutil.which('clang' if system == 'mac' else 'gcc') or ('clang' if system == 'mac' else 'gcc')
         cxx = shutil.which('clang++' if system == 'mac' else 'g++') or ('clang++' if system == 'mac' else 'g++')
         tools = {'bash': [bash, '--version'], 'cc': [cc, '--version'],
-                 'cxx': [cxx, '--version'], 'cmake': ['cmake', '--version'],
-                 'ninja': ['ninja', '--version'],
-                 'python': [str(builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/python3')
-                            if system == 'mac' else sys.executable, '--version'],
-                 'node': ['node', '--version']}
+                 'cxx': [cxx, '--version'],
+                 'cmake': [str(managed_mac_bin / 'cmake') if system == 'mac' else 'cmake', '--version'],
+                 'ninja': [str(managed_mac_bin / 'ninja') if system == 'mac' else 'ninja', '--version'],
+                 'python': [str(managed_mac_bin / 'python3') if system == 'mac' else sys.executable, '--version'],
+                 'node': [str(managed_mac_bin / 'node') if system == 'mac' else 'node', '--version']}
         command = [bash, '--noprofile', '--norc', '-c']
         if system == 'linux':
             tools['pkg-config'] = ['pkg-config', '--version']
