@@ -386,6 +386,9 @@ class OptionalGuestBashTests(unittest.TestCase):
         self.assertEqual(run[:3],['/docker','run','-d'])
         self.assertIn('--restart',run)
         self.assertIn('no',run)
+        self.assertEqual(run[run.index('--entrypoint') + 1], '/bin/sleep')
+        self.assertEqual(run[-1], 'infinity')
+        self.assertNotIn('trap "exit 0"', ' '.join(run))
         self.assertIn('CHERE_INVOKING=1',run)
         self.assertIn('TMPDIR=/tmp',run)
         self.assertEqual(probe[:2], ['/docker', 'exec'])
@@ -405,6 +408,73 @@ class OptionalGuestBashTests(unittest.TestCase):
              mock.patch.object(self.adapter,'_run_checked',return_value=None):
             with self.assertRaisesRegex(RuntimeError, 'Windows guest framebuffer failed before Wine'):
                 self.adapter._start_guest_locked(Path('/sdk'),{},'/docker','win',Path('/Source'))
+
+    def test_stopped_installed_guest_reports_exit_before_owned_cleanup(self):
+        from types import SimpleNamespace
+        calls = []
+        def result(rc=0, out='', err=''):
+            return SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+        def docker_call(docker, env, *args, **kwargs):
+            calls.append(args)
+            if args[:2] == ('image', 'inspect'):
+                return result()
+            if args[:2] == ('container', 'inspect'):
+                if 'State.Status' in ' '.join(args):
+                    return result(out='status=exited exit=137 oom=true error= finished=2026-11-13T23:00:15Z\n')
+                return result(rc=1, err='No such container')
+            if args[0] == 'logs':
+                return result(out='container terminated by memory limit\n')
+            return result()
+        with mock.patch.object(self.adapter, '_docker_call', side_effect=docker_call), \
+             mock.patch.object(self.adapter, '_image_archive', return_value=(Path('/archive.tar'), 'image:sha')), \
+             mock.patch.object(self.adapter, '_guest_host_binds', return_value=[]), \
+             mock.patch.object(self.adapter, '_run_checked'), \
+             mock.patch.object(self.adapter, '_verify_guest_bash',
+                               side_effect=RuntimeError('container 123 is not running')):
+            with self.assertRaisesRegex(RuntimeError, 'oom=true') as caught:
+                self.adapter._start_guest_locked(Path('/sdk'), {}, '/docker', 'linux', None)
+        self.assertIn('exit=137', str(caught.exception))
+        self.assertIn('container terminated by memory limit', str(caught.exception))
+        self.assertIn('container 123 is not running', str(caught.exception))
+        self.assertLess(next(i for i, c in enumerate(calls) if c[0] == 'logs'),
+                        next(i for i, c in enumerate(calls) if c[:2] == ('rm', '-f')))
+
+    def test_windows_probe_failure_keeps_running_shared_linux_container(self):
+        # The Linux and Windows tabs both attach to the one Debian container.
+        # A failed Wine probe must never delete the healthy Linux backend.
+        from types import SimpleNamespace
+        calls = []
+        def result(rc=0, out='', err=''):
+            return SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+        def docker_call(docker, env, *args, **kwargs):
+            calls.append(args)
+            if args[:2] == ('image', 'inspect'):
+                return result()
+            if args[:2] == ('container', 'inspect'):
+                if '--format' in args and '{{.State.Running}}' in args:
+                    return result(out='true\n')
+                return result(rc=1, err='not created')
+            return result()
+        with mock.patch.object(self.adapter, '_docker_call', side_effect=docker_call), \
+             mock.patch.object(self.adapter, '_image_archive', return_value=(Path('/archive.tar'), 'image:sha')), \
+             mock.patch.object(self.adapter, '_guest_host_binds', return_value=[]), \
+             mock.patch.object(self.adapter, '_run_checked'), \
+             mock.patch.object(self.adapter, '_ensure_wine_display'), \
+             mock.patch.object(self.adapter, '_guest_container_failure_evidence', return_value='status=running'), \
+             mock.patch.object(self.adapter, '_verify_guest_bash', side_effect=RuntimeError('Wine probe failed')):
+            with self.assertRaisesRegex(RuntimeError, 'keeping running shared guest'):
+                self.adapter._start_guest_locked(Path('/sdk'), {}, '/docker', 'win', None)
+        self.assertTrue(any(call[:2] == ('container', 'inspect') and
+                            '{{.State.Running}}' in call for call in calls))
+        self.assertFalse(any(call[0] == 'rm' for call in calls), calls)
+
+    def test_docker_exit_probe_handles_missing_container_without_masking_error(self):
+        from types import SimpleNamespace
+        with mock.patch.object(self.adapter, '_docker_call', return_value=SimpleNamespace(
+            returncode=1, stdout='', stderr='No such container')):
+            detail = self.adapter._guest_container_failure_evidence('/docker', {}, 'owned-guest')
+        self.assertIn('inspect unavailable', detail)
+        self.assertIn('No such container', detail)
 
     def test_unified_devtools_preserves_msys2_tmp_mount_point(self):
         with mock.patch.object(universal, '_files_under', return_value={}):

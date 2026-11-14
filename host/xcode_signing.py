@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
+from xml.sax.saxutils import escape as xml_escape
 from pathlib import Path
 import re
 import subprocess
@@ -67,6 +69,63 @@ def _macos_release_setting(settings: dict[str, str], name: str) -> str:
         if key in settings:
             return str(settings[key]).strip()
     return str(settings.get(name, '')).strip()
+
+
+def release_info_plist_bytes(settings: dict[str, str] | None = None) -> bytes:
+    """Render the user-authored Xcode Info.plist; never maintain a second plist.
+
+    Xcode resolves $(BUILD_SETTING) references when it builds the application.
+    The standalone Cinter packager must do the same *without altering the
+    authored file*. Resolve only values actually referenced by the template.
+    """
+    settings = settings if settings is not None else _project_release_settings()
+    selected = _macos_release_setting(settings, 'INFOPLIST_FILE')
+    if not selected:
+        raise RuntimeError('Xcode Release INFOPLIST_FILE must select an authored plist')
+    selected = selected.replace('$(PROJECT_DIR)', str(REPO))
+    template = Path(selected) if Path(selected).is_absolute() else REPO / selected
+    if not template.is_file() or template.is_symlink():
+        raise FileNotFoundError('Authored Xcode Info.plist missing: ' + str(template))
+    content = template.read_text(encoding='utf-8')
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        value = _macos_release_setting(settings, key)
+        if not value or '$(' in value:
+            raise RuntimeError('Unresolved Xcode Info.plist build setting: ' + key)
+        return xml_escape(value, {'"': '&quot;', "'": '&apos;'})
+    rendered = re.sub(r'\$\(([A-Za-z_][A-Za-z0-9_]*)\)', replace, content)
+    info = plistlib.loads(rendered.encode('utf-8'))
+    if (info.get('CFBundleIdentifier') != BUNDLE_ID or
+            info.get('CFBundleExecutable') != 'CinterForgeTerminal'):
+        raise RuntimeError('Authored Xcode Info.plist disagrees with Terminal executable/bundle ID')
+    return rendered.encode('utf-8')
+
+
+def release_sandbox_entitlements(settings: dict[str, str] | None = None) -> dict[str, bool]:
+    """Use Xcode Signing & Capabilities as the single sandbox authority.
+
+    Only the outer Terminal app gets these entitlements. Its nested VM has a
+    separate, already-authored virtualization entitlement and stays distinct.
+    """
+    settings = settings if settings is not None else _project_release_settings()
+    enabled = lambda key: _macos_release_setting(settings, key).upper() == 'YES'
+    entitlements: dict[str, bool] = {}
+    if enabled('ENABLE_APP_SANDBOX'):
+        entitlements['com.apple.security.app-sandbox'] = True
+    if enabled('ENABLE_INCOMING_NETWORK_CONNECTIONS'):
+        entitlements['com.apple.security.network.server'] = True
+    if enabled('ENABLE_OUTGOING_NETWORK_CONNECTIONS'):
+        entitlements['com.apple.security.network.client'] = True
+    for setting, entitlement_prefix in (
+        ('ENABLE_USER_SELECTED_FILES', 'com.apple.security.files.user-selected.'),
+        ('ENABLE_FILE_ACCESS_DOWNLOADS_FOLDER', 'com.apple.security.files.downloads.'),
+        ('ENABLE_FILE_ACCESS_PICTURE_FOLDER', 'com.apple.security.assets.pictures.'),
+    ):
+        access = _macos_release_setting(settings, setting).lower()
+        if access in ('readwrite', 'readonly'):
+            suffix = 'read-write' if access == 'readwrite' else 'read-only'
+            entitlements[entitlement_prefix + suffix] = True
+    return entitlements
 
 
 def _developer_id_identity(team: str) -> str:

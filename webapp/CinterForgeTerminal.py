@@ -2801,8 +2801,12 @@ class Handler(BaseHTTPRequestHandler):
                                     body.get('operation') in ('stat', 'read-file', 'read-directory'))
                 if not expected_missing:
                     operation = str(body.get('operation', '') if route == '/code/command' else route)
+                    # Retain the actual cause of a failed guest attachment;
+                    # "RuntimeError" alone loses the diagnostic on user Macs.
+                    detail = str(error).replace('\r', ' ').replace('\n', ' ')[:240]
                     self.server.log_event('Code-OSS request rejected ' + operation[:48] +
-                                          ' (' + code + ', ' + type(error).__name__ + ')')
+                                          ' (' + code + ', ' + type(error).__name__ +
+                                          '): ' + detail)
                 self._json(200 if expected_missing else 400,
                            {'ok': False, 'error': str(error), 'error_code': code})
             return
@@ -6415,6 +6419,33 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
                                ', '.join(foreign))
         _stop_owned_guests_locked(docker, env)
 
+    # Setup verifies the native amd64 Docker daemon, but installed-app boot
+    # previously only checked its VERSION. Colima ignores VM type/architecture
+    # flags once a profile exists; an old arm64/VZ cache can therefore appear
+    # healthy while immediately killing every linux/amd64 container.
+    installed = os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'installed'
+
+    def verified_installed_architecture() -> str:
+        probe = call([docker, 'info', '--format', '{{.Architecture}}'], timeout=30)
+        if probe.returncode:
+            raise RuntimeError('Cannot verify installed Terminal guest Docker architecture: ' +
+                               (probe.stderr or probe.stdout).strip()[-400:])
+        return probe.stdout.strip().lower()
+
+    def require_native_installed_architecture() -> None:
+        actual = verified_installed_architecture()
+        if actual not in ('amd64', 'x86_64'):
+            # Colima's VM architecture is immutable after profile creation.
+            # Deleting it from normal app launch destroys user cache and makes
+            # Colima download a fresh Ubuntu disk behind the splash screen.
+            # Preserve it for an explicit, separately consented repair; never
+            # try to run amd64 Debian/Wine against the wrong VM.
+            raise RuntimeError('Installed Terminal t guest is ' + actual +
+                               ', not native x86-64. Preserving the existing '
+                               'Colima profile; startup will not delete it or '
+                               'download a replacement VM. Repair the managed '
+                               'guest explicitly before using Linux/Windows Bash')
+
     # Check the app-owned profile's *saved* topology as well as live paths.
     # A legacy t-profile may still be running with the old overlapping mount
     # config. A healthy Docker socket alone cannot prove that all host drives
@@ -6422,10 +6453,18 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
     required = ['/host/mac', '/host/mac' + str(sdk)]
     if workspace is not None:
         required.append('/host/mac' + str(workspace))
+    installed_profile = bool(env.get('COLIMA_HOME')) and (
+        Path(env['COLIMA_HOME']) / PROFILE / 'colima.yaml').is_file()
     mount_changed = _configure_colima_host_mounts(env, mounts, dry_run=True)
-    emulation_changed = _configure_colima_runtime_emulation(env, dry_run=True)
+    # Installed profiles have immutable VM type/architecture. Updating their
+    # YAML cannot convert an already-created ARM/VZ disk to AMD64/QEMU.
+    # Inspect the *running* engine rather than rewriting these settings.
+    emulation_changed = (False if installed and installed_profile else
+                         _configure_colima_runtime_emulation(env, dry_run=True))
     config_changed = mount_changed or emulation_changed
     ping = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=20)
+    if ping.returncode == 0 and installed:
+        require_native_installed_architecture()
     if ping.returncode == 0:
         missing = [path for path in required if not guest_directory(path)]
         if not missing and not config_changed:
@@ -6449,7 +6488,8 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
                          title='Recovering idle VM with stale Docker socket', timeout=120)
 
     _configure_colima_host_mounts(env, mounts)
-    _configure_colima_runtime_emulation(env)
+    if not installed or not installed_profile:
+        _configure_colima_runtime_emulation(env)
     print('[DEVTOOLS] Sharing accessible Mac filesystem under /host/mac', flush=True)
     # Only the terminal-owned runtime profile t changes. Boot the actual
     # QEMU x86_64 Linux guest; Wine/MSYS2 runs natively inside that guest.
@@ -6461,15 +6501,25 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
     # Keep the YAML normalization for existing profiles and the live path
     # probes below: neither a successful VM boot nor a saved config proves
     # that VirtioFS actually mounted the host's source tree.
-    args = [colima, 'start', PROFILE, '--runtime', 'docker',
-            '--vm-type', 'qemu', '--mount-type', '9p',
-            '--mount', '/:/host/mac:w', '--arch', 'x86_64',
-            '--cpus', '4', '--memory', '8', '--disk', '32', '--save-config']
+    # Only initial profile creation needs immutable QEMU/architecture flags.
+    # Reusing a saved installed profile with those flags causes warnings and
+    # cannot change its VM. Do not rebuild an existing profile at app launch.
+    args = ([colima, 'start', PROFILE, '--runtime', 'docker']
+            if installed and installed_profile else
+            [colima, 'start', PROFILE, '--runtime', 'docker',
+             '--vm-type', 'qemu', '--mount-type', '9p',
+             '--mount', '/:/host/mac:w', '--arch', 'x86_64',
+             '--cpus', '4', '--memory', '8', '--disk', '32', '--save-config'])
+    if installed and not installed_profile:
+        print('[DEVTOOLS] Initializing new x86-64 t profile (no existing VM to replace)',
+              flush=True)
     _run_checked(args, env, title='Starting managed guest VM with host volumes', timeout=1200)
     daemon = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=45)
     if daemon.returncode:
         raise RuntimeError('Managed Terminal Docker socket still unavailable after VM start: ' +
                            (daemon.stderr or daemon.stdout).strip()[:240])
+    if installed:
+        require_native_installed_architecture()
     missing = [path for path in required if not guest_directory(path)]
     if missing:
         raise RuntimeError('Managed Terminal VM cannot access shared Mac paths ' +
@@ -6998,6 +7048,31 @@ def _docker_call(docker: str, env: dict[str, str], *args: str, timeout: int = 90
                           capture_output=True, timeout=timeout)
 
 
+def _guest_container_failure_evidence(docker: str, env: dict[str, str], name: str) -> str:
+    """Collect exit cause before cleanup destroys the only useful evidence.
+
+    App-installed failures may only be reported through the Steam Server log:
+    unlike developer Setup, a customer has no access to the builder or a
+    persistent Docker container.  Probe only this known, owned container and
+    bound each read; never retry/reinstall anything during diagnosis.
+    """
+    result = _docker_call(
+        docker, env, 'container', 'inspect', '--format',
+        'status={{.State.Status}} exit={{.State.ExitCode}} '
+        'oom={{.State.OOMKilled}} error={{.State.Error}} '
+        'finished={{.State.FinishedAt}}', name, timeout=15)
+    if result.returncode:
+        state = ('inspect unavailable: ' +
+                 (result.stderr or result.stdout or 'no Docker response').strip()[-350:])
+    else:
+        state = (result.stdout or 'no Docker state returned').strip()[-500:]
+    logs = _docker_call(docker, env, 'logs', '--tail', '30', name, timeout=15)
+    output = ((logs.stdout or '') + '\n' + (logs.stderr or '')).strip()[-1400:]
+    if logs.returncode and not output:
+        output = 'Docker logs unavailable (exit ' + str(logs.returncode) + ')'
+    return 'container ' + name + ' ' + state + '; last Docker output: ' + (output or '(empty)')
+
+
 def _stop_owned_guests_locked(docker: str, env: dict[str, str]) -> None:
     """Stop exactly the shared owned runtime container, never foreign workloads."""
     for name in {_guest_name('linux'), _guest_name('win')}:
@@ -7034,10 +7109,19 @@ def _start_guest_locked(sdk: Path, env: dict[str, str], docker: str,
         if running == 'true':
             # A named running container is not proof Bash actually works.
             # Wine needs the guest display before it initializes its prefix.
-            if kind == 'win':
-                _ensure_wine_display(docker, env, name)
-            _verify_guest_bash(docker, env, kind, name)
-            _activate_guest_vnc(docker, env, kind, name)
+            try:
+                if kind == 'win':
+                    _ensure_wine_display(docker, env, name)
+                _verify_guest_bash(docker, env, kind, name)
+                _activate_guest_vnc(docker, env, kind, name)
+            except Exception as error:
+                # The one shared container can exit between inspect and exec.
+                # Keep its exit evidence even on the reuse path.
+                try:
+                    evidence = _guest_container_failure_evidence(docker, env, name)
+                except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as diagnostic_error:
+                    evidence = 'Docker exit evidence unavailable: ' + str(diagnostic_error)
+                raise RuntimeError(str(error) + '; ' + evidence) from error
             return
         _stop_owned_guests_locked_one(docker, env, name)
     environment = ['-e', 'MSYSTEM=UCRT64', '-e', 'CHERE_INVOKING=1',
@@ -7051,17 +7135,39 @@ def _start_guest_locked(sdk: Path, env: dict[str, str], docker: str,
             '--publish', f'127.0.0.1:{_LAUNCHER_PORTS["win"]}:6081',
             *_guest_host_binds(sdk, kind, workspace),
             *environment, '--workdir', '/workspace' if workspace else '/',
-            '--entrypoint', '/bin/sh', image,
-            '-c', 'trap "exit 0" TERM INT; while :; do sleep 3600 & wait $!; done']
+            # Do not use a shell-owned background sleep/wait loop as PID 1.
+            # An interactive shell is created only by an explicit docker exec;
+            # this foreground keepalive has no inherited stdin or shell traps.
+            '--entrypoint', '/bin/sleep', image, 'infinity']
     _run_checked(args, env, title='Starting one reusable ' + kind + ' guest', timeout=120)
     try:
         if kind == 'win':
             _ensure_wine_display(docker, env, name)
         _verify_guest_bash(docker, env, kind, name)
         _activate_guest_vnc(docker, env, kind, name)
+    except Exception as error:
+        # Docker exec only says "container ... is not running". Capture the
+        # real exit status / OOM flag / entrypoint stderr BEFORE removing it.
+        # There is exactly one named Debian container for Linux and Windows.
+        try:
+            evidence = _guest_container_failure_evidence(docker, env, name)
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as diagnostic_error:
+            evidence = 'Docker exit evidence unavailable: ' + str(diagnostic_error)
+        # Linux and Windows are two capabilities of THIS SAME container.
+        # A broken Windows Wine/VNC probe must not delete the functioning
+        # Linux Bash container (and vice versa).  Only remove it when Docker
+        # confirms that the shared container has actually stopped.
+        try:
+            running = _docker_call(docker, env, 'container', 'inspect', '--format',
+                                   '{{.State.Running}}', name, timeout=15)
+            if running.returncode or running.stdout.strip() != 'true':
+                _stop_owned_guests_locked_one(docker, env, name)
+            else:
+                evidence += '; keeping running shared guest for the other platform'
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as cleanup_error:
+            evidence += '; cleanup inspection failed: ' + str(cleanup_error)
+        raise RuntimeError(str(error) + '; ' + evidence) from error
     except BaseException:
-        # Never mark a broken Wine/MSYS2 guest as reusable on the next tab.
-        # This is our newly-created named container, not a foreign workload.
         _stop_owned_guests_locked_one(docker, env, name)
         raise
 
@@ -7196,6 +7302,17 @@ def boot_runtime_guests() -> dict:
             except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
                 failures[kind] = str(error)
                 print('[DEVTOOLS] ' + kind + ' guest FAILED: ' + str(error), flush=True)
+        if not ready:
+            # No verified capability depends on this container. Capture of
+            # each startup failure has already happened before this cleanup.
+            # Do not keep a completely unusable guest alive until app exit.
+            # A cleanup failure must NOT mask the platform-specific cause.
+            try:
+                _stop_owned_guests_locked(docker, env)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as cleanup_error:
+                failures['cleanup'] = str(cleanup_error)
+                print('[DEVTOOLS] Unusable shared guest cleanup FAILED: ' +
+                      str(cleanup_error), flush=True)
     return {'installed': True, 'guests': ready, 'errors': failures,
             'docker': 'one-managed-engine'}
 

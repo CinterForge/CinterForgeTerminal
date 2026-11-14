@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import time
 import struct
+import tempfile
 import zlib
 
 from host import HOST_RELEASE
@@ -314,23 +315,36 @@ def _sign_and_verify_with_login_keychain(app: Path) -> None:
         sign_launcher(vm)
     sign_flags = (['--options', 'runtime', '--timestamp'] if identity
                   else ['--timestamp=none'])
+    from host.xcode_signing import release_sandbox_entitlements
+    sandbox_entitlements = release_sandbox_entitlements()
+    app_entitlements = sandbox_entitlements.copy()
+    # The Xcode target owns sandbox, network and user-selected file settings.
+    # The native VM has its own virtualization entitlement, not the outer app's.
     # Diagnostic beta only: test all SIX Hardened Runtime exceptions at once.
     # Debugging Tool means cs.debugger, NOT get-task-allow (notarization rejects
     # get-task-allow on distributed software). Normal Release is unchanged.
     diagnostic = os.environ.get('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS') == '1'
     diagnostic_entitlements = Path(__file__).resolve().parents[1] / 'build/xcode/DiagnosticBeta.entitlements'
     exception_flags = ['--entitlements', str(diagnostic_entitlements)] if diagnostic else []
+    # if diagnostic:
+    #     import plistlib
+    #     claims = plistlib.loads(diagnostic_entitlements.read_bytes())
+    #     required = ('allow-jit', 'allow-unsigned-executable-memory',
+    #                 'allow-dyld-environment-variables', 'disable-library-validation',
+    #                 'disable-executable-page-protection', 'debugger')
+    #     if any(claims.get('com.apple.security.cs.' + key) is not True for key in required):
+    #         raise RuntimeError('Incomplete diagnostic Beta Hardened Runtime entitlements')
+    #     if claims.get('com.apple.security.get-task-allow'):
+    #         raise RuntimeError('Diagnostic Beta must not include get-task-allow (notarization)')
+    #     print('[MAC SIGN] DIAGNOSTIC BETA: all six Hardened Runtime exceptions enabled', flush=True)
+    # Do not put the parent application's sandbox on any nested executable.
+    # codesign --deep --sign would re-sign nested code and can overwrite the
+    # independently signed VM's virtualization-only entitlement.
     if diagnostic:
-        import plistlib
-        claims = plistlib.loads(diagnostic_entitlements.read_bytes())
-        required = ('allow-jit', 'allow-unsigned-executable-memory',
-                    'allow-dyld-environment-variables', 'disable-library-validation',
-                    'disable-executable-page-protection', 'debugger')
-        if any(claims.get('com.apple.security.cs.' + key) is not True for key in required):
-            raise RuntimeError('Incomplete diagnostic Beta Hardened Runtime entitlements')
-        if claims.get('com.apple.security.get-task-allow'):
-            raise RuntimeError('Diagnostic Beta must not include get-task-allow (notarization)')
-        print('[MAC SIGN] DIAGNOSTIC BETA: all six Hardened Runtime exceptions enabled', flush=True)
+        diagnostic_claims = plistlib.loads(diagnostic_entitlements.read_bytes())
+        if diagnostic_claims.get('com.apple.security.get-task-allow'):
+            raise RuntimeError('Diagnostic Beta must not include get-task-allow')
+        app_entitlements.update(diagnostic_claims)
     if identity:
         # Apple notarization inspects *all* nested Mach-O code, including the
         # private Python/Host runtime below Resources (which --deep alone does
@@ -349,10 +363,21 @@ def _sign_and_verify_with_login_keychain(app: Path) -> None:
             subprocess.run(['/usr/bin/codesign', '--force', '--sign', identity,
                             '--preserve-metadata=entitlements', *exception_flags, *sign_flags,
                             str(nested)], check=True, capture_output=True, text=True)
-    subprocess.run(['/usr/bin/codesign', '--force', '--deep',
-                    '--preserve-metadata=entitlements', '--sign', identity or '-',
-                    *exception_flags, *sign_flags, str(app)], check=True, capture_output=True, text=True)
+    # Separate entitlements for the outer app; never rewrite the authored
+    # Xcode plist or the VM's virtualization entitlements in the repository.
+    with tempfile.TemporaryDirectory(prefix='MacCodeSign-', dir=app.parent) as signing_dir:
+        entitlements_path = Path(signing_dir) / 'Terminal.entitlements'
+        entitlements_path.write_bytes(plistlib.dumps(app_entitlements))
+        # Release nested Mach-O files have already been signed individually.
+        # Avoid --deep on Release, which propagates the outer sandbox to them.
+        # Preserve the original deep ad-hoc behavior for local development.
+        deep = [] if identity else ['--deep']
+        subprocess.run(['/usr/bin/codesign', '--force', *deep,
+                        '--preserve-metadata=entitlements', '--sign', identity or '-',
+                        '--entitlements', str(entitlements_path), *sign_flags,
+                        str(app)], check=True, capture_output=True, text=True)
     _verify_signature(app)
+    _verify_app_entitlements(app, sandbox_entitlements)
     if not has_virtualization_entitlement(vm):
         raise RuntimeError('VM entitlements missing after packaging; refusing broken release')
 
@@ -363,6 +388,27 @@ def _verify_signature(app: Path) -> None:
     if result.returncode:
         raise RuntimeError('Mac app code signature invalid: ' + str(app) + '\n' +
                            (result.stderr or result.stdout).strip())
+
+
+def _verify_app_entitlements(app: Path, expected: dict[str, bool]) -> None:
+    """Verify codesign actually embedded the Xcode-selected sandbox rights."""
+    result = subprocess.run(
+        ['/usr/bin/codesign', '--display', '--entitlements', ':-', str(app)],
+        capture_output=True, check=False,
+    )
+    if result.returncode:
+        raise RuntimeError('Cannot inspect signed Mac app entitlements: ' +
+                           result.stderr.decode('utf-8', 'replace').strip())
+    try:
+        actual = plistlib.loads(result.stdout)
+    except (ValueError, TypeError, plistlib.InvalidFileException) as error:
+        raise RuntimeError('Cannot decode signed Mac app entitlements') from error
+    for name, required in expected.items():
+        if actual.get(name) is not required:
+            raise RuntimeError('Signed Mac app missing Xcode entitlement: ' + name)
+    if actual.get('com.apple.security.virtualization'):
+        raise RuntimeError('Outer Terminal app must not inherit the VM virtualization entitlement')
+    print('[MAC SIGN] PASS: Xcode sandbox/network entitlements verified on signed app', flush=True)
 
 
 def application(builds: Path) -> Path:
@@ -401,24 +447,14 @@ def stage(builds: Path) -> Path:
     resources = app / 'Contents/Resources'
     resources.mkdir(parents=True, exist_ok=True)
     (resources / 'HostRelease.txt').write_text(HOST_RELEASE + '\n')
-    info = {
-        'CFBundleName': 'CinterForge Terminal',
-        'CFBundleDisplayName': 'CinterForge Terminal',
-        'CFBundleIdentifier': 'com.cinterforge.terminal',
-        'CFBundleExecutable': 'CinterForgeTerminal',
-        'CFBundlePackageType': 'APPL',
-        'CFBundleVersion': HOST_RELEASE,
-        'CFBundleShortVersionString': HOST_RELEASE,
-        'LSMinimumSystemVersion': '12.0',
-        'NSLocalNetworkUsageDescription': 'Discover and connect to CinterForge web services on your local network.',
-        'NSBonjourServices': ['_http._tcp'],
-    }
-    # The app icon derives only from the already-authored Terminal asset.
+    # Assemble from the authored Xcode Info.plist, exactly as the Xcode target
+    # does. Only its $(BUILD_SETTING) variables are expanded into the bundle.
+    # Never change build/xcode/Info.plist or invent a competing Python dict.
+    from host.xcode_signing import release_info_plist_bytes
     icon = _icon_source()
-    destination=app / 'Contents/Resources/AppIcon.icns'
-    build_icns(icon,destination,builds)
-    info['CFBundleIconFile']='AppIcon.icns'
-    (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
+    destination = app / 'Contents/Resources/AppIcon.icns'
+    build_icns(icon, destination, builds)
+    (app / 'Contents/Info.plist').write_bytes(release_info_plist_bytes())
     _stage_complete_resources(builds, app)
     _sign_and_verify(app)
     print('[MAC APP] staged ' + str(app), flush=True)

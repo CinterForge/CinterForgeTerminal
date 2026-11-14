@@ -35,6 +35,53 @@ class SharedGuestVMTests(unittest.TestCase):
         self.assertEqual(archive.name, 'f' * 16 + '.tar')
         self.assertTrue(image.endswith('f' * 16))
 
+    def test_one_failed_platform_keeps_verified_shared_guest(self):
+        # In particular a Windows Wine/VNC failure cannot orphan the Linux
+        # Code-OSS PTY by removing its already-verified Docker container.
+        with (mock.patch.object(terminal.platform, 'system', return_value='Darwin'),
+              mock.patch.object(terminal, 'sdk_root', return_value=self.sdk),
+              mock.patch.object(terminal, '_env', return_value=self.env),
+              mock.patch.object(terminal, '_guest_workspace', return_value=None),
+              mock.patch.object(terminal, '_ensure_docker_locked', return_value='/docker'),
+              mock.patch.object(terminal, '_start_guest_locked',
+                                side_effect=[None, RuntimeError('Wine failure')]) as start,
+              mock.patch.object(terminal, '_stop_owned_guests_locked') as stop):
+            result = terminal.boot_runtime_guests()
+        self.assertEqual(result['guests'], ['linux'])
+        self.assertIn('Wine failure', result['errors']['win'])
+        self.assertEqual(start.call_count, 2)
+        stop.assert_not_called()
+
+    def test_both_failed_platforms_cleanup_unusable_owned_guest(self):
+        with (mock.patch.object(terminal.platform, 'system', return_value='Darwin'),
+              mock.patch.object(terminal, 'sdk_root', return_value=self.sdk),
+              mock.patch.object(terminal, '_env', return_value=self.env),
+              mock.patch.object(terminal, '_guest_workspace', return_value=None),
+              mock.patch.object(terminal, '_ensure_docker_locked', return_value='/docker'),
+              mock.patch.object(terminal, '_start_guest_locked',
+                                side_effect=[RuntimeError('Linux exit 1'), RuntimeError('Wine exit 2')]),
+              mock.patch.object(terminal, '_stop_owned_guests_locked') as stop):
+            result = terminal.boot_runtime_guests()
+        self.assertEqual(result['guests'], [])
+        self.assertIn('Linux exit 1', result['errors']['linux'])
+        self.assertIn('Wine exit 2', result['errors']['win'])
+        stop.assert_called_once_with('/docker', self.env)
+
+    def test_cleanup_error_cannot_replace_original_guest_startup_errors(self):
+        with (mock.patch.object(terminal.platform, 'system', return_value='Darwin'),
+              mock.patch.object(terminal, 'sdk_root', return_value=self.sdk),
+              mock.patch.object(terminal, '_env', return_value=self.env),
+              mock.patch.object(terminal, '_guest_workspace', return_value=None),
+              mock.patch.object(terminal, '_ensure_docker_locked', return_value='/docker'),
+              mock.patch.object(terminal, '_start_guest_locked',
+                                side_effect=[RuntimeError('Linux exit 1'), RuntimeError('Wine exit 2')]),
+              mock.patch.object(terminal, '_stop_owned_guests_locked',
+                                side_effect=RuntimeError('remove failed'))):
+            result = terminal.boot_runtime_guests()
+        self.assertIn('Linux exit 1', result['errors']['linux'])
+        self.assertIn('Wine exit 2', result['errors']['win'])
+        self.assertIn('remove failed', result['errors']['cleanup'])
+
     def test_linux_and_windows_requests_cannot_start_colima_concurrently(self):
         max_active = [0]
         active = [0]
@@ -55,6 +102,132 @@ class SharedGuestVMTests(unittest.TestCase):
                                            self.env, self.workspace) for _ in range(2)]
                 self.assertEqual([f.result() for f in futures], ['docker', 'docker'])
         self.assertEqual(max_active[0], 1)
+
+    def test_installed_wrong_arch_preserves_existing_vm_without_replacement(self):
+        # Wrong architecture is not repairable by rewriting a saved Colima
+        # YAML file; an automatic delete causes a fresh Ubuntu download and
+        # destroys persistent cached state behind the startup splash.
+        config = self.colima / 't/colima.yaml'
+        config.parent.mkdir(parents=True)
+        original = 'arch: aarch64\nvmType: vz\nmountType: virtiofs\n'
+        config.write_text(original)
+        calls = []
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if argv[1] == 'info':
+                value = 'arm64' if '{{.Architecture}}' in argv else '29.8.1'
+                return subprocess.CompletedProcess(argv, 0, value + '\n', '')
+            raise AssertionError(argv)
+        with (mock.patch.dict(os.environ, {'CINTER_TERMINAL_RUNTIME_MODE': 'installed'}),
+              mock.patch.object(terminal, '_mac_host_mounts', return_value=[(Path('/'), '/host/mac')]),
+              mock.patch.object(terminal.subprocess, 'run', side_effect=run),
+              mock.patch.object(terminal, '_stop_owned_guests_locked') as cleanup,
+              mock.patch.object(terminal, '_run_checked') as checked):
+            with self.assertRaisesRegex(RuntimeError, 'Preserving the existing Colima profile'):
+                terminal._ensure_docker(self.sdk, self.env, self.workspace)
+        self.assertEqual(config.read_text(), original)
+        self.assertTrue(all(call[1] == 'info' for call in calls))
+        cleanup.assert_not_called()
+        checked.assert_not_called()
+
+    def test_installed_wrong_arch_preserves_even_foreign_stopped_containers(self):
+        # Wrong-arch detection must not even inspect/mutate other containers:
+        # no app-start operation is permitted to delete or replace the VM.
+        def run(argv, **kwargs):
+            if argv[1] == 'info':
+                value = 'arm64' if '{{.Architecture}}' in argv else '29.8.1'
+                return subprocess.CompletedProcess(argv, 0, value + '\n', '')
+            raise AssertionError(argv)
+        with (mock.patch.dict(os.environ, {'CINTER_TERMINAL_RUNTIME_MODE': 'installed'}),
+              mock.patch.object(terminal, '_mac_host_mounts', return_value=[(Path('/'), '/host/mac')]),
+              mock.patch.object(terminal.subprocess, 'run', side_effect=run),
+              mock.patch.object(terminal, '_run_checked') as checked):
+            with self.assertRaisesRegex(RuntimeError, 'not native x86-64'):
+                terminal._ensure_docker(self.sdk, self.env, self.workspace)
+        checked.assert_not_called()
+
+    def test_installed_stopped_wrong_arch_does_not_delete_or_retry(self):
+        config = self.colima / 't/colima.yaml'
+        config.parent.mkdir(parents=True)
+        original = ('arch: aarch64\nvmType: vz\nmountType: virtiofs\n'
+                    'mounts:\n  - location: "/"\n    mountPoint: "/host/mac"\n'
+                    '    writable: true\n')
+        config.write_text(original)
+        state = {'running': False, 'operations': []}
+        def run(argv, **kwargs):
+            if argv[1] == 'info':
+                if not state['running']:
+                    return subprocess.CompletedProcess(argv, 1, '', 'no daemon')
+                value = 'arm64' if '{{.Architecture}}' in argv else '29.8.1'
+                return subprocess.CompletedProcess(argv, 0, value + '\n', '')
+            if argv[1] == 'status':
+                return subprocess.CompletedProcess(argv, 1, '', 'not running')
+            raise AssertionError(argv)
+        def checked(argv, env, **kwargs):
+            state['operations'].append(argv)
+            if argv[1] == 'start':
+                state['running'] = True
+        with (mock.patch.dict(os.environ, {'CINTER_TERMINAL_RUNTIME_MODE': 'installed'}),
+              mock.patch.object(terminal, '_mac_host_mounts', return_value=[(Path('/'), '/host/mac')]),
+              mock.patch.object(terminal.subprocess, 'run', side_effect=run),
+              mock.patch.object(terminal, '_run_checked', side_effect=checked)):
+            with self.assertRaisesRegex(RuntimeError, 'Preserving the existing Colima profile'):
+                terminal._ensure_docker(self.sdk, self.env, None)
+        self.assertEqual([command[1] for command in state['operations']], ['start'])
+        self.assertNotIn('--arch', state['operations'][0])
+        self.assertEqual(config.read_text(), original)
+
+    def test_installed_new_profile_starts_with_explicit_native_amd64_flags(self):
+        # First profile initialization is distinct from destructive recovery.
+        state = {'started': False, 'commands': []}
+        def run(argv, **kwargs):
+            if argv[1] == 'info':
+                if not state['started']:
+                    return subprocess.CompletedProcess(argv, 1, '', 'no daemon')
+                value = 'x86_64' if '{{.Architecture}}' in argv else '29.8.1'
+                return subprocess.CompletedProcess(argv, 0, value + '\n', '')
+            if argv[1] == 'status':
+                return subprocess.CompletedProcess(argv, 1, '', 'not initialized')
+            if argv[1] == 'ssh':
+                return subprocess.CompletedProcess(argv, 0, '', '')
+            raise AssertionError(argv)
+        def checked(argv, env, **kwargs):
+            state['commands'].append(argv)
+            if argv[1] == 'start':
+                state['started'] = True
+        with (mock.patch.dict(os.environ, {'CINTER_TERMINAL_RUNTIME_MODE': 'installed'}),
+              mock.patch.object(terminal, '_mac_host_mounts', return_value=[(Path('/'), '/host/mac')]),
+              mock.patch.object(terminal.subprocess, 'run', side_effect=run),
+              mock.patch.object(terminal, '_run_checked', side_effect=checked)):
+            self.assertEqual(terminal._ensure_docker(self.sdk, self.env, None),
+                             str(self.sdk / 'mac/env/bin/docker'))
+        self.assertEqual([command[1] for command in state['commands']], ['start'])
+        command = state['commands'][0]
+        self.assertEqual(command[command.index('--arch') + 1], 'x86_64')
+        self.assertEqual(command[command.index('--vm-type') + 1], 'qemu')
+        self.assertNotIn('delete', command)
+
+    def test_installed_native_amd64_profile_does_not_recreate_vm(self):
+        config = self.colima / 't/colima.yaml'
+        config.parent.mkdir(parents=True)
+        config.write_text('arch: x86_64\nvmType: qemu\nmountType: 9p\n'
+                          'rosetta: false\nbinfmt: false\nmounts:\n'
+                          '  - location: "/"\n    mountPoint: "/host/mac"\n'
+                          '    writable: true\n')
+        def run(argv, **kwargs):
+            if argv[1] == 'info':
+                value = 'x86_64' if '{{.Architecture}}' in argv else '29.8.1'
+                return subprocess.CompletedProcess(argv, 0, value + '\n', '')
+            if argv[1] == 'ssh':
+                return subprocess.CompletedProcess(argv, 0, '', '')
+            raise AssertionError(argv)
+        with (mock.patch.dict(os.environ, {'CINTER_TERMINAL_RUNTIME_MODE': 'installed'}),
+              mock.patch.object(terminal, '_mac_host_mounts', return_value=[(Path('/'), '/host/mac')]),
+              mock.patch.object(terminal.subprocess, 'run', side_effect=run),
+              mock.patch.object(terminal, '_run_checked') as checked):
+            docker = terminal._ensure_docker(self.sdk, self.env, self.workspace)
+        self.assertEqual(docker, str(self.sdk / 'mac/env/bin/docker'))
+        checked.assert_not_called()
 
     def test_host_mounts_cover_all_drives_without_overlapping_lima_locations(self):
         # The host root includes /Volumes, including names with spaces.

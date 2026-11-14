@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import plistlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -20,6 +21,81 @@ SHA = '044C6D268490638165FCF56C2CA84888F5A8ADEA'
 
 
 class XcodeSigningTests(unittest.TestCase):
+    def test_authored_xcode_plist_is_rendered_without_source_changes(self):
+        info_source = signing.REPO / 'build/xcode/Info.plist'
+        before = info_source.read_bytes()
+        settings = {
+            'INFOPLIST_FILE': 'build/xcode/Info.plist',
+            'PRODUCT_BUNDLE_IDENTIFIER': signing.BUNDLE_ID,
+            'CURRENT_PROJECT_VERSION': '2026.11.23',
+        }
+        rendered = signing.release_info_plist_bytes(settings)
+        parsed = plistlib.loads(rendered)
+        self.assertEqual(parsed['CFBundleIdentifier'], signing.BUNDLE_ID)
+        self.assertEqual(parsed['CFBundleVersion'], '2026.11.23')
+        self.assertEqual(parsed['NSBonjourServices'], ['_http._tcp'])
+        self.assertIn('NSLocalNetworkUsageDescription', parsed)
+        self.assertTrue(parsed['NSHighResolutionCapable'])
+        self.assertEqual(info_source.read_bytes(), before)
+        with self.assertRaisesRegex(RuntimeError, 'Unresolved Xcode Info.plist'):
+            signing.release_info_plist_bytes({'INFOPLIST_FILE': 'build/xcode/Info.plist'})
+
+    def test_xcode_sandbox_network_and_file_choices_drive_release_entitlements(self):
+        settings = {
+            'ENABLE_APP_SANDBOX': 'YES',
+            'ENABLE_INCOMING_NETWORK_CONNECTIONS': 'YES',
+            'ENABLE_OUTGOING_NETWORK_CONNECTIONS': 'YES',
+            'ENABLE_USER_SELECTED_FILES': 'readwrite',
+            'ENABLE_FILE_ACCESS_DOWNLOADS_FOLDER': 'readwrite',
+            'ENABLE_FILE_ACCESS_PICTURE_FOLDER': 'readwrite',
+        }
+        actual = signing.release_sandbox_entitlements(settings)
+        for entry in ('com.apple.security.app-sandbox',
+                      'com.apple.security.network.server',
+                      'com.apple.security.network.client',
+                      'com.apple.security.files.user-selected.read-write',
+                      'com.apple.security.files.downloads.read-write',
+                      'com.apple.security.assets.pictures.read-write'):
+            self.assertIs(actual.get(entry), True, entry)
+        self.assertNotIn('com.apple.security.virtualization', actual)
+        settings['ENABLE_INCOMING_NETWORK_CONNECTIONS'] = 'NO'
+        self.assertNotIn('com.apple.security.network.server',
+                         signing.release_sandbox_entitlements(settings))
+
+    def test_release_codesign_applies_xcode_sandbox_only_to_outer_app(self):
+        with tempfile.TemporaryDirectory() as folder:
+            app = Path(folder) / 'CinterForge Terminal.app'
+            vm = (app / 'Contents/Resources/Builds/CinterForgeTerminal/Dependencies/'
+                  'LinuxKit/mac/arm64/CinterBDSVM')
+            vm.parent.mkdir(parents=True)
+            vm.write_bytes(b'fixture')
+            commands = []
+            def capture_codesign(cmd, **kwargs):
+                entitlements = None
+                if '--entitlements' in cmd:
+                    entitlements = plistlib.loads(Path(cmd[cmd.index('--entitlements') + 1]).read_bytes())
+                commands.append((list(cmd), entitlements))
+                return subprocess.CompletedProcess(cmd, 0, '', '')
+            chosen = {'com.apple.security.app-sandbox': True,
+                      'com.apple.security.network.client': True,
+                      'com.apple.security.network.server': True}
+            with (mock.patch.dict(mac_app.os.environ, {'CINTER_MAC_SIGN_IDENTITY': SHA}, clear=True),
+                  mock.patch.object(mac_app.os, 'uname', return_value=SimpleNamespace(sysname='Darwin')),
+                  mock.patch.object(launcher_signing, 'sign_launcher') as sign_vm,
+                  mock.patch.object(launcher_signing, 'has_virtualization_entitlement', return_value=True),
+                  mock.patch.object(mac_app, '_verify_signature'),
+                  mock.patch.object(mac_app, '_verify_app_entitlements'),
+                  mock.patch.object(signing, 'release_sandbox_entitlements', return_value=chosen),
+                  mock.patch.object(mac_app.subprocess, 'run', side_effect=capture_codesign)):
+                mac_app._sign_and_verify(app)
+            sign_vm.assert_called_once_with(vm, identity=SHA)
+            self.assertEqual(len(commands), 1)
+            command, entitlements = commands[0]
+            self.assertEqual(entitlements, chosen)
+            self.assertNotIn('--deep', command)
+            self.assertNotIn('com.apple.security.virtualization', entitlements)
+            self.assertNotIn('--timestamp=none', command)
+
     def test_xcode_project_selects_macos_specific_release_signer(self):
         # Assert against the real checked-in Xcode settings, not a second
         # configuration invented by this test.
@@ -54,6 +130,21 @@ class XcodeSigningTests(unittest.TestCase):
                 args=[], returncode=0, stdout=listing, stderr='')):
             self.assertEqual(signing._developer_id_identity(TEAM), SHA)
 
+    def test_signed_app_entitlement_verification_rejects_missing_network(self):
+        expectation = {'com.apple.security.app-sandbox': True,
+                       'com.apple.security.network.server': True,
+                       'com.apple.security.network.client': True}
+        response = subprocess.CompletedProcess([], 0, stdout=plistlib.dumps({
+            'com.apple.security.app-sandbox': True,
+            'com.apple.security.network.client': True,
+        }), stderr=b'')
+        with mock.patch.object(mac_app.subprocess, 'run', return_value=response):
+            with self.assertRaisesRegex(RuntimeError, 'com.apple.security.network.server'):
+                mac_app._verify_app_entitlements(Path('/tmp/fixture.app'), expectation)
+        response.stdout = plistlib.dumps(expectation)
+        with mock.patch.object(mac_app.subprocess, 'run', return_value=response):
+            mac_app._verify_app_entitlements(Path('/tmp/fixture.app'), expectation)
+
     def test_mac_app_seals_vm_with_exact_xcode_release_sha(self):
         # The real Mac failure was `codesign ... --sign "Developer ID ..."`
         # returning "no identity found" despite the valid SHA in Keychain.
@@ -75,6 +166,8 @@ class XcodeSigningTests(unittest.TestCase):
                   mock.patch.object(launcher_signing, 'sign_launcher', side_effect=fake_sign),
                   mock.patch.object(launcher_signing, 'has_virtualization_entitlement', return_value=True),
                   mock.patch.object(mac_app, '_verify_signature'),
+                  mock.patch.object(mac_app, '_verify_app_entitlements'),
+                  mock.patch.object(signing, 'release_sandbox_entitlements', return_value={}),
                   mock.patch.object(mac_app.subprocess, 'run', side_effect=fake_run)):
                 mac_app._sign_and_verify(app)
             self.assertIn(('vm', SHA), calls)
@@ -97,10 +190,13 @@ class XcodeSigningTests(unittest.TestCase):
                   mock.patch.object(launcher_signing, 'sign_launcher'),
                   mock.patch.object(launcher_signing, 'has_virtualization_entitlement', return_value=True),
                   mock.patch.object(mac_app, '_verify_signature'),
+                  mock.patch.object(mac_app, '_verify_app_entitlements'),
+                  mock.patch.object(signing, 'release_sandbox_entitlements', return_value={}),
                   mock.patch.object(mac_app.subprocess, 'run', side_effect=lambda cmd, **kwargs:
                                     calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, '', ''))):
                 mac_app._sign_and_verify(app)
-            self.assertNotIn('--entitlements', calls[0])
+            self.assertIn('--entitlements', calls[0])
+            self.assertNotIn(str(signing.REPO / 'build/xcode/DiagnosticBeta.entitlements'), calls[0])
 
     def test_codesign_uses_real_login_home_not_colima_managed_home(self):
         # `Cinter build all` replaces HOME for the Colima/Lima process family.
@@ -135,6 +231,8 @@ class XcodeSigningTests(unittest.TestCase):
                   mock.patch.object(launcher_signing, 'sign_launcher', side_effect=fake_sign),
                   mock.patch.object(launcher_signing, 'has_virtualization_entitlement', return_value=True),
                   mock.patch.object(mac_app, '_verify_signature'),
+                  mock.patch.object(mac_app, '_verify_app_entitlements'),
+                  mock.patch.object(signing, 'release_sandbox_entitlements', return_value={}),
                   mock.patch.object(mac_app.subprocess, 'run', side_effect=fake_codesign)):
                 mac_app._sign_and_verify(app)
                 self.assertEqual(os.environ['HOME'], str(managed_home))

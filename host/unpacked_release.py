@@ -100,8 +100,12 @@ def _source(builds: Path, name: str, data: dict, target: str, *, verify: bool = 
     if not real.is_relative_to(builds):
         raise RuntimeError('Stage/Publish input escaped canonical Builds: ' + str(real))
     if _stat(real) != data['stat']:
-        raise RuntimeError('Build input changed after Build: ' + name + '; rebuild before Stage/Publish')
-    if verify and _sha(real) != data['sha256']:
+        # Code signing, copying and filesystem metadata can change ctime or
+        # mtime without changing any bytes. A matching recorded SHA-256 is
+        # still an unchanged Build input. Never reuse different content.
+        if real.stat().st_size != data['bytes'] or _sha(real) != data['sha256']:
+            raise RuntimeError('Build input changed after Build: ' + name + '; rebuild before Stage/Publish')
+    elif verify and _sha(real) != data['sha256']:
         raise RuntimeError('Build input SHA-256 mismatch: ' + name)
     return real
 

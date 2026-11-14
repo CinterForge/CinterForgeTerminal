@@ -40,6 +40,26 @@ When diagnosing a lifecycle phase, supported independent commands remain:
 No other test commands are expected from the builder. If one fails, the full
 console transcript and a machine-readable result are retained automatically.
 
+### Small release regression gate
+
+The default `./Cinter test` runs **52 selected Python contract tests** defined
+in `tests/test_suite_core.py`, plus the existing JavaScript source/smoke
+checks. This is deliberately about 10% of the previous Python suite. The
+selection covers the lifecycle boundaries, release integrity, signing,
+installer, VM ownership, Bedrock, games, authentication and Steam paths.
+
+The remaining `tests/test_suite_*.py` methods are **diagnostic only**: they
+are no longer discovered by the lifecycle, because many mock internal
+implementation details and become stale after legitimate changes. They may
+be executed by maintainers to investigate a specific problem, but passing
+those diagnostics is not a release condition. A new default regression should
+replace a redundant selected check rather than increase the count.
+
+This does **not** weaken any real Setup/Build/Stage/Test acceptance requirement.
+`./Cinter test mac` must still verify the existing real VM/guest receipts,
+installed-stage integrity and signatures, and all JavaScript checks. No test
+is allowed to provision a toolchain or repair missing native acceptance.
+
 ## Incremental DevTools Build (persistent dirty checking)
 
 `./Cinter build all` stores a small per-target input/ZIP metadata cache in

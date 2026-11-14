@@ -580,6 +580,26 @@ class FourArtifactSteamReleaseTests(unittest.TestCase):
         for target in ('mac', 'win', 'linux'):
             self.assertEqual(first['artifacts'][target], second['artifacts'][target])
 
+    def test_unchanged_info_plist_metadata_does_not_invalidate_build_receipt(self):
+        from host import unpacked_release as unpacked
+        source = (self.builds / 'CinterForgeTerminal/Applications/mac/arm64/Release/'
+                  'CinterForge Terminal.app/Contents/Info.plist')
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b'<plist>original signed contents</plist>')
+        name = 'CinterForge Terminal.app/Contents/Info.plist'
+        details = {'source': str(source), 'sha256': unpacked._sha(source),
+                   'bytes': source.stat().st_size, 'stat': unpacked._stat(source)}
+        # Rewriting identical bytes changes ctime even if mtime is restored.
+        original_mtime = source.stat().st_mtime_ns
+        source.write_bytes(source.read_bytes())
+        os.utime(source, ns=(original_mtime, original_mtime))
+        self.assertNotEqual(details['stat'], unpacked._stat(source))
+        self.assertEqual(unpacked._source(self.builds, name, details, 'mac', verify=True), source)
+        source.write_bytes(b'X' + source.read_bytes()[1:])
+        os.utime(source, ns=(original_mtime, original_mtime))
+        with self.assertRaisesRegex(RuntimeError, 'Build input changed after Build'):
+            unpacked._source(self.builds, name, details, 'mac', verify=True)
+
     def test_same_size_rewrite_even_if_mtime_restored_invalidates_build(self):
         executable = self.builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/cmake'
         executable.parent.mkdir(parents=True, exist_ok=True)

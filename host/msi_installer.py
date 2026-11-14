@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 import re
 import shutil
@@ -24,6 +27,8 @@ UPGRADE_CODE = '506BDCC3-BB2B-5035-BC0D-FD99F49F3CB3'
 GUID_NAMESPACE = uuid.UUID('e67096da-e7c1-4c25-9a96-68b6eea50ff1')
 NS = 'http://schemas.microsoft.com/wix/2006/wi'
 SCHEMA = 'cinterforge.terminal.windows-msi-preflight.v5'
+# Increment when authored MSI structure or compiler invocation changes.
+PUBLISH_RECIPE = 'cinterforge.terminal.windows-msi-publish.v2'
 
 
 def _builds(builds: Path) -> Path:
@@ -96,6 +101,113 @@ def _cross(builds: Path, *, setup: bool):
     if not cross._has_image(cross.image):
         raise RuntimeError('Setup Windows cross image is not loaded; run Setup (Publish cannot load it)')
     return cross
+
+
+class _MacNativeMSITools:
+    """Native Apple-Silicon tools from the Setup-owned micromamba prefix."""
+    provider = 'host'
+
+    def __init__(self, builds: Path):
+        self.bin = builds / 'CinterForgeTerminal/Toolchains/mac/env/bin'
+
+    def path(self, path: Path) -> str:
+        return str(path)
+
+    def execute(self, command: list[str], *, cwd: Path, timeout: int = 600):
+        import subprocess
+        executable = self.bin / command[0]
+        if not executable.is_file() or executable.is_symlink():
+            raise RuntimeError('Setup-provisioned native MSI tool missing: ' + str(executable))
+        env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ.get('PATH', ''))
+        return subprocess.run([str(executable), *map(str, command[1:])], cwd=cwd,
+                              timeout=timeout, check=False, env=env, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+
+def _native_receipt(builds: Path) -> Path:
+    return _stage(builds) / 'mac-native-msi-preflight.json'
+
+
+def _native_compiler(builds: Path) -> _MacNativeMSITools | None:
+    """Publish must not install tools; select only Setup-accepted macOS arm64.
+
+    Prior setups have no receipt and use the working Docker fallback unchanged.
+    """
+    import platform
+    if platform.system() != 'Darwin' or platform.machine() != 'arm64':
+        return None
+    path = _native_receipt(builds)
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        data = json.loads(path.read_text('utf-8'))
+        tools = _MacNativeMSITools(builds)
+        if (data.get('schema') != 'cinterforge.terminal.native-msi.v1' or
+                data.get('status') != 'passed' or
+                data.get('version') != '0.106'):
+            return None
+        for name in ('wixl', 'msiinfo', 'msiextract'):
+            binary = tools.bin / name
+            if not binary.is_file() or binary.is_symlink() or not os.access(binary, os.X_OK):
+                return None
+            if data['binaries'][name] != _sha(binary):
+                return None
+        return tools
+    except (KeyError, ValueError, TypeError, OSError):
+        return None
+
+
+def _setup_mac_native(builds: Path) -> dict | None:
+    """Setup-only acceptance of the provisioned native ARM64 MSI producer.
+
+    Verify the same smoke, template registration, and cabinet extraction as
+    the established Debian compiler before enabling it during Publish.
+    """
+    import platform
+    if platform.system() != 'Darwin' or platform.machine() != 'arm64':
+        return None
+    tools = _MacNativeMSITools(builds)
+    report = {'schema': 'cinterforge.terminal.native-msi.v1',
+              'status': 'failed', 'version': '0.106'}
+    proof = _native_receipt(builds)
+    try:
+        version = tools.execute(['wixl', '--version'], cwd=builds, timeout=30)
+        if version.returncode or '0.106' not in (version.stdout or ''):
+            raise RuntimeError('Native MSI compiler must be staged msitools 0.106: ' +
+                               (version.stdout or '')[-500:])
+        report['wixl_version'] = (version.stdout or '').strip()
+        report['binaries'] = {name: _sha(tools.bin / name)
+                              for name in ('wixl', 'msiinfo', 'msiextract')}
+        work = builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/NativeSmoke'
+        work.mkdir(parents=True, exist_ok=True)
+        readme = work / 'README.txt'
+        readme.write_text('CinterForge MSI preflight: actual native wixl MSI cabinet verification.\n',
+                          encoding='utf-8')
+        smoke = _compile(builds, tools, work=work, sources={'README.txt': readme},
+                         release='2026.11.0', smoke=True)
+        smoke_checks = _verify_msi(tools, smoke, cwd=work, smoke=True, smoke_file='README.txt')
+        template_work = builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/NativeTemplateSmoke'
+        template_work.mkdir(parents=True, exist_ok=True)
+        cmd = template_work / 'Terminal.cmd'
+        exe = template_work / 'CinterForge Terminal.exe'
+        cmd.write_text('@echo off\r\necho CinterForge MSI template preflight\r\n', encoding='utf-8')
+        exe.write_bytes(b'CinterForge MSI template fixture (not executable)')
+        template = _compile(builds, tools, work=template_work,
+                            sources={'Terminal.cmd': cmd, 'CinterForge Terminal.exe': exe},
+                            release='2026.11.0', smoke=False)
+        template_checks = _verify_msi(tools, template, cwd=template_work)
+        report.update(status='passed', smoke_sha256=smoke_checks['sha256'],
+                      template_sha256=template_checks['sha256'],
+                      template_checks=template_checks, execution='native-macos-arm64-wixl-x64')
+        print('[WINDOWS MSI SETUP] PASS native macOS ARM64 wixl 0.106: x64 MSI cabinet, '
+              'registration, uninstall actions and shortcut verified', flush=True)
+    except Exception as error:
+        report['error'] = repr(error)
+        raise
+    finally:
+        proof.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_json(proof, report)
+    return report
 
 
 def _run(cross, name: str, command: list[str], *, cwd: Path, timeout: int = 600) -> str:
@@ -220,7 +332,7 @@ def _document(source_files: dict[str, Path], *, release: str, smoke: bool = Fals
 
 
 def _compile(builds: Path, cross, *, work: Path, sources: dict[str, Path],
-             release: str, smoke: bool) -> Path:
+             release: str, smoke: bool, native_scratch: bool = False) -> Path:
     work.mkdir(parents=True, exist_ok=True)
     # wixl is a native Linux executable: SourceFile attributes use guest POSIX
     # paths. Wine Z: paths and 32-bit Windows utilities are never involved.
@@ -230,9 +342,30 @@ def _compile(builds: Path, cross, *, work: Path, sources: dict[str, Path],
     output = work / ('InstallerSmoke.msi' if smoke else 'CinterForgeTerminal-win.msi')
     wxs.write_bytes(xml)
     output.unlink(missing_ok=True)
-    _run(cross, 'wixl native x64 MSI compiler',
-         ['wixl', '--arch', 'x64', '--output', cross.path(output), cross.path(wxs)],
-         cwd=work, timeout=1200)
+    if native_scratch and cross.provider != 'host':
+        # wixl writes an OLE/MSI database. Intermittent libgsf corruption was
+        # observed after direct writes to the macOS bind-mounted /builds.
+        # Each Docker invocation gets an empty, guest-native scratch directory.
+        # Validate the native database BEFORE copying it to the host mount,
+        # flush the copy and byte-compare before exiting that same container.
+        script = (
+            'set -eu\n'
+            'scratch=$(mktemp -d /tmp/cinterforge-msi.XXXXXXXX)\n'
+            "trap 'rm -rf \"$scratch\"' EXIT\n"
+            'wixl --arch x64 --output "$scratch/installer.msi" "$1"\n'
+            'msiinfo tables "$scratch/installer.msi" >/dev/null\n'
+            'cp "$scratch/installer.msi" "$2"\n'
+            'sync "$2"\n'
+            'cmp "$scratch/installer.msi" "$2"\n'
+        )
+        _run(cross, 'wixl native x64 MSI compiler',
+             ['sh', '-c', script, 'cinterforge-msi', cross.path(wxs), cross.path(output)],
+             cwd=work, timeout=1200)
+    else:
+        # Setup's tiny smoke files retain their existing tested compiler path.
+        _run(cross, 'wixl native x64 MSI compiler',
+             ['wixl', '--arch', 'x64', '--output', cross.path(output), cross.path(wxs)],
+             cwd=work, timeout=1200)
     if not output.is_file() or output.is_symlink() or output.stat().st_size < 1024:
         raise RuntimeError('wixl completed without writing a nonempty MSI: ' + str(output))
     return output
@@ -401,11 +534,16 @@ def setup(builds: Path) -> dict:
         # Native Windows ARP visibility/uninstall cannot be inferred from Wine.
         # The compiled MSI's property, action, sequence and shortcut tables are
         # the Setup gate. Test the final package on Windows before release.
+        # Native macOS arm64 wixl must pass the identical MSI smoke and
+        # registration checks before Setup marks the full MSI path accepted.
+        native_acceptance = _setup_mac_native(builds)
         report.update(status='passed', smoke_sha256=checks['sha256'],
                       smoke_file=str(output), checks=checks,
                       template_sha256=template_checks['sha256'],
                       template_file=str(template), template_checks=template_checks,
                       execution='native-linux-wixl-x64')
+        if native_acceptance is not None:
+            report['mac_native'] = native_acceptance
         print('[WINDOWS MSI SETUP] PASS: native wixl x64 MSI, ARPINSTALLLOCATION, '
               'per-machine registration/uninstall action tables and managed shortcut verified; '
               'native Windows install/uninstall remains external acceptance', flush=True)
@@ -419,54 +557,175 @@ def setup(builds: Path) -> dict:
     return report
 
 
-def publish(builds: Path, *, release: str, entries: dict[str, dict]) -> dict:
-    """Compile MSI in the existing provisioned AMD64 guest, owned by Publish."""
-    from host.amd64_backend import managed_amd64_backend
-    with managed_amd64_backend(builds, setup=False):
-        return _publish_with_backend(builds, release=release, entries=entries)
+@contextmanager
+def _publish_lock(builds: Path):
+    """One MSI producer at a time; do not race the shared distribution files."""
+    import fcntl  # MSI cross-publishing runs on POSIX; keep Windows imports safe.
+    directory = builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/Publish'
+    directory.mkdir(parents=True, exist_ok=True)
+    lock = directory / '.publish.lock'
+    if lock.is_symlink():
+        raise RuntimeError('Unsafe symlinked Windows MSI publish lock')
+    with lock.open('a+b') as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            # Legacy Publish wrote its MSI database directly into this shared
+            # directory. It is unverified scratch, NOT the Distribution MSI.
+            for old_name in ('Installer.wxs', 'CinterForgeTerminal-win.msi'):
+                old = directory / old_name
+                if old.is_symlink():
+                    raise RuntimeError('Unsafe symlinked Windows MSI scratch: ' + str(old))
+                if old.is_file():
+                    old.unlink()
+            # Recover abandoned candidates after a crash. A live producer
+            # cannot own these while we hold the exclusive publish lock.
+            for old in directory.glob('Candidate-*'):
+                if old.is_symlink():
+                    raise RuntimeError('Unsafe symlinked MSI candidate: ' + str(old))
+                if old.is_dir():
+                    shutil.rmtree(old)
+            yield directory
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _publish_with_backend(builds: Path, *, release: str,
-                          entries: dict[str, dict]) -> dict:
-    """Publish-only: produce MSI from immutable Windows Build inputs."""
-    builds = _builds(builds)
-    _check_tools(builds)  # validate Setup receipts, do not provision
-    from host.unpacked_release import _source
+def _input_fingerprint(release: str, entries: dict[str, dict]) -> str:
+    """Identify verified Build bytes, not timestamps or volume metadata.
+
+    Every member has already passed _source(..., verify=True); a new Build
+    receipt with identical file hashes must reuse the same verified MSI.
+    """
     from host.universal_package import APP_ROOTS
     prefix = APP_ROOTS['win'] + '/'
-    sources = {}
+    payload = {}
     for name, detail in sorted(entries.items()):
         if not name.startswith(prefix):
             raise RuntimeError('Unexpected Windows Build member: ' + name)
-        source = _source(builds, name, detail, 'win', verify=False)
-        sources[name[len(prefix):]] = source
-    required = ('Terminal.cmd', 'CinterForge Terminal.exe')
-    if any(item not in sources for item in required):
-        raise RuntimeError('Windows Build receipt lacks launchers required for MSI')
-    # No optional DevTools content belongs in the lightweight Windows installer.
-    if any(name.startswith('DevTools/') for name in sources):
-        raise RuntimeError('Windows MSI accidentally includes the optional DevTools bundle')
-    cross = _cross(builds, setup=False)
-    work = builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/Publish'
-    built = _compile(builds, cross, work=work, sources=sources,
-                     release=release, smoke=False)
-    evidence = _verify_msi(cross, built, cwd=work)
-    destination = builds / 'CinterForgeTerminal/Distribution/CinterForgeTerminal-win.msi'
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temp = destination.with_suffix('.msi.partial')
+        payload[name] = detail['sha256']
+    record = {'recipe': PUBLISH_RECIPE, 'release': release,
+              'wixl': '0.106', 'files': payload}
+    return hashlib.sha256(json.dumps(record, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def _reuse_installer(builds: Path, *, release: str, fingerprint: str) -> dict | None:
+    """Use a prior MSI only when its recorded inputs and final bytes agree."""
+    root = builds / 'CinterForgeTerminal/Distribution'
+    receipt_path = root / 'windows-msi.json'
+    destination = root / 'CinterForgeTerminal-win.msi'
+    if receipt_path.is_symlink() or destination.is_symlink() or not destination.is_file():
+        return None
     try:
-        shutil.copyfile(built, temp)
-        temp.replace(destination)
+        record = json.loads(receipt_path.read_text('utf-8'))
+        if (record.get('schema') != 'cinterforge.terminal.windows-msi.v1' or
+                record.get('release') != release or
+                record.get('input_fingerprint') != fingerprint or
+                record.get('filename') != destination.name or
+                record.get('format') != 'msi' or
+                record.get('bytes', 0) < 1024 or
+                record.get('bytes') != destination.stat().st_size or
+                record.get('sha256') != _sha(destination)):
+            return None
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    return record
+
+
+def _atomic_json(path: Path, value: dict) -> None:
+    """Do not leave a truncated receipt that makes a good MSI look reusable."""
+    fd, name = tempfile.mkstemp(prefix='Receipt-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as out:
+            json.dump(value, out, indent=2, sort_keys=True)
+            out.write('\n')
+            out.flush()
+            os.fsync(out.fileno())
+        Path(name).replace(path)
     finally:
-        temp.unlink(missing_ok=True)
+        Path(name).unlink(missing_ok=True)
+
+
+def publish(builds: Path, *, release: str, entries: dict[str, dict]) -> dict:
+    """Publish compiles only if the existing MSI isn't verified for these inputs."""
+    builds = _builds(builds)
+    from host.unpacked_release import _source
+    from host.universal_package import APP_ROOTS
+    with _publish_lock(builds) as work:
+        _check_tools(builds)  # Setup acceptance only; no downloads or Docker boot
+        prefix = APP_ROOTS['win'] + '/'
+        sources = {}
+        # Verify the immutable Build inputs even on cache hits. A metadata-only
+        # shortcut would allow a changed binary to retain an old MSI.
+        for name, detail in sorted(entries.items()):
+            if not name.startswith(prefix):
+                raise RuntimeError('Unexpected Windows Build member: ' + name)
+            sources[name[len(prefix):]] = _source(builds, name, detail, 'win', verify=True)
+        if any(item not in sources for item in ('Terminal.cmd', 'CinterForge Terminal.exe')):
+            raise RuntimeError('Windows Build receipt lacks launchers required for MSI')
+        if any(name.startswith('DevTools/') for name in sources):
+            raise RuntimeError('Windows MSI accidentally includes the optional DevTools bundle')
+        fingerprint = _input_fingerprint(release, entries)
+        cached = _reuse_installer(builds, release=release, fingerprint=fingerprint)
+        if cached is not None:
+            print('[TERMINAL PUBLISH] Reusing verified Windows MSI (unchanged Build inputs; no Docker)',
+                  flush=True)
+            return cached
+        native = _native_compiler(builds)
+        if native is not None:
+            print('[TERMINAL PUBLISH] Building MSI with Setup-verified native ARM64 wixl '
+                  '(no Docker/QEMU)', flush=True)
+            try:
+                return _publish_with_backend(builds, release=release, sources=sources,
+                                             fingerprint=fingerprint, work=work, cross=native)
+            except (OSError, RuntimeError) as error:
+                print('[TERMINAL PUBLISH] Native MSI compiler failed; retaining prior installer '
+                      'and trying provisioned AMD64 Docker fallback: ' + str(error)[-1500:], flush=True)
+        # Old Setup receipts, non-Apple Silicon, or native failures retain the
+        # existing provisioned t guest and Linux wixl. Never download in Publish.
+        from host.amd64_backend import managed_amd64_backend
+        with managed_amd64_backend(builds, setup=False):
+            return _publish_with_backend(builds, release=release, sources=sources,
+                                         fingerprint=fingerprint, work=work)
+
+
+def _publish_with_backend(builds: Path, *, release: str,
+                          sources: dict[str, Path], fingerprint: str, work: Path,
+                          cross=None) -> dict:
+    """Compile into fresh scratch, verify, then atomically promote."""
+    cross = cross if cross is not None else _cross(builds, setup=False)
+    # Native wixl creates its OLE database on the actual Mac system disk,
+    # not on the external /Volumes/Builds mount; it is verified before copy.
+    # The Docker producer retains its guest /tmp scratch implementation.
+    native = cross.provider == 'host'
+    with tempfile.TemporaryDirectory(prefix='NativeMSI-' if native else 'Candidate-',
+                                     dir=None if native else work) as candidate:
+        candidate_dir = Path(candidate)
+        built = _compile(builds, cross, work=candidate_dir, sources=sources,
+                         release=release, smoke=False, native_scratch=True)
+        evidence = _verify_msi(cross, built, cwd=candidate_dir)
+        destination = builds / 'CinterForgeTerminal/Distribution/CinterForgeTerminal-win.msi'
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix='CinterForgeTerminal-win-',
+                                         suffix='.msi.partial', dir=destination.parent)
+        temp = Path(temp_name)
+        try:
+            with os.fdopen(fd, 'wb') as output, built.open('rb') as source:
+                shutil.copyfileobj(source, output, length=4 * 1024 * 1024)
+                output.flush()
+                os.fsync(output.fileno())
+            if temp.stat().st_size != evidence['bytes'] or _sha(temp) != evidence['sha256']:
+                raise RuntimeError('Windows MSI changed during promotion; retaining prior installer')
+            temp.replace(destination)
+        finally:
+            temp.unlink(missing_ok=True)
     receipt = {'schema': 'cinterforge.terminal.windows-msi.v1', 'release': release,
                'filename': destination.name, 'sha256': evidence['sha256'],
                'bytes': evidence['bytes'], 'format': 'msi',
                'msi_version': _msi_version(release), 'upgrade_code': UPGRADE_CODE,
-               'file_count': len(sources), 'execution': 'native-linux-wixl-x64',
-               'registration': evidence['registration']}
-    (destination.parent / 'windows-msi.json').write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n',
-                                                        encoding='utf-8')
+               'file_count': len(sources), 'execution': ('native-macos-arm64-wixl-x64' if native
+                                                       else 'native-linux-wixl-x64'),
+               'registration': evidence['registration'],
+               'input_fingerprint': fingerprint}
+    _atomic_json(destination.parent / 'windows-msi.json', receipt)
     print('[TERMINAL PUBLISH] Windows MSI package verified: ' + str(destination), flush=True)
     return receipt
 

@@ -49,7 +49,7 @@ VM_STATE_FOLDER = 'CFTVM/U'
 PACKAGES = ('python=3.11', 'cmake=3.31', 'ninja=1.12', 'nodejs=22',
             'pkg-config', 'go=1.24', 'colima=0.10.3', 'docker-cli=29.8.1',
             'docker-buildx=0.35.0', 'git-lfs=3.8.0', '7zip=26.01',
-            'skopeo=1.24.1')
+            'skopeo=1.24.1', 'msitools=0.106')
 SCHEMA = 'cinterforge.terminal.mac-bootstrap.v1'
 
 
@@ -233,7 +233,9 @@ def ensure_macos_tools(builds: Path) -> dict[str, str]:
                 'colima': prefix / 'bin/colima', 'docker': prefix / 'bin/docker',
                 'buildx': prefix / 'bin/docker-buildx',
                 'git-lfs': prefix / 'bin/git-lfs',
-                'skopeo': prefix / 'bin/skopeo'}
+                'skopeo': prefix / 'bin/skopeo',
+                'wixl': prefix / 'bin/wixl', 'msiinfo': prefix / 'bin/msiinfo',
+                'msiextract': prefix / 'bin/msiextract'}
     if not all(binary.is_file() for binary in expected.values()):
         if prefix.exists():
             # Let the package manager reconcile a partially populated prefix;
@@ -247,7 +249,8 @@ def ensure_macos_tools(builds: Path) -> dict[str, str]:
         if not path.is_file():
             raise RuntimeError(f'Clean-Mac tool provisioning incomplete: {name} absent at {path}')
         # Go and Docker Buildx use the `version` subcommand, not `--version`.
-        _run([str(path), 'version' if name in ('go', 'buildx') else '--version'])
+        _run([str(path), 'version' if name in ('go', 'buildx') else
+              '--help' if name in ('msiinfo', 'msiextract') else '--version'])
     if not any((prefix / 'bin' / name).is_file() for name in ('7zz', '7z')):
         # Some 7zip builds use 7zz and others use 7z. Both can expand CAB.
         _run([str(mamba), 'install', '--yes', '--prefix', str(prefix),

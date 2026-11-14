@@ -160,8 +160,19 @@ before promoting the MSI to production. Publish refuses an invalid Setup
 receipt, but the receipt must not be represented as native Windows acceptance.
 
 The old Windows ZIP remains available for compatibility.
-This native `wixl` compilation uses the Setup-verified Debian OCI environment on Mac;
-native Windows installation, upgrade and uninstall acceptance remain required
+On Apple Silicon, Setup also provisions pinned `msitools=0.106` through the
+existing micromamba-managed macOS prefix under `Builds`, without Homebrew or
+global installs. Setup compiles and inspects an independent native ARM64 smoke
+MSI and the full installer template. Once this acceptance is recorded in
+`Builds/CinterForgeTerminal/Toolchains/WindowsMSI/mac-native-msi-preflight.json`,
+Publish uses native `wixl`, `msiinfo` and `msiextract`, avoiding Docker/QEMU for
+MSI assembly. Publish **never installs tools**. Older Setup receipts, other
+hosts and native compiler failures use the already-provisioned Debian AMD64
+Docker toolchain as fallback. The MSI input fingerprint is based on verified
+SHA-256 content, release and packaging recipe, not timestamps, so identical
+Windows builds reuse the same verified MSI. A changed or damaged MSI is rebuilt
+in clean scratch and verified before atomically replacing the distribution MSI.
+Actual Windows installation, upgrade and uninstall acceptance remain required
 before production deployment. These packages are not Windows code-signed
 unless a separate signing identity is configured and verified.
 

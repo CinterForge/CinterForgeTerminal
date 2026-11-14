@@ -519,5 +519,286 @@ class ScopedPublishContracts(unittest.TestCase):
             self.assertEqual(result['bucket'], 'cdn-assets-dev')
 
 
+class MSIAtomicPublishContracts(unittest.TestCase):
+    """A failed/retried MSI Publish must not clobber a verified installer."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.builds = Path(self.temp.name) / 'Builds'
+        self.builds.mkdir()
+        self.release = '2026.11.23'
+        from host.universal_package import APP_ROOTS
+        self.prefix = APP_ROOTS['win'] + '/'
+        self.entries = {}
+        for name in ('Terminal.cmd', 'CinterForge Terminal.exe'):
+            source = self.builds / 'CinterForgeTerminal/Prepared/Win' / name
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(name.encode() * 128)
+            self.entries[self.prefix + name] = self._entry(source)
+
+    @staticmethod
+    def _entry(source):
+        info = source.stat()
+        return {'source': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+                'stat': [info.st_size, info.st_mtime_ns, info.st_ctime_ns]}
+
+    @staticmethod
+    def _fake_compile(builds, cross, *, work, sources, release, smoke, native_scratch=False):
+        if not native_scratch or smoke:
+            raise AssertionError('Publish must use native guest scratch')
+        output = work / 'CinterForgeTerminal-win.msi'
+        output.write_bytes(b'valid-MSI-fixture' * 90)
+        return output
+
+    @staticmethod
+    def _fake_verify(cross, output, *, cwd):
+        return {'sha256': hashlib.sha256(output.read_bytes()).hexdigest(),
+                'bytes': output.stat().st_size, 'registration': {'allusers': '1'}}
+
+    def _patch_producer(self):
+        from contextlib import nullcontext
+        from host.windows_environment import WindowsCrossEnvironment
+        return (mock.patch.object(msi, '_check_tools'),
+                mock.patch.object(WindowsCrossEnvironment, 'validate_staged',
+                                  return_value=(self.builds, {'image': 'image:pinned'})),
+                mock.patch('host.amd64_backend.managed_amd64_backend',
+                           side_effect=lambda *args, **kwargs: nullcontext()),
+                mock.patch.object(msi, '_cross', return_value=mock.Mock()),
+                mock.patch.object(msi, '_compile', side_effect=self._fake_compile),
+                mock.patch.object(msi, '_verify_msi', side_effect=self._fake_verify))
+
+    def test_msi_cache_fingerprint_ignores_file_timestamps_and_modes(self):
+        from copy import deepcopy
+        entries = deepcopy(self.entries)
+        old = msi._input_fingerprint(self.release, entries)
+        for entry in entries.values():
+            entry['stat'][1] += 10_000_000_000
+            entry['stat'][2] += 10_000_000_000
+        self.assertEqual(old, msi._input_fingerprint(self.release, entries))
+        item = next(iter(entries.values()))
+        item['sha256'] = 'f' * 64
+        self.assertNotEqual(old, msi._input_fingerprint(self.release, entries))
+        self.assertNotEqual(old, msi._input_fingerprint('2026.11.24', self.entries))
+
+    def test_native_mac_publish_does_not_start_guest_and_reuses_msi(self):
+        from contextlib import ExitStack
+        native = mock.Mock(provider='host')
+        with ExitStack() as stack:
+            patches = [stack.enter_context(p) for p in self._patch_producer()]
+            _, _, backend, cross, compiler, verifier = patches
+            stack.enter_context(mock.patch.object(msi, '_native_compiler', return_value=native))
+            with redirect_stdout(StringIO()):
+                result = msi.publish(self.builds, release=self.release, entries=self.entries)
+                reused = msi.publish(self.builds, release=self.release, entries=self.entries)
+            self.assertEqual(result, reused)
+            self.assertEqual(result['execution'], 'native-macos-arm64-wixl-x64')
+            self.assertEqual(compiler.call_count, 1)
+            self.assertEqual(compiler.call_args.kwargs['native_scratch'], True)
+            self.assertEqual(backend.call_count, 0)
+            self.assertEqual(cross.call_count, 0)
+            self.assertEqual(verifier.call_args.args[0], native)
+            self.assertFalse(list(self.builds.rglob('NativeMSI-*')))
+
+    def test_failing_native_compiler_falls_back_to_staged_amd64_guest(self):
+        from contextlib import ExitStack
+        native = mock.Mock(provider='host')
+        with ExitStack() as stack:
+            patches = [stack.enter_context(p) for p in self._patch_producer()]
+            _, _, backend, cross, compiler, verifier = patches
+            stack.enter_context(mock.patch.object(msi, '_native_compiler', return_value=native))
+            counter = {'attempts': 0}
+            def compile_or_fail(*args, **kwargs):
+                counter['attempts'] += 1
+                if args[1] is native:
+                    raise RuntimeError('native wixl failed')
+                return self._fake_compile(*args, **kwargs)
+            compiler.side_effect = compile_or_fail
+            with redirect_stdout(StringIO()) as out:
+                result = msi.publish(self.builds, release=self.release, entries=self.entries)
+            self.assertEqual(result['execution'], 'native-linux-wixl-x64')
+            self.assertEqual(counter['attempts'], 2)
+            self.assertEqual(backend.call_count, 1)
+            self.assertIn('trying provisioned AMD64 Docker fallback', out.getvalue())
+
+    def test_native_receipt_requires_staged_tool_digests(self):
+        from contextlib import ExitStack
+        tools = self.builds / 'CinterForgeTerminal/Toolchains/mac/env/bin'
+        tools.mkdir(parents=True)
+        hashes = {}
+        for name in ('wixl', 'msiinfo', 'msiextract'):
+            file = tools / name
+            file.write_bytes(name.encode() * 150)
+            file.chmod(0o755)
+            hashes[name] = msi._sha(file)
+        proof = msi._native_receipt(self.builds)
+        proof.parent.mkdir(parents=True, exist_ok=True)
+        proof.write_text(json.dumps({'schema': 'cinterforge.terminal.native-msi.v1',
+                                      'status': 'passed', 'version': '0.106',
+                                      'binaries': hashes}))
+        with (mock.patch('platform.system', return_value='Darwin'),
+              mock.patch('platform.machine', return_value='arm64')):
+            self.assertIsNotNone(msi._native_compiler(self.builds))
+            (tools / 'wixl').write_bytes(b'corrupted')
+            self.assertIsNone(msi._native_compiler(self.builds))
+            proof.unlink()
+            self.assertIsNone(msi._native_compiler(self.builds))
+
+    def test_native_setup_accepts_real_tables_and_cabinet_before_recording_pass(self):
+        tools = self.builds / 'CinterForgeTerminal/Toolchains/mac/env/bin'
+        tools.mkdir(parents=True)
+        for name in ('wixl', 'msiinfo', 'msiextract'):
+            path = tools / name
+            path.write_bytes((name * 150).encode())
+            path.chmod(0o755)
+        fake_version = mock.Mock(returncode=0, stdout='wixl 0.106')
+        def fake_compile(builds, cross, *, work, sources, release, smoke, native_scratch=False):
+            filename = 'InstallerSmoke.msi' if smoke else 'CinterForgeTerminal-win.msi'
+            output = work / filename
+            output.write_bytes(b'fixture-msi-' + filename.encode())
+            return output
+        def fake_verify(cross, path, *, cwd, smoke=False, smoke_file=None):
+            return {'sha256': msi._sha(path), 'bytes': path.stat().st_size,
+                    'registration': {'allusers': '1'}}
+        with (mock.patch('platform.system', return_value='Darwin'),
+              mock.patch('platform.machine', return_value='arm64'),
+              mock.patch.object(msi._MacNativeMSITools, 'execute', return_value=fake_version),
+              mock.patch.object(msi, '_compile', side_effect=fake_compile) as compile_it,
+              mock.patch.object(msi, '_verify_msi', side_effect=fake_verify) as verify,
+              redirect_stdout(StringIO())):
+            report = msi._setup_mac_native(self.builds)
+        self.assertEqual(report['status'], 'passed')
+        self.assertEqual(report['execution'], 'native-macos-arm64-wixl-x64')
+        self.assertEqual(compile_it.call_count, 2)
+        self.assertEqual(verify.call_args_list[0].kwargs['smoke_file'], 'README.txt')
+        self.assertEqual(verify.call_args_list[1].kwargs.get('smoke_file'), None)
+        self.assertEqual(json.loads(msi._native_receipt(self.builds).read_text())['status'], 'passed')
+        with (mock.patch('platform.system', return_value='Darwin'),
+              mock.patch('platform.machine', return_value='arm64')):
+            self.assertIsNotNone(msi._native_compiler(self.builds))
+
+    def test_mac_bootstrap_stages_msitools_with_existing_micromamba(self):
+        from host import mac_bootstrap
+        self.assertIn('msitools=0.106', mac_bootstrap.PACKAGES)
+        source = (REPO / 'host/mac_bootstrap.py').read_text('utf-8')
+        for executable in ('wixl', 'msiinfo', 'msiextract'):
+            self.assertIn("'" + executable + "': prefix / 'bin/" + executable, source)
+        self.assertNotIn('brew install msitools', source)
+
+    def test_publish_compiles_once_then_reuses_verified_msi_without_docker(self):
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            patches = [stack.enter_context(p) for p in self._patch_producer()]
+            _, _, backend, cross, compiler, verifier = patches
+            with redirect_stdout(StringIO()):
+                first = msi.publish(self.builds, release=self.release, entries=self.entries)
+                second = msi.publish(self.builds, release=self.release, entries=self.entries)
+            self.assertEqual(first, second)
+            self.assertEqual(compiler.call_count, 1)
+            self.assertEqual(verifier.call_count, 1)
+            self.assertEqual(backend.call_count, 1)
+            self.assertEqual(cross.call_count, 1)
+            self.assertIn('input_fingerprint', first)
+            self.assertFalse(list((self.builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/Publish').glob('Candidate-*')))
+            self.assertFalse(list((self.builds / 'CinterForgeTerminal/Distribution').glob('*.partial')))
+
+    def test_rebuilt_same_bytes_new_mtimes_reuses_verified_installer(self):
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            patches = [stack.enter_context(p) for p in self._patch_producer()]
+            _, _, backend, cross, compiler, verifier = patches
+            with redirect_stdout(StringIO()):
+                previous = msi.publish(self.builds, release=self.release, entries=self.entries)
+            # Simulate a new Build receipt after rebuilding the same binary bytes.
+            for name, detail in list(self.entries.items()):
+                source = Path(detail['source'])
+                before = source.stat().st_mtime_ns
+                os.utime(source, ns=(before + 1_000_000_000, before + 1_000_000_000))
+                self.entries[name] = self._entry(source)
+            with redirect_stdout(StringIO()):
+                cached = msi.publish(self.builds, release=self.release, entries=self.entries)
+            self.assertEqual(previous, cached)
+            self.assertEqual(backend.call_count, 1)
+            self.assertEqual(compiler.call_count, 1)
+            self.assertEqual(verifier.call_count, 1)
+
+    def test_rebuild_failure_preserves_prior_msi_receipt_and_discards_scratch(self):
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            patches = [stack.enter_context(p) for p in self._patch_producer()]
+            _, _, backend, cross, compiler, verifier = patches
+            with redirect_stdout(StringIO()):
+                previous = msi.publish(self.builds, release=self.release, entries=self.entries)
+            root = self.builds / 'CinterForgeTerminal/Distribution'
+            msi_before = (root / 'CinterForgeTerminal-win.msi').read_bytes()
+            receipt_before = (root / 'windows-msi.json').read_bytes()
+            source = Path(self.entries[self.prefix + 'Terminal.cmd']['source'])
+            source.write_bytes(b'changed Windows build contents')
+            self.entries[self.prefix + 'Terminal.cmd'] = self._entry(source)
+            compiler.side_effect = RuntimeError('wixl corrupted the candidate')
+            with self.assertRaisesRegex(RuntimeError, 'wixl corrupted'), redirect_stdout(StringIO()):
+                msi.publish(self.builds, release=self.release, entries=self.entries)
+            self.assertEqual((root / 'CinterForgeTerminal-win.msi').read_bytes(), msi_before)
+            self.assertEqual((root / 'windows-msi.json').read_bytes(), receipt_before)
+            self.assertFalse(list((self.builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/Publish').glob('Candidate-*')))
+            self.assertEqual(backend.call_count, 2)
+            self.assertEqual(previous['sha256'], hashlib.sha256(msi_before).hexdigest())
+
+    def test_corrupt_distribution_msi_is_not_reused(self):
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            patches = [stack.enter_context(p) for p in self._patch_producer()]
+            _, _, backend, cross, compiler, verifier = patches
+            with redirect_stdout(StringIO()):
+                msi.publish(self.builds, release=self.release, entries=self.entries)
+            destination = self.builds / 'CinterForgeTerminal/Distribution/CinterForgeTerminal-win.msi'
+            destination.write_bytes(b'corrupt')
+            with redirect_stdout(StringIO()):
+                repaired = msi.publish(self.builds, release=self.release, entries=self.entries)
+            self.assertEqual(compiler.call_count, 2)
+            self.assertEqual(backend.call_count, 2)
+            self.assertEqual(destination.stat().st_size, repaired['bytes'])
+
+    def test_legacy_unverified_scratch_is_cleared_without_touching_final(self):
+        work = self.builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/Publish'
+        work.mkdir(parents=True)
+        (work / 'Installer.wxs').write_text('stale')
+        (work / 'CinterForgeTerminal-win.msi').write_bytes(b'corrupt')
+        abandoned = work / 'Candidate-abandoned'
+        abandoned.mkdir()
+        (abandoned / 'corrupt.msi').write_bytes(b'broken')
+        dist = self.builds / 'CinterForgeTerminal/Distribution'
+        dist.mkdir(parents=True)
+        final = dist / 'CinterForgeTerminal-win.msi'
+        final.write_bytes(b'known good')
+        with msi._publish_lock(self.builds):
+            self.assertFalse((work / 'Installer.wxs').exists())
+            self.assertFalse((work / 'CinterForgeTerminal-win.msi').exists())
+            self.assertFalse(abandoned.exists())
+            self.assertEqual(final.read_bytes(), b'known good')
+
+    def test_publish_compiler_uses_fresh_guest_native_ole_database(self):
+        work = self.builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/Publish/Candidate-fixture'
+        work.mkdir(parents=True)
+        source = self.builds / 'README.txt'
+        source.write_text('test')
+        cross = mock.Mock(provider='docker-linux-amd64-wine')
+        cross.path.side_effect = lambda path: '/builds/' + Path(path).name
+        output = work / 'CinterForgeTerminal-win.msi'
+        def fake_run(*args, **kwargs):
+            command = args[2]
+            self.assertEqual(command[:2], ['sh', '-c'])
+            self.assertIn('mktemp -d /tmp/cinterforge-msi.', command[2])
+            self.assertIn('wixl --arch x64 --output "$scratch/installer.msi"', command[2])
+            self.assertIn('msiinfo tables "$scratch/installer.msi"', command[2])
+            self.assertIn('cmp "$scratch/installer.msi" "$2"', command[2])
+            output.write_bytes(b'MSI' * 500)
+        with mock.patch.object(msi, '_run', side_effect=fake_run):
+            result = msi._compile(self.builds, cross, work=work,
+                                  sources={'README.txt': source}, release=self.release,
+                                  smoke=False, native_scratch=True)
+        self.assertEqual(result, output)
+
+
 if __name__ == '__main__':
     unittest.main()
