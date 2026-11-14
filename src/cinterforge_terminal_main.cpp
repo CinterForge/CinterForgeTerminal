@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <vector>
+#include <algorithm>
 #include <cstdlib>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -47,7 +48,32 @@ namespace
         const fs::path app = currentExecutable().parent_path().parent_path().parent_path();
         const fs::path embedded = app / "Contents/Resources/Builds";
         fs::path builds;
-        if (!cfg.builds.empty())
+        if (cfg.developer)
+        {
+            // Xcode Debug products live beneath <repo>/../Builds/Xcode/Products.
+            // Do not use the signed app's embedded Resources/Builds as a
+            // writable development tree: this sent Xcode server/VM logs to
+            // the installed-app paths and prevented reproducing guest errors.
+            if (!cfg.builds.empty())
+                builds = cfg.builds;
+            else
+            {
+                fs::path candidate = app;
+                while (candidate != candidate.root_path() && candidate.filename() != "Builds")
+                    candidate = candidate.parent_path();
+                if (candidate.filename() != "Builds")
+                    throw std::runtime_error(
+                        "Developer app is not under sibling Builds; pass --builds <repo>/../Builds");
+                builds = candidate;
+            }
+            builds = fs::weakly_canonical(builds);
+            if (builds.filename() != "Builds" || !fs::is_directory(builds) ||
+                std::any_of(builds.begin(), builds.end(), [](const fs::path &part) {
+                    return part.extension() == ".app";
+                }))
+                throw std::runtime_error("Unsafe Xcode developer Builds directory: " + builds.string());
+        }
+        else if (!cfg.builds.empty())
             builds = cfg.builds;
         else if (fs::is_directory(embedded))
             builds = embedded;
@@ -101,7 +127,12 @@ namespace
         // must never treat it as a writable developer Builds tree. In developer
         // sessions the Python PTY exports CINTER_BUILDS_ROOT explicitly.
         if (cfg.developer)
+        {
             setenv("CINTER_BUILDS_ROOT", cfg.builds.c_str(), 1);
+            setenv("CINTER_TERMINAL_RUNTIME_MODE", "developer", 1);
+            std::cerr << "[CinterForgeTerminal] Xcode/developer runtime: " << cfg.builds
+                      << "; Server logs: " << (builds / "Logs/CinterForgeTerminal/Runtime").string() << '\n';
+        }
         if (cfg.developer)
         {
             // Explicit developer launcher: lifecycle and VM state belong to Builds.

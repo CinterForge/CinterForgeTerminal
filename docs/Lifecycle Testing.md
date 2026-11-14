@@ -115,6 +115,15 @@ or launching Terminal explicitly in repository/VS Code development mode uses the
 sibling workspace `Builds` for developer artifacts, dependencies, caches,
 and `Builds/Logs/CinterForgeTerminal/Runtime/` for development server logs.
 
+The shared Xcode **Run/Debug** scheme passes `--developer`; the native
+launcher resolves the workspace's sibling `Builds` from its Xcode build product
+path (under `Builds/Xcode/Products`) **before** starting the Python server.
+Its runtime logs are at `Builds/Logs/CinterForgeTerminal/Runtime/`, and its
+managed `t` guest state is under `Builds/CFTVM/T`. Xcode Debug is not sandboxed
+so its already-verified developer toolchains can run in the sibling workspace;
+Release signing and installed-app mode remain unchanged. No files inside
+`Contents/Resources/Builds` are used as writable developer state.
+
 An installed/downloaded native app uses the actual installed Steam library for
 writable state, optional DevTools, and live Server and shell session logs:
 

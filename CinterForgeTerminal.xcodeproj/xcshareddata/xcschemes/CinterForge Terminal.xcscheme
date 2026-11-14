@@ -50,6 +50,13 @@
             ReferencedContainer = "container:CinterForgeTerminal.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
+      <!-- Xcode Run is a developer lifecycle, never an installed Steam launch. -->
+      <CommandLineArguments>
+         <CommandLineArgument
+            argument = "--developer"
+            isEnabled = "YES">
+         </CommandLineArgument>
+      </CommandLineArguments>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
