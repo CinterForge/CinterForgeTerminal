@@ -9,7 +9,7 @@
 Builds Working, Missing Features, Known Blockers
 
 - [macOS — Apple silicon](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/beta/CinterForgeTerminal-mac.dmg)
-- [Windows — x64](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/beta/CinterForgeTerminal-win.zip)
+- [Windows — x64](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/beta/CinterForgeTerminal-win.msi)
 - [Linux — x64](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/beta/CinterForgeTerminal-linux.zip)
 
 The [release manifest](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/2026.11.23/four-artifacts.json) contains checksums and includes the separate, optional DevTools archive. `./Cinter publish public` updates these links after public download verification; if CDN propagation is delayed, `./Cinter verify public` completes the update once verification succeeds.
