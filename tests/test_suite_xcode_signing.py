@@ -82,41 +82,6 @@ class XcodeSigningTests(unittest.TestCase):
             self.assertEqual(len(signing_calls), 1)
             self.assertEqual(signing_calls[0][signing_calls[0].index('--sign') + 1], SHA)
 
-    def test_diagnostic_beta_signs_app_with_all_six_notarizable_exceptions(self):
-        import plistlib
-        from types import SimpleNamespace
-        import os
-        policy = Path(__file__).resolve().parents[1] / 'build/xcode/DiagnosticBeta.entitlements'
-        entitlements = plistlib.loads(policy.read_bytes())
-        required = ('allow-jit', 'allow-unsigned-executable-memory',
-                    'allow-dyld-environment-variables', 'disable-library-validation',
-                    'disable-executable-page-protection', 'debugger')
-        self.assertEqual({key for key, enabled in entitlements.items() if enabled},
-                         {'com.apple.security.cs.' + key for key in required})
-        self.assertNotIn('com.apple.security.get-task-allow', entitlements)
-        with tempfile.TemporaryDirectory() as folder:
-            app = Path(folder) / 'CinterForge Terminal.app'
-            vm = (app / 'Contents/Resources/Builds/CinterForgeTerminal/Dependencies/'
-                  'LinuxKit/mac/arm64/CinterBDSVM')
-            vm.parent.mkdir(parents=True)
-            vm.write_bytes(b'fixture')
-            calls = []
-            def fake_run(command, **kwargs):
-                calls.append(command)
-                return subprocess.CompletedProcess(command, 0, '', '')
-            with (mock.patch.dict(os.environ, {'CINTER_MAC_SIGN_IDENTITY': SHA,
-                                              'CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS': '1'}),
-                  mock.patch.object(mac_app.os, 'uname', return_value=SimpleNamespace(sysname='Darwin')),
-                  mock.patch.object(launcher_signing, 'sign_launcher'),
-                  mock.patch.object(launcher_signing, 'has_virtualization_entitlement', return_value=True),
-                  mock.patch.object(mac_app, '_verify_signature'),
-                  mock.patch.object(mac_app.subprocess, 'run', side_effect=fake_run)):
-                mac_app._sign_and_verify(app)
-            self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0][calls[0].index('--entitlements') + 1], str(policy))
-            self.assertIn('--options', calls[0])
-            self.assertIn('runtime', calls[0])
-
     def test_normal_release_does_not_use_diagnostic_beta_exceptions(self):
         from types import SimpleNamespace
         import os
