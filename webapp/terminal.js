@@ -1189,8 +1189,10 @@
     if (message.action !== 'launch' || !launcherApps.has(message.app) ||
         activeTab?.kind !== 'launcher' || activeTab.backend !== message.platform) return;
     const tab = activeTab;
+    sendLauncherState(tab, {message: 'Starting ' + message.app + ' — checking the X11 window…'});
     void api('/api/launcher/launch', {platform: tab.backend, app: message.app})
-      .then(() => sendLauncherState(tab, {message: message.app + ' launched'}))
+      .then(result => sendLauncherState(tab, {message: result.message ||
+        (result.opened ? message.app + ' window visible' : message.app + ' did not open')}))
       .catch(error => sendLauncherState(tab, {error: error.message}));
   });
 

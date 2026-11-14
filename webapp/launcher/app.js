@@ -16,11 +16,11 @@ document.getElementById('wallpaper').src = `assets/backgrounds/${wallpaperFile}.
 const clock = document.getElementById('launcher-clock');
 clock.textContent = new Date().toLocaleString([], {weekday:'short', hour:'numeric', minute:'2-digit'});
 let toastTimer;
-function showToast(message) {
+function showToast(message, persistent = false) {
   toast.textContent = String(message || '');
   toast.style.display = 'block';
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toast.style.display = 'none'; }, 3500);
+  if (!persistent) toastTimer = setTimeout(() => { toast.style.display = 'none'; }, 4500);
 }
 for (const button of document.querySelectorAll('[data-app]')) {
   button.addEventListener('click', () => {
@@ -33,7 +33,7 @@ window.addEventListener('message', event => {
   if (event.origin !== location.origin || event.source !== window.parent ||
       event.data?.type !== 'cinter-launcher-session' || event.data?.platform !== platform) return;
   if (event.data.error) {
-    showToast(event.data.error);
+    showToast(event.data.error, true);
     return;
   }
   if (platform !== 'mac' && event.data.viewer_url) {

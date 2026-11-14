@@ -7963,13 +7963,77 @@ def _launcher_staged_app(kind: str) -> Path:
     return executable
 
 
+def _launcher_x11_window(docker: str, env: dict[str, str], kind: str,
+                         name: str, exit_receipt: str = '') -> tuple[str, str]:
+    """Read the REAL mapped X11 window tree, not Docker's exec acknowledgment.
+
+    The guest image already includes x11-utils (xwininfo). One window per
+    platform is identified by the title set in CinterApplicationShell.cpp;
+    Linux and Wine use independent DISPLAYs in the same Docker container.
+    """
+    script = r"""set -u
+if ! command -v xwininfo >/dev/null 2>&1; then
+  echo CINTER_X11_ERROR=xwininfo-missing-from-Setup-image
+  exit 0
+fi
+if ! xdpyinfo >/dev/null 2>&1; then
+  echo CINTER_X11_ERROR=display-not-ready
+  exit 0
+fi
+windows=$(LC_ALL=C xwininfo -root -tree 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "CINTER_X11_ERROR=$windows"
+  exit 0
+fi
+ids=$(printf '%s\n' "$windows" | awk 'tolower($0) ~ /"cinterforge terminal/ && $1 ~ /^0x[0-9a-fA-F]+$/ { print $1 }')
+for id in $ids; do
+  detail=$(LC_ALL=C xwininfo -id "$id" 2>/dev/null) || continue
+  if printf '%s\n' "$detail" | grep -q 'Map State: IsViewable'; then
+    printf 'CINTER_WINDOW_VISIBLE=%s\n' "$id"
+    exit 0
+  fi
+done
+if [ -n "$1" ] && [ -f "$1" ]; then
+  printf 'CINTER_LAUNCH_EXIT=%s\n' "$(cat "$1")"
+fi
+"""
+    check = _docker_call(docker, env, 'exec', *_launcher_guest_env(kind), name,
+                         '/bin/sh', '-c', script, 'x11-check', exit_receipt, timeout=12)
+    if check.returncode:
+        return '', 'Docker/X11 inspection failed: ' + (check.stderr or check.stdout or '').strip()[-320:]
+    output = (check.stdout or '').strip()
+    for line in output.splitlines():
+        if line.startswith('CINTER_WINDOW_VISIBLE='):
+            return line.partition('=')[2], ''
+    for line in output.splitlines():
+        if line.startswith('CINTER_LAUNCH_EXIT='):
+            return '', 'Process exited with status ' + line.partition('=')[2]
+        if line.startswith('CINTER_X11_ERROR='):
+            return '', 'X11 inspection: ' + line.partition('=')[2]
+    return '', ''
+
+
+def _launcher_guest_diagnostics(docker: str, env: dict[str, str], name: str,
+                                log: str, status: str) -> str:
+    """Expose only this launch's captured output; never hide it inside Docker."""
+    script = r"""if [ -f "$2" ]; then printf 'exit='; cat "$2"; fi
+if [ -f "$1" ]; then tail -n 35 "$1"; else echo 'No guest launch log was created'; fi
+"""
+    try:
+        result = _docker_call(docker, env, 'exec', name, '/bin/sh', '-c',
+                              script, 'launch-diagnostics', log, status, timeout=12)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 'Unable to read guest startup output: ' + str(exc)
+    return (result.stdout or result.stderr or '').strip()[-1700:]
+
+
 def _launcher_launch(kind: str, app: str, server=None) -> dict:
     if app not in _LAUNCHER_APPS or kind not in ('mac', 'linux', 'win'):
         raise ValueError('Unknown CinterForge launcher application')
     staged = _launcher_staged_app(kind)
     if kind == 'mac':
         # Launch/focus the real staged .app on the host, never in the WebView.
-        # In particular, do not redirect to the user's system Terminal.app.
         if platform.system() != 'Darwin':
             raise RuntimeError('The staged Mac application requires a macOS host')
         app_bundle = staged.parents[2]   # .../CinterForge Terminal.app
@@ -7980,40 +8044,93 @@ def _launcher_launch(kind: str, app: str, server=None) -> dict:
                                started.stderr.strip()[-400:])
         return {'opened': True, 'platform': kind, 'external': True}
 
-    # Both graphical apps run inside the ONE managed Debian Docker guest.
-    # Linux uses DISPLAY=:99; Windows/Wine uses independent DISPLAY=:100. The X11/VNC framebuffer remains
-    # inside its one Launcher Session tab. No second VM or detached desktop.
-    _launcher_start(kind, server)
+    # The only GUI processes run in the existing shared Debian container.
+    # VNC was already activated by the Launcher tab; do not install a runtime,
+    # provision another container, or start another VM on an app-icon click.
     docker, env, name = _launcher_container(kind, server)
-    guest_executable = '/host/mac' + str(staged)
-    present = _docker_call(docker, env, 'exec', name, 'test', '-f', guest_executable,
-                           timeout=20)
-    if present.returncode:
-        raise RuntimeError('Staged ' + kind + ' build is not visible through the managed guest mount: ' +
-                           str(staged))
-    if kind == 'linux':
-        # Run the staged launcher script rather than its raw ELF executable:
-        # it owns runtime Python, worker, service and resource arguments.
-        command = ['/bin/sh', '-c',
-                   'cd "$(dirname "$1")" && exec /bin/sh "$1" >>/tmp/cinterforge-staged-app.log 2>&1',
-                   'cinterforge-launch', guest_executable]
-    else:
-        # Preserve the staged Windows .cmd wrapper, including its WebView2 and
-        # runtime setup, instead of invoking an incomplete bare PE executable.
-        # Wine's Z: drive maps to the Linux filesystem mounted at /host/mac.
-        win_path = 'Z:' + guest_executable.replace('/', '\\')
-        command = ['/bin/sh', '-c',
-                   'cd "$(dirname "$1")" && exec wine cmd.exe /c "$2" >>/tmp/cinterforge-staged-app.log 2>&1',
-                   'cinterforge-launch', guest_executable, win_path]
-    launched = _docker_call(docker, env, 'exec', '-d', *_launcher_guest_env(kind),
-                            name, *command, timeout=45)
-    if launched.returncode:
-        raise RuntimeError('Could not launch staged ' + kind + ' CinterForge Terminal: ' +
-                           (launched.stderr or launched.stdout).strip()[-400:])
-    # Docker's detached launch acknowledges submission, not an application
-    # readiness proof. The guest desktop will show its actual window if ready.
-    return {'opened': True, 'platform': kind, 'external': False,
-            'message': 'Staged application launch requested'}
+    with _launcher_lock:
+        window, error = _launcher_x11_window(docker, env, kind, name)
+        if window:
+            return {'opened': True, 'platform': kind, 'external': False,
+                    'window_id': window, 'message': 'CinterForge Terminal window already visible'}
+        if error:
+            raise RuntimeError(kind + ' guest display is unavailable: ' + error)
+        guest_executable = '/host/mac' + str(staged)
+        present = _docker_call(docker, env, 'exec', name, 'test', '-f', guest_executable,
+                               timeout=20)
+        if present.returncode:
+            raise RuntimeError('Staged ' + kind + ' build is not visible through the managed guest mount: ' +
+                               str(staged))
+
+        # Separate logs and completion receipts for Linux and Windows, even
+        # when both are started in the one shared container.  The wrapper
+        # records the ACTUAL native process exit, which docker exec -d cannot.
+        ident = secrets.token_hex(6)
+        base = '/tmp/cinterforge-launch-' + kind + '-' + ident
+        logfile, statusfile = base + '.log', base + '.exit'
+        win_path = 'Z:' + guest_executable.replace('/', '\\') if kind == 'win' else ''
+        script = r"""set -u
+platform=$1
+launcher=$2
+windows_path=$3
+log=$4
+status=$5
+(
+  cd "$(dirname "$launcher")" || exit 126
+  printf '[CinterForge Terminal %s] DISPLAY=%s launcher=%s\n' "$platform" "$DISPLAY" "$launcher"
+  if [ "$platform" = linux ]; then
+    /bin/sh "$launcher"
+  else
+    # Use the genuine packaged .cmd: it resolves the Windows Python runtime,
+    # worker, WebView2 fixed browser and required resource paths.
+    wine cmd.exe /c "$windows_path"
+  fi
+) >"$log" 2>&1
+rc=$?
+printf '%s\n' "$rc" >"$status.tmp"
+mv -f "$status.tmp" "$status"
+exit "$rc"
+"""
+        if server is not None:
+            server.log_event('Staged ' + kind + ' GUI launching on DISPLAY=' +
+                             (':99' if kind == 'linux' else ':100') +
+                             ' in managed container ' + name + '; guest log=' + logfile)
+        launched = _docker_call(docker, env, 'exec', '-d', *_launcher_guest_env(kind),
+                                name, '/bin/sh', '-c', script, 'cinterforge-launch',
+                                kind, guest_executable, win_path, logfile, statusfile,
+                                timeout=45)
+        if launched.returncode:
+            raise RuntimeError('Could not execute staged ' + kind + ' CinterForge Terminal: ' +
+                               (launched.stderr or launched.stdout or '').strip()[-400:])
+        # Linux WebKitGTK and Wine WebView2 can take different times to map.
+        # Check the live X server; a successful Docker exec is NOT success.
+        deadline = time.monotonic() + (85 if kind == 'win' else 45)
+        last_error = ''
+        last_heartbeat = time.monotonic()
+        while time.monotonic() < deadline:
+            if server is not None and server._stopping:
+                raise RuntimeError('Terminal quit while launching ' + kind + ' GUI')
+            window, error = _launcher_x11_window(docker, env, kind, name, statusfile)
+            if window:
+                if server is not None:
+                    server.log_event('Staged ' + kind + ' GUI window VISIBLE on X11: ' + window)
+                return {'opened': True, 'platform': kind, 'external': False,
+                        'window_id': window, 'message': 'CinterForge Terminal window visible'}
+            if error:
+                last_error = error
+                if error.startswith('Process exited with status ') or error.startswith('X11 inspection:'):
+                    break
+            if server is not None and time.monotonic() - last_heartbeat >= 10:
+                server.log_event('Waiting for staged ' + kind + ' X11 window; guest log=' + logfile)
+                last_heartbeat = time.monotonic()
+            time.sleep(0.6)
+        details = _launcher_guest_diagnostics(docker, env, name, logfile, statusfile)
+        explanation = last_error or 'No mapped CinterForge Terminal X11 window before launch deadline'
+        failure = ('Staged ' + kind + ' GUI failed: ' + explanation +
+                   '; guest output:\n' + details)
+        if server is not None:
+            server.log_event(failure)
+        raise RuntimeError(failure)
 
 
 def guest_shell_main(kind: str) -> int:
