@@ -909,7 +909,16 @@ namespace cinterforge
                             // Terminal's Edit actions to their actual native handlers;
                             // Code-OSS's code:* actions continue to use its menu service.
                             if ([name isEqualToString:@"Edit"] && depth == 0) {
-                                if ([title isEqualToString:@"Copy"]) {
+                                if ([title isEqualToString:@"Cut"]) {
+                                    // Code-OSS loses editor focus while the
+                                    // native menu is open. A sampled IAction
+                                    // can remain disabled even with a live
+                                    // selection. Use Cocoa's WKWebView editor
+                                    // responder chain instead of that snapshot.
+                                    [entry setAction:@selector(cut:)];
+                                    [entry setTarget:nil];
+                                    [entry setKeyEquivalent:@"x"];
+                                } else if ([title isEqualToString:@"Copy"]) {
                                     if ([action isEqualToString:@"edit:copy"])
                                         [entry setAction:@selector(copyTerminal:)];
                                     [entry setKeyEquivalent:@"c"];
@@ -919,7 +928,9 @@ namespace cinterforge
                                     [entry setKeyEquivalent:@"v"];
                                 }
                             }
-                            [entry setEnabled:![item[@"enabled"] respondsToSelector:@selector(boolValue)] ||
+                            [entry setEnabled:([name isEqualToString:@"Edit"] && depth == 0 &&
+                                [title isEqualToString:@"Cut"]) ||
+                                ![item[@"enabled"] respondsToSelector:@selector(boolValue)] ||
                                 [item[@"enabled"] boolValue]];
                             NSArray *children = item[@"children"];
                             if ([children isKindOfClass:[NSArray class]] && children.count) {

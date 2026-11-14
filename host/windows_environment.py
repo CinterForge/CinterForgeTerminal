@@ -195,9 +195,8 @@ class WindowsCrossEnvironment:
             # The Mac bootstrap / LinuxKit c producer is ARM64 and must NEVER
             # build the Debian AMD64 Wine image. Setup enters the dedicated
             # QEMU x86-64 t backend only after Bedrock acceptance.
-            if os.environ.get('DOCKER_CONTEXT') != 'colima-t':
-                raise RuntimeError('Windows AMD64 Setup requires the t QEMU guest '
-                                   'after Bedrock acceptance, not the ARM64 LinuxKit c producer')
+            from host.amd64_backend import require_managed_t_docker
+            require_managed_t_docker(self.builds)
             if not bundled_cli.is_file():
                 raise RuntimeError('Mac Setup must stage its pinned managed Docker CLI first')
             engines.append(('docker', str(bundled_cli)))
@@ -264,8 +263,8 @@ class WindowsCrossEnvironment:
         Docker tags so BuildKit has no registry dependency for its FROM layers.
         No second VM/daemon is used, and no authored source is modified.
         """
-        if os.environ.get('DOCKER_CONTEXT') != 'colima-t':
-            raise RuntimeError('Windows registry import requires the x86-64 t guest')
+        from host.amd64_backend import require_managed_t_docker
+        require_managed_t_docker(self.builds)
         assert self.docker
         skopeo = self.builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/skopeo'
         if not skopeo.is_file() or skopeo.is_symlink():

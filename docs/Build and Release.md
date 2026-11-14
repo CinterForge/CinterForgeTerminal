@@ -5,7 +5,7 @@ If you want to get started right away:
 ```bash
 ./Cinter all all               # Setup -> Build -> Stage -> Test
 ./Cinter all all publish       # Same phases, then dryrun Publish; never uploads
-./Cinter all win publish internal  # Only Windows: ZIP + MSI to private R2
+./Cinter all win publish internal  # Only Windows: app ZIP + MSI ZIP to private R2
 ./Cinter all mac publish beta     # macOS only to beta
 ./Cinter all linux publish internal  # Linux only to private R2
 ```
@@ -19,8 +19,8 @@ This chapter describes the **repository build driver**. The Game Terminal's game
 Builders run `./Cinter` lifecycle commands only; there are no separate
 manual preflight or source-test commands. `setup all` verifies the authored
 repository paths, input JSON and Python source syntax and provisions required
-dependencies before Build. `test mac` runs Python and JavaScript regressions
-before its native macOS UI acceptance. `all all` performs Setup → Build → Stage
+dependencies before Build. `test mac` runs the single root `test.py` real smoke suite
+against the completed staged release, plus a native WebView source syntax check. `all all` performs Setup → Build → Stage
 → Test on the Mac without publishing or claiming Windows/Linux native GUI
 acceptance. The `all all publish` form runs the same phases and, only if Test succeeds,
 packages a **dry run** without uploading. To upload explicitly, add `internal`,
@@ -41,7 +41,7 @@ next Setup attempt; no provisioning is moved into Build, Stage, or Test.
 
 Windows Setup also prints START/PASS/FAIL lines and an elapsed-time heartbeat
 every 15 seconds during blocking dependency checks, Wine initialization,
-and native MSI compilation. These lines appear in the same lifecycle log; they are
+and staged tool verification. These lines appear in the same lifecycle log; they are
 not guessed completion percentages; the initial Wine boot now fails after 180 seconds if it cannot complete.
 
 **Setup graphical preflight (both Linux and Windows):** After provisioning the
@@ -73,10 +73,10 @@ remains read-only and does not create logs. See [Lifecycle Testing](Lifecycle%20
 | Phase | Responsibility | Must not do |
 |---|---|---|
 | **Inspect** | Identify source, platform/ABI, rights and licenses, required inputs and hashes; report readiness | Change an installed user environment as an implicit side effect |
-| **Setup** | Download/verify and **extract verified published ZIPs/DMGs only here**, into canonical sibling `Builds` when needed; provision pinned toolchains, **native Debian wixl/msitools and a real tiny README MSI smoke**, and run required acceptance | Leave Setup VMs running; shift extraction to Build or Stage |
+| **Setup** | Download/verify and **extract verified published ZIPs/DMGs only here**, into canonical sibling `Builds` when needed; provision pinned toolchains, **native Debian wixl/msitools toolchain inputs**; no smoke/acceptance tests | Leave Setup VMs running; shift extraction to Build or Stage |
 | **Build** | Compile and sign three unpacked native apps; record the unified DevTools input inventory directly in `Builds` | ZIP/UnZIP, download, Stage or restart |
 | **Stage** | Copy already-built unpacked files straight to `steamapps` and validate receipts; skip unchanged DevTools | ZIP/UnZIP, provision, download or rebuild |
-| **Test** | Validate staged product offline and record evidence | ZIP/UnZIP, provision or download |
+| **Test** | Run root `test.py` (12 real source/artifact/system smoke checks), Bedrock, guest Bash/VNC, native MSI compiler acceptance; record evidence | ZIP/UnZIP, provision or download |
 | **Publish** | Create the **Mac DMG, three ZIPs and Windows enterprise MSI only here**; notarize beta/release Mac DMGs; perform read-only CDN checks on dryrun, otherwise upload and verify | Run during ordinary `all all`, upload without an explicit destination or provision toolchains |
 | **Reboot** | Restart only named running component: `server`, `docker`, `colima` or `app` | Build, Setup, Stage, ZIP/UnZIP or Publish |
 
@@ -159,14 +159,23 @@ Start-menu removal, upgrade, and uninstall must be checked on a Windows PC
 before promoting the MSI to production. Publish refuses an invalid Setup
 receipt, but the receipt must not be represented as native Windows acceptance.
 
-The old Windows ZIP remains available for compatibility.
+The existing portable Windows ZIP stays unchanged. Publish additionally places the
+verified `CinterForgeTerminal-win.msi` inside `CinterForgeTerminal-win-msi.zip`
+(with one archive member, no directory wrapping) and uploads **only the MSI ZIP**,
+not the bare MSI. The Windows scoped `win-artifacts.json` records the ZIP hash,
+its size, and the enclosed MSI SHA-256. Both target-scoped Windows Publish and
+full four-artifact Publish use this same route. Local ZIP construction and
+byte-for-byte extraction verification must finish before full-channel uploads.
+MSI signing, when configured, must occur before this ZIP step; the current
+pipeline does not claim an Authenticode signature without a Windows signing key.
+
 On Apple Silicon, Setup also provisions pinned `msitools=0.106` through the
 existing micromamba-managed macOS prefix under `Builds`, without Homebrew or
-global installs. Setup compiles and inspects an independent native ARM64 smoke
-MSI and the full installer template. Once this acceptance is recorded in
+global installs. The subsequent Test phase compiles and inspects a native ARM64 smoke
+MSI and the full installer template. Once Test acceptance is recorded in
 `Builds/CinterForgeTerminal/Toolchains/WindowsMSI/mac-native-msi-preflight.json`,
 Publish uses native `wixl`, `msiinfo` and `msiextract`, avoiding Docker/QEMU for
-MSI assembly. Publish **never installs tools**. Older Setup receipts, other
+MSI assembly. Publish **never installs tools**. Older verified Test receipts, other
 hosts and native compiler failures use the already-provisioned Debian AMD64
 Docker toolchain as fallback. The MSI input fingerprint is based on verified
 SHA-256 content, release and packaging recipe, not timestamps, so identical
@@ -180,7 +189,7 @@ Target-only publishing writes `mac-artifacts.json`, `linux-artifacts.json`, or
 `win-artifacts.json` to the existing channel root; separate local
 `<target>-packages.json` receipts cache unchanged archives without modifying the
 original all-platform `four-artifacts.json`. Windows `win-artifacts.json`
-covers the ZIP and MSI. Full publishing retains `four-artifacts.json` for the
+covers the portable application ZIP and separate MSI ZIP. Full publishing retains `four-artifacts.json` for the
 original four products and publishes the MSI with an auxiliary scoped
 manifest; it verifies the MSI **before uploading any full-release artifacts**.
 Only changed scoped artifacts need R2 transfer/round-trip checks, and DevTools
@@ -281,7 +290,7 @@ substitute for native interactive acceptance.
 ./Cinter all all publish beta   # explicit beta upload after Test PASS
 ./Cinter all all publish release # explicit production upload after Test PASS
 ./Cinter all mac                # macOS-only Build / Stage / Test after shared Setup
-./Cinter all win publish internal   # Windows ZIP + MSI only, private Cloudflare
+./Cinter all win publish internal   # Windows app ZIP + MSI ZIP only, private Cloudflare
 ./Cinter all linux publish internal # Linux ZIP only, private Cloudflare
 ./Cinter all mac publish beta       # Mac DMG only, public beta
 ./Cinter windows cross-test     # Windows PE / Wine cross-compatibility evidence
@@ -307,7 +316,7 @@ The producer assumes the authored Terminal repository and documented external in
 3. Compile/verify the **custom ARM64 LinuxKit kernel with VirtioFS enabled**, package its kernel/initrd/cmdline and Mac LAN relayd launcher, and refresh its generated guest manifest when inputs change. Cache hits require hash/receipt validation; clean state builds from pinned source.
 4. Build/verify the ARM64 kernel, guest glibc and ARM64 NetherNet probe through the **same** `c` producer; release `c` before the actual LinuxKit/Bedrock guest acceptance. After Bedrock passes, start the separately managed QEMU **x86-64** `t` Docker guest and build the single Debian AMD64 Linux/Windows image there, not through ARM64 `c` binfmt/Rosetta. Reuse `t` for cross-build, Wine/MSYS2, Linux Bash and both VNC acceptances; release it on success, failure or interruption. Do not introduce a `w` VM or depend on CFOS's comprehensive Ubuntu image.
 5. Provision/check portable Python and native runtime closures for each release target, the Code-OSS web workbench and extensions, JS Z-machine, game/IF catalogs and native WebView dependencies. The pinned Code-OSS browser producer skips upstream `extensions/copilot` during its nested npm dependency pass: that GitHub-only extension is excluded from the web product, and its optional platform-specific SDK is not a Setup prerequisite. All other pinned extension dependencies and the CinterForge-owned browser extension remain intact. Connecting a local AI provider (including Pleias) is separate from provisioning the editor; this does not claim that chat inference is configured. For Lagomorph, **pull the complete authored `Builds/Lagomorph` tree from the authenticated internal CDN before generating its HFS disks**. Download a single `Builds-Lagomorph.zip` snapshot from the internal `cdn-assets-dev` R2 bucket; verify its committed manifest, whole-ZIP SHA-256, each file hash and empty directories before updating the local source. Previously published per-file snapshots remain readable for migration. A missing snapshot is a Setup error; the source pull must not contact public release media. Respect independent licensed media inputs rather than fabricating substitutes.
-6. With **explicit official Bedrock EULA acceptance**, download/verify the official test archive, start a disposable isolated Bedrock server through the signed LinuxKit guest, inspect readiness, console and LAN behavior, stop the server/guest, and record evidence. Never touch the player's worlds during this producer test.
+6. Provision and verify the official Bedrock archive and guest runtime inputs needed for later acceptance (respecting the official EULA). **Do not launch Bedrock or run an acceptance test during Setup.** Test subsequently starts a disposable isolated server, checks networking/console, and stops it; never touch the player's worlds.
 7. Write versioned setup manifests and logs. On success, error, interrupt or owning-process death, stop the owned `c` LinuxKit producer, `t` AMD64 producer and temporary children; leave unrelated VMs untouched. Persistent managed caches may be retained for the next validated build.
 
 Producer-time official Bedrock acceptance is separate from **end-user Bedrock installation**, which occurs on explicit request in the installed Game Terminal only after the user's own EULA acceptance. No Bedrock executable is bundled as a general-purpose freely redistributable native app component.

@@ -109,7 +109,7 @@
   // Number of completed scenarios that triggers the closing sequence.
   // Single source of truth: game.js's finalSequence() and the localized
   // "SCENARIOS RUN: N" / "SCENARI ESEGUITI: N" display line both derive from
-  // this constant (guarded by tests/unit/srcCanonical.test.js).
+  // this constant (guarded by root test.py smoke suite).
   var REQUIRED_WAR_RUNS = 3;
 
   function completeRun(completedRuns) {

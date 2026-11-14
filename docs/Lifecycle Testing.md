@@ -12,21 +12,27 @@ required to complete this drop.
 ./Cinter all all
 ```
 
-This single command runs Setup → Build → Stage → Test. It does **not**
-publish or launch the Terminal GUI. Setup checks repository inputs, expected
-directories and syntax before expensive provisioning, and runs existing
-LinuxKit/Bedrock acceptance. Test performs Python and JavaScript regressions,
-release ZIP/signature and Stage receipt checks without starting the application.
-On macOS, Setup additionally exercises the **actual `t` runtime VM**, Linux and
-Windows/Wine guest startups, both persistent Bash PTYs, both VNC/noVNC endpoints,
-and owned shutdown. Every check is recorded under
-`Builds/Logs/CinterForgeTerminal/guest-connections-setup.{json,log}`;
-`./Cinter test mac` validates that receipt **read-only** and rejects missing or
-incomplete acceptance. Test must never start guests, download tools, or repair
-an incomplete Setup. The Mac builder must perform real acceptance; mocked
-regression tests alone do not establish it.
-Interactive native acceptance of Mac/Windows/Linux shells is a later DevTools
-work item; none is inferred from container tests or successful packaging.
+This single command runs **Setup → Build → Stage → Test**. It does not
+publish or launch the Terminal GUI. The explicit Test phase is the ONLY
+place where release acceptance runs. Setup provisions all toolchains,
+Bedrock/NetherNet inputs and guest images; Build compiles unpacked artifacts;
+Stage copies/verifies those artifacts. None invokes the root smoke suite.
+
+All **12** consolidated smoke checks live in **root `test.py`**. The former
+`tests/` directory, hundreds of micro-tests and JavaScript smoke harnesses
+were physically deleted. `test.py` has a permanent rule: keep at most 50 tests;
+if the count ever reaches 75, consolidate to fewer than 50. Real system tests
+are preferred over fake Docker replies or monkeypatches. The suite performs
+read-only receipt/signature/resource checks and real Bedrock/Linux/Windows
+Bash/VNC/MSI acceptance on the staged macOS build machine. The official
+Bedrock acceptance uses a disposable Builds workspace, never a player's world.
+Missing setup inputs cause Test to fail; Test must not acquire dependencies.
+
+Linux/Windows guest acceptance and its complete VM cleanup report are under
+`Builds/Logs/CinterForgeTerminal/guest-connections-test.{json,log}`. The Bedrock
+acceptance receipt remains at `Builds/Logs/CinterForgeTerminal/linuxkit-bedrock-acceptance.json`.
+**A PASS requires the real Mac lifecycle**; source syntax checks performed
+elsewhere cannot establish that guest VMs or native signing work.
 
 When diagnosing a lifecycle phase, supported independent commands remain:
 
@@ -39,26 +45,6 @@ When diagnosing a lifecycle phase, supported independent commands remain:
 
 No other test commands are expected from the builder. If one fails, the full
 console transcript and a machine-readable result are retained automatically.
-
-### Small release regression gate
-
-The default `./Cinter test` runs **52 selected Python contract tests** defined
-in `tests/test_suite_core.py`, plus the existing JavaScript source/smoke
-checks. This is deliberately about 10% of the previous Python suite. The
-selection covers the lifecycle boundaries, release integrity, signing,
-installer, VM ownership, Bedrock, games, authentication and Steam paths.
-
-The remaining `tests/test_suite_*.py` methods are **diagnostic only**: they
-are no longer discovered by the lifecycle, because many mock internal
-implementation details and become stale after legitimate changes. They may
-be executed by maintainers to investigate a specific problem, but passing
-those diagnostics is not a release condition. A new default regression should
-replace a redundant selected check rather than increase the count.
-
-This does **not** weaken any real Setup/Build/Stage/Test acceptance requirement.
-`./Cinter test mac` must still verify the existing real VM/guest receipts,
-installed-stage integrity and signatures, and all JavaScript checks. No test
-is allowed to provision a toolchain or repair missing native acceptance.
 
 ## Incremental DevTools Build (persistent dirty checking)
 
@@ -191,13 +177,16 @@ preflight or independent `python`/`node` commands are required of the builder.
 
 ## Validation status of this delivered source
 
-- **Observed in a Linux development container:** 281 Python tests run,
-  1 skipped, 0 failures; six Node JavaScript syntax/smoke/guest checks passed.
-- **Observed:** an intentionally unsuccessful Stage against empty Builds wrote
-  its error transcript, FAIL JSON and latest-result pointer. Setup source
-  preflight also completed on this cumulative source.
-- **Not observed for this drop:** a full `./Cinter all all` on HOPE-DEV/Kevin,
-  native Windows WebView2/ConPTY, native Linux WebKitGTK, live Cloudflare
-  upload/download, Gatekeeper/notarization or Lagomorph cold first boot.
+- **Observed in a Linux development container for this single-suite source:**
+  all six repository-structure and authored-input checks pass; the root
+  `test.py` discovers 12 test cases in total. The six hardware-dependent
+  Mac release checks cannot run in the Linux container.
+- **Observed in the user's prior Mac lifecycle log before this restructuring:**
+  Setup, Build and Stage passed, including actual Bedrock, cross-toolchain,
+  Bash/VNC, app packaging and VM shutdown. The old simulated regression suite
+  subsequently stalled during Test and was removed from this source.
+- **Not observed for this new drop:** a full `./Cinter all all` on the actual
+  Mac builder after the lifecycle/test separation, native Windows WebView2,
+  native Linux WebKitGTK, live beta publish or first-boot cold acceptance.
 
 Only update acceptance statuses from actual lifecycle logs.

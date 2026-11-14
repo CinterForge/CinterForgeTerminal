@@ -475,8 +475,8 @@
   /** Send a command to the actual Code-OSS extension, not the outer Terminal. */
   function sendCodeCommand(type, data = {}) {
     if (!codeIsActive()) return false;
-    if (!codeCommands) {
-      notice('Code-OSS command channel is unavailable');
+    if (!codeCommands || !codeOwnerId) {
+      notice('Code-OSS commands are not ready yet; see Server Log if startup fails');
       return false;
     }
     codeCommands.postMessage({type, ...data, requestId: ++codeCommandSerial});
@@ -2500,7 +2500,10 @@ method: 'POST', headers: {
     // second hard-coded editor command catalog and no disappearing menus.
     const editorItems = (codeServiceMenus.get(name) || []).map(function clone(item) {
       if (item.separator) return {separator: true};
-      return {...item, enabled: active && item.enabled !== false,
+      const kind = String(item.action || '').startsWith('terminal:')
+        ? item.action.slice(9) : null;
+      return {...item, enabled: kind ? terminalActionEnabled(kind) :
+        (active && item.enabled !== false),
         ...(Array.isArray(item.children) ? {children: item.children.map(clone)} : {})};
     });
     if (name === 'Terminal') {
@@ -2626,18 +2629,35 @@ method: 'POST', headers: {
     }, window.location.origin);
   };
 
-  function readCodeServiceItems(items, sourceActions, depth = 0) {
+  // Terminal's own commands are executed by its existing host bridge. Their
+  // visible positions and titles still come from Code-OSS, but do not rely on
+  // an editor IAction whose enabled state was sampled before a guest booted.
+  const hostTerminalMenuActions = Object.freeze({
+    'New Terminal': 'native',
+    'New Mac Bash': 'mac',
+    'Open Linux Bash in Code-OSS': 'linux',
+    'Open Windows Bash in Code-OSS': 'win',
+    'New Server Log Terminal': 'server',
+    'Mac Launcher': 'launcher:mac',
+    'Windows Launcher': 'launcher:win',
+    'Linux Launcher': 'launcher:linux'
+  });
+  function readCodeServiceItems(items, sourceActions, menuName, depth = 0) {
     if (!Array.isArray(items) || depth > 8 || items.length > 200) return [];
     const output = [];
     for (const item of items) {
       if (item?.separator === true) { output.push({separator: true}); continue; }
       if (typeof item?.title !== 'string' || typeof item?.action !== 'string' ||
           item.title.length > 240 || item.action.length > 180) continue;
-      const normalized = {title: item.title, action: 'code:' + item.action,
-        enabled: item.enabled !== false};
+      const hostKind = menuName === 'Terminal' && depth === 0
+        ? hostTerminalMenuActions[item.title] : null;
+      const normalized = {title: item.title,
+        action: hostKind ? `terminal:${hostKind}` : 'code:' + item.action,
+        enabled: hostKind ? terminalActionEnabled(hostKind) : item.enabled !== false};
       if (Array.isArray(item.children)) {
-        normalized.children = readCodeServiceItems(item.children, sourceActions, depth + 1);
-      } else {
+        normalized.children = readCodeServiceItems(item.children, sourceActions,
+          menuName, depth + 1);
+      } else if (!hostKind) {
         sourceActions.add(normalized.action);
       }
       output.push(normalized);
@@ -2656,7 +2676,7 @@ method: 'POST', headers: {
     const sourceActions = new Set();
     for (const group of groups) {
       if (!codeMenuNames.includes(group?.name) || updated.has(group.name)) continue;
-      updated.set(group.name, readCodeServiceItems(group.items, sourceActions));
+      updated.set(group.name, readCodeServiceItems(group.items, sourceActions, group.name));
     }
     if (!updated.size) return;
     codeServiceMenus.clear();

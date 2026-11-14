@@ -157,7 +157,7 @@ def prepare_guest() -> Path:
     # the existing managed Ubuntu glibc and ARM64 probe producer, independently
     # of the Bedrock server/EULA acquisition performed by the user later.
     if platform.system() == 'Darwin':
-        from tests.acceptance_linuxkit import provision_guest_runtime
+        from linuxos.guest_inputs import provision_guest_runtime
         docker, env = managed_setup_docker()
         provision_guest_runtime(output / 'GuestRuntime', docker, env)
     # Assemble the existing NAT VM launcher with its owned host LAN relay.
@@ -203,7 +203,7 @@ def verify_guest() -> Path:
                 not fingerprint.is_file() or fingerprint.read_text() != expected or
                 not has_virtualization_entitlement(target)):
             raise RuntimeError('Signed VM launcher missing/stale; run ./Cinter setup all')
-        from tests.acceptance_linuxkit import _require_elf
+        from linuxos.guest_inputs import _require_elf
         runtime = output / 'GuestRuntime'
         loader = runtime / 'glibc-x86_64/ld-linux-x86-64.so.2'
         probe = runtime / 'cinter-nethernet-probe'
@@ -234,7 +234,7 @@ def setup() -> None:
     verify_guest()
     # Official Bedrock bytes belong to Setup, never the later offline Test.
     _licensed()
-    from tests.acceptance_linuxkit import prepare_official_bedrock_archive
+    from linuxos.guest_inputs import prepare_official_bedrock_archive
     prepare_official_bedrock_archive(REPO)
     print('[CinterForgeTerminal LinuxKit] Setup prepared kernel, signed VZ launcher, LAN relay and guest runtime', flush=True)
 
@@ -255,8 +255,9 @@ def test(*, offline: bool = True) -> None:
     # Test only consumes the official archive already acquired by Setup.
     # Missing bytes are a hard failure, never a reason to download during Test.
     _licensed()
-    cmd = [sys.executable, '-B', str(REPO / 'tests' / 'acceptance_linuxkit.py'), '--repo-root', str(REPO), '--offline']
-    _call(*cmd)
+    # Real official-Bedrock/Rosetta acceptance lives exclusively in root test.py.
+    from test import test_linuxkit
+    test_linuxkit(REPO, offline=True)
 
 
 def launch(server: Path) -> None:

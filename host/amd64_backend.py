@@ -13,6 +13,45 @@ import platform
 import subprocess
 
 
+def require_managed_t_docker(builds: Path) -> str:
+    """Reject foreign/legacy Docker endpoints before Windows/Linux Setup work.
+
+    This checks *which* guest owns DOCKER_HOST; callers additionally query the
+    real daemon architecture.  A Docker context name is not proof of ownership:
+    it may be missing, stale, or point at LinuxKit c instead of AMD64 t.
+    """
+    if platform.system() != 'Darwin':
+        return os.environ.get('DOCKER_HOST', '')
+    builds = builds.resolve(strict=True)
+    configured = os.environ.get('CINTER_BUILDS_ROOT', '')
+    if (builds.name != 'Builds' or not configured or
+            Path(configured).expanduser().resolve() != builds or
+            os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') != 'developer'):
+        raise RuntimeError('Setup/Build must own the developer Builds t backend')
+    # The managed runtime picks the shortest real Builds ancestor so Lima
+    # stays under macOS's Unix socket length limit.
+    roots = [parent / 'CFTVM/T' for parent in reversed((builds, *builds.parents))
+             if parent.name == 'Builds' and parent.is_dir() and not parent.is_symlink()]
+    root = Path(os.environ.get('COLIMA_HOME', '/__unmanaged__')).parent
+    if root not in roots or root.is_symlink():
+        raise RuntimeError('Setup/Build Docker COLIMA_HOME is not the managed t VM state')
+    expected = {
+        'COLIMA_HOME': str(root / 'c'),
+        'LIMA_HOME': str(root / 'l'),
+        'DOCKER_CONFIG': str(root / 'd'),
+        'DOCKER_HOST': 'unix://' + str(root / 'c/t/docker.sock'),
+    }
+    for key, correct in expected.items():
+        if os.environ.get(key) != correct:
+            raise RuntimeError(f'Setup/Build Docker {key} does not identify owned t: '
+                               f'expected {correct!r}, got {os.environ.get(key)!r}')
+    for key in ('DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
+        if os.environ.get(key):
+            raise RuntimeError(f'Setup/Build Docker {key} is a stale/foreign selector; '
+                               'the owned t backend uses DOCKER_HOST only')
+    return expected['DOCKER_HOST']
+
+
 def docker_bind_source(path: Path) -> str:
     """Docker bind mounts use paths on the *daemon*, not on the Mac client.
 
@@ -20,7 +59,11 @@ def docker_bind_source(path: Path) -> str:
     separately mounted source paths. Do not apply this mapping to c or Linux.
     """
     resolved = str(path.resolve())
-    if platform.system() == 'Darwin' and os.environ.get('DOCKER_CONTEXT') == 'colima-t':
+    if platform.system() == 'Darwin':
+        builds = os.environ.get('CINTER_BUILDS_ROOT', '')
+        if not builds:
+            raise RuntimeError('Docker bind requires explicit managed developer Builds root')
+        require_managed_t_docker(Path(builds))
         return '/host/mac' + resolved
     return resolved
 
@@ -88,12 +131,14 @@ def managed_amd64_backend(builds: Path, *, setup: bool = True):
                                    f'(actual={actual!r}): {arch.stderr[-500:]}')
             print('[TERMINAL AMD64] PASS: one QEMU x86-64 t guest, '
                   'Docker daemon architecture=' + actual, flush=True)
-        # Docker's DOCKER_HOST takes precedence over DOCKER_CONTEXT. A prior
-        # LinuxKit c environment may have set it; remove it before switching.
-        for key in ('DOCKER_HOST', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
+        # Replace every Docker selector as a unit, including a previous c
+        # context. dict.update() alone leaves stale keys in os.environ.
+        for key in ('DOCKER_CONTEXT', 'DOCKER_HOST', 'DOCKER_TLS_VERIFY',
+                    'DOCKER_CERT_PATH'):
             os.environ.pop(key, None)
         # All children (including Windows cross build and Linux samples) use t.
         os.environ.update(env)
+        require_managed_t_docker(builds)
         yield docker
     finally:
         try:

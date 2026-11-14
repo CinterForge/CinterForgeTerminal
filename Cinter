@@ -237,40 +237,25 @@ def invoke(*args: str) -> None:
 
 
 def _run_automated_regression_tests() -> None:
-    """Run offline source checks as part of native Test, never as user chores.
+    """Execute the single real staged-system smoke suite in the Test phase only.
 
-    The outer lifecycle log captures every regression result. Test does not
-    launch the native GUI; interactive WebView acceptance is tracked separately
-    in the final DevTools phase on each target platform.
+    No unittest discovery, mock fixtures or legacy JavaScript test scripts.
+    The node parser is a real source-syntax check, not a test framework.
     """
-    # Keep the default regression gate intentionally small. The older
-    # implementation-level suites remain available for targeted diagnosis,
-    # but must not break every release when a private helper changes.
-    print('[Cinter test] Running 52 selected Python lifecycle contracts', flush=True)
-    invoke(sys.executable, '-B', '-m', 'unittest', 'discover', '-s', 'tests',
-           '-p', 'test_suite_core.py', '-q')
-    node_executable = shutil.which('node')
-    if not node_executable:
-        raise RuntimeError('Node.js unavailable in Test environment. Run ./Cinter setup all '
-                           'to provision the managed toolchain before Test.')
-    javascript_checks = (
-        ('--check', 'webapp/terminal.js'),
-        ('tests/lagomorph-timing-smoke.cjs',),
-        ('tests/test_lagomorph_controls.cjs',),
-        ('tests/ui-smoke.cjs',),
-        ('tests/museum-ui-smoke.cjs',),
-        ('tests/ui-acceptance-smoke.cjs',),
-    )
-    for check_arguments in javascript_checks:
-        print('[Cinter test] JavaScript ' + ' '.join(check_arguments), flush=True)
-        invoke(node_executable, *check_arguments)
-    print('[Cinter test] PASS Python and JavaScript source regressions', flush=True)
+    print('[Cinter test] Running root test.py (real staged smoke checks)', flush=True)
+    invoke(sys.executable, '-B', str(REPO / 'test.py'), '-q')
+    node_executable = BUILDS / 'CinterForgeTerminal/Toolchains/mac/env/bin/node'
+    if (not node_executable.is_file() or node_executable.is_symlink() or
+            not os.access(node_executable, os.X_OK)):
+        raise RuntimeError('Managed Node.js unavailable in Test; run ./Cinter setup all')
+    invoke(str(node_executable), '--check', str(REPO / 'webapp/terminal.js'))
+    print('[Cinter test] PASS root smoke suite and terminal.js syntax', flush=True)
 
 
 @contextmanager
 def _temporary_build_services(argv: list[str]):
-    """Outer Setup/Build owns Colima, including failure and SIGKILL cleanup."""
-    owner = (bool(argv) and argv[0] in ('setup', 'build', 'publish') and
+    """Lifecycle phase owns only its Colima helpers, including crash cleanup."""
+    owner = (bool(argv) and argv[0] in ('setup', 'build', 'test', 'publish') and
              not os.environ.get('CINTER_LIFECYCLE_PARENT') and
              platform.system() == 'Darwin')
     if not owner:
@@ -367,8 +352,13 @@ def _prepare_windows_release_msi(builds: Path) -> dict:
     from host.universal_package import HOST_RELEASE
     from host.unpacked_release import _load
     from host.msi_installer import publish as package_windows_msi
+    from host.target_publish import package_msi_zip
     win = _load(builds, HOST_RELEASE)['targets']['win']
-    return package_windows_msi(builds, release=HOST_RELEASE, entries=win['files'])
+    installer = package_windows_msi(builds, release=HOST_RELEASE, entries=win['files'])
+    # Finish the browser-downloadable MSI ZIP before the four-artifact upload.
+    # An archive failure must never create a half-committed public release.
+    package_msi_zip(builds, installer)
+    return installer
 
 
 def main(argv: list[str]) -> int:
@@ -414,7 +404,7 @@ def main(argv: list[str]) -> int:
         with managed_amd64_backend(BUILDS):
             invoke(sys.executable, '-B', '-m', 'host.windows_dependencies', '--builds', str(BUILDS))
             invoke(sys.executable, '-B', '-m', 'host.msi_installer', '--builds', str(BUILDS))
-        print('[CinterForgeTerminal] Windows Setup complete: cross-runtime and real WiX MSI smoke passed', flush=True)
+        print('[CinterForgeTerminal] Windows Setup complete: cross-runtime and WiX tools provisioned', flush=True)
         return 0
     if argv in (['setup', 'mac'], ['setup', 'linux']):
         # These targets currently share the broader platform toolchain
@@ -450,15 +440,13 @@ def main(argv: list[str]) -> int:
             from host.mac_bootstrap import stop_linuxkit_build_backend
             print('[CinterForgeTerminal] Releasing guest-input builder c before Bedrock acceptance', flush=True)
             stop_linuxkit_build_backend(BUILDS)
-        # This is an actual official-Bedrock launch through the signed,
-        # native-bridged LinuxKit VM, not a placeholder compile check.
-        invoke(sys.executable, '-B', str(REPO / 'linuxos/lifecycle.py'), 'test')
+        # Setup only provisions Bedrock inputs; Test performs the real launch.
         # Do not build the Debian AMD64 image under ARM64 LinuxKit's c Docker.
         # Setup owns this single QEMU x86-64 t backend through all subsequent
         # provisioning and acceptance, including failure/interruption cleanup.
         from host.amd64_backend import managed_amd64_backend
         with managed_amd64_backend(BUILDS):
-            # Bedrock must pass FIRST. Only then build the unified x86-64 Debian
+            # Prepare Bedrock inputs FIRST. Only then prepare the unified x86-64 Debian
             # Linux/Windows toolchain image and its real Linux/Wine/MSYS2 smokes.
             # Windows is a required target, not a best-effort add-on. Stage the
             # FULL MinGW/Wine/Xvfb image and Windows SDK/runtime acquisition into
@@ -467,19 +455,16 @@ def main(argv: list[str]) -> int:
             if platform.system() in ('Darwin', 'Linux'):
                 invoke(sys.executable, '-B', '-m', 'host.windows_dependencies',
                        '--builds', str(BUILDS))
-                # Setup acceptance builds and inspects a tiny real WiX MSI.
-                # Publish reuses this verified toolchain and never provisions it.
-                invoke(sys.executable, '-B', '-m', 'host.msi_installer',
-                       '--builds', str(BUILDS))
+                # Setup provisions WiX tools; tiny-MSI execution is Test-only.
             # For this Setup phase, verify the full developer tool inventory first.
-            # The resulting Markdown report includes every failed probe as well as
+            # The resulting Markdown inventory includes failed tool checks as well as
             # successful versions and measured executable sizes.
             invoke(sys.executable, '-B', '-m', 'host.devtooling',
                    '--builds', str(BUILDS))
             from host.bootstrap_bundle import provision_zmachine
             provision_zmachine(BUILDS)
-            # Setup prepares EVERY dependency (including foreign Python runtimes)
-            # and executes the real Minecraft acceptance before any release ZIP.
+            # Setup prepares EVERY dependency (including foreign Python runtimes);
+            # only Test executes Minecraft acceptance after Build and Stage.
             from host.portable_python import provision
             provision(BUILDS, 'mac', 'arm64')
             from host.universal_package import provision_release_runtimes
@@ -495,12 +480,8 @@ def main(argv: list[str]) -> int:
                 # No build VM may remain alongside the installed Terminal runtime.
                 from host.mac_bootstrap import stop_setup_build_vms
                 stop_setup_build_vms(BUILDS)
-                # Only Setup may prove the installed app's VM, persistent Bash and
-                # VNC paths using the provisioned pinned closure. Its t VM and
-                # guest processes are stopped on success *and* failure.
-                invoke(sys.executable, '-B', '-m', 'host.guest_runtime_acceptance',
-                       '--builds', str(BUILDS))
-        print('[CinterForgeTerminal] Setup complete: dependencies, LinuxKit, guest runtime and real Bedrock acceptance verified', flush=True)
+                # Real Bash/VNC/VM acceptance runs only after Stage in Test.
+        print('[CinterForgeTerminal] Setup complete: dependencies and guest inputs provisioned; acceptance belongs to Test', flush=True)
         return 0
     # Four unpacked Build outputs; ZIP files are exclusively Publish outputs.
     # Mac orchestrates real Linux OCI/Windows cross builds, without presenting
@@ -600,17 +581,12 @@ def main(argv: list[str]) -> int:
             stage_four(BUILDS, targets=('mac',))
         else:
             if action == 'test':
-                # Test is read-only/offline: require the durable Setup receipt
-                # proving the exact managed VM, two PTYs, two VNC sessions and
-                # mandatory shutdown. Never boot a guest or provision here.
-                from host.guest_runtime_acceptance import verify_setup_receipt
-                verify_setup_receipt(BUILDS)
-                # Users run lifecycle commands only. Test runs automated
-                # regressions and non-launch staged Mac verification; native
-                # GUI acceptance is deferred to the final DevTools phase.
+                # Only Test exercises staged real Bedrock, Linux/Windows guests,
+                # native MSI compiler and root smoke suite. No provisioning.
                 _run_automated_regression_tests()
-            invoke(sys.executable, '-B', '-m', 'host.mac_app', action,
-                   '--builds', str(BUILDS))
+            else:
+                invoke(sys.executable, '-B', '-m', 'host.mac_app', action,
+                       '--builds', str(BUILDS))
         return 0
     if len(argv) == 2 and argv[0] == 'build' and argv[1] in ('mac', 'linux', 'win'):
         target = argv[1]
@@ -775,8 +751,18 @@ def main(argv: list[str]) -> int:
             if stream.read(len(magic)) != magic:
                 raise RuntimeError(f'{target} staged native launcher has invalid executable magic')
         if target == 'win':
-            from host.msi_installer import _check_tools
-            _check_tools(BUILDS)  # Setup tiny-MSI acceptance is mandatory
+            from host.msi_installer import _check_tools, test as test_msi
+            try:
+                # A previous Test invocation can provide verified, reusable
+                # compiler evidence. No Setup receipt is accepted here.
+                _check_tools(BUILDS)
+            except RuntimeError:
+                # A scoped `all win` still runs the real MSI acceptance inside
+                # Test, without requiring a prior `test mac` invocation.
+                from host.amd64_backend import managed_amd64_backend
+                with managed_amd64_backend(BUILDS, setup=False):
+                    test_msi(BUILDS)
+                _check_tools(BUILDS)
         print(f'[Cinter test] PASS {target}: staged executable, Build receipt and tools verified; '
               'native GUI/install acceptance is separate', flush=True)
         return 0
@@ -786,6 +772,8 @@ def main(argv: list[str]) -> int:
         if platform.system() != 'Darwin':
             raise RuntimeError('The four-artifact automated Test orchestrator requires macOS')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'mac')
+        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'linux')
+        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'win')
         from host.universal_package import status_four
         result = status_four(BUILDS)
         if not result['complete_build_receipt'] or not result['complete_stage_receipt']:

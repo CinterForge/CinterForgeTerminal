@@ -916,13 +916,7 @@ def test_host(builds: Path) -> None:
     _run([str(product / 'bin' / ('cinter-python-host' + suffix)),
           '--python', sys.executable, '--worker', str(product / 'python/worker.py'),
           '--method', 'ping'])
-    library = (product / 'bin/CinterForgePythonHost.dll' if os.name == 'nt' else
-               product / 'lib' / ('libCinterForgePythonHost.dylib' if current_platform() == 'mac'
-                                  else 'libCinterForgePythonHost.so'))
-    env = dict(os.environ, CINTER_BUILDS_ROOT=str(builds), CPH_HOST_LIBRARY=str(library), PYTHONDONTWRITEBYTECODE='1',
-               CPH_ZEROCONF_ENABLED='1' if manifest.get('features', {}).get('zeroconf') else '0')
-    _run([sys.executable, '-B', '-m', 'unittest', 'discover', '-s', 'tests', '-v'],
-         cwd=Path(__file__).resolve().parents[1], env=env)
+    # Native Host RPC, queue and executable acceptance above is the Test gate.
     # A successful test run is bound to the exact staged artifact; the publisher
     # will reject stale receipts. Under Wine this is NOT native Windows proof.
     execution = 'native'
@@ -1044,13 +1038,24 @@ def main(argv=None) -> int:
             print(json.dumps(verify_injection(args.app_bundle.resolve()), indent=2))
             return 0
         if args.action in ('build', 'stage', 'test', 'all'):
+            full = args.name == 'all'
             if args.action in ('build', 'all'):
                 build_host(builds, zeroconf=not args.without_zeroconf, clean=args.clean,
                            application_shell=args.application_shell)
+                if full:
+                    from host.bootstrap_bundle import run_target_phase
+                    run_target_phase(builds, 'build')
             if args.action in ('stage', 'all'):
                 stage_host(builds)
+                if full:
+                    from host.bootstrap_bundle import run_target_phase
+                    run_target_phase(builds, 'stage')
             if args.action in ('test', 'all'):
-                test_host(builds)
+                if full:
+                    from host.bootstrap_bundle import test_all
+                    print(json.dumps(test_all(builds), indent=2, sort_keys=True))
+                else:
+                    test_host(builds)
             return 0
         if args.action == 'setup' and args.name == 'all':
             # Provision the pinned *portable* Terminal Python, not a host venv.

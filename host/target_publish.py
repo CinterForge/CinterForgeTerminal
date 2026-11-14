@@ -1,6 +1,6 @@
 """One-platform release publisher; never reads or modifies four-artifacts.json.
 
-Windows also publishes a WiX MSI with a separate signed-content manifest. This
+Windows also publishes a WiX MSI ZIP with a separate content-hash manifest. This
 module is strictly Publish-only: inputs must already be built and Setup-tested.
 """
 from __future__ import annotations
@@ -11,9 +11,12 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from zipfile import BadZipFile, ZIP_STORED, ZipFile
 
 SCHEMA = 'cinterforge.terminal.scoped-distribution.v1'
 TARGETS = ('mac', 'linux', 'win')
+MSI_NAME = 'CinterForgeTerminal-win.msi'
+MSI_ZIP_NAME = 'CinterForgeTerminal-win-msi.zip'
 
 
 def _sha(path: Path) -> str:
@@ -22,6 +25,66 @@ def _sha(path: Path) -> str:
         for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b''):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _zip_contains_msi(archive: Path, *, sha256: str, size: int) -> bool:
+    """Verify the actual uncompressed MSI bytes, not just the ZIP CRC/header."""
+    if not archive.is_file() or archive.is_symlink():
+        return False
+    try:
+        with ZipFile(archive, 'r') as bundle:
+            if bundle.namelist() != [MSI_NAME] or bundle.getinfo(MSI_NAME).file_size != size:
+                return False
+            digest = hashlib.sha256()
+            extracted = 0
+            with bundle.open(MSI_NAME) as stream:
+                for block in iter(lambda: stream.read(4 * 1024 * 1024), b''):
+                    digest.update(block)
+                    extracted += len(block)
+            return extracted == size and digest.hexdigest() == sha256
+    except (BadZipFile, EOFError, OSError, ValueError, RuntimeError):
+        return False
+
+
+def package_msi_zip(builds: Path, installer: dict) -> dict:
+    """Wrap a verified MSI in its own browser-downloadable ZIP, atomically.
+
+    Do not sign/recompile the MSI here. Authenticode signing, if configured,
+    must be completed and verified *before* the bytes in this ZIP are sealed.
+    """
+    if installer.get('filename') != MSI_NAME or not installer.get('release'):
+        raise RuntimeError('Expected a verified Windows MSI packaging receipt')
+    root = builds / 'CinterForgeTerminal/Distribution'
+    source = root / MSI_NAME
+    expected_sha = installer.get('sha256')
+    expected_size = installer.get('bytes')
+    if (not isinstance(expected_sha, str) or len(expected_sha) != 64 or
+            not isinstance(expected_size, int) or expected_size <= 0 or
+            not source.is_file() or source.is_symlink() or
+            source.stat().st_size != expected_size or _sha(source) != expected_sha):
+        raise RuntimeError('Windows MSI changed after compiler verification; refusing ZIP')
+    root.mkdir(parents=True, exist_ok=True)
+    destination = root / MSI_ZIP_NAME
+    if not _zip_contains_msi(destination, sha256=expected_sha, size=expected_size):
+        fd, tmp_name = tempfile.mkstemp(prefix='.win-msi-', suffix='.zip.part', dir=root)
+        os.close(fd)
+        pending = Path(tmp_name)
+        try:
+            # MSI already contains compressed CAB data. ZIP_STORED avoids
+            # wasting CPU compressing that data a second time.
+            with ZipFile(pending, 'w', compression=ZIP_STORED, allowZip64=True) as bundle:
+                bundle.write(source, arcname=MSI_NAME)
+            if not _zip_contains_msi(pending, sha256=expected_sha, size=expected_size):
+                raise RuntimeError('New Windows MSI ZIP failed byte-for-byte verification')
+            os.replace(pending, destination)
+            print(f'[WINDOWS MSI] ZIP verified: {destination}', flush=True)
+        finally:
+            pending.unlink(missing_ok=True)
+    else:
+        print(f'[WINDOWS MSI] Reusing verified MSI ZIP: {destination}', flush=True)
+    return {'filename': MSI_ZIP_NAME, 'release': installer['release'],
+            'bytes': destination.stat().st_size, 'sha256': _sha(destination),
+            'msi_sha256': expected_sha}
 
 
 def _reusable(cfg: dict, prefix: str, remote: dict, manifest: str,
@@ -148,10 +211,12 @@ def publish(builds: Path, *, target: str, channel: str = 'dryrun',
         from host.msi_installer import publish as make_msi
         record = _load(builds, release)['targets']['win']
         installer = make_msi(builds, release=release, entries=record['files'])
-        path = builds / 'CinterForgeTerminal/Distribution' / installer['filename']
+        archive = package_msi_zip(builds, installer)
+        path = builds / 'CinterForgeTerminal/Distribution' / archive['filename']
         files[path.name] = path
-        artifacts[path.name] = {'sha256': installer['sha256'], 'bytes': installer['bytes'],
-                                'build_fingerprint': record['fingerprint']}
+        artifacts[path.name] = {'sha256': archive['sha256'], 'bytes': archive['bytes'],
+                                'build_fingerprint': record['fingerprint'],
+                                'contains': MSI_NAME, 'msi_sha256': archive['msi_sha256']}
     return _publish_files(builds, channel=channel, target=target, files=files,
                           document={'release': release, 'target': target,
                                     'artifacts': artifacts}, config=config)
@@ -166,12 +231,12 @@ def publish_msi_addendum(builds: Path, *, channel: str, release: str | None = No
     release = release or up.HOST_RELEASE
     record = _load(builds.resolve(), release)['targets']['win']
     entry = packaged if packaged is not None else make_msi(builds, release=release, entries=record['files'])
-    if entry.get('release') != release or entry.get('filename') != 'CinterForgeTerminal-win.msi':
+    if entry.get('release') != release or entry.get('filename') != MSI_NAME:
         raise RuntimeError('Invalid prepared Windows MSI publication receipt')
-    path = builds / 'CinterForgeTerminal/Distribution' / entry['filename']
-    if not path.is_file() or _sha(path) != entry.get('sha256') or path.stat().st_size != entry.get('bytes'):
-        raise RuntimeError('Windows MSI changed after packaging; refusing publication')
+    archive = package_msi_zip(builds, entry)
+    path = builds / 'CinterForgeTerminal/Distribution' / archive['filename']
     return _publish_files(builds, channel=channel, target='win', files={path.name: path},
                           document={'release': release, 'target': 'win', 'artifacts': {
-                              path.name: {'sha256': entry['sha256'], 'bytes': entry['bytes'],
-                                          'build_fingerprint': record['fingerprint']}}}, config=config)
+                              path.name: {'sha256': archive['sha256'], 'bytes': archive['bytes'],
+                                          'build_fingerprint': record['fingerprint'],
+                                          'contains': MSI_NAME, 'msi_sha256': archive['msi_sha256']}}}, config=config)

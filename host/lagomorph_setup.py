@@ -331,8 +331,8 @@ def _stage_hfs_linux(builds: Path, temp: Path,
     One Docker call prepares all three volumes, avoids rebuilding Wine/MSYS2,
     and keeps the published media fully offline and unchanged until verified.
     """
-    if os.environ.get('DOCKER_CONTEXT') != 'colima-t':
-        raise RuntimeError('Lagomorph HFS Setup requires the existing AMD64 t guest')
+    from host.amd64_backend import require_managed_t_docker
+    require_managed_t_docker(builds)
     package = _hfs_package(builds)
     from host.amd64_backend import docker_bind_source
     from host.three_samples import _docker_image

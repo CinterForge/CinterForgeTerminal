@@ -1,7 +1,7 @@
 """Native Debian wixl Windows Installer producer for the existing CinterForge lifecycle.
 
-Setup ONLY: use the Setup-provisioned, version-checked wixl/msitools toolchain
-and compile, inspect, and extract a real tiny x64 MSI. Publish ONLY: compile
+Setup checks pinned compiler dependencies without executing tests.
+Test compiles, inspects and extracts a real x64 MSI using staged tools. Publish ONLY: compile
 verified unpacked Windows Build files using the prevalidated OCI image.
 No WiX 3 executable, PE32 loader, Wine Mono, provisioning, or extraction is
 needed by MSI packaging. Other Windows guest testing still uses patched Wine.
@@ -51,11 +51,11 @@ def _sha(path: Path) -> str:
 
 
 def _check_tools(builds: Path) -> None:
-    """Publish validates Setup's completed acceptance, never installs tools."""
+    """Publish requires Test's real compiler acceptance, never installs tools."""
     stage = _stage(builds)
     proof = stage / 'msi-preflight.json'
     if proof.is_symlink():
-        raise RuntimeError('Symlinked Windows MSI Setup receipt')
+        raise RuntimeError('Symlinked Windows MSI Test receipt')
     try:
         record = json.loads(proof.read_text('utf-8'))
     except (OSError, ValueError):
@@ -69,13 +69,13 @@ def _check_tools(builds: Path) -> None:
             not (builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/TemplateSmoke/CinterForgeTerminal-win.msi').is_file() or
             (builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/TemplateSmoke/CinterForgeTerminal-win.msi').is_symlink() or
             record.get('template_sha256') != _sha(builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/TemplateSmoke/CinterForgeTerminal-win.msi')):
-        raise RuntimeError('Setup MSI tools missing or acceptance receipt invalid; run ./Cinter setup all')
-    # Confirm the OCI image whose native wixl/msitools produced the Setup receipt
+        raise RuntimeError('MSI Test receipt missing or invalid; run ./Cinter test win')
+    # Confirm the OCI image whose native wixl/msitools produced the Test receipt
     # is still the staged, pinned toolchain identity. No daemon/start/download.
     from host.windows_environment import WindowsCrossEnvironment
     _, identity = WindowsCrossEnvironment.validate_staged(builds)
     if record.get('image') != identity.get('image'):
-        raise RuntimeError('Windows MSI Setup image changed; rerun Setup')
+        raise RuntimeError('Windows MSI producer image changed; rerun Setup and Test')
     # Wine is not a reliable implementation of the native Windows ARP UI.
     # Require the actual compiled MSI table evidence; native Windows installation
     # and removal are user acceptance, not a simulated Setup gate.
@@ -85,7 +85,7 @@ def _check_tools(builds: Path) -> None:
             proof_registration.get('allusers') != '1' or
             not proof_registration.get('uninstall_supported') or
             not proof_registration.get('start_menu_managed')):
-        raise RuntimeError('Setup MSI compiled registration acceptance missing; rerun Setup')
+        raise RuntimeError('MSI Test compiled registration acceptance missing; rerun Test')
 
 
 def _cross(builds: Path, *, setup: bool):
@@ -157,8 +157,8 @@ def _native_compiler(builds: Path) -> _MacNativeMSITools | None:
         return None
 
 
-def _setup_mac_native(builds: Path) -> dict | None:
-    """Setup-only acceptance of the provisioned native ARM64 MSI producer.
+def _test_mac_native(builds: Path) -> dict | None:
+    """Test-only acceptance of the provisioned native ARM64 MSI producer.
 
     Verify the same smoke, template registration, and cabinet extraction as
     the established Debian compiler before enabling it during Publish.
@@ -199,7 +199,7 @@ def _setup_mac_native(builds: Path) -> dict | None:
         report.update(status='passed', smoke_sha256=smoke_checks['sha256'],
                       template_sha256=template_checks['sha256'],
                       template_checks=template_checks, execution='native-macos-arm64-wixl-x64')
-        print('[WINDOWS MSI SETUP] PASS native macOS ARM64 wixl 0.106: x64 MSI cabinet, '
+        print('[WINDOWS MSI TEST] PASS native macOS ARM64 wixl 0.106: x64 MSI cabinet, '
               'registration, uninstall actions and shortcut verified', flush=True)
     except Exception as error:
         report['error'] = repr(error)
@@ -362,7 +362,7 @@ def _compile(builds: Path, cross, *, work: Path, sources: dict[str, Path],
              ['sh', '-c', script, 'cinterforge-msi', cross.path(wxs), cross.path(output)],
              cwd=work, timeout=1200)
     else:
-        # Setup's tiny smoke files retain their existing tested compiler path.
+        # Test's tiny smoke files retain their existing compiler path.
         _run(cross, 'wixl native x64 MSI compiler',
              ['wixl', '--arch', 'x64', '--output', cross.path(output), cross.path(wxs)],
              cwd=work, timeout=1200)
@@ -496,7 +496,35 @@ def _verify_msi(cross, msi: Path, *, cwd: Path, smoke_file: str | None = None,
 
 
 def setup(builds: Path) -> dict:
-    """Setup-only native compiler + real MSI table/cabinet acceptance."""
+    """Setup-only dependency readiness; never compiles or executes smoke MSIs.
+
+    host.windows_dependencies has already staged the x86-64 producer image.
+    This step checks that pinned tooling is present without running tests.
+    Test (after Stage) will compile/cabinet-inspect the actual smoke MSIs.
+    """
+    builds = _builds(builds)
+    from host.windows_environment import WindowsCrossEnvironment
+    archive, identity = WindowsCrossEnvironment.validate_staged(builds)
+    if not archive.is_file() or archive.is_symlink():
+        raise RuntimeError('Setup missing pinned Windows MSI producer image')
+    import platform
+    if platform.system() == 'Darwin' and platform.machine() == 'arm64':
+        native = builds / 'CinterForgeTerminal/Toolchains/mac/env/bin'
+        for name in ('wixl', 'msiinfo', 'msiextract'):
+            path = native / name
+            if not path.is_file() or path.is_symlink():
+                raise RuntimeError('Setup missing native MSI tool: ' + str(path))
+    print('[WINDOWS MSI SETUP] PASS provisioned compiler/tool closure; real MSI acceptance deferred to Test',
+          flush=True)
+    return {'ready': True, 'image': identity.get('image'), 'archive': str(archive)}
+
+
+def test(builds: Path) -> dict:
+    """Test-only native compiler + real MSI table/cabinet acceptance.
+
+    All OCI/compiler dependencies must already have been provisioned by Setup.
+    A missing image is a hard error here, never an invitation to download.
+    """
     builds = _builds(builds)
     stage = _stage(builds)
     stage.mkdir(parents=True, exist_ok=True)
@@ -506,7 +534,7 @@ def setup(builds: Path) -> dict:
     report = {'schema': SCHEMA, 'status': 'failed',
               'compiler': 'debian-wixl', 'wixl_package_version': WIXL_PACKAGE_VERSION}
     try:
-        cross = _cross(builds, setup=True)
+        cross = _cross(builds, setup=False)
         work = builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/Smoke'
         work.mkdir(parents=True, exist_ok=True)
         report['image'] = str(getattr(cross, 'image', ''))
@@ -517,8 +545,8 @@ def setup(builds: Path) -> dict:
         output = _compile(builds, cross, work=work,
                           sources={'README.txt': readme}, release='2026.11.0', smoke=True)
         checks = _verify_msi(cross, output, cwd=work, smoke_file='README.txt', smoke=True)
-        # Exercise the exact same minimal MSI schema with actual launcher filenames
-        # during Setup so Publish cannot fail on an untested template variant.
+        # Test the MSI schema with actual launcher filenames against the
+        # pre-provisioned compiler before Publish.
         template_work = builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/TemplateSmoke'
         template_work.mkdir(parents=True, exist_ok=True)
         sample_cmd = template_work / 'Terminal.cmd'
@@ -533,10 +561,10 @@ def setup(builds: Path) -> dict:
         template_checks = _verify_msi(cross, template, cwd=template_work)
         # Native Windows ARP visibility/uninstall cannot be inferred from Wine.
         # The compiled MSI's property, action, sequence and shortcut tables are
-        # the Setup gate. Test the final package on Windows before release.
+        # the Test gate. Native Windows install/uninstall is separate acceptance.
         # Native macOS arm64 wixl must pass the identical MSI smoke and
-        # registration checks before Setup marks the full MSI path accepted.
-        native_acceptance = _setup_mac_native(builds)
+        # registration checks before Test marks the MSI path accepted.
+        native_acceptance = _test_mac_native(builds)
         report.update(status='passed', smoke_sha256=checks['sha256'],
                       smoke_file=str(output), checks=checks,
                       template_sha256=template_checks['sha256'],
@@ -544,7 +572,7 @@ def setup(builds: Path) -> dict:
                       execution='native-linux-wixl-x64')
         if native_acceptance is not None:
             report['mac_native'] = native_acceptance
-        print('[WINDOWS MSI SETUP] PASS: native wixl x64 MSI, ARPINSTALLLOCATION, '
+        print('[WINDOWS MSI TEST] PASS: native wixl x64 MSI, ARPINSTALLLOCATION, '
               'per-machine registration/uninstall action tables and managed shortcut verified; '
               'native Windows install/uninstall remains external acceptance', flush=True)
     except Exception as error:

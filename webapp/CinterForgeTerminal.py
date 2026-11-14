@@ -17,8 +17,9 @@ AUTHORING/LIFECYCLE CONTRACT
     The browser UI is ``webapp/terminal.js``. The native C++ host owns the
     process lifetime, and ``Cinter`` owns all build/setup/publish commands.
     Runtime files must work *without* the original source checkout installed.
-    Installed apps write exclusively to their resolved Steam library; explicit
-    repository development/lifecycle runs use sibling Builds. Do not repurpose
+    Installed apps keep normal runtime data in their selected Steam library;
+    an explicitly consented DevTools install also creates/uses the selected
+    developer Builds tree. Repository lifecycle runs use sibling Builds. Do not repurpose
     or terminate another process's managed VM.
     Do not change the Infinite Mac guest-input automation in this backend.
 
@@ -603,8 +604,15 @@ class TerminalSession:
         scripts = _install_shell_commands(Path(env['CINTER_TERMINAL_SCRATCH_ROOT']), system, env)
         self.shell = command if command is not None else _shell_command(system, scripts, builds)
         if child_env:
-            # Only the app-owned Docker subprocess needs this Colima context.
-            # The host shell and its authenticated CLI token are unchanged.
+            # The session environment starts from the native process. Remove
+            # inherited Docker selectors before applying the verified managed
+            # socket: a stale DOCKER_CONTEXT overrides DOCKER_HOST and breaks
+            # the real Linux/Windows Bash PTYs even after _env() was fixed.
+            # Native Mac Bash (without child_env) keeps its normal user env.
+            if 'DOCKER_HOST' in child_env:
+                for key in ('DOCKER_CONTEXT', 'DOCKER_HOST',
+                            'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
+                    env.pop(key, None)
             env.update(child_env)
         working_directory = working_directory or self.root
         if output_log is None:
@@ -2102,7 +2110,16 @@ class Handler(BaseHTTPRequestHandler):
                     with self.server.guest_shells_lock:
                         terminal = self.server.guest_shells.get(backend)
                         if terminal is None or terminal.closed or terminal.process.poll() is not None:
-                            raise RuntimeError(backend.title() + ' Bash is not connected; see Server Log')
+                            # Code-OSS loads while the app-owned VM is still
+                            # booting. A pending attach is not a failed Bash:
+                            # the adapter retries this same ID after readiness.
+                            with self.server.guest_start_lock:
+                                state = self.server.guest_start_state
+                                cause = self.server.guest_errors.get(backend) or self.server.guest_start_error
+                            if state == 'starting':
+                                return {'opened': False, 'pending': True, 'backend': backend}
+                            raise RuntimeError(backend.title() + ' Bash unavailable: ' +
+                                               (cause or ('guest state=' + state)) + '; see Server Log')
                         terminal.code_backend = backend
                         self.server.code_sessions[code_id] = terminal
                         self.server.devtools_requested = True
@@ -5075,19 +5092,109 @@ def _devtools_release() -> str:
     return value
 
 
-def _devtools_destination(release: str):
-    from pathlib import Path
-    configured = os.environ.get('CINTER_STEAMAPPS') or os.environ.get('CFOS_STEAMAPPS')
-    if configured:
-        steamapps = Path(configured).expanduser()
-        if steamapps.name.lower() != 'steamapps' or steamapps.is_symlink() or not steamapps.is_dir():
-            raise RuntimeError('Provide a real Steam steamapps root via CINTER_STEAMAPPS: ' + str(steamapps))
-        steamapps = steamapps.resolve(strict=True)
+def _devtools_builds_pin() -> Path | None:
+    """Remember the consented development Builds location across workspaces.
+
+    This file is user configuration in the selected Steam library, not an SDK
+    or transient build artifact. Merely checking DevTools must not create it.
+    """
+    steam = _steam_library_for_installed_root(ASSETS.parent)
+    if steam is None:
+        return None
+    return steam / 'common/CinterForge/Applications/TerminalState/devtools-builds.json'
+
+
+def _devtools_builds_root() -> Path:
+    """Resolve the actual developer Builds location without creating it.
+
+    A downloaded Terminal has no right to create Builds on normal launch.
+    `devtools install` is the explicit opt-in which creates that folder.
+    Repository development uses the same sibling Builds as ./Cinter.
+    """
+    supplied = os.environ.get('CINTER_BUILDS_ROOT', '').strip()
+    if supplied:
+        root = Path(supplied).expanduser()
     else:
-        steamapps = _steam_library_for_installed_root(ASSETS.parent)
-        if steamapps is None:
-            raise RuntimeError('Cannot identify the installed Steam library; set CINTER_STEAMAPPS')
-    return steamapps / 'common/CinterForge/Applications/DevTools/CinterForge Terminal' / release
+        pinned = _devtools_builds_pin()
+        if pinned is not None and pinned.is_file():
+            if pinned.is_symlink():
+                raise RuntimeError('Unsafe DevTools Builds selection')
+            try:
+                record = json.loads(pinned.read_text(encoding='utf-8'))
+                if record.get('schema') != 'cinterforge.devtools-builds.v1':
+                    raise ValueError('Unknown DevTools Builds configuration')
+                root = Path(record['builds'])
+            except (ValueError, KeyError, TypeError, OSError) as error:
+                raise RuntimeError('Invalid saved DevTools Builds location: ' + str(pinned)) from error
+        else:
+            home = _real_login_home()
+            selected = os.environ.get('CINTER_CODE_WORKSPACE', '').strip()
+            workspace = Path(selected).expanduser() if selected else None
+            if workspace is not None and (not workspace.is_absolute() or
+                                          not workspace.is_dir()):
+                raise RuntimeError('Selected Code-OSS workspace is not an existing absolute folder')
+            if workspace is None:
+                base = (home / 'Source' if (home / 'Source').is_dir() else
+                        home / 'Documents' if (home / 'Documents').is_dir() else home)
+            else:
+                workspace = workspace.resolve(strict=True)
+                if workspace.name == 'Builds':
+                    base = workspace.parent
+                elif (workspace / 'Cinter').is_file() and (workspace / 'CMakeLists.txt').is_file():
+                    base = workspace.parent  # the repository's sibling Builds
+                elif (home / 'Source').is_dir() and workspace.is_relative_to(home / 'Source'):
+                    base = home / 'Source'
+                elif (home / 'Documents').is_dir() and workspace.is_relative_to(home / 'Documents'):
+                    base = home / 'Documents'
+                else:
+                    base = workspace
+            root = base / 'Builds'
+    if not root.is_absolute() or root.name != 'Builds':
+        raise RuntimeError('Developer toolchains require an absolute Builds directory: ' + str(root))
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        raise RuntimeError('Unsafe developer Builds location: ' + str(root))
+    resolved = root.resolve(strict=False)
+    # Never extract DevTools into the immutable app, a Steam library, or a
+    # packaged subdirectory merely named Builds.
+    if any(part.lower() == 'steamapps' or part.endswith('.app')
+           for part in resolved.parts):
+        raise RuntimeError('DevTools Builds must be outside Steam and signed apps: ' + str(resolved))
+    return resolved
+
+
+def _devtools_destination(release: str) -> Path:
+    """Small installation receipt; tools themselves go in canonical Builds."""
+    return _devtools_builds_root() / 'CinterForgeTerminal/DevTools' / release
+
+
+def _legacy_devtools_destination(release: str) -> Path | None:
+    """Read only: previously installed Steam SDKs remain usable until moved."""
+    steam = _steam_library_for_installed_root(ASSETS.parent)
+    if steam is None:
+        return None
+    return steam / 'common/CinterForge/Applications/DevTools/CinterForge Terminal' / release
+
+
+def _save_devtools_builds_root() -> None:
+    """Persist the selected destination only after a verified installation."""
+    pin = _devtools_builds_pin()
+    if pin is None:
+        return  # explicit developer source tree; no installed-app preference
+    if pin.is_symlink() or (pin.exists() and not pin.is_file()):
+        raise RuntimeError('Unsafe DevTools Builds selection file: ' + str(pin))
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    if pin.parent.is_symlink():
+        raise RuntimeError('Unsafe DevTools configuration directory')
+    import tempfile
+    fd, name = tempfile.mkstemp(prefix='devtools-builds-', suffix='.tmp', dir=pin.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump({'schema': 'cinterforge.devtools-builds.v1',
+                       'builds': str(_devtools_builds_root())}, stream, indent=2)
+            stream.write('\n')
+        os.replace(name, pin)
+    finally:
+        Path(name).unlink(missing_ok=True)
 
 
 def _public_manifest(release: str) -> tuple[dict, str]:
@@ -5273,6 +5380,9 @@ def _stage_devtools_zip(archive_path, destination, release: str, artifact: dict)
     import zipfile
     if destination.is_symlink():
         raise RuntimeError('Unsafe DevTools destination redirect')
+    builds = destination.parents[2]
+    if builds.name != 'Builds' or builds.is_symlink():
+        raise RuntimeError('DevTools must be extracted into the developer Builds directory')
     with zipfile.ZipFile(archive_path) as archive:
         contents = archive.namelist()
         if len(set(contents)) != len(contents) or 'release-manifest.json' not in contents:
@@ -5304,8 +5414,12 @@ def _stage_devtools_zip(archive_path, destination, release: str, artifact: dict)
         completed = 0
         last = time.monotonic()
         for name, info in files.items():
-            item = destination.joinpath(*PurePosixPath(name).parts)
-            for parent in [destination, *reversed(list(item.parents)[:-1])]:
+            # The published ZIP has a portable DevTools/Builds wrapper.
+            # Strip it: the real destination is <workspace>/Builds/<source path>.
+            parts = PurePosixPath(name).parts
+            item = (destination / 'README.txt' if name == 'DevTools/README.txt' else
+                    builds.joinpath(*parts[2:]))
+            for parent in [builds, destination, *reversed(list(item.parents)[:-1])]:
                 # Every parent in the final destination must remain real.
                 if parent.is_symlink():
                     raise RuntimeError('Unsafe DevTools install symlink: ' + str(parent))
@@ -5314,7 +5428,7 @@ def _stage_devtools_zip(archive_path, destination, release: str, artifact: dict)
                 raise RuntimeError('Unsafe DevTools symlink redirect: ' + str(item))
             if item.is_dir():
                 # Build-owned file paths can be obstructed by an old directory.
-                # Preserve it in Steam, never discard it or fail for normal drift.
+                # Preserve the previous directory; never delete user-authored content.
                 import uuid
                 backup = destination.parent / 'Previous DevTools Conflicts' / uuid.uuid4().hex / name
                 backup.parent.mkdir(parents=True, exist_ok=True)
@@ -5356,7 +5470,7 @@ def _verify_native_devtools(destination) -> bool:
     import platform
     import subprocess
     targets = []
-    root = destination / 'DevTools/Builds/CinterForgeTerminal/Toolchains'
+    root = destination.parents[2] / 'CinterForgeTerminal/Toolchains'
     if platform.system() == 'Darwin':
         for name in ('cmake', 'ninja', 'python3', 'node'):
             targets.append(root / 'mac/env/bin' / name)
@@ -5404,8 +5518,8 @@ def install_devtools() -> int:
             sdk = sdk_root()
         except (ImportError, OSError, ValueError, RuntimeError):
             sdk = None
-        if sdk is not None and sdk == destination / 'DevTools/Builds/CinterForgeTerminal/Toolchains':
-            print(f'[DEVTOOLS] already staged: {destination}', flush=True)
+        if sdk is not None and sdk == destination.parents[2] / 'CinterForgeTerminal/Toolchains':
+            print(f'[DEVTOOLS] already staged in Builds: {destination.parents[2]}', flush=True)
             return 0 if _verify_native_devtools(destination) else 1
         print('[DEVTOOLS] Existing installation incomplete; reinstall requires your consent.', flush=True)
     artifact, manifest = _public_manifest(release)
@@ -5414,7 +5528,10 @@ def install_devtools() -> int:
     print(f'  Public release: {manifest}', flush=True)
     print(f'  Package: {url}', flush=True)
     print(f'  Download: {artifact["bytes"] / 1073741824:.2f} GiB', flush=True)
-    print(f'  Install to: {destination}', flush=True)
+    print(f'  Developer Builds: {destination.parents[2]}', flush=True)
+    print(f'  SDK files: {destination.parents[2] / "CinterForgeTerminal/Toolchains"}', flush=True)
+    print(f'  Installation receipt: {destination / "stage-receipt.json"}', flush=True)
+    print('  Builds will be created here after confirmation if it does not exist.', flush=True)
     if input('Type INSTALL to confirm download and installation: ').strip() != 'INSTALL':
         print('[DEVTOOLS] canceled; nothing downloaded', flush=True)
         return 1
@@ -5434,8 +5551,9 @@ def install_devtools() -> int:
         print('[DEVTOOLS] Installed files retained, as is the verified ZIP for '
               'a local repair; no re-download is needed.', flush=True)
         return 1
+    _save_devtools_builds_root()
     pending.unlink(missing_ok=True)
-    print(f'[DEVTOOLS] installed: {destination}', flush=True)
+    print(f'[DEVTOOLS] installed into Builds: {destination.parents[2]}', flush=True)
     # A completed optional install changes startup capabilities. Relaunch the
     # existing native owner so its single boot supervisor checks both shells
     # BEFORE it displays the normal UI. Do not boot Colima in this PTY worker.
@@ -6012,19 +6130,28 @@ def sdk_root() -> Path | None:
     selected OCI image before its first Docker load. A stale receipt alone is
     never proof that Windows/Linux Bash can start.
     """
-    destination = _devtools_destination(_devtools_release())
+    release = _devtools_release()
+    destination = _devtools_destination(release)
     receipt = destination / 'stage-receipt.json'
-    if not receipt.is_file() or receipt.is_symlink() or destination.is_symlink():
+    legacy = False
+    if not receipt.is_file():
+        # Compatibility with already-installed SDKs: do not force a second
+        # multi-GB download just because the installation layout changed.
+        previous = _legacy_devtools_destination(release)
+        if previous is None or not (previous / 'stage-receipt.json').is_file():
+            return None
+        destination, receipt, legacy = previous, previous / 'stage-receipt.json', True
+    if receipt.is_symlink() or destination.is_symlink():
         return None
     try:
         record = json.loads(receipt.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return None
     if (record.get('schema') not in (FOUR_SCHEMA, 'cinterforge.terminal.unpacked-build.v1') or
-            record.get('target') != 'devtools' or
-            record.get('release') != _devtools_release()):
+            record.get('target') != 'devtools' or record.get('release') != release):
         return None
-    sdk = destination / 'DevTools/Builds/CinterForgeTerminal/Toolchains'
+    sdk = (destination / 'DevTools/Builds/CinterForgeTerminal/Toolchains' if legacy
+           else destination.parents[2] / 'CinterForgeTerminal/Toolchains')
     needed = ('mac/env/bin/colima', 'mac/env/bin/docker', 'mac/lima/bin/limactl',
               'mac/qemu/bin/qemu-img', 'mac/qemu/bin/qemu-system-x86_64',
               'Windows/MSYS2/usr/bin/bash.exe', 'Windows/MSYS2/usr/bin/msys-2.0.dll')
@@ -6072,7 +6199,7 @@ def _state_root() -> Path:
 
     Steam is strictly applications and persistent user data. No Lima/Colima
     disks, Docker images, caches, or temporary files may be created there.
-    Installed apps must also never create a developer Builds directory.
+    Normal installed-app startup must not create a developer Builds directory.
     """
     installed = os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'installed'
     if installed:
@@ -6085,7 +6212,7 @@ def _state_root() -> Path:
         if platform.system() != 'Darwin':
             raise RuntimeError('Managed macOS guest VM requires a macOS runtime')
         # A short Lima socket path is mandatory on macOS. Cache contains only
-        # disposable app-owned VM state; DevTools archives remain in Steam.
+        # disposable app-owned VM state; installed DevTools live in selected Builds.
         roots = [_real_login_home() / 'Library/Caches/CFTVM/T']
     else:
         configured = os.environ.get('CINTER_BUILDS_ROOT', '')
@@ -6123,13 +6250,18 @@ def _env(sdk: Path) -> dict[str, str]:
     if len(os.fsencode(socket)) >= 100:
         raise RuntimeError('Managed VM socket path too long within developer Builds or user cache: ' + str(socket))
     env = dict(os.environ)
-    for key in ('DOCKER_HOST', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
+    for key in ('DOCKER_CONTEXT', 'DOCKER_HOST', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
         env.pop(key, None)
+    # Colima owns the single t daemon socket.  Connect to it directly: the
+    # Docker context JSON is disposable and may be absent after VM restart,
+    # particularly in the installed-app cache.  DOCKER_CONTEXT would override
+    # DOCKER_HOST and fail with `context colima-t not found` despite a healthy VM.
+    socket_url = 'unix://' + str(root / 'c' / PROFILE / 'docker.sock')
     env.update(HOME=str(root/'h'), COLIMA_HOME=str(root/'c'),
                LIMA_HOME=str(lima_home), COLIMA_CACHE_HOME=str(root/'cache/colima'),
                DOCKER_CONFIG=str(root/'d'), XDG_CONFIG_HOME=str(root/'config'),
                XDG_CACHE_HOME=str(root/'cache'), TMPDIR=str(root/'tmp'),
-               DOCKER_CONTEXT='colima-' + PROFILE,
+               DOCKER_HOST=socket_url,
                PATH=os.pathsep.join([str(sdk/'mac/qemu/bin'),
                                      str(sdk/'mac/lima/bin'), str(sdk/'mac/env/bin'),
                                      os.environ.get('PATH', '')]))
@@ -6173,8 +6305,52 @@ def _image_archive(sdk: Path, kind: str) -> tuple[Path, str]:
 
 
 def _run_checked(command: list[str], env: dict[str, str], *, title: str, timeout: int = 600) -> None:
+    """Stream real guest process output and retain its error in the Server Log.
+
+    Previously Colima's entire diagnostic disappeared behind CalledProcessError,
+    leaving only a long command and exit=1. There is no Setup/repair fallback
+    in the installed application: a failed guest must report its actual cause.
+    """
+    import selectors
     print('[DEVTOOLS] ' + title, flush=True)
-    subprocess.run(command, check=True, env=env, timeout=timeout)
+    tail = bytearray()
+    started = time.monotonic()
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          env=env, bufsize=0) as process:
+        assert process.stdout is not None
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            try:
+                while selector.get_map() or process.poll() is None:
+                    remaining = timeout - (time.monotonic() - started)
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    for key, _ in selector.select(timeout=min(1, remaining)):
+                        chunk = os.read(key.fd, 65536)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        tail.extend(chunk)
+                        if len(tail) > 8192:
+                            del tail[:-8192]
+                        print(chunk.decode('utf-8', errors='replace'), end='', flush=True)
+                returncode = process.wait(timeout=max(1, remaining))
+            except subprocess.TimeoutExpired as error:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                detail = tail.decode('utf-8', errors='replace').strip()[-3200:]
+                raise RuntimeError(title + ' timed out after ' + str(timeout) +
+                                   's; last guest output: ' + (detail or '(none)')) from error
+            except BaseException:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                raise
+    if returncode:
+        detail = tail.decode('utf-8', errors='replace').strip()[-3200:]
+        raise RuntimeError(title + ' failed (exit ' + str(returncode) + '): ' +
+                           (detail or 'process exited without diagnostics'))
 
 
 @contextmanager
@@ -6669,10 +6845,13 @@ def _verify_persistent_guest_shell(shell: TerminalSession, kind: str, *, timeout
 
 def _guest_docker_context(sdk: Path) -> dict[str, str]:
     full = _env(sdk)
+    # Match _env(): the managed t engine is selected by its owned Unix
+    # socket, not Colima's disposable Docker context metadata. This child
+    # environment is used by BOTH Linux and Windows persistent Bash PTYs.
     return {key: full[key] for key in ('HOME', 'COLIMA_HOME', 'LIMA_HOME',
                                       'COLIMA_CACHE_HOME', 'DOCKER_CONFIG',
                                       'XDG_CONFIG_HOME', 'XDG_CACHE_HOME',
-                                      'DOCKER_CONTEXT', 'TMPDIR', 'PATH')}
+                                      'DOCKER_HOST', 'TMPDIR', 'PATH')}
 
 
 def _new_owned_guest_shell(server: CinterShellServer, kind: str, sdk: Path) -> TerminalSession:

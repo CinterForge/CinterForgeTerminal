@@ -1,13 +1,13 @@
-"""CinterForgeTerminal application bootstrap: execute real smoke tests then seal a runtime bundle.
+"""CinterForgeTerminal application bootstrap: provision targets, then test and seal.
 
 This is intentionally a gate, not an alternative Python/Bedrock installer. The
 existing named Python environment, Bedrock manager, and versioned Host are used
 as-is. All inputs and outputs live in sibling Builds; no automatic EULA consent
 or redistribution of the official Bedrock server is performed.
 
-On the macOS orchestrator, `setup all` invokes its native target and registered
-Builds-resident Linux/Windows runners. Each runner executes this same module on
-the target runtime. A missing runner, runtime, or failed smoke aborts the stage.
+On the macOS orchestrator, Setup only provisions native and registered target
+runners. The separate Test phase executes actual smoke and seals bundles. A
+missing runner or failing native acceptance is a hard failure in its own phase.
 """
 from __future__ import annotations
 
@@ -572,8 +572,8 @@ def _bootstrap_runner(builds: Path) -> Path:
     """
     repo = Path(__file__).resolve().parents[1]
     output = builds / 'CinterForgeTerminal/Bootstrap/Runner' / RELEASE
-    names = ('CMakeLists.txt', 'Cinter', 'build/powershell.packages.example.json')
-    subtrees = ('host', 'include', 'src', 'build', 'webapp', 'tests', 'linuxos')
+    names = ('CMakeLists.txt', 'Cinter', 'test.py', 'build/powershell.packages.example.json')
+    subtrees = ('host', 'include', 'src', 'build', 'webapp', 'linuxos')
     sources = {name: repo / name for name in names}
     for directory in subtrees:
         for path in (repo / directory).rglob('*'):
@@ -614,25 +614,47 @@ def _bootstrap_runner(builds: Path) -> Path:
 
 
 def setup_local(builds: Path) -> dict:
-    """Run the *real* native Setup/Build/Stage/Test on a target runner.
+    """Setup only the pinned native target inputs. Never build/stage/test here.
 
-    No foreign OS is inferred from Wine, a LinuxKit Bedrock appliance, or a
-    marker file. Stage the standard-library-only portable Python first, then
-    build and smoke the actual native Host and its relocated service closure.
+    A target runner is a native execution transport. Its smoke evidence and
+    relocatable bundle belong to the later explicit Test phase.
     """
     builds = _require_builds(builds)
     system, arch = _native()
     from host.portable_python import provision as provision_python
-    from host.manager import build_host, stage_host, test_host
     from host.toolchain import probe_local
     probe_local(builds, require_cross=(system == 'mac'))
     provision_python(builds, system, arch)
-    build_host(builds, application_shell=True)
-    stage_host(builds)
+    return {'platform': system, 'arch': arch, 'status': 'provisioned'}
+
+
+def test_local(builds: Path) -> dict:
+    """Test the real native stage, its services and its relocated runtime."""
+    builds = _require_builds(builds)
+    system, arch = _native()
+    from host.manager import test_host
     test_host(builds)
-    report = smoke_local(builds)
+    receipt = smoke_local(builds)
     bundle = bundle_target(builds, system, arch)
-    return {'platform': system, 'arch': arch, 'receipt': report, 'bundle': str(bundle)}
+    return {'platform': system, 'arch': arch, 'receipt': receipt, 'bundle': str(bundle)}
+
+
+def build_local(builds: Path) -> dict:
+    """Build the native Host using only Setup-provisioned prerequisites."""
+    builds = _require_builds(builds)
+    system, arch = _native()
+    from host.manager import build_host
+    build_host(builds, application_shell=True)
+    return {'platform': system, 'arch': arch, 'status': 'built'}
+
+
+def stage_local(builds: Path) -> dict:
+    """Stage the native Host built by Build; no provisioning or tests."""
+    builds = _require_builds(builds)
+    system, arch = _native()
+    from host.manager import stage_host
+    stage_host(builds)
+    return {'platform': system, 'arch': arch, 'status': 'staged'}
 
 
 def _registered_runners(builds: Path, native: str) -> tuple[dict[str, list[str]], dict[str, str]]:
@@ -682,43 +704,100 @@ def _registered_runners(builds: Path, native: str) -> tuple[dict[str, list[str]]
 
 
 def setup_all(builds: Path) -> dict:
-    """One public operation for all targets; report every incomplete target."""
+    """Provision native and registered target-runner inputs; no smoke execution.
+
+    Real checks and relocatable runtime seals are made only by ``test_all``.
+    """
     builds = _require_builds(builds)
     runner = _bootstrap_runner(builds)
     system, arch = _native()
     runners, problems = _registered_runners(builds, system)
-    freshly_smoked = {}
-    if system in TARGETS:
-        try:
-            smoke_local(builds)
-            bundle_target(builds, system, arch)
-            freshly_smoked[system] = [arch]
-        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-            problems[system] = f'Native {system} runtime cannot be bundled: {exc}'
+    provisioned = {system: setup_local(builds)}
     for target, command in runners.items():
         try:
             run = [command[0], *(arg.replace('{bootstrap}', str(runner))
                                   .replace('{builds}', str(builds)) for arg in command[1:])]
-            before = {a: _receipt(builds, target, a).stat().st_mtime_ns
-                      for a in _find_arches(builds, target)}
+            # Default bootstrap target runner calls --setup-local here. Custom
+            # overrides must likewise implement provisioning without smoke.
             subprocess.run(run, check=True, timeout=300)
-            verified = [a for a in _find_arches(builds, target)
-                        if _receipt(builds, target, a).stat().st_mtime_ns > before.get(a, 0)]
-            if not verified:
-                raise RuntimeError('runner exited without a fresh target smoke receipt')
-            freshly_smoked[target] = verified
+            provisioned[target] = {'status': 'provisioned', 'runner': str(run[0])}
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
             problems[target] = str(exc)
     if problems:
         detail = '\n'.join(f'  {target}: {problem}' for target, problem in sorted(problems.items()))
-        raise RuntimeError('CinterForgeTerminal setup all is incomplete on these targets:\n' + detail)
-    outputs = {}
-    for target in TARGETS:
-        if target not in freshly_smoked:
-            raise RuntimeError(f'No real target execution for {target}')
-        outputs[target] = [str(bundle_target(builds, target, arch))
-                           for arch in freshly_smoked[target]]
-    return outputs
+        raise RuntimeError('CinterForgeTerminal target provisioning incomplete:\n' + detail)
+    return provisioned
+
+
+def run_target_phase(builds: Path, phase: str) -> dict:
+    """Route Build/Stage only to registered real target runners.
+
+    Setup's target runner bootstrap is reused but no tests may run here.
+    """
+    if phase not in ('build', 'stage'):
+        raise ValueError('Only build and stage target routing is supported')
+    builds = _require_builds(builds)
+    runner = builds / 'CinterForgeTerminal/Bootstrap/Runner' / RELEASE / 'bootstrap_runner.py'
+    if not runner.is_file() or runner.is_symlink():
+        raise RuntimeError('Setup-created target runner missing: ' + str(runner))
+    native, _ = _native()
+    runners, problems = _registered_runners(builds, native)
+    result = {}
+    flag = '--build-local' if phase == 'build' else '--stage-local'
+    for target, command in runners.items():
+        try:
+            run = [command[0], *(arg.replace('{bootstrap}', str(runner))
+                                  .replace('{builds}', str(builds))
+                                  .replace('--setup-local', flag)
+                                  for arg in command[1:])]
+            if flag not in run or '--setup-local' in run:
+                raise RuntimeError('Target runner does not support explicit ' + phase)
+            subprocess.run(run, check=True, timeout=1200)
+            result[target] = {'status': phase + '-complete'}
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            problems[target] = str(exc)
+    if problems:
+        detail = '\n'.join(f'  {target}: {problem}' for target, problem in sorted(problems.items()))
+        raise RuntimeError('CinterForgeTerminal target ' + phase + ' incomplete:\n' + detail)
+    return result
+
+
+def test_all(builds: Path) -> dict:
+    """Execute actual native target smoke and seal bundles after Build/Stage."""
+    builds = _require_builds(builds)
+    runner = builds / 'CinterForgeTerminal/Bootstrap/Runner' / RELEASE / 'bootstrap_runner.py'
+    if not runner.is_file() or runner.is_symlink():
+        raise RuntimeError('Setup-created target runner missing in Test: ' + str(runner))
+    system, arch = _native()
+    runners, problems = _registered_runners(builds, system)
+    result = {}
+    try:
+        result[system] = [test_local(builds)['bundle']]
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        problems[system] = f'Native {system} release Test failed: {exc}'
+    for target, command in runners.items():
+        try:
+            run = [command[0], *(arg.replace('{bootstrap}', str(runner))
+                                  .replace('{builds}', str(builds))
+                                  .replace('--setup-local', '--smoke-local')
+                                  for arg in command[1:])]
+            # Reject a configured override that would run Setup under Test.
+            if '--setup-local' in run or '--smoke-local' not in run:
+                raise RuntimeError('Target Test runner must invoke --smoke-local')
+            before = {a: _receipt(builds, target, a).stat().st_mtime_ns
+                      for a in _find_arches(builds, target)}
+            subprocess.run(run, check=True, timeout=300)
+            fresh = [a for a in _find_arches(builds, target)
+                     if _receipt(builds, target, a).stat().st_mtime_ns > before.get(a, 0)]
+            if not fresh:
+                raise RuntimeError('Target Test runner exited without a fresh smoke receipt')
+            result[target] = [str(bundle_target(builds, target, a)) for a in fresh]
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            problems[target] = str(exc)
+    if problems:
+        detail = '\n'.join(f'  {target}: {problem}' for target, problem in sorted(problems.items()))
+        raise RuntimeError('CinterForgeTerminal native Test incomplete:\n' + detail)
+    return result
 
 
 def provision_zmachine(builds: Path) -> Path:
@@ -784,16 +863,22 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument('--builds', type=Path, required=True)
-    cli.add_argument('--smoke-local', action='store_true', help='Internal smoke-only command')
-    cli.add_argument('--setup-local', action='store_true', help='Perform full native build/stage/test/smoke on the target runner')
+    cli.add_argument('--smoke-local', action='store_true', help='Real native stage smoke (Test only)')
+    cli.add_argument('--build-local', action='store_true', help='Build native target with Setup inputs')
+    cli.add_argument('--stage-local', action='store_true', help='Stage native target with Build inputs')
+    cli.add_argument('--setup-local', action='store_true', help='Provision native target input closure without tests')
     args = cli.parse_args(argv)
+    phases = [args.setup_local, args.build_local, args.stage_local, args.smoke_local]
+    if sum(bool(value) for value in phases) > 1:
+        cli.error('choose only one of --setup-local/--build-local/--stage-local/--smoke-local')
     if args.setup_local:
         print(json.dumps(setup_local(args.builds), indent=2))
+    elif args.build_local:
+        print(json.dumps(build_local(args.builds), indent=2))
+    elif args.stage_local:
+        print(json.dumps(stage_local(args.builds), indent=2))
     elif args.smoke_local:
-        receipt = smoke_local(args.builds)
-        system, arch = _native()
-        bundle = bundle_target(args.builds, system, arch)
-        print(json.dumps({'receipt': receipt, 'bundle': str(bundle)}, indent=2))
+        print(json.dumps(test_local(args.builds), indent=2))
     else:
         print(json.dumps(setup_all(args.builds), indent=2))
     return 0

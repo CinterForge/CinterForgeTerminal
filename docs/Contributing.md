@@ -20,7 +20,7 @@ See the [User Manual](User%20Manual.md), [Architecture](Architecture.md) and [Bu
 
 ## Lifecycle responsibility
 
-**Setup** acquires/builds/verifies all prerequisites and performs a real consented, isolated LinuxKit/Bedrock acceptance test. **Build** compiles, signs and produces exactly **three native app ZIPs and one unified DevTools ZIP**. **Stage** verifies/extracts the finished ZIPs without changing them. **Test** launches actual staged applications and checks real user actions; **Publish** is always a distinct explicit command. The developer `all all` command never publishes.
+**Setup** acquires/builds/verifies all prerequisite inputs; it does not run smoke tests or the real Bedrock acceptance. **Build** compiles/signs unpacked native apps and inventories unified DevTools without ZIPs. **Stage** copies/verifies those unpacked outputs without provisioning or ZIPs. **Test** executes the single root `test.py` smoke suite (12 real source, staged artifact, guest and Bedrock checks); **Publish** is always a distinct explicit command. The developer `all all` command never publishes.
 
 Mac producer Setup uses only the `c` Docker producer for the LinuxKit kernel/guest inputs and later Linux/Windows cross-build images; it shuts down that producer and its helpers after completion or failure. Native Terminal uses its independently owned `t` runtime. The installed application owns its live Bedrock runtime separately, and closes that runtime when its owning app exits. Retain the original Terminal-owned LinuxKit/Rosetta virtual machine and the existing CinterBDSNetRelay producer; do not introduce a second networking service or depend on CFOS's unrelated Ubuntu image. End-user Bedrock installation requires explicit EULA consent.
 

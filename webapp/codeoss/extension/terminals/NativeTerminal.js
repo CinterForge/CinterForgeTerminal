@@ -35,6 +35,7 @@
             this.busy = false;
             this.opened = false;
             this.closed = false;
+            this.failed = false;
             this.pendingDimensions = null;
         }
 
@@ -44,13 +45,21 @@
             // launching IFPlayer never starts a native shell.
             const start = async () => {
                 try {
-                    await request(
-                        '/host/code-shell-open',
-                        {
+                    let pendingNotice = false;
+                    while (!this.closed) {
+                        const result = await request('/host/code-shell-open', {
                             id: this.id,
                             backend: this.backend
+                        });
+                        if (!result?.pending) break;
+                        if (!pendingNotice) {
+                            this.writeEmitter.fire(`Waiting for ${this.backend} Bash guest readiness...\r\n`);
+                            pendingNotice = true;
                         }
-                    );
+                        // This only waits for the app-owned startup. It never
+                        // starts a second guest, VM, or Bash process.
+                        await delay(1000);
+                    }
                     // close() may have run while the HTTP open was pending.
                     // Never leave that late-created PTY in the Host registry.
                     if (this.closed) {
@@ -73,6 +82,7 @@
                     return true;
                 } catch (error) {
                     if (!this.closed) {
+                        this.failed = true;
                         this.writeEmitter.fire(`ERROR: ${error.message}\r\n`);
                     }
                     return false;

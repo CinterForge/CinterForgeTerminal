@@ -598,6 +598,7 @@ async function activateCoordinator(context) {
     // Linux and Windows are development-only: one Code-OSS terminal each.
     // Mac shells intentionally have no singleton limit.
     const guestTerminals = new Map();
+    const guestTerminalPtys = new Map();
 
     let zMachinePty = null;
 
@@ -789,11 +790,16 @@ async function activateCoordinator(context) {
         // Reopening a guest shell focuses it instead of allocating another PTY.
         if (backend === 'linux' || backend === 'win') {
             const existing = guestTerminals.get(backend);
-            if (existing && (vscode.window.terminals || []).includes(existing)) {
+            if (existing && !guestTerminalPtys.get(backend)?.failed &&
+                (vscode.window.terminals || []).includes(existing)) {
                 existing.show();
                 return existing;
             }
+            // Failed initial attachments must be retryable after the guest is
+            // repaired. Don't keep focusing a dead VS Code terminal forever.
+            if (existing) existing.dispose();
             guestTerminals.delete(backend);
+            guestTerminalPtys.delete(backend);
         }
         nativeSerial++;
         const id = `terminal-${codeWindowId}-${nativeSerial}`;
@@ -813,6 +819,7 @@ async function activateCoordinator(context) {
         );
         if (backend === 'linux' || backend === 'win') {
             guestTerminals.set(backend, terminal);
+            guestTerminalPtys.set(backend, pty);
         }
 
         terminal.show();
@@ -971,7 +978,10 @@ async function activateCoordinator(context) {
                         terminal
                     );
                     for (const [backend, current] of guestTerminals) {
-                        if (current === terminal) guestTerminals.delete(backend);
+                        if (current === terminal) {
+                            guestTerminals.delete(backend);
+                            guestTerminalPtys.delete(backend);
+                        }
                     }
 
                     if (

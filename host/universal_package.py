@@ -644,7 +644,7 @@ def _devtools_assets(builds: Path) -> dict[str, Path | bytes]:
         'CinterForgeTerminal optional unified development tools for macOS, Linux and Windows.\n'
         'The macOS platform compiler is supplied by Xcode on macOS; it cannot be redistributed.\n'
         'Toolchain containers are immutable archives. Do not import running Colima/Lima disk state.\n'
-        'Installed into steamapps by Stage; end-user acquisition remains optional.\n').encode()
+        'Producer Stage copies SDK into Steam; explicit user DevTools install populates Builds.\n').encode()
     return assets
 
 

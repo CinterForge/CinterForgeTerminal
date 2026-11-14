@@ -106,7 +106,7 @@ BDS_PID=$!
   # address, so probing a second port doubled the wall time without adding
   # evidence for the configured BDS port (19132).
   i=0
-  while [ "$i" -lt 12 ]; do
+  while [ "$i" -lt 60 ]; do
     # This subshell is a child of the LinuxKit service.  Write acceptance
     # markers to the service stdout/stderr inherited by containerd.  Writing
     # them to /dev/console races BDS, which also owns /dev/console for its
@@ -117,7 +117,17 @@ BDS_PID=$!
       echo "CINTER_BDS_NETHERNET_PASS port=19132"
       exit 0
     fi
-    i=$((i+1)); sleep 1
+    if ! kill -0 "$BDS_PID" 2>/dev/null; then
+      echo "CINTER_BDS_NETHERNET_FAIL bds-exited-before-listener attempt=$((i+1))" >&2
+      exit 1
+    fi
+    i=$((i+1))
+    # Real BDS level creation under Rosetta may outlast the old 12s probe.
+    # This remains bounded by the host's 90s startup/acceptance deadline.
+    if [ "$((i % 10))" -eq 0 ]; then
+      echo "CINTER_BDS_NETHERNET_WAIT attempts=$i limit=60" 
+    fi
+    sleep 1
   done
   echo "CINTER_BDS_NETHERNET_DIAGNOSTIC_BEGIN"
   echo "CINTER_BDS_NETHERNET_DIAGNOSTIC port=19132"
