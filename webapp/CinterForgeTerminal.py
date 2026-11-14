@@ -3,7 +3,7 @@
 PUBLIC ENTRY POINTS (see ``main()`` immediately below configuration):
     no mode           Staged HTTP bootstrap/smoke service
     --terminal-cli    Human-facing text commands, game catalog, install actions
-    --guest-shell     Managed Win/Linux guest Bash Session on macOS
+    --guest-shell     Legacy helper (guest Bash lives exclusively in Code-OSS)
     --vm-watchdog     Private VM lifetime guardian (never starts Bedrock)
 
 COMPONENTS
@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
 
     No arguments: the staged HTTP readiness smoke exercise.
     --terminal-cli: user-facing shell commands (help, games, Bedrock, etc.).
-    --guest-shell: interactive Linux/Windows guest, when user permitted.
+    --guest-shell: legacy guest status helper; never starts a duplicate Bash.
     --vm-watchdog: private Bedrock VM lifetime owner (never a server launcher).
     """
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -568,7 +568,8 @@ def _session_environment(builds: Path, system: str) -> dict[str, str]:
 class TerminalSession:
     def __init__(self, builds: Path, system: str, cols: int, rows: int, *, url: str, token: str,
                  command: list[str] | None = None, working_directory: Path | None = None,
-                 output_log: Path | None = None, internal_token: str | None = None):
+                 output_log: Path | None = None, internal_token: str | None = None,
+                 child_env: dict[str, str] | None = None):
         self.id = uuid.uuid4().hex
         self.system = system
         self.cols, self.rows = _bounded_size(cols, rows)
@@ -601,6 +602,10 @@ class TerminalSession:
             env['CINTER_CODE_WORKSPACE'] = str(working_directory)
         scripts = _install_shell_commands(Path(env['CINTER_TERMINAL_SCRATCH_ROOT']), system, env)
         self.shell = command if command is not None else _shell_command(system, scripts, builds)
+        if child_env:
+            # Only the app-owned Docker subprocess needs this Colima context.
+            # The host shell and its authenticated CLI token are unchanged.
+            env.update(child_env)
         working_directory = working_directory or self.root
         if output_log is None:
             output_log = _runtime_logs_root(builds) / 'Sessions' / (self.id + '.log')
@@ -1818,6 +1823,10 @@ class CinterShellServer(ThreadingHTTPServer):
         self.mutable_builds = _terminal_mutable_root(builds)
         self.code_workspace = CodeWorkspace(self.mutable_builds)
         self.code_sessions = {}  # Code-OSS terminal name -> real host Session or Server Log cursor
+        # App-owned Bash PTYs survive Code-OSS tab close/reopen. Exactly one
+        # Linux and one Windows process; only this owner may close them.
+        self.guest_shells: dict[str, TerminalSession] = {}
+        self.guest_shells_lock = threading.RLock()
         self.code_sessions_lock = threading.Lock()
         self.code_closed_owners = set()  # Late worker requests cannot revive a closed CodeOSS tab.
         self.lan_login_lock = threading.Lock()
@@ -1930,8 +1939,9 @@ class CinterShellServer(ThreadingHTTPServer):
                 code_sessions = list(self.code_sessions.values())
                 self.code_sessions.clear()
             for entry in code_sessions:
-                if isinstance(entry, TerminalSession):
+                if isinstance(entry, TerminalSession) and not _is_owned_guest_shell(self, entry):
                     entry.close()
+            _close_owned_guest_shells(self)
             self.sessions.clear()
             # Guest VM is application-owned, not HTTP-reload-owned.
             if self.bedrock is not None:
@@ -2015,7 +2025,7 @@ class Handler(BaseHTTPRequestHandler):
                 owned = self.server.code_sessions.get(code_id) is entry
                 if owned:
                     self.server.code_sessions.pop(code_id)
-            if owned:
+            if owned and not _is_owned_guest_shell(self.server, entry):
                 entry.close()
         return {'rows': [{'text': data.decode('utf-8', errors='replace')}] if data else [],
                 'closed': closed}
@@ -2036,7 +2046,7 @@ class Handler(BaseHTTPRequestHandler):
                 names = [name for name in self.server.code_sessions if name.startswith(prefix)]
                 entries = [self.server.code_sessions.pop(name) for name in names]
             for entry in entries:
-                if isinstance(entry, TerminalSession):
+                if isinstance(entry, TerminalSession) and not _is_owned_guest_shell(self.server, entry):
                     entry.close()
             return {'closed': len(entries)}
         code_id = body.get('id')
@@ -2054,7 +2064,8 @@ class Handler(BaseHTTPRequestHandler):
                              if isinstance(entry, TerminalSession) and entry.closed]
                 ended = [self.server.code_sessions.pop(key) for key in ended_ids]
             for entry in ended:
-                entry.close()
+                if not _is_owned_guest_shell(self.server, entry):
+                    entry.close()
             with self.server.code_sessions_lock:
                 owner = code_id[len('terminal-'):].rsplit('-', 1)[0]
                 if owner in self.server.code_closed_owners:
@@ -2086,9 +2097,17 @@ class Handler(BaseHTTPRequestHandler):
                     command = [sys.executable, str(ASSETS / 'CinterForgeTerminal.py'),
                                '--terminal-cli', 'minecraft']
                 elif self.server.system == 'mac' and backend in ('linux', 'win'):
-                    command = [sys.executable, '-u', str(ASSETS / 'CinterForgeTerminal.py'),
-                               '--guest-shell', backend]
-                    self.server.devtools_requested = True
+                    # Code-OSS attaches to the already-running app-owned PTY.
+                    # Never fork another docker exec, Bash or VM for a tab.
+                    with self.server.guest_shells_lock:
+                        terminal = self.server.guest_shells.get(backend)
+                        if terminal is None or terminal.closed or terminal.process.poll() is not None:
+                            raise RuntimeError(backend.title() + ' Bash is not connected; see Server Log')
+                        terminal.code_backend = backend
+                        self.server.code_sessions[code_id] = terminal
+                        self.server.devtools_requested = True
+                    return {'opened': True, 'backend': backend, 'cwd':
+                            self.server.code_workspace.details()['cwd'], 'reused': True}
                 elif backend != 'native' and backend != self.server.system:
                     raise RuntimeError(backend + ' backend unavailable on ' + self.server.system)
                 cwd = Path(self.server.code_workspace.details()['cwd'])
@@ -2107,7 +2126,7 @@ class Handler(BaseHTTPRequestHandler):
         if entry is None:
             raise FileNotFoundError('Code-OSS terminal is not open')
         if route == '/host/code-shell-close':
-            if isinstance(entry, TerminalSession):
+            if isinstance(entry, TerminalSession) and not _is_owned_guest_shell(self.server, entry):
                 entry.close()
             return {'closed': True}
         if isinstance(entry, dict):
@@ -2766,7 +2785,7 @@ class Handler(BaseHTTPRequestHandler):
                             old_sessions = list(self.server.code_sessions.values())
                             self.server.code_sessions.clear()
                         for item in old_sessions:
-                            if isinstance(item, TerminalSession):
+                            if isinstance(item, TerminalSession) and not _is_owned_guest_shell(self.server, item):
                                 item.close()
                 else:
                     result = self._code_shell_action(route, body)
@@ -2842,7 +2861,15 @@ class Handler(BaseHTTPRequestHandler):
                             self.server.guest_start_state = 'starting'
                             self.server.guest_start_error = ''
                         try:
+                            _close_owned_guest_shells(self.server)
                             result = reboot_runtime_guests(component)
+                            sdk = sdk_root()
+                            if sdk is None:
+                                raise RuntimeError('DevTools disappeared during guest reboot')
+                            for kind in ('linux', 'win'):
+                                connected = _new_owned_guest_shell(self.server, kind, sdk)
+                                with self.server.guest_shells_lock:
+                                    self.server.guest_shells[kind] = connected
                         except Exception as error:
                             with self.server.guest_start_lock:
                                 self.server.guest_start_state = 'failed'
@@ -3155,7 +3182,7 @@ class Handler(BaseHTTPRequestHandler):
                         previous = list(self.server.code_sessions.values())
                         self.server.code_sessions.clear()
                     for item in previous:
-                        if isinstance(item, TerminalSession):
+                        if isinstance(item, TerminalSession) and not _is_owned_guest_shell(self.server, item):
                             item.close()
                 with self.server.debug_lock:
                     self.server.code_actions.append({'reload': action != 'run'})
@@ -5952,7 +5979,7 @@ def terminal_cli_main(argv: list[str] | None = None) -> int:
 # ============================================================================
 # REAL LINUX/WINDOWS GUEST SHELL SESSIONS
 # ============================================================================
-"""On-demand real guest Bash for macOS CinterForgeTerminal Session tabs.
+"""Real persistent guest Bash for macOS Code-OSS integrated terminals.
 
 This module is intentionally shipped with the lightweight application; all
 SDK binaries and OCI images come from the separately consented DevTools ZIP.
@@ -5995,10 +6022,15 @@ def sdk_root() -> Path | None:
         return None
     sdk = destination / 'DevTools/Builds/CinterForgeTerminal/Toolchains'
     needed = ('mac/env/bin/colima', 'mac/env/bin/docker', 'mac/lima/bin/limactl',
+              'mac/qemu/bin/qemu-img', 'mac/qemu/bin/qemu-system-x86_64',
               'Windows/MSYS2/usr/bin/bash.exe', 'Windows/MSYS2/usr/bin/msys-2.0.dll')
     if any(not (sdk / name).is_file() or (sdk / name).is_symlink() for name in needed):
         return None
-    for kind in ('LinuxSample', 'WindowsCross'):
+    if (not (sdk / 'mac/qemu/share/qemu').is_dir() or
+            (sdk / 'mac/qemu/share/qemu').is_symlink() or
+            not (sdk / 'mac/qemu/cinter-qemu-receipt.json').is_file()):
+        return None
+    for kind in ('WindowsCross',):
         directory = sdk / kind
         if not directory.is_dir() or directory.is_symlink():
             return None
@@ -6014,13 +6046,12 @@ def sdk_root() -> Path | None:
                                   data.get('archive_sha256'), data.get('image'))
             # An older DevTools archive may contain WineHQ instead of MSYS2's
             # patched Wine. Never consider that Windows closure runtime-ready.
-            if kind == 'WindowsCross' and data.get('wine_version') != 'wine-11.15':
+            if data.get('wine_version') != 'wine-11.15':
                 continue
-            # LinuxSample's actual producer stores only the leading 16 hex
-            # digits of its Dockerfile hash. WindowsCross stores all 64.
-            # Requiring 64 for both rejects valid installed Linux images and
-            # causes every Win/Linux Session to demand DevTools again.
-            if (isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{16}|[0-9a-f]{64}', digest) and
+            # Linux and Windows share the one pinned WindowsCross image;
+            # reject obsolete LinuxSample-only SDKs instead of asking the user
+            # to reinstall a valid unified package on each launch.
+            if (isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest) and
                     isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{64}', sha) and
                     isinstance(image, str) and image and
                     (directory / (digest[:16] + '.tar')).is_file() and
@@ -6095,13 +6126,18 @@ def _env(sdk: Path) -> dict[str, str]:
                DOCKER_CONFIG=str(root/'d'), XDG_CONFIG_HOME=str(root/'config'),
                XDG_CACHE_HOME=str(root/'cache'), TMPDIR=str(root/'tmp'),
                DOCKER_CONTEXT='colima-' + PROFILE,
-               PATH=os.pathsep.join([str(sdk/'mac/lima/bin'), str(sdk/'mac/env/bin'),
+               PATH=os.pathsep.join([str(sdk/'mac/qemu/bin'),
+                                     str(sdk/'mac/lima/bin'), str(sdk/'mac/env/bin'),
                                      os.environ.get('PATH', '')]))
     return env
 
 
 def _image_archive(sdk: Path, kind: str) -> tuple[Path, str]:
-    folder = sdk / ('LinuxSample' if kind == 'linux' else 'WindowsCross')
+    if kind not in ('linux', 'win'):
+        raise ValueError('Unknown managed guest platform')
+    # The same verified amd64 Debian image supplies both native Linux and
+    # Wine/MSYS2 Windows tools. Two UI platforms, ONE running container.
+    folder = sdk / 'WindowsCross'
     receipts = sorted(folder.glob('*.json'))
     for receipt in receipts:
         if receipt.is_symlink():
@@ -6112,10 +6148,10 @@ def _image_archive(sdk: Path, kind: str) -> tuple[Path, str]:
             continue
         # Archive selection must not silently fall back to an old stock-Wine
         # image when multiple valid hashes remain in installed DevTools.
-        if kind == 'win' and record.get('wine_version') != 'wine-11.15':
+        if record.get('wine_version') != 'wine-11.15':
             continue
         digest = record.get('dockerfile_sha256', '')
-        name = record.get('image') or (record.get('image_tag') if kind == 'win' else '')
+        name = record.get('image')
         tar = folder / (str(digest)[:16] + '.tar')
         if not tar.is_file() or tar.is_symlink() or not name or '/' in str(name).split(':')[0]:
             continue
@@ -6316,11 +6352,17 @@ def _configure_colima_runtime_emulation(env: dict[str, str], *, dry_run: bool = 
     if not config.is_file():
         return False
     original = config.read_text(encoding='utf-8')
-    desired = {'rosetta': 'false', 'binfmt': 'true'}
+    desired = {'rosetta': 'false', 'binfmt': 'false',
+               'arch': 'x86_64', 'vmType': 'qemu', 'mountType': '9p'}
     updated = original
     for key, value in desired.items():
         pattern = r'(?m)^(' + re.escape(key) + r':)[^\n]*$'
-        updated = re.sub(pattern, lambda match: match.group(1) + ' ' + value, updated)
+        if re.search(pattern, updated):
+            updated = re.sub(pattern, lambda match: match.group(1) + ' ' + value, updated)
+        else:
+            # An earlier ARM64/VZ profile may omit explicit architecture
+            # fields. Leaving them absent lets Colima reuse the wrong ABI.
+            updated = key + ': ' + value + '\n' + updated
     if updated == original:
         return False
     if dry_run:
@@ -6357,7 +6399,7 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
         return bool(result.stdout.strip())
 
     def recover_stale_owned_guests() -> None:
-        # A crashed/old Terminal may leave its own two named containers
+        # A crashed Terminal may leave its owned container
         # running inside this dedicated VM. Never sacrifice foreign workloads.
         listing = call([docker, 'ps', '--format',
                         '{{.Names}}|{{.Label "io.cinterforge.terminal"}}'], timeout=35)
@@ -6409,12 +6451,19 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
     _configure_colima_host_mounts(env, mounts)
     _configure_colima_runtime_emulation(env)
     print('[DEVTOOLS] Sharing accessible Mac filesystem under /host/mac', flush=True)
-    # Only the terminal-owned runtime profile t changes. Keep VZ ARM64 and
-    # virtiofs; use QEMU binfmt to execute linux/amd64 Wine/MSYS2 instead of
-    # the Rosetta x86 AVX signal-restoration path that exits with code 133.
+    # Only the terminal-owned runtime profile t changes. Boot the actual
+    # QEMU x86_64 Linux guest; Wine/MSYS2 runs natively inside that guest.
+    # Do not run amd64 Wine through ARM64 binfmt or Rosetta user translation.
+    # Pass the full-root share explicitly. On first profile creation Colima
+    # constructs its configuration from CLI flags; --save-config otherwise
+    # writes the default mounts over the YAML edited above. The three-part
+    # flag preserves the nondefault guest mount point and write permission.
+    # Keep the YAML normalization for existing profiles and the live path
+    # probes below: neither a successful VM boot nor a saved config proves
+    # that VirtioFS actually mounted the host's source tree.
     args = [colima, 'start', PROFILE, '--runtime', 'docker',
-            '--vm-type', 'vz', '--mount-type', 'virtiofs',
-            '--vz-rosetta=false', '--binfmt=true', '--arch', 'aarch64',
+            '--vm-type', 'qemu', '--mount-type', '9p',
+            '--mount', '/:/host/mac:w', '--arch', 'x86_64',
             '--cpus', '4', '--memory', '8', '--disk', '32', '--save-config']
     _run_checked(args, env, title='Starting managed guest VM with host volumes', timeout=1200)
     daemon = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=45)
@@ -6492,6 +6541,195 @@ def _schedule_guest_boot(server: CinterShellServer) -> dict:
     return _guest_boot_snapshot(server)
 
 
+def _is_owned_guest_shell(server: CinterShellServer, entry: TerminalSession) -> bool:
+    with server.guest_shells_lock:
+        return any(entry is shell for shell in server.guest_shells.values())
+
+
+def _close_owned_guest_shells(server: CinterShellServer) -> None:
+    """Release PTYs before Docker/Colima shutdown (also on HTTP worker stop)."""
+    with server.guest_shells_lock:
+        shells = list(server.guest_shells.values())
+        server.guest_shells.clear()
+    for shell in shells:
+        try:
+            shell.close()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            server.log_event('Guest Bash PTY cleanup FAILED: ' + str(error))
+
+
+def _runtime_guest_shell_command(sdk: Path, kind: str, workspace: Path | None) -> list[str]:
+    """One real interactive Docker/Wine Bash, shared by all Code-OSS attachments."""
+    if kind not in ('linux', 'win'):
+        raise ValueError('Unknown persistent guest Bash kind')
+    docker = str(sdk / 'mac/env/bin/docker')
+    cwd = '/host/mac' + str(workspace) if workspace else '/'
+    command = [docker, 'exec', '-it', *_launcher_guest_env(kind),
+               '--workdir', cwd, _guest_name(kind)]
+    if kind == 'linux':
+        return command + ['/bin/bash', '--noprofile', '-i']
+    # Use the exact profile-free MSYS2 entry point already proven by
+    # _verify_guest_bash().  --login invokes /etc/profile, whose first-start
+    # pacman-key hook fails against the deliberately read-only /msys2 bind.
+    # Establish coreutils/UCRT64 PATH explicitly, then replace the bootstrap
+    # process with ONE long-lived interactive Bash on the existing Docker PTY.
+    # No machine-wide initialization, pacman setup, or second guest is needed.
+    bootstrap = ('export PATH=/usr/bin:/ucrt64/bin:$PATH; '
+                 'exec /usr/bin/bash --noprofile --norc -i')
+    return command + ['wine', r'Z:\msys2\usr\bin\bash.exe',
+                      '--noprofile', '--norc', '-c', bootstrap]
+
+
+def _verify_persistent_guest_shell(shell: TerminalSession, kind: str, *, timeout: float = 120) -> None:
+    """Exercise the actual long-lived PTY, not a separate --version probe."""
+    nonce = uuid.uuid4().hex
+    # Split the marker in the transmitted command: terminal echo is NOT proof
+    # of command execution. Only the command's expanded output contains it.
+    marker = ('CINTER_SHELL_READY:' + nonce).encode('ascii')
+    shell.write('printf "CINTER_SHELL_READY:%s%s\\n" "' + nonce[:16] +
+                '" "' + nonce[16:] + '"\n')
+    started = time.monotonic()
+    deadline = started + timeout
+    next_progress = started + 15
+    label = 'Windows' if kind == 'win' else 'Linux'
+    print('[DEVTOOLS] ' + label + ' persistent Bash PTY START', flush=True)
+    output = bytearray()
+    while time.monotonic() < deadline:
+        data, closed = shell.poll(500)
+        output.extend(data)
+        if marker in output:
+            # Keep one real shell prompt buffered for Code-OSS to render after
+            # the initial splash; there is no new Bash when the tab attaches.
+            shell.write('\n')
+            print('[DEVTOOLS] ' + label + ' persistent Bash PTY PASS (' +
+                  str(round(time.monotonic() - started, 1)) + 's)', flush=True)
+            return
+        if len(output) > 4096:
+            del output[:-4096]
+        now = time.monotonic()
+        if now >= next_progress:
+            print('[DEVTOOLS] ' + label + ' persistent Bash PTY WORKING (' +
+                  str(int(now - started)) + 's)', flush=True)
+            next_progress = now + 15
+        if closed or shell.process.poll() is not None:
+            break
+    raise RuntimeError(kind + ' persistent Bash did not execute PTY readiness command: ' +
+                       output.decode('utf-8', 'replace')[-700:])
+
+
+def _guest_docker_context(sdk: Path) -> dict[str, str]:
+    full = _env(sdk)
+    return {key: full[key] for key in ('HOME', 'COLIMA_HOME', 'LIMA_HOME',
+                                      'COLIMA_CACHE_HOME', 'DOCKER_CONFIG',
+                                      'XDG_CONFIG_HOME', 'XDG_CACHE_HOME',
+                                      'DOCKER_CONTEXT', 'TMPDIR', 'PATH')}
+
+
+def _new_owned_guest_shell(server: CinterShellServer, kind: str, sdk: Path) -> TerminalSession:
+    """Create and validate once. No Code-OSS tab creates guest processes."""
+    workspace = Path(server.code_workspace.details()['cwd'])
+    shell = TerminalSession(server.mutable_builds, server.system, 100, 30,
+                            url=server.origin, token=server.token,
+                            command=_runtime_guest_shell_command(sdk, kind, workspace),
+                            working_directory=workspace, internal_token=server.cli_token,
+                            child_env=_guest_docker_context(sdk), output_log=_runtime_logs_root(server.mutable_builds) /
+                            ('Sessions/persistent-' + kind + '.log'))
+    try:
+        _verify_persistent_guest_shell(shell, kind)
+        if server._stopping:
+            raise RuntimeError('Native Terminal quit during Bash startup')
+        return shell
+    except BaseException:
+        shell.close()
+        raise
+
+
+def _check_owned_guest_vnc(sdk: Path, kind: str) -> bool:
+    """Keep the same guest's VNC display alive; never create new containers.
+
+    True means a stopped endpoint was restarted idempotently within the
+    existing named guest. A healthy endpoint is only probed, not relaunched.
+    """
+    env = _env(sdk)
+    docker = str(sdk / 'mac/env/bin/docker')
+    name = _guest_name(kind)
+    try:
+        _verify_guest_vnc(docker, env, kind, name)
+        return False
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        # _activate_guest_vnc verifies the RFB handshake and HTTP endpoint
+        # after restarting *only* missing helpers inside this owned container.
+        _activate_guest_vnc(docker, env, kind, name)
+        return True
+
+
+def _maintain_owned_guest_shells(server: CinterShellServer, sdk: Path) -> None:
+    """Maintain Bash PTYs and both VNC endpoints without starting another VM.
+
+    If a guest is unavailable, log a bounded failure and preserve Mac Bash.
+    The independent native-lifetime watchdog owns crash recovery for the VM.
+    """
+    failures = {'linux': 0, 'win': 0}
+    vnc_failures = {'linux': 0, 'win': 0}
+    last_vnc_check = time.monotonic()
+    while not server._stopping:
+        time.sleep(2)
+        if server._stopping:
+            return
+        with server.guest_shells_lock:
+            lost = [(kind, session) for kind, session in server.guest_shells.items()
+                    if session.closed or session.process.poll() is not None]
+        for kind, previous in lost:
+            if server._stopping or failures[kind] >= 3:
+                continue
+            failures[kind] += 1
+            server.log_event(kind + ' persistent Bash exited; reconnecting within its existing guest')
+            try:
+                replacement = _new_owned_guest_shell(server, kind, sdk)
+                with server.guest_shells_lock:
+                    if server._stopping or server.guest_shells.get(kind) is not previous:
+                        replacement.close()
+                        continue
+                    server.guest_shells[kind] = replacement
+                with server.code_sessions_lock:
+                    for code_id, entry in list(server.code_sessions.items()):
+                        if entry is previous:
+                            server.code_sessions.pop(code_id, None)
+                previous.close()
+                failures[kind] = 0
+                server.log_event(kind + ' persistent Bash reconnected (Code-OSS can reattach)')
+            except Exception as error:
+                server.log_event(kind + ' persistent Bash reconnect FAILED: ' + str(error))
+                if failures[kind] >= 3:
+                    with server.guest_start_lock:
+                        server.guest_errors[kind] = str(error)
+                        server.guest_ready = [v for v in server.guest_ready if v != kind]
+                        server.guest_start_state = 'failed'
+                        server.guest_start_error = '; '.join(k + ': ' + v
+                                                           for k, v in server.guest_errors.items())
+        # The Session viewers use the same two VNC endpoints, but can remain
+        # closed for hours. Probe them periodically and repair only missing
+        # guest-local helpers; do not create an additional RFB server/VM.
+        if not server._stopping and time.monotonic() - last_vnc_check >= 30:
+            last_vnc_check = time.monotonic()
+            for kind in ('linux', 'win'):
+                with server.guest_start_lock:
+                    ready = kind in server.guest_ready
+                if not ready or server._stopping or vnc_failures[kind] >= 3:
+                    continue
+                try:
+                    if _check_owned_guest_vnc(sdk, kind):
+                        server.log_event(kind + ' VNC endpoint recovered in existing guest')
+                    vnc_failures[kind] = 0
+                except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                    vnc_failures[kind] += 1
+                    server.log_event(kind + ' VNC health/recovery FAILED (' +
+                                     str(vnc_failures[kind]) + '/3): ' + str(error))
+                    if vnc_failures[kind] >= 3:
+                        server.log_event(kind + ' VNC unavailable; Launcher can explicitly retry '
+                                         'without creating a guest or VM')
+
+
 def _boot_guests_logged(server: CinterShellServer) -> None:
     watchdog_ready = False
     try:
@@ -6508,11 +6746,32 @@ def _boot_guests_logged(server: CinterShellServer) -> None:
             raise RuntimeError('DevTools disappeared during managed guest startup')
         ready = list(result.get('guests', []))
         errors = dict(result.get('errors', {}))
+        sdk = sdk_root()
+        if sdk is None:
+            raise RuntimeError('Verified DevTools disappeared while connecting Bash')
+        for kind in list(ready):
+            if server._stopping:
+                raise RuntimeError('Native Terminal quit during guest startup')
+            try:
+                connected = _new_owned_guest_shell(server, kind, sdk)
+                with server.guest_shells_lock:
+                    if server._stopping:
+                        connected.close()
+                        raise RuntimeError('Native Terminal quit during guest startup')
+                    server.guest_shells[kind] = connected
+                server.log_event(kind + ' persistent Bash connected (Code-OSS reusable PTY)')
+            except Exception as error:
+                ready.remove(kind)
+                errors[kind] = str(error)
+                server.log_event(kind + ' persistent Bash FAILED: ' + str(error))
         with server.guest_start_lock:
             server.guest_ready = ready
             server.guest_errors = errors
             server.guest_start_state = 'ready' if not errors else 'failed'
             server.guest_start_error = '; '.join(k + ': ' + v for k, v in errors.items())
+        if ready and not server._stopping:
+            threading.Thread(target=_maintain_owned_guest_shells, args=(server, sdk),
+                             daemon=True, name='cinter-guest-shell-supervisor').start()
         if errors:
             # A failed Wine guest must not destroy a working Linux guest.
             # Splash closes on failure; Mac Bash is always available.
@@ -6525,6 +6784,7 @@ def _boot_guests_logged(server: CinterShellServer) -> None:
         # load / Bash verification. The guardian is already responsible for
         # abnormal native exits; cleanup here handles failure while it lives.
         if watchdog_ready and not server._stopping:
+            _close_owned_guest_shells(server)
             try:
                 stop_runtime_vm()
             except Exception as cleanup_error:
@@ -6698,7 +6958,7 @@ def _runtime_watchdog_main(argv: list[str]) -> int:
 def _guest_name(kind: str) -> str:
     if kind not in ('linux', 'win'):
         raise ValueError('Invalid Terminal guest')
-    return 'cinterforge-terminal-t-' + kind
+    return 'cinterforge-terminal-t-debian'
 
 
 def _guest_host_binds(sdk: Path, kind: str, workspace: Path | None) -> list[str]:
@@ -6709,7 +6969,7 @@ def _guest_host_binds(sdk: Path, kind: str, workspace: Path | None) -> list[str]
         binds += ['--mount', 'type=bind,src=' + guest + ',dst=' + guest]
     if workspace is not None:
         binds += ['--mount', 'type=bind,src=/host/mac' + str(workspace) + ',dst=/workspace']
-    if kind == 'win':
+    if kind in ('linux', 'win'):
         msys = sdk / 'Windows/MSYS2'
         binds += ['--mount', 'type=bind,src=/host/mac' + str(msys) + ',dst=/msys2,readonly',
                   '--tmpfs', '/msys2/tmp:rw,nosuid,nodev,size=64m']
@@ -6739,9 +6999,8 @@ def _docker_call(docker: str, env: dict[str, str], *args: str, timeout: int = 90
 
 
 def _stop_owned_guests_locked(docker: str, env: dict[str, str]) -> None:
-    """Stop exactly two owned named containers, never third-party workloads."""
-    for kind in ('linux', 'win'):
-        name = _guest_name(kind)
+    """Stop exactly the shared owned runtime container, never foreign workloads."""
+    for name in {_guest_name('linux'), _guest_name('win')}:
         result = _docker_call(docker, env, 'container', 'inspect', '--format',
                               '{{index .Config.Labels "io.cinterforge.terminal"}}', name)
         if result.returncode:
@@ -6778,17 +7037,18 @@ def _start_guest_locked(sdk: Path, env: dict[str, str], docker: str,
             if kind == 'win':
                 _ensure_wine_display(docker, env, name)
             _verify_guest_bash(docker, env, kind, name)
+            _activate_guest_vnc(docker, env, kind, name)
             return
         _stop_owned_guests_locked_one(docker, env, name)
-    environment = (['-e', 'MSYSTEM=UCRT64', '-e', 'CHERE_INVOKING=1', '-e', 'HOME=/tmp',
-                    '-e', 'TMPDIR=/tmp', '-e', 'TMP=/tmp', '-e', 'TEMP=/tmp']
-                   if kind == 'win' else [])
-    # Port is guest-local to Colima's host loopback forwarding, not public LAN.
-    # Setup includes the VNC stack; it remains idle until Launcher is opened.
+    environment = ['-e', 'MSYSTEM=UCRT64', '-e', 'CHERE_INVOKING=1',
+                   '-e', 'HOME=/tmp', '-e', 'TMPDIR=/tmp', '-e', 'TMP=/tmp', '-e', 'TEMP=/tmp']
+    # Both loopback VNC endpoints belong to ONE persistent guest container.
+    # Setup includes GUI dependencies; the two displays remain independent.
     args = [docker, 'run', '-d', '--restart', 'no', '--name', name,
             '--label', 'io.cinterforge.terminal=' + PROFILE,
             '--platform', 'linux/amd64',
-            '--publish', f'127.0.0.1:{_LAUNCHER_PORTS[kind]}:6080',
+            '--publish', f'127.0.0.1:{_LAUNCHER_PORTS["linux"]}:6080',
+            '--publish', f'127.0.0.1:{_LAUNCHER_PORTS["win"]}:6081',
             *_guest_host_binds(sdk, kind, workspace),
             *environment, '--workdir', '/workspace' if workspace else '/',
             '--entrypoint', '/bin/sh', image,
@@ -6798,6 +7058,7 @@ def _start_guest_locked(sdk: Path, env: dict[str, str], docker: str,
         if kind == 'win':
             _ensure_wine_display(docker, env, name)
         _verify_guest_bash(docker, env, kind, name)
+        _activate_guest_vnc(docker, env, kind, name)
     except BaseException:
         # Never mark a broken Wine/MSYS2 guest as reusable on the next tab.
         # This is our newly-created named container, not a foreign workload.
@@ -6814,14 +7075,14 @@ def _ensure_wine_display(docker: str, env: dict[str, str], name: str) -> None:
     script = r'''set -eu
 command -v Xvfb >/dev/null
 command -v xdpyinfo >/dev/null
-if ! DISPLAY=:99 xdpyinfo >/dev/null 2>&1; then
-  nohup Xvfb :99 -screen 0 1600x900x24 -nolisten tcp >/tmp/cinter-launcher-xvfb.log 2>&1 </dev/null &
+if ! DISPLAY=:100 xdpyinfo >/dev/null 2>&1; then
+  nohup Xvfb :100 -screen 0 1600x900x24 -nolisten tcp >/tmp/cinter-launcher-win-xvfb.log 2>&1 </dev/null &
 fi
 for n in 1 2 3 4 5 6 7 8 9 10; do
-  if DISPLAY=:99 xdpyinfo >/dev/null 2>&1; then exit 0; fi
+  if DISPLAY=:100 xdpyinfo >/dev/null 2>&1; then exit 0; fi
   sleep 1
 done
-cat /tmp/cinter-launcher-xvfb.log >&2 || true
+cat /tmp/cinter-launcher-win-xvfb.log >&2 || true
 exit 18
 '''
     result = _docker_call(docker, env, 'exec', name, '/bin/sh', '-c', script, timeout=35)
@@ -6830,27 +7091,86 @@ exit 18
                            (result.stderr or result.stdout or '').strip()[-700:])
 
 
+def _guest_verification_probe(docker: str, env: dict[str, str], name: str,
+                              stage: str, command: list[str], *, timeout: int,
+                              expected: str = '') -> subprocess.CompletedProcess:
+    """Verify a real owned guest with bounded time and visible idle progress.
+
+    A Docker exec may provide no stdout while Wine initializes. Never mistake
+    that silence for a successful guest; report the exact layer and exit code.
+    The lifecycle console already persists these messages under Builds/Logs.
+    """
+    started = time.monotonic()
+    completed = threading.Event()
+    print('[DEVTOOLS] Windows Bash probe START ' + stage, flush=True)
+
+    def heartbeat() -> None:
+        while not completed.wait(15):
+            print('[DEVTOOLS] Windows Bash probe WORKING ' + stage +
+                  ' (' + str(int(time.monotonic() - started)) + 's)', flush=True)
+
+    ticker = threading.Thread(target=heartbeat, daemon=True)
+    ticker.start()
+    try:
+        try:
+            result = _docker_call(docker, env, *command, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError('win guest Bash verification timed out during ' + stage +
+                               ' after ' + str(timeout) + 's') from error
+    finally:
+        completed.set()
+        ticker.join(timeout=1)
+
+    output = ((result.stdout or '') + '\n' + (result.stderr or '')).strip()
+    if result.returncode != 0:
+        signal = (' (SIGSEGV / signal 11)' if result.returncode in (139, -11) else '')
+        diagnostic = output[-1200:] if output else 'no guest output'
+        raise RuntimeError('win guest Bash verification exited ' + str(result.returncode) +
+                           signal + ' during ' + stage + ': ' + diagnostic)
+    if expected and expected.lower() not in output.lower():
+        raise RuntimeError('win guest Bash verification did not confirm ' + stage +
+                           ': ' + (output[-700:] if output else 'no guest output'))
+    print('[DEVTOOLS] Windows Bash probe PASS ' + stage +
+          ' (' + str(round(time.monotonic() - started, 1)) + 's)', flush=True)
+    return result
+
+
 def _verify_guest_bash(docker: str, env: dict[str, str], kind: str, name: str) -> None:
     if kind == 'linux':
-        command = [docker, 'exec', name, '/bin/bash', '--version']
-    else:
-        # The base MSYS2 Bash starts without its PATH when --noprofile is
-        # specified. Test the *actual* shell and a coreutils executable, not
-        # just wine --version; the Wine build has Cygwin-specific patches.
-        command = [docker, 'exec', *_launcher_guest_env('win'), name,
-                   'wine', r'Z:\msys2\usr\bin\bash.exe', '--noprofile', '--norc',
-                   '-c', 'export PATH=/usr/bin:/ucrt64/bin:$PATH; '
-                         'test -x /usr/bin/rm.exe || exit 73; '
-                         'f=/tmp/cinterforge-bash-$$; : > "$f" && rm "$f" && '
-                         '/usr/bin/uname -s']
-    print('[DEVTOOLS] Verifying reusable ' + kind + ' guest', flush=True)
-    result = _docker_call(docker, env, *command[1:], timeout=150)
-    if result.returncode:
-        diagnostic = (result.stderr or result.stdout or '').strip()[-1200:]
-        raise RuntimeError(kind + ' guest Bash verification exited ' + str(result.returncode) +
-                           (': ' + diagnostic if diagnostic else '; no guest output'))
-    if kind == 'win' and 'msys' not in (result.stdout or '').lower():
-        raise RuntimeError('Windows guest Bash did not identify itself as real MSYS2')
+        print('[DEVTOOLS] Verifying reusable linux guest', flush=True)
+        result = _docker_call(docker, env, 'exec', name, '/bin/bash', '--version', timeout=150)
+        if result.returncode:
+            diagnostic = (result.stderr or result.stdout or '').strip()[-1200:]
+            raise RuntimeError('linux guest Bash verification exited ' + str(result.returncode) +
+                               (': ' + diagnostic if diagnostic else '; no guest output'))
+        return
+
+    # Check each layer before launching the real Windows MSYS2 shell. An exit
+    # 139 from a qemu-backed guest previously carried no stdout or stderr and
+    # could not distinguish a broken Linux binary translator, Wine startup,
+    # or the Windows PE/Cygwin runtime. These are read-only smoke commands;
+    # they neither provision a dependency nor substitute a simulated shell.
+    common = ['exec', *_launcher_guest_env('win'), name]
+    _guest_verification_probe(docker, env, name, 'amd64 Linux userspace',
+                              ['exec', name, '/bin/bash', '--version'],
+                              timeout=30, expected='GNU bash')
+    _guest_verification_probe(docker, env, name, 'Wine loader',
+                              [*common, 'wine', '--version'], timeout=45,
+                              expected='wine-')
+    _guest_verification_probe(docker, env, name, 'Wine Windows PE execution',
+                              [*common, 'wine', 'cmd.exe', '/c', 'echo',
+                               'CINTER_WINE_PE_READY'], timeout=90,
+                              expected='CINTER_WINE_PE_READY')
+    # The base MSYS2 Bash starts without its PATH when --noprofile is
+    # specified. Test actual shell plus coreutils, not merely wine --version.
+    _guest_verification_probe(
+        docker, env, name, 'MSYS2 UCRT64 Bash + coreutils',
+        [*common, 'wine', r'Z:\msys2\usr\bin\bash.exe', '--noprofile', '--norc',
+         '-c', 'export PATH=/usr/bin:/ucrt64/bin:$PATH; '
+               'test -x /usr/bin/rm.exe || exit 73; '
+               'f=/tmp/cinterforge-bash-$$; : > "$f" && rm "$f" && '
+               '/usr/bin/uname -s'],
+        timeout=150, expected='msys')
 
 
 def _stop_owned_guests_locked_one(docker: str, env: dict[str, str], name: str) -> None:
@@ -6858,7 +7178,7 @@ def _stop_owned_guests_locked_one(docker: str, env: dict[str, str], name: str) -
 
 
 def boot_runtime_guests() -> dict:
-    """On app startup/DevTools installation: one VM and two persistent guests."""
+    """On app startup: one VM, one persistent Debian guest, two desktops."""
     if platform.system() != 'Darwin':
         return {'platform': platform.system(), 'guests': 'native'}
     sdk = sdk_root()
@@ -6880,7 +7200,7 @@ def boot_runtime_guests() -> dict:
             'docker': 'one-managed-engine'}
 
 
-def stop_runtime_vm() -> None:
+def stop_runtime_vm(*, setup_sdk: Path | None = None) -> None:
     """Stop the app-owned VM on normal quit or watchdog-detected native exit.
 
     If the host Docker context has broken, inspect the same t profile through
@@ -6889,7 +7209,7 @@ def stop_runtime_vm() -> None:
     """
     if platform.system() != 'Darwin':
         return
-    sdk = sdk_root()
+    sdk = setup_sdk if setup_sdk is not None else sdk_root()
     if sdk is None:
         return
     env = _env(sdk)
@@ -6996,7 +7316,8 @@ _launcher_lock = threading.RLock()
 
 
 def _launcher_guest_env(kind: str) -> list[str]:
-    result = ['-e', 'DISPLAY=:99', '-e', r'PS1=\u@\h \w \$ ']
+    result = ['-e', 'DISPLAY=' + (':100' if kind == 'win' else ':99'),
+              '-e', r'PS1=\u@\h \w \$ ']
     if kind == 'win':
         # Match the guest's existing MSYS2 Bash environment and prefix, not
         # the separate builder-only Wine PREFIX or a second Windows image.
@@ -7032,13 +7353,49 @@ def _launcher_container(kind: str, server=None) -> tuple[str, dict[str, str], st
     return str(sdk / 'mac/env/bin/docker'), env, _guest_name(kind)
 
 
-def _launcher_start(kind: str, server=None) -> dict:
-    docker, env, name = _launcher_container(kind, server)
+def _verify_guest_vnc(docker: str, env: dict[str, str], kind: str, name: str) -> None:
+    """Verify actual RFB handshake and noVNC HTTP on the retained guest."""
+    rfb_port = 5901 if kind == 'win' else 5900
+    web_port = 6081 if kind == 'win' else 6080
+    script = r'''import socket, time, urllib.request, sys
+rfb_port, web_port = map(int, sys.argv[1:])
+error = 'not ready'
+for i in range(25):
+    try:
+        with socket.create_connection(('127.0.0.1', rfb_port), timeout=2) as conn:
+            banner = conn.recv(12)
+            if len(banner) != 12 or not banner.startswith(b'RFB '):
+                raise RuntimeError('invalid RFB handshake: ' + repr(banner))
+    except (OSError, RuntimeError, ValueError) as exc:
+        error = 'RFB port %d: %s' % (rfb_port, exc)
+        time.sleep(0.3)
+        continue
+    try:
+        with urllib.request.urlopen('http://127.0.0.1:%d/vnc.html' % web_port, timeout=2) as response:
+            if response.status != 200 or b'<html' not in response.read(2048).lower():
+                raise RuntimeError('noVNC HTTP endpoint incomplete')
+    except (OSError, RuntimeError, ValueError) as exc:
+        error = 'noVNC port %d: %s' % (web_port, exc)
+        time.sleep(0.3)
+        continue
+    print('CINTER_VNC_READY')
+    break
+else:
+    raise RuntimeError('VNC unavailable: ' + error)
+'''
+    result = _docker_call(docker, env, 'exec', name, 'python3', '-c', script,
+                          str(rfb_port), str(web_port), timeout=90)
+    if result.returncode or 'CINTER_VNC_READY' not in (result.stdout or ''):
+        raise RuntimeError(kind + ' guest VNC handshake failed: ' +
+                           (result.stderr or result.stdout or '').strip()[-650:])
+
+
+def _activate_guest_vnc(docker: str, env: dict[str, str], kind: str, name: str) -> dict:
     with _launcher_lock:
         # Do not install/repair packages at runtime. All dependencies belong
         # to Setup's existing pinned guest images and the unified SDK.
         probe_script = ("for tool in Xvfb xdpyinfo openbox x11vnc websockify feh pgrep; do "
-                        "command -v '$tool' >/dev/null 2>&1 || echo missing:$tool; done; "
+                        'command -v "$tool" >/dev/null 2>&1 || echo missing:$tool; done; '
                         "test -f /usr/share/novnc/vnc.html || echo missing:novnc; true")
         probe = _docker_call(docker, env, 'exec', name, '/bin/sh', '-c', probe_script,
                              timeout=30)
@@ -7054,45 +7411,83 @@ def _launcher_start(kind: str, server=None) -> dict:
         if not wallpaper.is_file() or wallpaper.is_symlink():
             raise RuntimeError('Missing staged ' + kind + ' Launcher wallpaper')
         copied = _docker_call(docker, env, 'cp', str(wallpaper),
-                              name + ':/tmp/cinterforge-launcher-wallpaper.png', timeout=30)
+                              name + ':/tmp/cinterforge-launcher-' + wallpaper_name + '-wallpaper.png', timeout=30)
         if copied.returncode:
             raise RuntimeError('Unable to load ' + kind + ' Launcher wallpaper: ' + copied.stderr.strip()[:400])
         # Exact one-off helper script is idempotent within this owned container.
         # No root-level host agent, no additional VM; Docker container removal
         # terminates every helper when the application exits.
+        # Independent desktops inside ONE Debian guest. Do not use global
+        # `pgrep -x openbox/x11vnc`: another display can already own that PID.
+        display = ':100' if kind == 'win' else ':99'
+        rfb_port = 5901 if kind == 'win' else 5900
+        web_port = 6081 if kind == 'win' else 6080
         script = r'''set -eu
-if ! pgrep -f '^Xvfb :99 ' >/dev/null 2>&1; then
-  nohup Xvfb :99 -screen 0 1600x900x24 -nolisten tcp >/tmp/cinter-launcher-xvfb.log 2>&1 </dev/null &
+DISPLAY="$1"
+RFB="$2"
+WEB="$3"
+WALLPAPER="$4"
+PREFIX="$5"
+if ! DISPLAY="$DISPLAY" xdpyinfo >/dev/null 2>&1; then
+  nohup Xvfb "$DISPLAY" -screen 0 1600x900x24 -nolisten tcp >"/tmp/cinter-${PREFIX}-xvfb.log" 2>&1 </dev/null &
 fi
 for n in 1 2 3 4 5 6 7 8 9 10; do
-  DISPLAY=:99 xdpyinfo >/dev/null 2>&1 && break
+  DISPLAY="$DISPLAY" xdpyinfo >/dev/null 2>&1 && break
   sleep 1
 done
-DISPLAY=:99 xdpyinfo >/dev/null 2>&1 || exit 18
-if ! pgrep -x openbox >/dev/null 2>&1; then
-  DISPLAY=:99 nohup openbox --sm-disable >/tmp/cinter-launcher-openbox.log 2>&1 </dev/null &
+DISPLAY="$DISPLAY" xdpyinfo >/dev/null 2>&1 || exit 18
+# Per-desktop helpers are keyed to their display and network port.
+if ! test -s "/tmp/cinter-${PREFIX}-openbox.pid" ||
+   ! kill -0 "$(cat "/tmp/cinter-${PREFIX}-openbox.pid")" 2>/dev/null; then
+  DISPLAY="$DISPLAY" nohup openbox --sm-disable >"/tmp/cinter-${PREFIX}-openbox.log" 2>&1 </dev/null &
+  echo $! >"/tmp/cinter-${PREFIX}-openbox.pid"
 fi
-# Real guest windows and the host WebView both use this platform asset.
-# No KDE theme, background manager daemon, or embedded wallpaper artwork.
-DISPLAY=:99 feh --bg-fill /tmp/cinterforge-launcher-wallpaper.png
-if ! pgrep -x x11vnc >/dev/null 2>&1; then
-  DISPLAY=:99 nohup x11vnc -display :99 -rfbport 5900 -localhost -forever -shared -nopw >/tmp/cinter-launcher-vnc.log 2>&1 </dev/null &
+DISPLAY="$DISPLAY" feh --bg-fill "$WALLPAPER"
+if ! python3 -c 'import socket,sys;s=socket.socket();s.settimeout(0.5);r=s.connect_ex(("127.0.0.1",int(sys.argv[1])));s.close();sys.exit(0 if r==0 else 1)' "$RFB"; then
+  DISPLAY="$DISPLAY" nohup x11vnc -display "$DISPLAY" -rfbport "$RFB" -localhost -forever -shared -nopw >"/tmp/cinter-${PREFIX}-vnc.log" 2>&1 </dev/null &
 fi
-if ! pgrep -f 'websockify.*6080 ' >/dev/null 2>&1; then
-  nohup websockify --web /usr/share/novnc 6080 127.0.0.1:5900 >/tmp/cinter-launcher-web.log 2>&1 </dev/null &
+if ! python3 -c 'import socket,sys;s=socket.socket();s.settimeout(0.5);r=s.connect_ex(("127.0.0.1",int(sys.argv[1])));s.close();sys.exit(0 if r==0 else 1)' "$WEB"; then
+  nohup websockify --web /usr/share/novnc "$WEB" "127.0.0.1:$RFB" >"/tmp/cinter-${PREFIX}-web.log" 2>&1 </dev/null &
 fi
 '''
         result = _docker_call(docker, env, 'exec', *_launcher_guest_env(kind),
-                              name, '/bin/bash', '-c', script, timeout=45)
+                              name, '/bin/bash', '-c', script, 'gui', display,
+                              str(rfb_port), str(web_port),
+                              '/tmp/cinterforge-launcher-' + wallpaper_name + '-wallpaper.png',
+                              kind, timeout=45)
         if result.returncode:
             raise RuntimeError('Guest graphical display startup failed: ' +
                                (result.stderr or result.stdout).strip()[-600:])
+        try:
+            _verify_guest_vnc(docker, env, kind, name)
+        except RuntimeError as error:
+            # The image's transient preflight starts its own display, so its
+            # earlier PASS cannot diagnose a failed *retained* runtime helper.
+            # Capture the guest-local startup logs before the owning container
+            # is torn down by Setup's failure cleanup.
+            details = ''
+            try:
+                diagnostic = _docker_call(
+                    docker, env, 'exec', name, '/bin/sh', '-c',
+                    'for service in xvfb openbox vnc web; do '
+                    'file=/tmp/cinter-' + kind + '-$service.log; '
+                    'if test -f "$file"; then printf "\n[%s]\n" "$service"; '
+                    'tail -n 18 "$file"; fi; done', timeout=20)
+                details = (diagnostic.stdout or diagnostic.stderr or '').strip()[-1800:]
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            raise RuntimeError(str(error) + ('\nGuest display logs:\n' + details
+                                             if details else '')) from error
         port = _LAUNCHER_PORTS[kind]
         # A forwarded Colima localhost port is not an Internet service.
         # Its browser frame appears only after an explicit Launcher action.
         return {'platform': kind, 'viewer_url':
                 f'http://127.0.0.1:{port}/vnc.html?autoconnect=true&resize=scale&show_dot=true'}
 
+
+def _launcher_start(kind: str, server=None) -> dict:
+    docker, env, name = _launcher_container(kind, server)
+    return _activate_guest_vnc(docker, env, kind, name)
 
 def _launcher_staged_app(kind: str) -> Path:
     """Read-only resolution of the verified Steam Stage for one platform.
@@ -7157,8 +7552,8 @@ def _launcher_launch(kind: str, app: str, server=None) -> dict:
                                started.stderr.strip()[-400:])
         return {'opened': True, 'platform': kind, 'external': True}
 
-    # Both graphical apps run inside their existing managed Docker guest and
-    # share DISPLAY=:99 with VSCode Bash/Debug. The X11/VNC framebuffer remains
+    # Both graphical apps run inside the ONE managed Debian Docker guest.
+    # Linux uses DISPLAY=:99; Windows/Wine uses independent DISPLAY=:100. The X11/VNC framebuffer remains
     # inside its one Launcher Session tab. No second VM or detached desktop.
     _launcher_start(kind, server)
     docker, env, name = _launcher_container(kind, server)
@@ -7208,28 +7603,10 @@ def guest_shell_main(kind: str) -> int:
         # Do not open a PTY or race that owner's pending shutdown/restart.
         print('[DEVTOOLS] The Terminal app is relaunching; reopen the guest Bash in Code-OSS.', flush=True)
         return 0
-    env = _env(sdk)
-    docker = str(sdk / 'mac/env/bin/docker')
-    # The app initializes its two reusable guests at launch. Session tabs
-    # wait for readiness; they MUST NOT start Colima or Docker themselves.
     _wait_for_app_guests(kind)
-    name = _guest_name(kind)
-    workspace = _guest_workspace()
-    cwd = '/host/mac' + str(workspace) if workspace else '/'
-    args = [docker, 'exec', '-it', *_launcher_guest_env(kind), '--workdir', cwd, name]
-    if kind == 'linux':
-        args += ['/bin/bash', '--noprofile', '-i']
-    else:
-        args += ['wine', r'Z:\msys2\usr\bin\bash.exe', '--login', '-i']
-    print('[DEVTOOLS] Attaching ' + kind + ' Bash to shared guest', flush=True)
-    process = subprocess.Popen(args, env=env)
-    try:
-        return process.wait()
-    except KeyboardInterrupt:
-        process.terminate()
-        return process.wait(timeout=10)
-
-
+    print('[DEVTOOLS] ' + kind + ' Bash is already connected. Open/focus its existing '
+          'Code-OSS integrated terminal; Session does not create guest Bash.', flush=True)
+    return 0
 
 
 

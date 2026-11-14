@@ -86,41 +86,59 @@ class ManagedLimaEntitlements(unittest.TestCase):
             self.assertEqual(mac._stage_lima(Path(self.directory.name)), binary)
         signer.assert_called_once_with(binary)
 
+def _fake_c_environment(builds):
+    state = builds / 'CFTVM/U'
+    env = {k: v for k, v in os.environ.items()
+           if k not in ('DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH')}
+    return dict(env, LIMA_HOME=str(state / 'l'),
+                COLIMA_HOME=str(state / 'c'), DOCKER_CONFIG=str(state / 'docker'),
+                DOCKER_HOST=f'unix://{state}/c/c/docker.sock',
+                CFOS_COLIMA_PROFILE='c')
+
+
 class ManagedMacSocketPaths(unittest.TestCase):
     def test_managed_socket_is_short_without_external_symlinks(self):
         with tempfile.TemporaryDirectory() as directory:
             builds = Path(directory) / 'Builds'
             builds.mkdir()
-            with mock.patch.object(mac, 'SOCKET_PATH_LIMIT', 512):
+            with mock.patch.object(mac, 'SOCKET_PATH_LIMIT', 512), \
+                 mock.patch('linuxos.managed_backend.backend_environment',
+                            return_value=_fake_c_environment(builds)):
                 env = mac.managed_environment(builds)
             state = builds / mac.VM_STATE_FOLDER
-            self.assertEqual(Path(env['LIMA_HOME']), state / 'lima')
-            self.assertEqual(Path(env['COLIMA_HOME']), state / 'colima')
+            self.assertEqual(Path(env['LIMA_HOME']), state / 'l')
+            self.assertEqual(Path(env['COLIMA_HOME']), state / 'c')
             self.assertEqual(Path(env['DOCKER_CONFIG']), state / 'docker')
-            self.assertEqual(env['DOCKER_CONTEXT'], 'colima-' + mac.COLIMA_PROFILE)
+            self.assertEqual(env['CFOS_COLIMA_PROFILE'], 'c')
+            self.assertNotIn('DOCKER_CONTEXT', env)
+            self.assertIn('CFTVM/U/c/c/docker.sock', env['DOCKER_HOST'])
             self.assertIn('docker-buildx=0.35.0', mac.PACKAGES)
             socket = (Path(env['LIMA_HOME']) / ('colima-' + mac.COLIMA_PROFILE)
                       / 'ssh.sock.1234567890123456')
-            # This is a synthetic socket-root fixture. Check the shortening
-            # relative to the retired layout, not the runner's TMPDIR length.
-            old_socket = (builds / 'CinterForgeTerminal/Toolchains/mac/container/lima'
-                          / ('colima-' + mac.COLIMA_PROFILE)
-                          / 'ssh.sock.1234567890123456')
-            self.assertGreater(len(os.fsencode(old_socket)), len(os.fsencode(socket)))
+            retired = (builds / 'CinterForgeTerminal/Toolchains/mac/container/lima'
+                       / 'colima-w/ssh.sock.1234567890123456')
+            self.assertLess(len(os.fsencode(socket)), len(os.fsencode(retired)))
             self.assertFalse(state.is_symlink())
+
     def test_foreign_docker_host_cannot_override_managed_context(self):
         with tempfile.TemporaryDirectory() as directory:
             builds = Path(directory) / 'Builds'
             builds.mkdir()
             with mock.patch.dict(os.environ, {
                 'DOCKER_HOST': 'tcp://some-other-engine:2375',
+                'DOCKER_CONTEXT': 'foreign',
                 'DOCKER_TLS_VERIFY': '1',
                 'DOCKER_CERT_PATH': str(Path(directory) / 'Other'),
             }):
-                with mock.patch.object(mac, 'SOCKET_PATH_LIMIT', 512):
+                with mock.patch.object(mac, 'SOCKET_PATH_LIMIT', 512), \
+                     mock.patch('linuxos.managed_backend.backend_environment',
+                                return_value=_fake_c_environment(builds)):
                     env = mac.managed_environment(builds)
-            for key in ('DOCKER_HOST', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
+            self.assertEqual(env['DOCKER_HOST'],
+                             f'unix://{builds}/CFTVM/U/c/c/docker.sock')
+            for key in ('DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
                 self.assertNotIn(key, env)
+
     def test_long_physical_root_rejected_without_creating_state(self):
         with tempfile.TemporaryDirectory() as directory:
             builds = Path(directory) / ('x' * 75) / 'Builds'
@@ -135,99 +153,68 @@ class ManagedMacSocketPaths(unittest.TestCase):
             builds.mkdir()
             outside = Path(directory) / 'Other'
             outside.mkdir()
+            (builds / "CFTVM").mkdir()
             (builds / mac.VM_STATE_FOLDER).symlink_to(outside, target_is_directory=True)
             with mock.patch.object(mac, 'SOCKET_PATH_LIMIT', 255):
                 with self.assertRaisesRegex(RuntimeError, 'real directory'):
                     mac.managed_state_root(builds)
             self.assertTrue(outside.is_dir())
     def test_unhealthy_running_colima_is_stopped_before_restart(self):
-        """Colima start ignores an already-running VM with a dead Docker daemon."""
+        """Only canonical c backend owns recovery, never a second w driver."""
+        from linuxos import managed_backend
         with tempfile.TemporaryDirectory() as directory:
             builds = Path(directory) / 'Builds'
             builds.mkdir()
             tools = builds / 'CinterForgeTerminal/Toolchains/mac'
             for rel in ('env/bin/docker', 'env/bin/colima', 'env/bin/docker-buildx',
                         'lima/bin/limactl'):
-                path = tools / rel
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b'fixture')
-            state = {'running': True, 'docker': False}
-            calls = []
-
-            def run(command, **kwargs):
-                calls.append(command)
-                if command[1] == 'stop':
-                    state['running'] = False
-                if command[1] == 'start':
-                    self.assertFalse(state['running'], 'must stop stale running VM first')
-                    state.update(running=True, docker=True)
-
-            def probe(command, **kwargs):
-                if command[1:3] == ['buildx', 'version']:
-                    return subprocess.CompletedProcess(command, 0, 'github.com/docker/buildx v0.35.0')
-                if command[1:3] == ['ssh', '--profile']:
-                    return subprocess.CompletedProcess(command, 0, '')
-                return subprocess.CompletedProcess(command, 0 if state['docker'] else 1,
-                                                   '29.8.1' if state['docker'] else 'Cannot connect to the Docker daemon')
-
+                binary = tools / rel
+                binary.parent.mkdir(parents=True, exist_ok=True)
+                binary.write_bytes(b'fixture')
+            buildx = tools / 'env/bin/docker-buildx'
             with mock.patch.object(mac.platform, 'system', return_value='Darwin'), \
-                 mock.patch.object(mac, 'SOCKET_PATH_LIMIT', 255), \
+                 mock.patch.object(mac, 'SOCKET_PATH_LIMIT', 512), \
+                 mock.patch.object(managed_backend, 'backend_environment',
+                                   return_value=_fake_c_environment(builds)), \
                  mock.patch.object(mac, '_stage_lima'), \
-                 mock.patch.object(mac, '_probe', side_effect=probe), \
-                 mock.patch.object(mac, '_run', side_effect=run), \
-                 mock.patch.object(mac, '_start_colima_checked',
-                                   side_effect=lambda command, **kwargs: run(command)):
-                mac.ensure_docker(builds)
+                 mock.patch.object(mac, '_ensure_buildx_plugin', return_value=buildx), \
+                 mock.patch.object(managed_backend, 'ensure_backend',
+                                   side_effect=RuntimeError('c readiness failed')) as backend:
+                with self.assertRaisesRegex(RuntimeError, 'c readiness failed'):
+                    mac.ensure_docker(builds)
+            backend.assert_called_once()
+            self.assertFalse((builds / 'CFTVM/colima/w').exists())
 
-            self.assertEqual([cmd[1] for cmd in calls if cmd[1] in ('stop', 'start')],
-                             ['stop', 'start'])
-            self.assertFalse(any(cmd[1] == 'delete' for cmd in calls))
     def test_running_vm_missing_mounts_is_reconfigured_without_deleting_images(self):
+        """The c backend is the sole owner of mount checks and re-use."""
+        from linuxos import managed_backend
         with tempfile.TemporaryDirectory() as directory:
             builds = Path(directory) / 'Builds'
             builds.mkdir()
             tools = builds / 'CinterForgeTerminal/Toolchains/mac'
             for rel in ('env/bin/docker', 'env/bin/colima', 'env/bin/docker-buildx',
                         'lima/bin/limactl'):
-                path = tools / rel
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b'fixture')
-            state = {'running': True, 'mounted': False}
-            calls = []
-
-            def run(command, **kwargs):
-                calls.append(command)
-                if command[1] == 'stop':
-                    state['running'] = False
-                if command[1] == 'start':
-                    state['running'] = True
-                    state['mounted'] = True
-
-            def probe(command, **kwargs):
-                if command[1:3] == ['buildx', 'version']:
-                    return subprocess.CompletedProcess(command, 0, 'github.com/docker/buildx v0.35.0')
-                if command[1:3] == ['ssh', '--profile']:
-                    return subprocess.CompletedProcess(command, 0 if state['mounted'] else 1, '')
-                return subprocess.CompletedProcess(command, 0 if state['running'] else 1, '29.5.2')
-
+                binary = tools / rel
+                binary.parent.mkdir(parents=True, exist_ok=True)
+                binary.write_bytes(b'fixture')
+            buildx = tools / 'env/bin/docker-buildx'
+            env = {'DOCKER_HOST': 'unix:///owned/c/docker.sock'}
             with mock.patch.object(mac.platform, 'system', return_value='Darwin'), \
-                 mock.patch.object(mac, 'SOCKET_PATH_LIMIT', 255), \
+                 mock.patch.object(mac, 'SOCKET_PATH_LIMIT', 512), \
+                 mock.patch.object(managed_backend, 'backend_environment',
+                                   return_value=_fake_c_environment(builds)), \
                  mock.patch.object(mac, '_stage_lima'), \
-                 mock.patch.object(mac, '_probe', side_effect=probe), \
-                 mock.patch.object(mac, '_run', side_effect=run), \
-                 mock.patch.object(mac, '_start_colima_checked',
-                                   side_effect=lambda command, **kwargs: run(command)):
+                 mock.patch.object(mac, '_ensure_buildx_plugin', return_value=buildx), \
+                 mock.patch.object(managed_backend, 'ensure_backend',
+                                   return_value=(str(tools / 'env/bin/docker'), env)) as backend, \
+                 mock.patch.object(mac, '_probe', return_value=subprocess.CompletedProcess([], 0, '29.5.2')):
                 mac.ensure_docker(builds)
-                # Once fixed, the next Setup must reuse the running VM.
                 mac.ensure_docker(builds)
-
-            self.assertEqual([c[1] for c in calls if c[1] == 'stop'], ['stop'])
-            starts = [c for c in calls if c[1] == 'start']
-            self.assertEqual(len(starts), 1)
-            self.assertIn('--save-config', starts[0])
-            self.assertIn(str(builds) + ':w', starts[0])
-            self.assertFalse(any(c[1] == 'delete' for c in calls))
-
+            self.assertEqual(backend.call_count, 2)
+            receipt = builds / 'CFTVM/U/backend.json'
+            self.assertTrue(receipt.is_file())
+            self.assertEqual(json.loads(receipt.read_text())['profile'], 'c')
+            self.assertFalse((builds / 'CFTVM/colima/w').exists())
 
 # Migrated from tests/test_linuxkit_shared_docker.py.
 """LinuxKit Setup/Build/Stage/Test separation (mocked; no VMs/network)."""
@@ -348,23 +335,21 @@ class LinuxKitPhaseOwnershipTests(unittest.TestCase):
         for fn in (kernel, guest, verify, licensed, archive):
             fn.assert_called_once()
 
-    def test_clean_mac_setup_builds_kernel_with_w_then_switches_to_c(self):
-        # A cold kernel build needs the w Docker cache. Releasing w before
-        # setup_kernel would break empty-state reproduction, even if a warm
-        # builder appeared to work by skipping that producer.
+    def test_clean_mac_setup_starts_c_before_kernel_and_reuses_it_for_guest(self):
         phases = []
+        env = {'DOCKER_HOST': 'unix:///owned/c/docker.sock', 'PATH': '/managed/bin'}
         with mock.patch.object(lifecycle.platform, 'system', return_value='Darwin'), \
+             mock.patch.object(lifecycle, 'managed_setup_docker',
+                               side_effect=lambda: (phases.append('c-ready') or ('/managed/docker', env))), \
              mock.patch.object(lifecycle, 'setup_kernel', side_effect=lambda: phases.append('kernel')), \
-             mock.patch.object(mac_bootstrap, 'stop_managed_colima',
-                               side_effect=lambda builds: phases.append('stop-w')) as stop, \
              mock.patch.object(lifecycle, 'prepare_guest', side_effect=lambda: phases.append('guest-c')), \
              mock.patch.object(lifecycle, 'verify_guest', side_effect=lambda: phases.append('verify')), \
              mock.patch.object(lifecycle, '_licensed', side_effect=lambda: phases.append('consent')), \
              mock.patch.object(test_linuxkit, 'prepare_official_bedrock_archive',
-                               side_effect=lambda repo: phases.append('bedrock-archive')):
+                               side_effect=lambda repo: phases.append('bedrock-archive')), \
+             mock.patch.dict(os.environ, {}, clear=False):
             lifecycle.setup()
-        self.assertEqual(phases, ['kernel', 'stop-w', 'guest-c', 'verify', 'consent', 'bedrock-archive'])
-        stop.assert_called_once_with(lifecycle.BUILDS)
+        self.assertEqual(phases, ['c-ready', 'kernel', 'guest-c', 'verify', 'consent', 'bedrock-archive'])
 
     def test_acceptance_uses_setup_guest_and_does_not_start_builder(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -396,6 +381,93 @@ class LinuxKitPhaseOwnershipTests(unittest.TestCase):
             receipt = builds / 'Logs/CinterForgeTerminal/linuxkit-bedrock-acceptance.json'
             self.assertEqual(json.loads(receipt.read_text())['status'], 'passed')
 
+
+    def test_bedrock_acceptance_cleanup_retries_macos_enotempty(self):
+        # A generated Bedrock world may gain filesystem-observer entries while
+        # Python recursively removes it on macOS (Errno 66).
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = pathlib.Path(temp) / 'Acceptance-race'
+            data = workspace / 'Server/worlds/Bedrock level/db'
+            data.mkdir(parents=True)
+            (data / 'CURRENT').write_text('generated Bedrock world')
+            real_rmtree = shutil.rmtree
+            calls = []
+
+            def rmtree_with_observer_race(path):
+                calls.append(pathlib.Path(path))
+                if len(calls) == 1:
+                    real_rmtree(path)
+                    (workspace / 'Server').mkdir(parents=True)
+                    (workspace / 'Server/.DS_Store').write_text('observer entry')
+                    raise OSError(errno.ENOTEMPTY, 'Directory not empty', str(workspace / 'Server'))
+                return real_rmtree(path)
+
+            with mock.patch.object(test_linuxkit.shutil, 'rmtree', side_effect=rmtree_with_observer_race), \
+                 mock.patch.object(test_linuxkit.time, 'sleep') as sleeper:
+                test_linuxkit._remove_acceptance_workspace(workspace)
+            self.assertEqual(len(calls), 2)
+            sleeper.assert_called_once()
+            self.assertFalse(workspace.exists())
+
+    def test_bedrock_acceptance_cleanup_fails_if_generated_workspace_persists(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = pathlib.Path(temp) / 'Acceptance-stuck'
+            (workspace / 'Server').mkdir(parents=True)
+            with mock.patch.object(test_linuxkit.shutil, 'rmtree',
+                                   side_effect=OSError(errno.ENOTEMPTY, 'Directory not empty')), \
+                 mock.patch.object(test_linuxkit.time, 'sleep'):
+                with self.assertRaisesRegex(RuntimeError, 'cleanup failed after 6 attempts'):
+                    test_linuxkit._remove_acceptance_workspace(workspace)
+            self.assertTrue(workspace.is_dir())
+
+    def test_bedrock_acceptance_cleanup_runs_when_validator_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = pathlib.Path(temp)
+            invoked = []
+
+            def run(command):
+                invoked.append(command)
+                if '--linuxkit-test-install' in command:
+                    server = pathlib.Path(command[command.index('--linuxkit-test-install') + 1])
+                    (server / 'worlds/Bedrock level/db').mkdir(parents=True)
+                    (server / 'worlds/Bedrock level/db/CURRENT').write_text('generated')
+                else:
+                    raise RuntimeError('validator rejection')
+
+            with mock.patch.object(test_linuxkit, '_run', side_effect=run), \
+                 mock.patch.object(test_linuxkit, '_install_prepared_runtime', return_value={}):
+                with self.assertRaisesRegex(RuntimeError, 'validator rejection'):
+                    test_linuxkit._execute_acceptance(ROOT, ROOT, parent / 'install.py',
+                                                       parent / 'validate.py', parent, {}, False, parent)
+            self.assertEqual(len(invoked), 2)
+            self.assertEqual(list(parent.glob('Acceptance-*')), [])
+
+    def test_bedrock_acceptance_real_subprocess_fixture_and_disposal(self):
+        # Exercise real installer/validator child processes and a generated
+        # multi-directory Bedrock world, not just a mocked command dispatch.
+        with tempfile.TemporaryDirectory() as temp:
+            scratch = pathlib.Path(temp)
+            installer = scratch / 'install.py'
+            validator = scratch / 'validate.py'
+            installer.write_text(
+                'import pathlib, sys\n'
+                'server = pathlib.Path(sys.argv[sys.argv.index("--linuxkit-test-install") + 1])\n'
+                'for i in range(24):\n'
+                '    db = server / "worlds" / "Bedrock level" / "db" / str(i)\n'
+                '    db.mkdir(parents=True)\n'
+                '    for j in range(8): (db / f"{j}.ldb").write_bytes(b"generated")\n'
+                'print("fixture server installed", flush=True)\n'
+            )
+            validator.write_text(
+                'import pathlib, sys\n'
+                'server = pathlib.Path(sys.argv[sys.argv.index("--cfos-linuxkit-test-server") + 1])\n'
+                'assert len(list(server.glob("worlds/Bedrock level/db/*/*.ldb"))) == 192\n'
+                'print("fixture server smoke passed", flush=True)\n'
+            )
+            with mock.patch.object(test_linuxkit, '_install_prepared_runtime', return_value={}):
+                test_linuxkit._execute_acceptance(ROOT, ROOT, installer, validator,
+                                                   scratch, {}, True, scratch)
+            self.assertEqual(list(scratch.glob('Acceptance-*')), [])
 
     def test_bedrock_acceptance_never_downloads_missing_archive(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -564,22 +636,10 @@ from host import mac_bootstrap
 
 
 class ProcessLifetimeTests(unittest.TestCase):
-    def test_cleanup_stops_only_named_vm_when_health_probe_times_out(self):
-        with tempfile.TemporaryDirectory() as temp:
-            builds = pathlib.Path(temp) / 'Builds'
-            colima = builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/colima'
-            colima.parent.mkdir(parents=True)
-            colima.touch()
-            # Socket path-length protection has separate tests. Do not let
-            # a deeply nested fixture path reject a mock-only cleanup test.
-            with mock.patch.object(mac_bootstrap.platform, 'system', return_value='Darwin'), \
-                 mock.patch.object(mac_bootstrap, 'managed_environment', return_value={}), \
-                 mock.patch.object(mac_bootstrap, '_probe', side_effect=subprocess.TimeoutExpired('colima status', 10)), \
-                 mock.patch.object(mac_bootstrap, '_run') as execute:
-                mac_bootstrap.stop_managed_colima(builds)
-                self.assertEqual(execute.call_args.args[0],
-                                 [str(colima), 'stop', mac_bootstrap.COLIMA_PROFILE])
-                self.assertEqual(execute.call_args.kwargs['timeout'], 8)
+    def test_cleanup_stops_only_named_c_producer(self):
+        with mock.patch.object(mac_bootstrap, 'stop_linuxkit_build_backend') as stop:
+            mac_bootstrap.stop_setup_build_vms(pathlib.Path('/tmp/Builds'))
+        stop.assert_called_once_with(pathlib.Path('/tmp/Builds'))
 
     def test_docker_failure_skips_graceful_stop(self):
         with mock.patch.object(mac_bootstrap, '_run') as execute:
@@ -676,12 +736,12 @@ class ProcessLifetimeTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0],
                              [str(root / 'env/bin/colima'), 'stop', 'c'])
 
-    def test_cleanup_attempts_both_even_if_first_fails(self):
-        with mock.patch.object(mac_bootstrap, 'stop_managed_colima', side_effect=RuntimeError('first')), \
-             mock.patch.object(mac_bootstrap, 'stop_linuxkit_build_backend') as second:
-            with self.assertRaisesRegex(RuntimeError, 'did not shut down'):
+    def test_cleanup_propagates_failure_of_single_owned_producer(self):
+        with mock.patch.object(mac_bootstrap, 'stop_linuxkit_build_backend',
+                               side_effect=RuntimeError('c cleanup failed')) as cleanup:
+            with self.assertRaisesRegex(RuntimeError, 'c cleanup failed'):
                 mac_bootstrap.stop_setup_build_vms(pathlib.Path('/tmp/Builds'))
-            second.assert_called_once()
+            cleanup.assert_called_once()
 
     def test_bedrock_watchdog_checks_exact_vm_before_stopping(self):
         spec = importlib.util.spec_from_file_location('bedrock_watchdog_test', ROOT / 'webapp/CinterForgeTerminal.py')

@@ -9,6 +9,7 @@ class DevToolsSplashTests(unittest.TestCase):
         server = SimpleNamespace(system='mac', guest_start_lock=threading.RLock(),
             guest_start_state=state, guest_start_error='', guest_ready=[], guest_errors={},
             native_parent_pid=1001, mutable_builds=Path('/test/Builds'),
+            guest_shells={}, guest_shells_lock=threading.RLock(),
             _stopping=False, log_event=events.append)
         return server, events
 
@@ -33,8 +34,14 @@ class DevToolsSplashTests(unittest.TestCase):
         with mock.patch.object(terminal, '_start_runtime_watchdog'), \
              mock.patch.object(terminal, '_runtime_logs_root', return_value=Path('/test/Logs')), \
              mock.patch.object(terminal, 'boot_runtime_guests', return_value=result), \
+             mock.patch.object(terminal, 'sdk_root', return_value=Path('/sdk')), \
+             mock.patch.object(terminal, '_new_owned_guest_shell', return_value=mock.Mock()) as bash, \
+             mock.patch.object(terminal.threading, 'Thread') as monitor, \
              mock.patch.object(terminal, 'stop_runtime_vm') as stop:
             terminal._boot_guests_logged(server)
+        bash.assert_called_once_with(server, 'linux', Path('/sdk'))
+        self.assertIn('linux', server.guest_shells)
+        monitor.assert_called_once()
         self.assertEqual(server.guest_start_state, 'failed')
         self.assertEqual(terminal._guest_boot_snapshot(server)['guests'], ['linux'])
         self.assertIn('wine bash exited 127', terminal._guest_boot_snapshot(server)['error'])

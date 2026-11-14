@@ -405,9 +405,12 @@ def main(argv: list[str]) -> int:
         if platform.system() == 'Darwin':
             invoke(sys.executable, '-B', '-m', 'host.mac_bootstrap', '--builds', str(BUILDS))
             from host.mac_bootstrap import managed_environment
+            os.environ.pop('DOCKER_CONTEXT', None)
             os.environ.update(managed_environment(BUILDS))
-        invoke(sys.executable, '-B', '-m', 'host.windows_dependencies', '--builds', str(BUILDS))
-        invoke(sys.executable, '-B', '-m', 'host.msi_installer', '--builds', str(BUILDS))
+        from host.amd64_backend import managed_amd64_backend
+        with managed_amd64_backend(BUILDS):
+            invoke(sys.executable, '-B', '-m', 'host.windows_dependencies', '--builds', str(BUILDS))
+            invoke(sys.executable, '-B', '-m', 'host.msi_installer', '--builds', str(BUILDS))
         print('[CinterForgeTerminal] Windows Setup complete: cross-runtime and real WiX MSI smoke passed', flush=True)
         return 0
     if argv in (['setup', 'mac'], ['setup', 'linux']):
@@ -433,50 +436,67 @@ def main(argv: list[str]) -> int:
             # Subsequent child lifecycles MUST use the staged Colima Docker
             # context, Lima state, caches and VM under sibling Builds.
             from host.mac_bootstrap import managed_environment
+            os.environ.pop('DOCKER_CONTEXT', None)
             os.environ.update(managed_environment(BUILDS))
-        # Windows is a required target, not a best-effort add-on. Stage the
-        # FULL MinGW/Wine/Xvfb image and Windows SDK/runtime acquisition into
-        # Builds BEFORE any other cross build or Linux SDK preflight. Verify
-        # local dependency closure; DevTools transfer packaging comes later.
-        if platform.system() in ('Darwin', 'Linux'):
-            invoke(sys.executable, '-B', '-m', 'host.windows_dependencies',
-                   '--builds', str(BUILDS))
-            # Setup acceptance builds and inspects a tiny real WiX MSI.
-            # Publish reuses this verified toolchain and never provisions it.
-            invoke(sys.executable, '-B', '-m', 'host.msi_installer',
-                   '--builds', str(BUILDS))
-        # For this Setup phase, verify the full developer tool inventory first.
-        # The resulting Markdown report includes every failed probe as well as
-        # successful versions and measured executable sizes.
-        invoke(sys.executable, '-B', '-m', 'host.devtooling',
-               '--builds', str(BUILDS))
-        from host.bootstrap_bundle import provision_zmachine
-        provision_zmachine(BUILDS)
-        # Setup prepares EVERY dependency (including foreign Python runtimes)
-        # and executes the real Minecraft acceptance before any release ZIP.
-        from host.portable_python import provision
-        provision(BUILDS, 'mac', 'arm64')
-        from host.universal_package import provision_release_runtimes
-        provision_release_runtimes(BUILDS)
-        # LinuxKit's custom-kernel producer uses the *existing w Docker
-        # engine*. It must finish before we release w and start c. The LinuxKit
-        # Setup lifecycle owns this handoff, not Build or Stage.
+        # LinuxKit Setup starts the canonical c Docker producer directly,
+        # builds its ARM64 kernel and guest closure, then releases c before
+        # actual Bedrock acceptance. No w cross-builder is started.
         invoke(sys.executable, '-B', str(REPO / 'linuxos/lifecycle.py'), 'setup')
         if platform.system() == 'Darwin':
-            # Setup produced the glibc/probe closure; c is no longer needed.
-            # Release its memory before starting the real LinuxKit/Bedrock VM.
+            # Release the producer before Bedrock's LinuxKit VM acceptance.
             from host.mac_bootstrap import stop_linuxkit_build_backend
             print('[CinterForgeTerminal] Releasing guest-input builder c before Bedrock acceptance', flush=True)
             stop_linuxkit_build_backend(BUILDS)
         # This is an actual official-Bedrock launch through the signed,
         # native-bridged LinuxKit VM, not a placeholder compile check.
         invoke(sys.executable, '-B', str(REPO / 'linuxos/lifecycle.py'), 'test')
-        invoke(sys.executable, '-B', str(REPO / 'webapp/codeoss/setup.py'),
-               '--workspace', str(REPO.parent))
-        # Required source pull is internal-only, before HFS media construction.
-        # Do not access the public bucket or publish anything in Setup.
-        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'pull', 'lagomorph', 'source')
-        invoke(sys.executable, '-B', '-m', 'host.lagomorph_setup', '--builds', str(BUILDS))
+        # Do not build the Debian AMD64 image under ARM64 LinuxKit's c Docker.
+        # Setup owns this single QEMU x86-64 t backend through all subsequent
+        # provisioning and acceptance, including failure/interruption cleanup.
+        from host.amd64_backend import managed_amd64_backend
+        with managed_amd64_backend(BUILDS):
+            # Bedrock must pass FIRST. Only then build the unified x86-64 Debian
+            # Linux/Windows toolchain image and its real Linux/Wine/MSYS2 smokes.
+            # Windows is a required target, not a best-effort add-on. Stage the
+            # FULL MinGW/Wine/Xvfb image and Windows SDK/runtime acquisition into
+            # Builds BEFORE any other cross build or Linux SDK preflight. Verify
+            # local dependency closure; DevTools transfer packaging comes later.
+            if platform.system() in ('Darwin', 'Linux'):
+                invoke(sys.executable, '-B', '-m', 'host.windows_dependencies',
+                       '--builds', str(BUILDS))
+                # Setup acceptance builds and inspects a tiny real WiX MSI.
+                # Publish reuses this verified toolchain and never provisions it.
+                invoke(sys.executable, '-B', '-m', 'host.msi_installer',
+                       '--builds', str(BUILDS))
+            # For this Setup phase, verify the full developer tool inventory first.
+            # The resulting Markdown report includes every failed probe as well as
+            # successful versions and measured executable sizes.
+            invoke(sys.executable, '-B', '-m', 'host.devtooling',
+                   '--builds', str(BUILDS))
+            from host.bootstrap_bundle import provision_zmachine
+            provision_zmachine(BUILDS)
+            # Setup prepares EVERY dependency (including foreign Python runtimes)
+            # and executes the real Minecraft acceptance before any release ZIP.
+            from host.portable_python import provision
+            provision(BUILDS, 'mac', 'arm64')
+            from host.universal_package import provision_release_runtimes
+            provision_release_runtimes(BUILDS)
+            invoke(sys.executable, '-B', str(REPO / 'webapp/codeoss/setup.py'),
+                   '--workspace', str(REPO.parent))
+            # Required source pull is internal-only, before HFS media construction.
+            # Do not access the public bucket or publish anything in Setup.
+            invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'pull', 'lagomorph', 'source')
+            invoke(sys.executable, '-B', '-m', 'host.lagomorph_setup', '--builds', str(BUILDS))
+            if platform.system() == 'Darwin':
+                # Release the single Setup-owned c producer before accepting t.
+                # No build VM may remain alongside the installed Terminal runtime.
+                from host.mac_bootstrap import stop_setup_build_vms
+                stop_setup_build_vms(BUILDS)
+                # Only Setup may prove the installed app's VM, persistent Bash and
+                # VNC paths using the provisioned pinned closure. Its t VM and
+                # guest processes are stopped on success *and* failure.
+                invoke(sys.executable, '-B', '-m', 'host.guest_runtime_acceptance',
+                       '--builds', str(BUILDS))
         print('[CinterForgeTerminal] Setup complete: dependencies, LinuxKit, guest runtime and real Bedrock acceptance verified', flush=True)
         return 0
     # Four unpacked Build outputs; ZIP files are exclusively Publish outputs.
@@ -494,19 +514,18 @@ def main(argv: list[str]) -> int:
         for name, value in release_signing_environment().items():
             if value and not os.environ.get(name):
                 os.environ[name] = value
-        from host.mac_bootstrap import managed_environment, ensure_docker
-        os.environ.update(managed_environment(BUILDS))
+        from host.amd64_backend import managed_amd64_backend
         invoke(sys.executable, '-B', '-m', 'host.toolchain', '--builds', str(BUILDS))
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'build', '--application-shell')
-        # Setup-produced runtime prerequisites are immutable here. Build
-        # recompiles the apps, assembles and signs unpacked files; Publish alone emits a Mac DMG and three ZIPs.
         invoke(sys.executable, '-B', str(REPO / 'linuxos/lifecycle.py'), 'verify')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'stage')
         invoke(sys.executable, '-B', '-m', 'host.mac_app', 'stage', '--builds', str(BUILDS))
-        invoke(sys.executable, '-B', '-m', 'host.cross_build', '--builds', str(BUILDS))
-        from host.linux_runner import build_terminal
-        build_terminal(BUILDS, docker=ensure_docker(BUILDS),
-                       logfile=BUILDS / 'Logs/CinterForgeTerminal/linux-native-build.log')
+        # Build only uses Setup-provisioned t; no ARM64 c, image creation, or packages.
+        with managed_amd64_backend(BUILDS, setup=False) as docker:
+            invoke(sys.executable, '-B', '-m', 'host.cross_build', '--builds', str(BUILDS))
+            from host.linux_runner import build_terminal
+            build_terminal(BUILDS, docker=docker,
+                           logfile=BUILDS / 'Logs/CinterForgeTerminal/linux-native-build.log')
         from host.universal_package import build_four
         report = build_four(BUILDS)
         if set(report['artifacts']) != {'mac', 'linux', 'win', 'devtools'}:
@@ -535,6 +554,10 @@ def main(argv: list[str]) -> int:
         selected = argv[1]
         publish_mode = (argv[3] if len(argv) == 4 else
                         'dryrun' if len(argv) == 3 else None)
+        if publish_mode == 'beta' and selected in ('mac', 'all') and platform.system() == 'Darwin':
+            os.environ['CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS'] = '1'
+        elif publish_mode == 'release':
+            os.environ.pop('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS', None)
         if (selected in ('mac', 'all') and publish_mode in ('beta', 'release') and
                 platform.system() == 'Darwin'):
             # The BUILDER's missing Apple signing private key must stop a
@@ -560,6 +583,7 @@ def main(argv: list[str]) -> int:
         if platform.system() != 'Darwin':
             raise RuntimeError('Mac application lifecycle requires macOS')
         from host.mac_bootstrap import managed_environment
+        os.environ.pop('DOCKER_CONTEXT', None)
         os.environ.update(managed_environment(BUILDS))
         action = argv[0]
         if action == 'stage':
@@ -567,6 +591,11 @@ def main(argv: list[str]) -> int:
             stage_four(BUILDS, targets=('mac',))
         else:
             if action == 'test':
+                # Test is read-only/offline: require the durable Setup receipt
+                # proving the exact managed VM, two PTYs, two VNC sessions and
+                # mandatory shutdown. Never boot a guest or provision here.
+                from host.guest_runtime_acceptance import verify_setup_receipt
+                verify_setup_receipt(BUILDS)
                 # Users run lifecycle commands only. Test runs automated
                 # regressions and non-launch staged Mac verification; native
                 # GUI acceptance is deferred to the final DevTools phase.
@@ -579,19 +608,22 @@ def main(argv: list[str]) -> int:
         native = {'Darwin': 'mac', 'Linux': 'linux', 'Windows': 'win'}.get(platform.system())
         if target == 'mac' and native == 'mac':
             from host.mac_bootstrap import managed_environment
+            os.environ.pop('DOCKER_CONTEXT', None)
             os.environ.update(managed_environment(BUILDS))
             invoke(sys.executable, '-B', '-m', 'host.toolchain', '--builds', str(BUILDS))
             invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'build', '--application-shell')
             invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'stage')
             invoke(sys.executable, '-B', '-m', 'host.mac_app', 'stage', '--builds', str(BUILDS))
         elif target == 'win' and native in ('mac', 'linux'):
-            invoke(sys.executable, '-B', '-m', 'host.cross_build', '--builds', str(BUILDS))
+            from host.amd64_backend import managed_amd64_backend
+            with managed_amd64_backend(BUILDS, setup=False):
+                invoke(sys.executable, '-B', '-m', 'host.cross_build', '--builds', str(BUILDS))
         elif target == 'linux' and native == 'mac':
-            from host.mac_bootstrap import managed_environment, ensure_docker
-            os.environ.update(managed_environment(BUILDS))
+            from host.amd64_backend import managed_amd64_backend
             from host.linux_runner import build_terminal
-            build_terminal(BUILDS, docker=ensure_docker(BUILDS),
-                           logfile=BUILDS / 'Logs/CinterForgeTerminal/linux-native-build.log')
+            with managed_amd64_backend(BUILDS, setup=False) as docker:
+                build_terminal(BUILDS, docker=docker,
+                               logfile=BUILDS / 'Logs/CinterForgeTerminal/linux-native-build.log')
         elif target == native:
             invoke(sys.executable, '-B', '-m', 'host.toolchain', '--builds', str(BUILDS))
             invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'build', '--application-shell')
@@ -602,12 +634,14 @@ def main(argv: list[str]) -> int:
         return 0
     if argv == ['windows', 'cross-test']:
         # Windows PE compilation and CLI execution under Wine. WebView2 GUI
-        # acceptance is deferred to native Windows.
+        # acceptance is deferred to native Windows; require the staged t VM.
         if platform.system() not in ('Darwin', 'Linux'):
             raise RuntimeError('windows cross-test requires macOS or Linux')
         BUILDS.mkdir(parents=True, exist_ok=True)
-        invoke(sys.executable, '-B', '-m', 'host.cross_build',
-               '--builds', str(BUILDS))
+        from host.amd64_backend import managed_amd64_backend
+        with managed_amd64_backend(BUILDS, setup=False):
+            invoke(sys.executable, '-B', '-m', 'host.cross_build',
+                   '--builds', str(BUILDS))
         return 0
     if argv == ['toolchain', 'check']:
         invoke(sys.executable, '-B', '-m', 'host.toolchain',
@@ -661,6 +695,12 @@ def main(argv: list[str]) -> int:
         selected = {'public': 'release'}.get(options[0], options[0]) if options else 'dryrun'
         if selected not in ('dryrun', 'internal', 'beta', 'release'):
             raise ValueError('Usage: ./Cinter publish cfterminal [mac|win|linux|all] [dryrun|internal|beta|release]')
+        if selected == 'beta' and target in ('all', 'mac') and platform.system() == 'Darwin':
+            # One broad, explicitly diagnostic customer launch experiment.
+            # Normal Release has no exceptions; no Xcode global setting is changed.
+            os.environ['CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS'] = '1'
+        elif selected == 'release':
+            os.environ.pop('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS', None)
         if selected in ('release', 'beta') and target in ('all', 'mac') and platform.system() == 'Darwin':
             from host.xcode_signing import release_signing_environment
             for name, value in release_signing_environment().items():

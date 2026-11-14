@@ -139,7 +139,8 @@ def _input_identity(assets: dict[str, Path | bytes], target: str) -> dict:
             identity[name] = [str(value.resolve()), *_stat(value)]
     if target == 'mac':
         identity['@signing'] = [os.environ.get('CINTER_MAC_SIGN_IDENTITY', '') or 'ad-hoc',
-                                os.environ.get('CINTER_MAC_NOTARY_PROFILE', '')]
+                                os.environ.get('CINTER_MAC_NOTARY_PROFILE', ''),
+                                os.environ.get('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS', '')]
     return identity
 
 
@@ -407,10 +408,17 @@ def prepare_publish_packages(builds: Path, *, release: str | None = None,
     artifacts = {}
     for target in selected:
         info = record['targets'][target]
+        # Standalone `publish ... beta` can reuse a normal Build but still
+        # must NOT reuse the normal Mac DMG. Publish-only copy is re-signed
+        # with diagnostic entitlements before notarization below.
+        diagnostic_beta = (target == 'mac' and
+                           os.environ.get('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS') == '1')
+        package_fingerprint = (hashlib.sha256((info['fingerprint'] + '|diagnostic-beta-v1').encode()).hexdigest()
+                               if diagnostic_beta else info['fingerprint'])
         name = up.artifact_filename(target)
         old = previous.get('artifacts', {}).get(target, {})
         path = root / name
-        if (old.get('build_fingerprint') == info['fingerprint'] and
+        if (old.get('build_fingerprint') == package_fingerprint and
                 (target != 'mac' or (old.get('format') == 'dmg' and
                  (not notarize or not os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip() or
                   old.get('notarized') is True))) and
@@ -459,6 +467,9 @@ def prepare_publish_packages(builds: Path, *, release: str | None = None,
                     shutil.rmtree(publish_app)
                 publish_app.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(signed, publish_app, symlinks=True)
+                if diagnostic_beta:
+                    from host.mac_app import _sign_and_verify
+                    _sign_and_verify(publish_app)
                 up._notarize_mac_app(publish_app, temporary)
             from host.mac_dmg import create_dmg
             artifact = create_dmg(publish_app, path, builds,
@@ -468,7 +479,7 @@ def prepare_publish_packages(builds: Path, *, release: str | None = None,
         else:
             artifact = up._write_release_zip(path, inputs, target=target, release=release,
                                              root=up.APP_ROOTS[target])
-        artifact['build_fingerprint'] = info['fingerprint']
+        artifact['build_fingerprint'] = package_fingerprint
         if target == 'devtools':
             artifact['archive_identity'] = up._release_archive_identity(path)
         artifacts[target] = artifact
@@ -573,7 +584,7 @@ def setup_restore_if_needed(builds: Path, *, release: str | None = None,
     builds = _safe_builds(builds)
     required = (builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/colima',
                 builds / 'CinterForgeTerminal/Toolchains/Windows/MSYS2/usr/bin/bash.exe',
-                builds / 'CinterForgeTerminal/Toolchains/LinuxSample')
+                builds / 'CinterForgeTerminal/Toolchains/WindowsCross')
     if all(path.exists() and not path.is_symlink() for path in required):
         return {'source': 'existing-provisioned-Builds', 'downloaded': False}
     destination = builds / 'CinterForgeTerminal/Distribution'

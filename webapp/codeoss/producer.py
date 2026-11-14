@@ -17,6 +17,7 @@ from .adapters import codeoss_root
 import platform
 import re
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import time
@@ -163,11 +164,23 @@ def codeoss_is_installed(repo_root: Path | None = None) -> bool:
 
 
 def _run_checked(
-    args: list[str], *, cwd: Path | None = None, timeout: int = 3600, env: dict[str, str] | None = None
+    args: list[str], *, cwd: Path | None = None, timeout: int = 3600,
+    env: dict[str, str] | None = None, inactivity_timeout: int = 300,
+    label: str | None = None,
 ) -> None:
-    completed = run_process(
-        args, cwd=str(cwd) if cwd else None, capture_output=True, text=True, timeout=timeout, env=env
-    )
+    task = label or (" ".join(str(arg) for arg in args[:3]))
+    try:
+        completed = run_process(
+            args, cwd=str(cwd) if cwd else None, capture_output=True,
+            text=True, timeout=timeout, env=env, live=True, label=task,
+            inactivity_timeout=inactivity_timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        detail = str(error.output or '').strip()
+        raise RuntimeError(
+            f"Code - OSS {task} stalled/timed out after {int(error.timeout)}s. "
+            f"Last output: {detail[-2000:]}"
+        ) from error
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip()
         raise RuntimeError(f"Code - OSS command failed ({' '.join(args)}): {detail[-4000:]}")
@@ -181,11 +194,35 @@ def _sync_checkout(source: Path, *, refresh: bool, ref: str) -> str:
         if source.exists():
             shutil.rmtree(source)
         source.parent.mkdir(parents=True, exist_ok=True)
-        _run_checked([git, "clone", "--filter=blob:none", "--no-checkout", CODEOSS_REPOSITORY, str(source)])
-    if refresh:
-        _run_checked([git, "fetch", "origin", ref, "--depth", "1"], cwd=source)
-    _run_checked([git, "checkout", "--detach", ref], cwd=source)
-    _run_checked([git, "reset", "--hard", ref], cwd=source)
+        _run_checked([git, "-c", "http.version=HTTP/1.1", "clone", "--progress", "--filter=blob:none",
+                      "--no-checkout", CODEOSS_REPOSITORY, str(source)],
+                     timeout=900, inactivity_timeout=180, label="Code-OSS Git clone")
+    # A source-only extension change does not invalidate the pinned upstream
+    # commit. Avoid contacting GitHub when the complete object is already local.
+    present = run_process([git, "cat-file", "-e", f"{ref}^{{commit}}"],
+                          cwd=str(source), capture_output=True, text=True, timeout=20)
+    if present.returncode == 0:
+        _log(f"pinned upstream commit {ref[:12]} already cached; skipping network fetch")
+    else:
+        # Fail a stalled/incomplete transfer within a bounded interval and
+        # retry transient HTTP errors without changing the pinned ref.
+        command = [git, "-c", "http.version=HTTP/1.1", "-c", "http.lowSpeedLimit=1024",
+                   "-c", "http.lowSpeedTime=60", "fetch", "--progress", "origin", ref, "--depth", "1"]
+        for attempt in range(1, 3):
+            try:
+                _log(f"fetching pinned Code-OSS commit {ref[:12]} attempt={attempt}/2 via HTTP/1.1")
+                _run_checked(command, cwd=source, timeout=600,
+                             inactivity_timeout=180, label=f"Code-OSS Git fetch {attempt}/2")
+                break
+            except RuntimeError:
+                if attempt == 2:
+                    raise
+                _log("Code-OSS Git transfer interrupted; retrying pinned commit (no checkout deleted)")
+                time.sleep(2)
+    _run_checked([git, "checkout", "--detach", ref], cwd=source,
+                 timeout=120, label="Code-OSS Git checkout")
+    _run_checked([git, "reset", "--hard", ref], cwd=source,
+                 timeout=120, label="Code-OSS Git reset")
     completed = run_process([git, "rev-parse", "HEAD"], cwd=str(source), capture_output=True, text=True, timeout=15)
     if completed.returncode != 0:
         raise RuntimeError("Code - OSS checkout has no readable git revision")
@@ -833,7 +870,8 @@ def _build_web(source: Path) -> None:
     if install_trees:
         _log(f"removed {len(install_trees)} stale node_modules tree(s) before npm ci")
     _log("npm ci: preserving host-platform optional dependencies; non-shipped Copilot SDK excluded")
-    _run_checked([*npm, "ci", "--include=optional"], cwd=source, timeout=3600, env=env)
+    _run_checked([*npm, "ci", "--include=optional"], cwd=source, timeout=3600,
+                 env=env, label="Code-OSS npm ci")
     # The build-next server-web bundle resolves codicon.css from the source tree,
     # but a clean checkout does not carry the generated font beside that CSS.
     # Upstream VS Code build workflows seed it from the pinned @vscode/codicons
@@ -855,13 +893,14 @@ def _build_web(source: Path) -> None:
         raise RuntimeError(f"Pinned Code - OSS checkout is missing server-web builder: {next_builder}")
     _run_checked(
         [str(node), str(next_builder), "bundle", "--nls", "--target", "server-web", "--out", "out-vscode-reh-web"],
-        cwd=source, timeout=3600, env=env,
+        cwd=source, timeout=3600, env=env, label="Code-OSS server-web bundle",
     )
     # The REH workbench build does not compile the browser entrypoints of the
     # built-in extensions. They are part of the web runtime too (Markdown
     # preview, merge-conflict, language features, etc.), so build them before
     # staging rather than serving raw extension sources.
-    _run_checked([*npm, "run", "gulp", "compile-extensions-build"], cwd=source, timeout=3600, env=env)
+    _run_checked([*npm, "run", "gulp", "compile-extensions-build"],
+                 cwd=source, timeout=3600, env=env, label="Code-OSS compile extensions")
     generated = source / "out-vscode-reh-web"
     files_changed, chars_escaped = _ascii_escape_javascript_tree(generated)
     _log(
@@ -937,7 +976,8 @@ def _ensure_browser_extension_products(source: Path) -> int:
     # compile-extensions-build then packages those products into .build/extensions.
     # Running only the packaging task leaves browser-only esbuild products absent.
     _run_checked([*npm, "run", "gulp", "compile-web"], cwd=source, timeout=3600, env=env)
-    _run_checked([*npm, "run", "gulp", "compile-extensions-build"], cwd=source, timeout=3600, env=env)
+    _run_checked([*npm, "run", "gulp", "compile-extensions-build"],
+                 cwd=source, timeout=3600, env=env, label="Code-OSS compile extensions")
 
     remaining = _missing_packaged_browser_extensions(source)
     if remaining:
@@ -956,7 +996,8 @@ def _ensure_browser_extension_products(source: Path) -> int:
             _run_checked([*npm, "run", "compile-web"], cwd=manifest_path.parent, timeout=3600, env=env)
             repaired_individually.append(name)
         if repaired_individually:
-            _run_checked([*npm, "run", "gulp", "compile-extensions-build"], cwd=source, timeout=3600, env=env)
+            _run_checked([*npm, "run", "gulp", "compile-extensions-build"],
+                 cwd=source, timeout=3600, env=env, label="Code-OSS compile extensions")
         remaining = _missing_packaged_browser_extensions(source)
     if remaining:
         detail = ", ".join(f"{name}:{rel}" for name, rel in remaining[:20])
@@ -1758,7 +1799,9 @@ def _stage_web(source: Path, web: Path) -> None:
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True, exist_ok=True)
     try:
+        _log(f"staging Code-OSS compiled browser files from {output}")
         shutil.copytree(output, staging / "out")
+        _log("staging Code-OSS resources")
         shutil.copytree(source / "resources", staging / "resources")
         # Built-in extension packaging is split by upstream: authored/static files
         # live under source/extensions while compile-extensions-build materializes
@@ -1778,6 +1821,7 @@ def _stage_web(source: Path, web: Path) -> None:
         # extensions/node_modules/.bin symlinks on macOS). Those are build inputs,
         # not browser-extension payload. Runtime dependencies are supplied by the
         # compiled overlay and root node-module staging below.
+        _log("staging Code-OSS built-in extensions")
         shutil.copytree(
             authored_extensions,
             staging / "extensions",
@@ -1796,11 +1840,13 @@ def _stage_web(source: Path, web: Path) -> None:
         # vscode-oniguruma). Stage every root package referenced by emitted web
         # code/compiled extensions. This is derived from the build output rather
         # than maintained as a language-specific allowlist.
+        _log("staging referenced Code-OSS browser dependencies")
         _stage_referenced_node_modules(source, staging)
         for name in required_files:
             shutil.copy2(source / name, staging / name)
         # CinterForge owns this web extension. It is injected into the staged
         # runtime at build time; the pinned upstream checkout remains pristine.
+        _log("injecting current CinterForge extension into Code-OSS")
         _stage_cinterforge_extension(staging)
         pruned = _prune_static_web_runtime(staging)
         _log(
@@ -1852,7 +1898,9 @@ def ensure_codeoss(repo_root: Path | None = None, *, refresh: bool = False, forc
     source = root / "Source"
     root.mkdir(parents=True, exist_ok=True)
     _log(f"maintainer build ref={ref} source={source} web={web}")
+    _log("phase 1/4: resolve pinned upstream checkout")
     commit = _sync_checkout(source, refresh=True, ref=ref)
+    _log("phase 2/4: apply and verify CinterForge source patches")
     _skip_upstream_copilot_install(source)
     _patch_cinterforge_bootstrap_provider(source)
     _patch_codeoss_menubar_bridge(source)
@@ -1881,6 +1929,7 @@ def ensure_codeoss(repo_root: Path | None = None, *, refresh: bool = False, forc
         # refresh so an incomplete or stale consumer tree can never survive merely
         # because its manifest and a few bootstrap files still validate.
         _ensure_browser_extension_products(source)
+        _log("phase 4/4: stage cached Code-OSS browser product")
         _stage_web(source, web)
         _log(
             f"upstream + compiled bootstrap unchanged commit={commit[:12]}; "
@@ -1902,6 +1951,7 @@ def ensure_codeoss(repo_root: Path | None = None, *, refresh: bool = False, forc
     # is insufficient because CinterForge patches web.main.ts before compiling.
     # Adopting arbitrary products from the same upstream commit can therefore
     # stage an unpatched workbench that has no early cinterforge: provider.
+    _log("phase 3/4: verify or rebuild compiled Code-OSS products")
     if cache_matches:
         _log(f"compiled Code - OSS unchanged commit={commit[:12]}; reusing build products")
     else:
@@ -1914,6 +1964,7 @@ def ensure_codeoss(repo_root: Path | None = None, *, refresh: bool = False, forc
     # Fill only missing bundles here; successful products remain in Source and
     # subsequent update-data runs are a fast no-op.
     _ensure_browser_extension_products(source)
+    _log("phase 4/4: stage and validate Code-OSS browser product")
     _stage_web(source, web)
     manifest = {
         "schema": CODEOSS_SCHEMA,

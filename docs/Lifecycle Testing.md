@@ -17,6 +17,14 @@ publish or launch the Terminal GUI. Setup checks repository inputs, expected
 directories and syntax before expensive provisioning, and runs existing
 LinuxKit/Bedrock acceptance. Test performs Python and JavaScript regressions,
 release ZIP/signature and Stage receipt checks without starting the application.
+On macOS, Setup additionally exercises the **actual `t` runtime VM**, Linux and
+Windows/Wine guest startups, both persistent Bash PTYs, both VNC/noVNC endpoints,
+and owned shutdown. Every check is recorded under
+`Builds/Logs/CinterForgeTerminal/guest-connections-setup.{json,log}`;
+`./Cinter test mac` validates that receipt **read-only** and rejects missing or
+incomplete acceptance. Test must never start guests, download tools, or repair
+an incomplete Setup. The Mac builder must perform real acceptance; mocked
+regression tests alone do not establish it.
 Interactive native acceptance of Mac/Windows/Linux shells is a later DevTools
 work item; none is inferred from container tests or successful packaging.
 

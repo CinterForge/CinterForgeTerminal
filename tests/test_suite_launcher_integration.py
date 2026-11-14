@@ -218,7 +218,7 @@ export function setupTerminalMenus(): void {
         other = DummyPTY()
         fake_server = SimpleNamespace(code_sessions_lock=threading.Lock(),code_closed_owners=set(),code_sessions={
             'terminal-alpha-1': owned[0], 'terminal-alpha-2': owned[1],
-            'terminal-beta-1': other})
+            'terminal-beta-1': other}, guest_shells_lock=threading.RLock(), guest_shells={})
         handler = object.__new__(terminal.Handler)
         handler.server = fake_server
         result = handler._code_shell_action('/host/code-shell-close-owner', {'owner':'alpha'})

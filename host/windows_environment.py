@@ -12,6 +12,9 @@ import json
 import os
 from pathlib import Path
 import platform
+import signal
+import select
+import sys
 import shutil
 import subprocess
 import time
@@ -20,6 +23,17 @@ import uuid
 SCHEMA = 'cinterforge.terminal.windows-cross-environment.v1'
 IMAGE_NAME = 'cinterforge-terminal-windows-cross'
 PINNED_WINE_VERSION = 'wine-11.15'
+# Immutable AMD64 registry inputs. On Mac, fetch with the native (ARM64)
+# Setup-owned skopeo and import them into the ONE x86-64 t Docker daemon.
+# Docker/BuildKit inside QEMU must not depend on a short TLS handshake timeout
+# while resolving registry manifests. The build still executes in x86-64 t.
+AMD64_BASE_IMAGES = (
+    ('ghcr.io/msys2/msys2-docker-build-base@sha256:19c2b7a96a437f71222656462e4fa5014245f2eb2633ac3988dd9cf208f51ed4',
+     'cinterforge-terminal-msys2-base:19c2b7a96a437f71'),
+    ('docker.io/library/debian@sha256:7378260c0a098d27ac206225db5e7d92b8c7c84ea7afccc86eeb513756bbd392',
+     'cinterforge-terminal-debian-base:7378260c0a098d27'),
+)
+
 DOCKERFILE = Path(__file__).resolve().parent / 'docker/windows-cross.Dockerfile'
 GUI_PREFLIGHT_SOURCE = DOCKERFILE.parent / 'gui_preflight.py'
 
@@ -43,32 +57,85 @@ TOOL_VERSIONS = {
 def _run(command: list[str], *, cwd: Path | None = None, timeout: int = 600,
          quiet: bool = False, env: dict[str, str] | None = None,
          output_log: Path | None = None) -> subprocess.CompletedProcess:
+    """Stream actual guest/Windows build output as it happens (and keep logs).
+
+    Unlike subprocess.run(capture_output=True), a hung Wine or compiler child
+    still shows its last activity and a 10-second elapsed-time heartbeat.
+    """
+    command = [str(c) for c in command]
     if not quiet:
-        print('[WINDOWS CROSS] ' + ' '.join(map(str, command)), flush=True)
+        print('[WINDOWS CROSS] ' + ' '.join(command), flush=True)
     if output_log is not None:
-        # Persist Wine diagnostics as the child emits them. A Ctrl-C/timeout
-        # must not discard the only evidence of a stalled wineboot process.
         output_log.parent.mkdir(parents=True, exist_ok=True)
-        with output_log.open('w', encoding='utf-8', errors='replace') as stream:
-            stream.write('$ ' + ' '.join(map(str, command)) + '\n')
-            stream.flush()
-            result = subprocess.run([str(c) for c in command], cwd=cwd, text=True,
-                                    stdout=stream, stderr=subprocess.STDOUT,
-                                    timeout=timeout, check=False, env=env)
-        # The caller only needs a diagnostic tail, not a huge log in memory.
-        with output_log.open('rb') as stream:
-            stream.seek(max(0, output_log.stat().st_size - 20000))
-            tail = stream.read().decode('utf-8', errors='replace')
-        return subprocess.CompletedProcess(result.args, result.returncode, tail)
-    return subprocess.run([str(c) for c in command], cwd=cwd, text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          timeout=timeout, check=False, env=env)
+    started = time.monotonic()
+    last_heartbeat = started
+    chunks: list[bytes] = []
+    log = output_log.open('wb') if output_log is not None else None
+    try:
+        if log is not None:
+            log.write(('$ ' + ' '.join(command) + '\n').encode())
+            log.flush()
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, bufsize=0,
+                                   start_new_session=(os.name == 'posix'))
+        try:
+            assert process.stdout is not None
+            while True:
+                now = time.monotonic()
+                if now - started >= timeout:
+                    raise subprocess.TimeoutExpired(command, timeout, b''.join(chunks))
+                ready, _, _ = select.select([process.stdout], [], [],
+                                            min(1.0, max(0.0, timeout - (now - started))))
+                if ready:
+                    chunk = os.read(process.stdout.fileno(), 16384)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    if log is not None:
+                        log.write(chunk)
+                        log.flush()
+                    if not quiet:
+                        output = getattr(sys.stdout, 'buffer', None)
+                        if output is not None:
+                            output.write(chunk)
+                            output.flush()
+                        else:
+                            sys.stdout.write(chunk.decode('utf-8', errors='replace'))
+                            sys.stdout.flush()
+                if not quiet and time.monotonic() - last_heartbeat >= 10:
+                    print(f'\n[WINDOWS CROSS] WORKING ({int(time.monotonic()-started)}s) '
+                          + Path(command[0]).name + ' ' + ' '.join(command[1:4]), flush=True)
+                    last_heartbeat = time.monotonic()
+            result = process.wait(timeout=max(1, int(timeout - (time.monotonic()-started))))
+        except BaseException:
+            if process.poll() is None:
+                if os.name == 'posix':
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    process.kill()
+                process.wait(timeout=10)
+            raise
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+        data = b''.join(chunks).decode('utf-8', errors='replace')
+        # Native compiler output remains live and in Cinter's persistent log.
+        # Preserve the last 2 MiB for caller validations and failure context.
+        return subprocess.CompletedProcess(command, result, data[-2 * 1024 * 1024:])
+    finally:
+        if log is not None:
+            log.close()
 
 
 def _logged(command: list[str], *, cwd: Path | None = None, timeout: int = 600) -> None:
-    print('[WINDOWS CROSS] ' + ' '.join(map(str, command)), flush=True)
-    # Stream Docker installation/image-build output to the visible console.
-    subprocess.run([str(c) for c in command], cwd=cwd, timeout=timeout, check=True)
+    """Stream and log native subprocess output with a 10-second heartbeat."""
+    result = _run(command, cwd=cwd, timeout=timeout)
+    if result.returncode:
+        raise subprocess.CalledProcessError(result.returncode, command,
+                                            output=result.stdout[-4000:])
 
 
 class WindowsCrossEnvironment:
@@ -124,12 +191,20 @@ class WindowsCrossEnvironment:
         """
         engines = []
         bundled_cli = self.builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/docker'
-        if platform.system() == 'Darwin' and bundled_cli.is_file():
+        if platform.system() == 'Darwin':
+            # The Mac bootstrap / LinuxKit c producer is ARM64 and must NEVER
+            # build the Debian AMD64 Wine image. Setup enters the dedicated
+            # QEMU x86-64 t backend only after Bedrock acceptance.
+            if os.environ.get('DOCKER_CONTEXT') != 'colima-t':
+                raise RuntimeError('Windows AMD64 Setup requires the t QEMU guest '
+                                   'after Bedrock acceptance, not the ARM64 LinuxKit c producer')
+            if not bundled_cli.is_file():
+                raise RuntimeError('Mac Setup must stage its pinned managed Docker CLI first')
             engines.append(('docker', str(bundled_cli)))
-        for kind in ('docker', 'podman'):
-            executable = shutil.which(kind)
-            if executable:
-                if not any(k == kind for k, _ in engines):
+        else:
+            for kind in ('docker', 'podman'):
+                executable = shutil.which(kind)
+                if executable:
                     engines.append((kind, executable))
         failures = []
         for kind, engine in engines:
@@ -137,20 +212,19 @@ class WindowsCrossEnvironment:
                        else [engine, 'info', '--format', '{{.Host.Arch}}'])
             health = _run(command, quiet=True, timeout=25)
             if health.returncode == 0:
+                if platform.system() == 'Darwin':
+                    architecture = _run([engine, 'info', '--format', '{{.Architecture}}'],
+                                        quiet=True, timeout=25)
+                    if (architecture.returncode != 0 or
+                            architecture.stdout.strip().lower() not in ('x86_64', 'amd64')):
+                        raise RuntimeError('Refusing to build AMD64 Wine under non-x86-64 Docker daemon: ' +
+                                           architecture.stdout.strip() + (architecture.stderr or '').strip())
                 self.container_kind = kind
                 print(f'[WINDOWS CROSS] {kind} engine ready: {health.stdout.strip()}', flush=True)
                 return engine
             failures.append(f'{kind}: {health.stdout.strip()[-300:]}')
-        if platform.system() == 'Darwin':
-            from host.mac_bootstrap import ensure_docker
-            engine = ensure_docker(self.builds)
-            from host.mac_bootstrap import managed_environment
-            os.environ.update(managed_environment(self.builds))
-            health = _run([engine, 'info', '--format', '{{.ServerVersion}}'], quiet=True, timeout=25)
-            if health.returncode == 0:
-                self.container_kind = 'docker'
-                return engine
-            failures.append('managed Docker installation did not yield a running engine')
+        # No ARM64 `ensure_docker()` fallback. An absent t engine is a failed
+        # Setup prerequisite, never permission to boot c and emulate AMD64.
         raise RuntimeError('No operational Docker/Podman engine and no complete MinGW/Wine '
                            'host or staged toolchain. Windows PE build cannot start. '
                            + ('; '.join(failures) if failures else
@@ -183,6 +257,71 @@ class WindowsCrossEnvironment:
             raise RuntimeError(f'Windows cross-image stage is modified or corrupt: {archive}')
         return staged, data
 
+    def _mac_offline_base_dockerfile(self) -> Path:
+        """Load pinned AMD64 base images via native Mac HTTPS, never via QEMU TLS.
+
+        This is Setup-only. The generated Dockerfile uses exact, verified local
+        Docker tags so BuildKit has no registry dependency for its FROM layers.
+        No second VM/daemon is used, and no authored source is modified.
+        """
+        if os.environ.get('DOCKER_CONTEXT') != 'colima-t':
+            raise RuntimeError('Windows registry import requires the x86-64 t guest')
+        assert self.docker
+        skopeo = self.builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/skopeo'
+        if not skopeo.is_file() or skopeo.is_symlink():
+            raise RuntimeError('Mac Bootstrap did not provision pinned native skopeo; '
+                               're-run ./Cinter setup all')
+        self.stage.mkdir(parents=True, exist_ok=True)
+        source = DOCKERFILE.read_text(encoding='utf-8')
+        for remote, local in AMD64_BASE_IMAGES:
+            if source.count(remote) != 1:
+                raise RuntimeError('Pinned Windows base reference missing/duplicated: ' + remote)
+            probe = _run([self.docker, 'image', 'inspect', '--format',
+                          '{{.Architecture}}', local], quiet=True, timeout=30)
+            if probe.returncode != 0:
+                # The download occurs on native macOS, where HTTPS/registry
+                # handshakes are not slowed by QEMU x86 full-system emulation.
+                cache = self.builds / 'Intermediates/CinterForgeTerminal/RegistryInputs'
+                cache.mkdir(parents=True, exist_ok=True)
+                # Conda's containers-common currently provides a legacy v1
+                # registries.conf, which pinned Skopeo 1.24 rejects. Select
+                # this explicit v2 config for native registry copies only;
+                # leave the packaged Conda environment and host config alone.
+                registry_conf = cache / 'registries-v2.conf'
+                if registry_conf.is_symlink():
+                    raise RuntimeError('Unsafe managed registry config path: ' + str(registry_conf))
+                registry_conf.write_text('unqualified-search-registries = []\n', encoding='utf-8')
+                archive = cache / (local.replace(':', '-') + '.tar')
+                if archive.exists() and archive.is_symlink():
+                    raise RuntimeError('Unsafe managed registry download path: ' + str(archive))
+                archive.unlink(missing_ok=True)
+                print('[WINDOWS CROSS] Downloading pinned AMD64 source on native Mac: '
+                      + remote, flush=True)
+                try:
+                    _logged([str(skopeo), '--registries-conf', str(registry_conf),
+                             '--override-os', 'linux', '--override-arch', 'amd64', 'copy',
+                             'docker://' + remote,
+                             'docker-archive:' + str(archive) + ':' + local], timeout=2400)
+                    if not archive.is_file() or not archive.stat().st_size:
+                        raise RuntimeError('Registry downloader produced no OCI archive: ' + remote)
+                    print('[WINDOWS CROSS] Importing into the single x86-64 t guest: '
+                          + local, flush=True)
+                    _logged([self.docker, 'load', '--input', str(archive)], timeout=1800)
+                finally:
+                    # Downloaded inputs are disposable; the guest image layer
+                    # cache and final verified toolchain image provide reuse.
+                    archive.unlink(missing_ok=True)
+                probe = _run([self.docker, 'image', 'inspect', '--format',
+                              '{{.Architecture}}', local], quiet=True, timeout=30)
+            if probe.returncode != 0 or probe.stdout.strip() != 'amd64':
+                raise RuntimeError('Wrong/missing x86-64 Docker base image after native import '
+                                   + local + ': ' + probe.stdout[-500:])
+            print('[WINDOWS CROSS] PASS: pinned local AMD64 base ' + local, flush=True)
+            source = source.replace(remote, local)
+        output = self.stage / 'windows-cross.offline.Dockerfile'
+        output.write_text(source, encoding='utf-8')
+        return output
+
     def _ensure_image(self) -> None:
         assert self.docker
         self.stage.mkdir(parents=True, exist_ok=True)
@@ -209,7 +348,11 @@ class WindowsCrossEnvironment:
                            'linux/amd64', '--progress', 'plain']
             else:
                 command = [self.docker, 'build', '--platform', 'linux/amd64']
-            command += ['--tag', image, '--file', str(DOCKERFILE), str(DOCKERFILE.parent)]
+            # The Mac path first imports both immutable AMD64 base images from
+            # native HTTPS. BuildKit resolves only LOCAL base tags inside t.
+            build_file = (self._mac_offline_base_dockerfile()
+                          if platform.system() == 'Darwin' else DOCKERFILE)
+            command += ['--tag', image, '--file', str(build_file), str(DOCKERFILE.parent)]
             _logged(command, timeout=2400)
         if not self._has_image(image):
             raise RuntimeError(f'Windows cross image was not created: {image}')
@@ -425,7 +568,7 @@ class WindowsCrossEnvironment:
                 if not xvfb:
                     raise RuntimeError('Wine WebView requires xvfb-run on the Linux host')
                 command = [xvfb, '-a', '--server-args=-screen 0 1280x800x24', *command]
-            return _run(command, cwd=cwd, timeout=timeout, quiet=True, env=env,
+            return _run(command, cwd=cwd, timeout=timeout, quiet=False, env=env,
                         output_log=diagnostic_log)
         if not self.docker or not self.image:
             raise RuntimeError('Windows cross environment was not successfully provisioned')
@@ -434,10 +577,11 @@ class WindowsCrossEnvironment:
         # Setup must have provisioned this named volume; other lifecycle
         # phases cannot create or repair it implicitly.
         uses_wine = self._uses_wine_prefix(command)
+        from host.amd64_backend import docker_bind_source
         docker_command = [self.docker, 'run', '--rm', '--platform', 'linux/amd64',
                           '--network', ('bridge' if network else 'none'),
-                          '--mount', f'type=bind,src={self.repository},dst=/source,readonly',
-                          '--mount', f'type=bind,src={self.builds},dst=/builds',
+                          '--mount', f'type=bind,src={docker_bind_source(self.repository)},dst=/source,readonly',
+                          '--mount', f'type=bind,src={docker_bind_source(self.builds)},dst=/builds',
                           '--workdir', self.path(cwd)]
         if uses_wine:
             volume = self._require_wine_volume()

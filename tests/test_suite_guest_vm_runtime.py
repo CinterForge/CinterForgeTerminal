@@ -117,7 +117,10 @@ class SharedGuestVMTests(unittest.TestCase):
         self.assertTrue(terminal._configure_colima_runtime_emulation(self.env))
         actual = config.read_text()
         self.assertIn('rosetta: false', actual)
-        self.assertIn('binfmt: true', actual)
+        self.assertIn('binfmt: false', actual)
+        self.assertIn('arch: x86_64', actual)
+        self.assertIn('vmType: qemu', actual)
+        self.assertIn('mountType: 9p', actual)
         self.assertIn('mountPoint: "/host/mac"', actual)
         self.assertFalse(terminal._configure_colima_runtime_emulation(self.env, dry_run=True))
         self.assertFalse(terminal._configure_colima_runtime_emulation(self.env))
@@ -144,11 +147,12 @@ class SharedGuestVMTests(unittest.TestCase):
               mock.patch.object(terminal, '_run_checked', side_effect=checked)):
             terminal._ensure_docker(self.sdk, self.env, self.workspace)
         self.assertEqual([cmd[1] for cmd in seen], ['stop', 'start'])
-        self.assertIn('--vz-rosetta=false', seen[1])
-        self.assertIn('--binfmt=true', seen[1])
+        self.assertEqual(seen[1][seen[1].index('--arch') + 1], 'x86_64')
+        self.assertEqual(seen[1][seen[1].index('--vm-type') + 1], 'qemu')
+        self.assertEqual(seen[1][seen[1].index('--mount-type') + 1], '9p')
         self.assertNotIn('--vz-rosetta', seen[1])
         self.assertIn('rosetta: false', config.read_text())
-        self.assertIn('binfmt: true', config.read_text())
+        self.assertIn('binfmt: false', config.read_text())
 
     def test_runtime_emulation_refuses_symlinked_profile(self):
         other = self.root / 'other'
@@ -183,13 +187,42 @@ class SharedGuestVMTests(unittest.TestCase):
         self.assertTrue(result.endswith('/mac/env/bin/docker'))
         args = state['start_args']
         self.assertIn('--mount-type', args)
-        self.assertIn('virtiofs', args)
-        self.assertIn('--vz-rosetta=false', args)
-        self.assertIn('--binfmt=true', args)
-        self.assertNotIn('--mount', args)  # custom mountPoint comes from profile YAML
+        self.assertEqual(args[args.index('--mount-type') + 1], '9p')
+        self.assertEqual(args[args.index('--vm-type') + 1], 'qemu')
+        self.assertEqual(args[args.index('--arch') + 1], 'x86_64')
+        self.assertNotIn('--binfmt=true', args)
+        self.assertEqual(args[args.index('--mount') + 1], '/:/host/mac:w')
         config = (self.colima / terminal.PROFILE / 'colima.yaml').read_text()
         self.assertIn('mountPoint: "/host/mac"', config)
         self.assertNotIn('mountPoint: "/host/volumes"', config)
+
+    def test_colima_first_boot_keeps_explicit_share_despite_save_config(self):
+        # Regression for the Mac Setup failure: the first t-profile boot was
+        # READY, but the saved profile did not expose /host/mac or the staged
+        # toolchains. Emulate Colima building the new profile from CLI flags.
+        state = {'started': False, 'mount': False}
+        def run(argv, **kwargs):
+            if 'info' in argv:
+                return subprocess.CompletedProcess(argv, 0 if state['started'] else 1, '', '')
+            if 'status' in argv:
+                return subprocess.CompletedProcess(argv, 1, '', 'not started')
+            if 'ssh' in argv:
+                self.assertEqual(argv[2:5], ['--profile', terminal.PROFILE, '--'])
+                return subprocess.CompletedProcess(argv, 0 if state['mount'] else 1, '', '')
+            raise AssertionError(argv)
+        def checked(argv, env, **kwargs):
+            self.assertEqual(argv[1:3], ['start', terminal.PROFILE])
+            state['started'] = True
+            # When --save-config runs on a fresh profile, Colima does not
+            # inherit our earlier YAML edit unless the mount is a CLI flag.
+            state['mount'] = ('--mount' in argv and
+                              argv[argv.index('--mount') + 1] == '/:/host/mac:w')
+        with (mock.patch.object(terminal, '_mac_host_mounts', return_value=[(Path('/'), '/host/mac')]),
+              mock.patch.object(terminal.subprocess, 'run', side_effect=run),
+              mock.patch.object(terminal, '_run_checked', side_effect=checked)):
+            docker = terminal._ensure_docker(self.sdk, self.env, self.workspace)
+        self.assertEqual(docker, str(self.sdk / 'mac/env/bin/docker'))
+        self.assertTrue(state['mount'])
 
     def test_active_guest_is_never_stopped_for_missing_workspace_mount(self):
         def run(argv, **kwargs):
@@ -260,6 +293,7 @@ class SharedGuestVMTests(unittest.TestCase):
         ssh_calls = []
         expected_mounts = [(Path('/'), '/host/mac')]
         terminal._configure_colima_host_mounts(self.env, expected_mounts)
+        terminal._configure_colima_runtime_emulation(self.env)
         def run(argv, **kwargs):
             if argv[1] == 'info':
                 return subprocess.CompletedProcess(argv, 0, '29.5.2', '')
@@ -357,8 +391,7 @@ class SharedGuestVMTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, '', '')
             if argv[1] == 'ssh' and 'ps' in argv:
                 return subprocess.CompletedProcess(argv, 0,
-                    'cinterforge-terminal-t-linux|t\n'
-                    'cinterforge-terminal-t-win|t\n', '')
+                    terminal._guest_name('linux') + '|t\n', '')
             if argv[1] == 'ssh' and 'rm' in argv:
                 return subprocess.CompletedProcess(argv, 0, 'removed', '')
             raise AssertionError(argv)
@@ -369,7 +402,7 @@ class SharedGuestVMTests(unittest.TestCase):
               mock.patch.object(terminal, '_docker_call', return_value=subprocess.CompletedProcess([], 1, '', 'missing')),
               mock.patch.object(terminal, '_run_checked') as checked):
             terminal.stop_runtime_vm()
-        self.assertEqual(len([a for a in commands if 'rm' in a]), 2)
+        self.assertEqual(len([a for a in commands if 'rm' in a]), 1)
         self.assertEqual(checked.call_args.args[0][1:], ['stop', terminal.PROFILE])
 
     def test_stale_host_docker_socket_preserves_foreign_container(self):

@@ -9,6 +9,7 @@ no player's worlds, Steam installation or production server may be modified.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import platform
@@ -18,6 +19,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 
 REPO = Path(__file__).resolve().parents[1]
@@ -200,11 +202,44 @@ def test_linuxkit(repo: Path, *, offline: bool = False) -> None:
     print('[CFOS LinuxKit Test] PASS: official Bedrock installed and executed via ARM64 LinuxKit/Rosetta; NetherNet, list, stop, exit verified', flush=True)
 
 
+def _remove_acceptance_workspace(workspace: Path) -> None:
+    """Remove only this test's generated workspace after the VM has exited.
+
+    macOS filesystem observers can create entries while rmtree traverses the
+    large Bedrock world directory, causing a transient ENOTEMPTY. Retry the
+    *whole* disposal, never suppress an incomplete cleanup or alter user data.
+    """
+    for attempt in range(1, 7):
+        if workspace.is_symlink():
+            raise RuntimeError(f'Unsafe Bedrock acceptance cleanup symlink: {workspace}')
+        if not workspace.exists():
+            print('[CFOS LinuxKit Test] Generated Bedrock acceptance cleanup PASS', flush=True)
+            return
+        try:
+            shutil.rmtree(workspace)
+        except OSError as exc:
+            if exc.errno != errno.ENOTEMPTY:
+                raise
+            if attempt == 6:
+                remaining = ', '.join(p.name for p in list(workspace.iterdir())[:10]) if workspace.is_dir() else '(removed)'
+                raise RuntimeError(
+                    f'Bedrock acceptance passed but generated workspace cleanup failed '
+                    f'after {attempt} attempts: {workspace}; remaining: {remaining}'
+                ) from exc
+            print(f'[CFOS LinuxKit Test] Cleanup retry {attempt}/5: '
+                  f'generated Bedrock workspace changed during removal ({workspace})', flush=True)
+            time.sleep(0.2 * attempt)
+    if workspace.exists():
+        raise RuntimeError(f'Bedrock acceptance cleanup left generated files: {workspace}')
+    print('[CFOS LinuxKit Test] Generated Bedrock acceptance cleanup PASS', flush=True)
+
+
 def _execute_acceptance(repo: Path, server_repo: Path, installer: Path, validator: Path,
                         tmp_parent: Path, evidence: dict, offline: bool,
                         guest: Path) -> None:
-    with tempfile.TemporaryDirectory(prefix='Acceptance-', dir=tmp_parent) as temp:
-        server = Path(temp) / 'Server'
+    workspace = Path(tempfile.mkdtemp(prefix='Acceptance-', dir=tmp_parent))
+    try:
+        server = workspace / 'Server'
         command = [sys.executable, '-u', str(installer), '--repo-root', str(server_repo),
                    '--linuxkit-test-install', str(server)]
         # Setup has already acquired and validated this official archive.
@@ -214,6 +249,8 @@ def _execute_acceptance(repo: Path, server_repo: Path, installer: Path, validato
         evidence['runtime'] = _install_prepared_runtime(server, guest)
         _run([sys.executable, '-u', str(validator), '--repo-root', str(server_repo),
               '--cfos-linuxkit-test-server', str(server), '--cfos-root', str(repo)])
+    finally:
+        _remove_acceptance_workspace(workspace)
 
 
 def main() -> int:

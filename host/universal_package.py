@@ -621,7 +621,6 @@ def _devtools_assets(builds: Path) -> dict[str, Path | bytes]:
     """One three-OS SDK closure, without live Colima VM disks or Bedrock."""
     required = (
         'CinterForgeTerminal/Toolchains/mac',
-        'CinterForgeTerminal/Toolchains/LinuxSample',
         'CinterForgeTerminal/Toolchains/WindowsCross',
         'CinterForgeTerminal/Toolchains/Windows/MSYS2',
         'Toolchains/WebView',
@@ -1095,7 +1094,9 @@ def build_four(builds: Path, *, release: str = HOST_RELEASE) -> dict:
             signing_id = os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip() or 'ad-hoc'
             notary_profile = os.environ.get('CINTER_MAC_NOTARY_PROFILE', '').strip()
             fingerprint = hashlib.sha256((MAC_ZIP_SEAL + signing_id + '\n' +
-                                          notary_profile + '\n' + fingerprint).encode()).hexdigest()
+                                          notary_profile + '\n' +
+                                          os.environ.get('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS', '') + '\n' +
+                                          fingerprint).encode()).hexdigest()
         input_fingerprints[target] = fingerprint
         old = previous.get('artifacts', {}).get(target, {})
         try:

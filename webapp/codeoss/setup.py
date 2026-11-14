@@ -23,14 +23,14 @@ else:
     from .extension_bundle import render_extension_bundle
 
 
-def _extension_matches_source(web: Path) -> bool:
+def _extension_matches_source(web: Path, *, authored: Path | None = None) -> bool:
     """Check that the verified Web product contains the current authored extension.
 
     An upstream Code-OSS build can still be valid after our own extension has
     changed. Compare its actual staged bytes, not timestamps or a stored receipt.
     Bundling is deterministic and this check does not write to source or Builds.
     """
-    source = Path(__file__).resolve().parent / 'extension'
+    source = Path(authored) if authored is not None else Path(__file__).resolve().parent / 'extension'
     staged = Path(web) / 'extensions/cinterforge-if'
     if not staged.is_dir():
         return False
@@ -39,6 +39,11 @@ def _extension_matches_source(web: Path) -> bool:
             if not authored.is_file():
                 continue
             relative = authored.relative_to(source)
+            # macOS Finder metadata is stripped from the production Web stage.
+            # It is not authored extension content and must never force an
+            # upstream Code-OSS rebuild (or an unnecessary Git fetch).
+            if '.DS_Store' in relative.parts or '__pycache__' in relative.parts:
+                continue
             target = staged / relative
             if not target.is_file():
                 return False

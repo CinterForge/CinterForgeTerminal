@@ -4,11 +4,13 @@ This runs during ``./Cinter setup all``, BEFORE any Windows CMake command.
 The portable Windows cross environment is a verified Linux/amd64 OCI image;
 MinGW-w64, Wine, Xvfb and dependent Linux shared libraries are INSIDE that
 image.  WebView source/headers, the actual Fixed Version Windows WebView2 browser and
-native Windows MSYS2 bootstrap installer are staged separately.  A byte-checked
-WindowsToolchains.zip is generated for transfer to a second machine.
+native Windows MSYS2 bootstrap installer are staged separately. The verified
+local dependency closure is recorded during Setup; packaging remains the
+separate Stage/Publish responsibility. Live c/t VM disks and their
+transient receipts are not portable dependencies.
 
 A saved image is not native Windows acceptance, nor an operational Docker
-engine.  No manifest is written as 'passed' until the entire archive exists.
+engine. No Setup manifest is marked passed without the executable checks.
 """
 from __future__ import annotations
 
@@ -224,44 +226,20 @@ def _transfer_archive(builds: Path, entries: dict[str, Path], *, output: Path) -
 
 
 def _mac_transfer_entries(builds: Path) -> dict[str, Path]:
-    """Collect the managed Mac host and the short, physically Builds-owned VM.
+    """Verify portable Mac Setup tools, never a live or disposable VM disk.
 
-    Tool binaries live in the long-lived mac toolchain; socket-bearing Lima,
-    Colima and Docker state is intentionally at Builds/CFTVM instead.  Both
-    trees are required in the Windows transfer archive.
+    LinuxKit's ARM64 c producer is started directly by linuxos.managed_backend,
+    then stopped before Bedrock acceptance. It does not call the separate
+    ensure_docker() receipt writer. Windows Setup has already executed and
+    verified its image and Wine/MSYS2 work in the x86-64 t backend; neither
+    c's VM state nor t's live disk is a transferable build dependency.
     """
-    from host.mac_bootstrap import (COLIMA_PROFILE, VM_STATE_FOLDER,
-                                    managed_state_root)
-
     mac = builds / 'CinterForgeTerminal/Toolchains/mac'
-    state = managed_state_root(builds)
-    receipt = state / 'backend.json'
-    if not receipt.is_file():
-        raise RuntimeError(f'Missing verified Mac container engine receipt: {receipt}')
-    data = json.loads(receipt.read_text(encoding='utf-8'))
-    if (data.get('schema') != 'cinterforge.terminal.managed-mac-oci.v2'
-            or data.get('state_root') != VM_STATE_FOLDER
-            or data.get('profile') != COLIMA_PROFILE
-            or not data.get('engine_version')):
-        raise RuntimeError(f'Invalid managed Mac container engine receipt: {receipt}')
-    # The Docker CLI package alone is insufficient: a clean Mac also needs
-    # the separately provisioned Buildx plugin for --progress/BuildKit builds.
-    # Check the actual executable copied into DOCKER_CONFIG, as well as the
-    # original pinned binary included with the Mac host environment.
-    buildx_source = mac / 'env/bin/docker-buildx'
-    buildx_registered = state / 'docker/cli-plugins/docker-buildx'
-    buildx_digest = data.get('buildx_plugin_sha256')
-    if (not isinstance(buildx_digest, str) or len(buildx_digest) != 64 or
-            not buildx_source.is_file() or buildx_source.is_symlink() or
-            not buildx_registered.is_file() or buildx_registered.is_symlink() or
-            _sha(buildx_source) != buildx_digest or
-            _sha(buildx_registered) != buildx_digest):
-        raise RuntimeError('Managed Mac Docker Buildx plugin missing or modified; '
-                           're-run ./Cinter setup all to restore verified toolchain')
-    entries = {'MacContainerBackend': state}
+    entries: dict[str, Path] = {}
     for name, rel in (
         ('MacHostEnvironment', 'env'),
         ('MacLimaRuntime', 'lima'),
+        ('MacQEMU', 'qemu'),
         ('MacMicromamba', 'mamba'),
         ('MacMicromambaCache', 'mamba-cache'),
         ('MacDownloads', 'downloads'),
@@ -269,11 +247,19 @@ def _mac_transfer_entries(builds: Path) -> dict[str, Path]:
         ('MacResolvedPackageManifest', 'mac-packages-explicit.txt'),
     ):
         path = mac / rel
-        if not path.exists():
+        if not path.exists() or path.is_symlink():
             raise RuntimeError(f'Missing staged macOS Windows-build dependency {name}: {path}')
         entries[name] = path
+    # The macOS bootstrap checked these executable versions and their pinned
+    # QEMU package; verify they are still present in the portable closure.
+    for rel in ('env/bin/docker', 'env/bin/docker-buildx', 'env/bin/skopeo',
+                'qemu/bin/qemu-img', 'qemu/bin/qemu-system-x86_64'):
+        binary = mac / rel
+        if not binary.is_file() or binary.is_symlink():
+            raise RuntimeError(f'Missing Mac cross-build executable: {binary}')
+    print('[WINDOWS DEPENDENCIES] PASS portable Mac bootstrap closure; '
+          'no disposable c/t VM receipt or live disk required', flush=True)
     return entries
-
 
 
 def _verify_wine_runtime(cross: WindowsCrossEnvironment, *, cwd: Path) -> dict[str, str]:
@@ -327,6 +313,10 @@ def ensure(builds: Path) -> dict:
     report = {'schema': SCHEMA, 'status': 'failed', 'host': platform.system(),
               'required': list(REQUIRED), 'stages': {}, 'timestamp': time.time()}
     try:
+        # Fail immediately on incomplete portable Mac inputs. Never spend
+        # minutes building Wine/MSYS2 only to discover a stale/missing c VM
+        # receipt at the very end of Windows dependency verification.
+        mac_entries = _mac_transfer_entries(builds) if platform.system() == 'Darwin' else {}
         # First create a real cross compiler + Wine runtime (all system libs in OCI layers).
         cross = WindowsCrossEnvironment(builds)
         cross.ensure_portable_image()
@@ -343,15 +333,13 @@ def ensure(builds: Path) -> dict:
             if proc.returncode != 0:
                 raise RuntimeError(f'Windows cross runtime missing {component}: {proc.stdout[-400:]}')
             report['stages'][component] = 'executable-verified'
-        # Provision the *existing* native Linux sample image during Setup,
-        # and validate its real display/VNC path before any Wine process.
-        # The later Developer Tooling phase reuses this exact image/receipt.
+        # Linux and Windows share the same pinned Debian AMD64 toolchain image.
+        # Verify both GUI sessions before running Wine/MSYS2 programs.
         from host.three_samples import _docker_image
         linux_docker = (cross.docker if cross.provider != 'host' else
                         (shutil.which('docker') or shutil.which('podman')))
         if not linux_docker:
-            from host.mac_bootstrap import ensure_docker
-            linux_docker = ensure_docker(builds)
+            raise RuntimeError('Windows/Linux Setup requires the accepted AMD64 Docker backend')
         linux_image = _docker_image(builds, str(linux_docker),
                                    builds / 'Logs/CinterForgeTerminal/DevTooling-linux-image.log')
         with progress_step('verify Linux X11 and VNC display'):
@@ -416,10 +404,9 @@ def ensure(builds: Path) -> dict:
                                        / f'Microsoft.WebView2.FixedVersionRuntime.{WEBVIEW2_FIXED_VERSION}.x64.cab'),
                    'WebView2FixedAcquisition': (builds / 'Intermediates/CinterForgeTerminal/WebView2'
                                        / f'fixed-{WEBVIEW2_FIXED_VERSION}-x64.json')}
-        if platform.system() == 'Darwin':
-            # Include the independently shortened, physically Builds-owned VM
-            # state, not the old deep mac/container tree that breaks AF_UNIX.
-            entries.update(_mac_transfer_entries(builds))
+        # Only Setup-owned portable Mac tools are part of the Windows
+        # dependency closure. Neither the stopped c VM nor the live t VM is.
+        entries.update(mac_entries)
         # Packaging is deferred until the four-artifact DevTools release.
         # In particular, a live Lima disk lock is NOT an exportable tool.
         report['closure'] = _verify_staged_closure(builds, entries)

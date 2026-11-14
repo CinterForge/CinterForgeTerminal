@@ -28,11 +28,9 @@ LINUX_NAME = 'cinterforge-terminal-linux-sample'
 
 
 def linux_recipe_sha256() -> str:
-    # Docker COPY inputs must invalidate images even when Dockerfile is fixed.
-    checksum = hashlib.sha256(LINUX_DOCKERFILE.read_bytes())
-    checksum.update(b'\0')
-    checksum.update((LINUX_DOCKERFILE.parent / 'gui_preflight.py').read_bytes())
-    return checksum.hexdigest()
+    """The shared WindowsCross Debian AMD64 recipe is also the Linux build ABI."""
+    from host.windows_environment import _image_recipe_sha256
+    return _image_recipe_sha256()
 
 
 def _exec(command: list[str], *, cwd: Path, logfile: Path, env=None,
@@ -105,51 +103,31 @@ def _sha_file(path: Path) -> str:
 
 
 def _docker_image(builds: Path, docker: str, logfile: Path) -> str:
-    digest = linux_recipe_sha256()[:16]
-    image = f'{LINUX_NAME}:{digest}'
-    staged = builds / 'CinterForgeTerminal/Toolchains/LinuxSample'
-    tar = staged / f'{digest}.tar'
-    receipt = staged / f'{digest}.json'
-    if tar.exists():
-        if not receipt.is_file():
-            raise RuntimeError('Linux sample image is missing its integrity receipt')
-        cached = json.loads(receipt.read_text())
-        if cached.get('dockerfile_sha256') != digest or cached.get('archive_sha256') != _sha_file(tar):
-            raise RuntimeError('Linux sample image archive/recipe integrity mismatch')
-    exists = subprocess.run([docker, 'image', 'inspect', image], stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL).returncode == 0
-    if not exists:
-        if tar.is_file() and receipt.is_file():
-            data = json.loads(receipt.read_text())
-            if data.get('archive_sha256') != _sha_file(tar):
-                raise RuntimeError('Cached Linux sample image was modified')
-            _exec([docker, 'load', '--input', str(tar)], cwd=REPO, logfile=logfile)
-        else:
-            _exec([docker, 'build', '--platform', 'linux/amd64', '--progress', 'plain',
-                   '-t', image, '-f', str(LINUX_DOCKERFILE), str(LINUX_DOCKERFILE.parent)],
-                  cwd=REPO, logfile=logfile)
+    """Use Setup's one portable Debian AMD64 Linux+Windows image.
+
+    No independent LinuxSample OCI image: duplicate full toolchains unnecessarily
+    inflate the unified DevTools download. Build/Stage must not fetch packages.
+    """
+    from host.windows_environment import WindowsCrossEnvironment
+    folder, manifest = WindowsCrossEnvironment.validate_staged(builds)
+    image = manifest['image']
     if subprocess.run([docker, 'image', 'inspect', image], stdout=subprocess.DEVNULL,
                       stderr=subprocess.DEVNULL).returncode:
-        raise RuntimeError('Linux sample Docker image unavailable')
-    if not tar.is_file():
-        staged.mkdir(parents=True, exist_ok=True)
-        partial = tar.with_suffix('.tar.part')
-        try:
-            _exec([docker, 'save', '-o', str(partial), image], cwd=REPO, logfile=logfile)
-            partial.replace(tar)
-            receipt.write_text(json.dumps({'dockerfile_sha256': digest,
-                'archive_sha256': _sha_file(tar),
-                'image': image}, indent=2) + '\n')
-        finally:
-            partial.unlink(missing_ok=True)
+        # Loading a Setup-verified local image is not dependency acquisition.
+        archive = folder / (manifest['dockerfile_sha256'][:16] + '.tar')
+        _exec([docker, 'load', '--input', str(archive)], cwd=REPO, logfile=logfile)
+    if subprocess.run([docker, 'image', 'inspect', image], stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL).returncode:
+        raise RuntimeError('Setup-provisioned Debian AMD64 image unavailable: ' + image)
     return image
 
 
 def _container_exec(builds: Path, docker: str, image: str, command: list[str],
                     logfile: Path, *, working: str = '/source') -> str:
+    from host.amd64_backend import docker_bind_source
     return _exec([docker, 'run', '--rm', '--platform', 'linux/amd64', '--network', 'none',
-                  '--mount', f'type=bind,src={REPO},dst=/source,readonly',
-                  '--mount', f'type=bind,src={builds},dst=/builds',
+                  '--mount', f'type=bind,src={docker_bind_source(REPO)},dst=/source,readonly',
+                  '--mount', f'type=bind,src={docker_bind_source(builds)},dst=/builds',
                   '--workdir', working, image, *command], cwd=REPO, logfile=logfile)
 
 
@@ -191,8 +169,7 @@ def run(builds: Path, *, docker: str | None = None) -> dict:
 
         # Linux x64: the identical C++/WebView source, compiled *inside* Linux.
         if not docker:
-            from host.mac_bootstrap import ensure_docker
-            docker = ensure_docker(builds)
+            raise RuntimeError('Linux/Windows samples require Setup-provisioned x86-64 t Docker')
         linux_image = _docker_image(builds, docker, log)
         linux_build = builds / 'Intermediates/CinterForgeTerminal/Samples/linux-x64'
         linux_build.mkdir(parents=True, exist_ok=True)

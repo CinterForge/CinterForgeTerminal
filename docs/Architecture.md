@@ -148,7 +148,19 @@ Native WebView inspectors use the real browser-engine debugging support, with na
 
 Bedrock is a normal user-requested game service: the official Bedrock Dedicated Server is installed only after explicit EULA acceptance. On macOS, it runs in the existing signed LinuxKit/Rosetta runtime with an unprivileged host LAN relay forwarding supported game and discovery ports. This does not provide a bridged guest IP and does not require the restricted `com.apple.vm.networking` entitlement. `bedrock start` discovers worlds, `bedrock run <world>` opens a dedicated **Bedrock** Session tab that owns the server process and two-way PTY, leaving the requesting Session unchanged. `bedrock run ""` reuses the selected world; repeated run requests reselect the live Bedrock Session rather than starting a second VM. `minecraft` opens a separate client console for the same running server. Closing a Minecraft client console detaches; closing the server-owning Bedrock tab or `bedrock stop` stops the server; closing the owning Terminal stops its managed Bedrock guest and helpers. User worlds and unrelated VMs are preserved.
 
-A macOS **producer Setup** uses separately managed short-path Colima profiles: **`w`** for the Windows cross-build/Docker/LinuxKit kernel build substrate, and **`c`** for ARM64 Ubuntu guest-input provisioning (glibc/NetherNet). The managed VM-hosting Lima binary has an appropriately verified Apple Virtualization entitlement, and all VM disks, caches and logs stay in sibling `Builds/CFTVM`. Setup starts and stops only its owned VMs; it does not adopt CFOS's unrelated VM or require a consumer app to run developer Setup. The installed application's normal game VMs belong to its own runtime lifetime, not the producer lifecycle.
+A macOS **producer Setup** uses **`c`** only for the LinuxKit ARM64 kernel and guest inputs (glibc/NetherNet); after Minecraft/Bedrock acceptance it releases `c` and starts **`t`**, the dedicated QEMU x86-64 guest for the single shared Debian Linux/Windows build/runtime image, Bash sessions and both VNC desktops. The AMD64 Docker image must never be installed through `c` or ARM64 user-space translation. Mac Bootstrap provisions the tools, including a pinned prebuilt native macOS ARM64 QEMU `qemu-system-x86_64` and `qemu-img` closure, without starting a VM; LinuxKit Setup starts `c` only when needed. The managed VM-hosting Lima binary has an appropriately verified Apple Virtualization entitlement, and all VM disks, caches and logs stay in sibling `Builds/CFTVM`. Setup starts and stops only its owned VMs; it does not adopt CFOS's unrelated VM or require a consumer app to run developer Setup. The installed application's normal game VMs belong to its own runtime lifetime, not the producer lifecycle.
+
+With a verified optional DevTools receipt, native Mac launch holds exactly one
+runtime `t` Colima VM, one Linux and one Windows/Wine guest container, **one
+persistent interactive Bash PTY inside each**, and one monitored X11/VNC/noVNC server
+inside each guest. Code-OSS terminal tabs **attach/detach** from those PTYs;
+they cannot create additional guest Bash processes. The Linux/Windows Launcher
+Sessions use VNC only, not guest Bash. Linux/Windows Code-OSS access remains
+unavailable when DevTools is absent; host-native Mac functionality is unaffected.
+An independent native-PID watchdog owns runtime crash cleanup, stopping the
+verified owned guest containers and VM after normal Quit or unexpected native
+termination. Setup proves these same startup paths and their shutdown without
+leaving the owned `t` or `c` VM running; Test validates the Setup receipt offline.
 
 The custom LinuxKit VirtioFS kernel, guest image, signed virtualization launcher and host LAN relay and Bedrock probe are produced/verified by Terminal Setup. That Setup runs **real, isolated, explicitly licensed official Bedrock acceptance** using disposable state and stops it. A user-facing application never implicitly downloads or starts Bedrock on startup.
 

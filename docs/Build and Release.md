@@ -27,6 +27,18 @@ packages a **dry run** without uploading. To upload explicitly, add `internal`,
 `beta` or `release` after `publish`. A failed phase stops the sequence before
 publication.
 
+Code-OSS Setup prints its pinned Git, npm, compiler and Web-staging phases,
+streams each child command's output into the normal lifecycle log, and reports
+elapsed and time-since-last-output every 15 seconds. A child producing no output
+for five minutes fails with its last output instead of silently blocking Setup;
+Git clone/fetch has a shorter three-minute inactivity limit, a bounded overall
+limit, and two HTTP/1.1 fetch attempts. If the pinned upstream commit is already
+present in the verified local checkout, Setup skips the network fetch. A changed
+CinterForge extension still triggers staging/verification, but macOS `.DS_Store`
+metadata cannot invalidate an otherwise current Web product. An interrupted
+Code-OSS Setup leaves the existing compiled/source caches available for the
+next Setup attempt; no provisioning is moved into Build, Stage, or Test.
+
 Windows Setup also prints START/PASS/FAIL lines and an elapsed-time heartbeat
 every 15 seconds during blocking dependency checks, Wine initialization,
 and native MSI compilation. These lines appear in the same lifecycle log; they are
@@ -124,11 +136,30 @@ Setup-managed `Builds/CFTVM` Colima/Wine guest-native volume paths and the
 
 Publish consumes the **existing unpacked Windows Build receipt** to create
 `Builds/CinterForgeTerminal/Distribution/CinterForgeTerminal-win.msi`.
-The deliberately simple MSI installs the application files to the per-machine
-Program Files location, supports standard uninstall, and uses a stable
-`UpgradeCode` for major upgrades. It has no custom installer UI, artwork, or
-Start Menu shortcut; launch `Terminal.cmd` from the installed application folder. It does **not** contain
-optional DevTools. The old Windows ZIP remains available for compatibility.
+The MSI defaults to **`Program Files\CinterForge\CinterForge Terminal`**
+(64-bit per-machine install), uses deterministic per-version `ProductCode`
+and a stable `UpgradeCode`, and registers itself in Windows **Installed Apps / Add
+or Remove Programs** with normal MSI uninstall enabled. Its single Start-menu
+shortcut is owned by the installed executable's MSI component and removed by
+the standard `RemoveShortcuts` uninstall action. It has no separate shortcut
+creation script or installer UI and does **not** contain optional DevTools.
+
+Setup compiles the real template MSI and inspects its compiled `Property`,
+`Directory`, `CustomAction`, `InstallExecuteSequence`, and `Shortcut` tables for
+per-machine scope, a Program Files default, manufacturer/name/version/product
+identity, `RegisterProduct`/`PublishProduct`, and managed shortcut creation and
+removal. A Type 51 `SetARPINSTALLLOCATION` assignment resolves `[INSTALLDIR]`
+after `CostFinalize`, so Windows Installer can populate InstallLocation for
+Add/Remove Programs. Windows Installer itself creates its native uninstall
+registry entry and `UninstallString`; the package does not write arbitrary
+uninstall registry keys. **Wine registry visibility is not a release gate**:
+Wine is not native Windows Installed Apps. The MSI Setup receipt records the
+compiled table evidence; actual Windows installation, registration, placement,
+Start-menu removal, upgrade, and uninstall must be checked on a Windows PC
+before promoting the MSI to production. Publish refuses an invalid Setup
+receipt, but the receipt must not be represented as native Windows acceptance.
+
+The old Windows ZIP remains available for compatibility.
 This native `wixl` compilation uses the Setup-verified Debian OCI environment on Mac;
 native Windows installation, upgrade and uninstall acceptance remain required
 before production deployment. These packages are not Windows code-signed
@@ -261,12 +292,12 @@ On Windows, the equivalent supported source bootstrap is `Cinter.cmd`; the insta
 The producer assumes the authored Terminal repository and documented external inputs exist, but **does not assume pre-existing VM disks, caches, OCI images, LinuxKit images, Python installations or local Docker services**. It uses Xcode as the only assumed preinstalled Mac development suite, with normal OS security/virtualization authorizations.
 
 1. Resolve `<repo>/../Builds` and all generated paths, establish pinned source, tools and archive hashes, verify input licenses and acquire the supported toolchain closure.
-2. Provision managed macOS builders independently: **`w`** (Windows cross-build/Docker, including the LinuxKit kernel image producer) and **`c`** (ARM64 Ubuntu guest-runtime inputs). Use short Lima/Colima paths under `Builds/CFTVM`, exact configured tools, and signed/entitled VM-host processes. No host-global Docker/Homebrew environment is required.
+2. Mac Bootstrap provisions Xcode-dependent tools, signed Lima, Docker CLI/Buildx, LinuxKit CLI and pinned, prebuilt native macOS ARM64 QEMU (both `qemu-img` and `qemu-system-x86_64`) **without starting a VM**. LinuxKit Setup starts the single `c` Docker producer for the ARM64 kernel and guest runtime inputs. Use short physical Lima/Colima paths under `Builds/CFTVM/U`, pinned tools and signed/entitled VM-host processes. No Docker Desktop/Homebrew dependency.
 3. Compile/verify the **custom ARM64 LinuxKit kernel with VirtioFS enabled**, package its kernel/initrd/cmdline and Mac LAN relayd launcher, and refresh its generated guest manifest when inputs change. Cache hits require hash/receipt validation; clean state builds from pinned source.
-4. Release `w` before starting `c` where the sequence requires it. Build/verify the guest glibc and native ARM64 NetherNet probe through `c`; release `c` before launching the actual LinuxKit guest. Do not combine the two builder VM profiles or substitute CFOS's comprehensive Ubuntu image.
+4. Build/verify the ARM64 kernel, guest glibc and ARM64 NetherNet probe through the **same** `c` producer; release `c` before the actual LinuxKit/Bedrock guest acceptance. After Bedrock passes, start the separately managed QEMU **x86-64** `t` Docker guest and build the single Debian AMD64 Linux/Windows image there, not through ARM64 `c` binfmt/Rosetta. Reuse `t` for cross-build, Wine/MSYS2, Linux Bash and both VNC acceptances; release it on success, failure or interruption. Do not introduce a `w` VM or depend on CFOS's comprehensive Ubuntu image.
 5. Provision/check portable Python and native runtime closures for each release target, the Code-OSS web workbench and extensions, JS Z-machine, game/IF catalogs and native WebView dependencies. The pinned Code-OSS browser producer skips upstream `extensions/copilot` during its nested npm dependency pass: that GitHub-only extension is excluded from the web product, and its optional platform-specific SDK is not a Setup prerequisite. All other pinned extension dependencies and the CinterForge-owned browser extension remain intact. Connecting a local AI provider (including Pleias) is separate from provisioning the editor; this does not claim that chat inference is configured. For Lagomorph, **pull the complete authored `Builds/Lagomorph` tree from the authenticated internal CDN before generating its HFS disks**. Download a single `Builds-Lagomorph.zip` snapshot from the internal `cdn-assets-dev` R2 bucket; verify its committed manifest, whole-ZIP SHA-256, each file hash and empty directories before updating the local source. Previously published per-file snapshots remain readable for migration. A missing snapshot is a Setup error; the source pull must not contact public release media. Respect independent licensed media inputs rather than fabricating substitutes.
 6. With **explicit official Bedrock EULA acceptance**, download/verify the official test archive, start a disposable isolated Bedrock server through the signed LinuxKit guest, inspect readiness, console and LAN behavior, stop the server/guest, and record evidence. Never touch the player's worlds during this producer test.
-7. Write versioned setup manifests and logs. On success, error, interrupt or owning-process death, stop the owned `w`/`c` profiles and temporary children; leave unrelated VMs untouched. Persistent managed caches may be retained for the next validated build.
+7. Write versioned setup manifests and logs. On success, error, interrupt or owning-process death, stop the owned `c` LinuxKit producer, `t` AMD64 producer and temporary children; leave unrelated VMs untouched. Persistent managed caches may be retained for the next validated build.
 
 Producer-time official Bedrock acceptance is separate from **end-user Bedrock installation**, which occurs on explicit request in the installed Game Terminal only after the user's own EULA acceptance. No Bedrock executable is bundled as a general-purpose freely redistributable native app component.
 
@@ -297,11 +328,11 @@ Unchanged DevTools files are not copied again. Stage preserves unrelated files a
 
 ## Reboot and application-owned guest lifetime
 
-The native app checks for installed DevTools on launch (and after installation). If available, it starts one dedicated managed Colima `t` profile and Docker engine, with exactly one persistent Linux guest and one persistent Windows Wine/MSYS2 guest. Every Terminal and Code-OSS session uses `docker exec` into the applicable guest with a separate PTY; tabs never create a new VM/container. The host filesystem and mounted volumes are made available inside guests, with macOS enforcing host permissions.
+The native app checks for installed DevTools on launch (and after installation). If available, it starts one dedicated managed Colima `t` profile and Docker engine, with exactly one persistent Debian AMD64 container providing both native Linux Bash and Wine/MSYS2 Windows Bash. Every Terminal and Code-OSS session uses `docker exec` into that same guest with a separate platform PTY; tabs never create a new VM/container. The host filesystem and mounted volumes are made available inside guests, with macOS enforcing host permissions.
 
-The native owner cleans up its two guest containers, Colima and Python services when quitting. An independent process watches the native app to recover ownership after Xcode Stop or a crash. Unrelated containers and Setup's `w`/`c` VMs are never terminated. `reboot docker` restarts Docker and guests, `reboot colima` restarts Colima/Docker/guests, `reboot server` swaps the Python service and reloads the WebView, and `reboot app` relaunches already-built native binaries. Development `reboot server` reloads Python and authored web assets directly from the current repository without recompilation. Reboot never invokes Setup, Build, Stage, Test, Publish, ZIP or UnZIP.
+The native owner cleans up its single shared Debian guest container, Colima and Python services when quitting. An independent process watches the native app to recover ownership after Xcode Stop or a crash. Unrelated containers and Setup's `c` producer are never terminated. `reboot docker` restarts Docker and guests, `reboot colima` restarts Colima/Docker/guests, `reboot server` swaps the Python service and reloads the WebView, and `reboot app` relaunches already-built native binaries. Development `reboot server` reloads Python and authored web assets directly from the current repository without recompilation. Reboot never invokes Setup, Build, Stage, Test, Publish, ZIP or UnZIP.
 
-The `t` profile has **one writable macOS host-root virtiofs share**, mapped to `/host/mac` in the VM and both existing guest containers. This is not a folder allowlist: host paths, including `/Volumes/<disk name>` and paths containing spaces, retain their normal directory hierarchy. Do **not** add nested `/Volumes` or individual-drive shares on top of `/`: Lima rejects overlapping mount locations. Access continues to depend on the host's real filesystem permissions and on which mounted volumes Apple's virtualization layer actually exposes; Terminal never attempts to override those OS decisions. An old `t` profile with overlapping shares is migrated at next startup, after checking that no unrelated containers are active. If the host virtualization layer refuses an external volume, that limitation cannot be solved by changing a Terminal-side folder permission.
+The `t` profile has **one writable macOS host-root QEMU/9p share**, mapped to `/host/mac` in the VM and the one shared Debian guest container. This is not a folder allowlist: host paths, including `/Volumes/<disk name>` and paths containing spaces, retain their normal directory hierarchy. Do **not** add nested `/Volumes` or individual-drive shares on top of `/`: Lima rejects overlapping mount locations. Access continues to depend on the host's real filesystem permissions and on which mounted volumes the QEMU/9p mount actually exposes; Terminal never attempts to override those OS decisions. An old disposable `t` profile with overlapping shares is reconfigured at next startup, after checking that no unrelated containers are active. If the host virtualization layer refuses an external volume, that limitation cannot be solved by changing a Terminal-side folder permission.
 
 A new native owner waits for the previous crash guardian to complete Colima cleanup before starting its guests. **`reboot server` keeps the same native app PID and reuses its existing guardian**, so a Python service reload cannot lock itself out or create another VM. If the native worker or HTTP listener dies unexpectedly, the native window closes and the guardian finishes cleanup. During shutdown, if the host Docker socket is unavailable, cleanup inspects the dedicated Colima profile over SSH before stopping it; uncertain or unrelated workloads produce an explicit failure rather than being killed blindly. No app-level restart triggers provisioning or any repository lifecycle phase.
 
@@ -368,3 +399,32 @@ For every CinterForge macOS application distributed outside the Mac App Store:
 - This DMG is a drag-to-Applications **disk image**, not a `.pkg` installer; `Developer ID Application` signs the app, while `Developer ID Installer` is reserved for `.pkg`.
 
 The reusable image helper lives in `host/mac_dmg.py`. It accepts the app path, volume name, README, and target path so the same packaging convention can be applied to other CinterForge Mac applications without introducing another lifecycle phase.
+
+### Lagomorph HFS build on the existing Linux guest
+
+On macOS, Setup reads the author-owned classic Macintosh files and their
+FinderInfo/resource forks using the existing `ditto`/AppleDouble process. It
+converts them to MacBinary II in sibling `Builds/Intermediates`. The **existing
+`t` Debian AMD64 image** (already provisioned for Linux Bash/Wine/MSYS2)
+then assembles all three HFS Standard volumes in one network-disabled Docker
+execution, round-trips the classic application and verifies its resource fork.
+It uses the official Debian Bookworm `hfsutils` 3.2.6-15 AMD64 `.deb` (SHA-256
+pinned to Debian's published hash) because Debian Trixie does not ship this
+package. The 78 KB `.deb` is downloaded and verified by Mac Setup and extracted
+**inside Linux**, with no Homebrew, no host-global installation, no extra VM,
+and no Wine-image rebuild. Source assets remain unchanged; generated media are
+published only with the separate Lagomorph publish command.
+
+### Diagnostic beta — broad Hardened Runtime experiment
+
+`./Cinter all all publish beta` signs the macOS Beta with **all six** Xcode
+Hardened Runtime exceptions enabled at once (JIT, unsigned executable memory,
+DYLD variables, disable library validation, disable executable page protection,
+and Debugging Tool). The same applies to an explicit Mac-only Beta Publish.
+These exceptions apply to the diagnostic Beta only: ordinary Builds and
+`publish release` do not enable them. The `Debugging Tool` entitlement is
+`com.apple.security.cs.debugger`, **not** `get-task-allow`, which can cause
+Apple notarization to reject a release. The final signing and notarization
+still must succeed; the Beta is not considered verified until the actual
+signed customer artifact passes the existing release checks. Never ship this
+broad-exception signing policy in production.

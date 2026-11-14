@@ -23,7 +23,7 @@ WIXL_PACKAGE_VERSION = '0.106+repack-1'  # Debian Trixie package provided by msi
 UPGRADE_CODE = '506BDCC3-BB2B-5035-BC0D-FD99F49F3CB3'
 GUID_NAMESPACE = uuid.UUID('e67096da-e7c1-4c25-9a96-68b6eea50ff1')
 NS = 'http://schemas.microsoft.com/wix/2006/wi'
-SCHEMA = 'cinterforge.terminal.windows-msi-preflight.v3'
+SCHEMA = 'cinterforge.terminal.windows-msi-preflight.v5'
 
 
 def _builds(builds: Path) -> Path:
@@ -71,6 +71,16 @@ def _check_tools(builds: Path) -> None:
     _, identity = WindowsCrossEnvironment.validate_staged(builds)
     if record.get('image') != identity.get('image'):
         raise RuntimeError('Windows MSI Setup image changed; rerun Setup')
+    # Wine is not a reliable implementation of the native Windows ARP UI.
+    # Require the actual compiled MSI table evidence; native Windows installation
+    # and removal are user acceptance, not a simulated Setup gate.
+    proof_registration = record.get('template_checks', {}).get('registration', {})
+    if (proof_registration.get('arp_install_location') != '[INSTALLDIR]' or
+            proof_registration.get('arp_action_type') != 51 or
+            proof_registration.get('allusers') != '1' or
+            not proof_registration.get('uninstall_supported') or
+            not proof_registration.get('start_menu_managed')):
+        raise RuntimeError('Setup MSI compiled registration acceptance missing; rerun Setup')
 
 
 def _cross(builds: Path, *, setup: bool):
@@ -135,11 +145,19 @@ def _msi_version(release: str) -> str:
     return f'{year - 2000}.{minor}.{build}'
 
 
+def _product_code(release: str, *, smoke: bool = False) -> str:
+    # Stable when the same release is built again; different releases use new
+    # ProductCodes while keeping UPGRADE_CODE stable for major upgrades.
+    namespace_key = ('smoke/' if smoke else 'win/') + _msi_version(release)
+    return str(uuid.uuid5(GUID_NAMESPACE, namespace_key)).upper()
+
+
 def _document(source_files: dict[str, Path], *, release: str, smoke: bool = False) -> bytes:
     """Build a minimal wixl-compatible MSI with stable component/upgrade IDs."""
     ET.register_namespace('', NS)
     root = _wix('Wix')
-    product = _child(root, 'Product', Id='*', Name=('CinterForge MSI Preflight' if smoke else 'CinterForge Terminal'),
+    product = _child(root, 'Product', Id=_product_code(release, smoke=smoke),
+                     Name=('CinterForge MSI Preflight' if smoke else 'CinterForge Terminal'),
                      Language='1033', Version=('1.0.0' if smoke else _msi_version(release)),
                      Manufacturer='CinterForge', UpgradeCode=(str(uuid.uuid5(GUID_NAMESPACE, 'smoke'))
                                                        if smoke else UPGRADE_CODE))
@@ -150,8 +168,25 @@ def _document(source_files: dict[str, Path], *, release: str, smoke: bool = Fals
            InstallScope='perMachine', Description='CinterForge Terminal installer')
     _child(product, 'MajorUpgrade', DowngradeErrorMessage='A newer version is already installed.')
     _child(product, 'MediaTemplate', EmbedCab='yes')
+    if not smoke:
+        # Let Windows Installer create its own Add/Remove Programs registration.
+        # ARPNOREMOVE and ARPSYSTEMCOMPONENT must never be authored.
+        _child(product, 'Property', Id='ARPNOMODIFY', Value='1')
+        _child(product, 'Property', Id='ARPURLINFOABOUT', Value='https://www.cinterforge.com/')
+        # wixl 0.106 supports the underlying MSI Type 51 CustomAction. Its
+        # <SetProperty> WiX sugar is not consistently implemented by wixl.
+        # Resolve INSTALLDIR only after CostFinalize, never at authoring time.
+        _child(product, 'CustomAction', Id='SetARPINSTALLLOCATION',
+               Property='ARPINSTALLLOCATION', Value='[INSTALLDIR]')
+        sequence = _child(product, 'InstallExecuteSequence')
+        _child(sequence, 'Custom', Action='SetARPINSTALLLOCATION',
+               After='CostFinalize')
     target = _child(product, 'Directory', Id='TARGETDIR', Name='SourceDir')
     program = _child(target, 'Directory', Id='ProgramFiles64Folder')
+    if not smoke:
+        # Standard per-machine Start-menu folder; Wixl generates both create
+        # and remove actions for the shortcut tied to the EXE component.
+        _child(target, 'Directory', Id='ProgramMenuFolder')
     maker = _child(program, 'Directory', Id='CinterForgeDir', Name='CinterForge')
     install = _child(maker, 'Directory', Id='INSTALLDIR', Name=('MSI Preflight' if smoke else 'CinterForge Terminal'))
     feature = _child(product, 'Feature', Id='MainFeature', Title='CinterForge Terminal', Level='1')
@@ -171,7 +206,15 @@ def _document(source_files: dict[str, Path], *, release: str, smoke: bool = Fals
         component = _child(directories[parts[:-1]], 'Component', Id=identifier,
                            Guid=str(uuid.uuid5(GUID_NAMESPACE, ('smoke/' if smoke else 'win/') + rel.lower())),
                            Win64='yes')
-        _child(component, 'File', Id='F' + digest, Name=parts[-1], Source=str(source), KeyPath='yes')
+        file_node = _child(component, 'File', Id='F' + digest, Name=parts[-1],
+                           Source=str(source), KeyPath='yes')
+        if not smoke and rel == 'CinterForge Terminal.exe':
+            # The shortcut is owned by this MSI component. RemoveShortcuts is
+            # automatically scheduled on MSI uninstall: no free-standing .lnk.
+            _child(file_node, 'Shortcut', Id='CinterForgeTerminalStartMenu',
+                   Directory='ProgramMenuFolder', Name='CinterForge Terminal',
+                   Description='CinterForge Terminal', Advertise='yes',
+                   WorkingDirectory='INSTALLDIR')
         _child(feature, 'ComponentRef', Id=identifier)
     return ET.tostring(root, encoding='utf-8', xml_declaration=True)
 
@@ -195,16 +238,115 @@ def _compile(builds: Path, cross, *, work: Path, sources: dict[str, Path],
     return output
 
 
-def _verify_msi(cross, msi: Path, *, cwd: Path, smoke_file: str | None = None) -> dict:
-    # Read real MSI tables and embedded cabinets; cannot be satisfied by a fake
-    # ole-header file or a successful compiler exit alone.
+def _msi_table(cross, msi: Path, *, cwd: Path, name: str) -> list[dict[str, str]]:
+    """Read the compiled MSI, not the WiX source. msiinfo exports IDT rows."""
+    raw = _run(cross, 'read ' + name, ['msiinfo', 'export', cross.path(msi), name], cwd=cwd)
+    lines = [line.rstrip('\r') for line in raw.splitlines() if line.strip()]
+    if len(lines) < 3:
+        raise RuntimeError('MSI ' + name + ' table has no IDT header')
+    fields = lines[0].split('\t')
+    if not fields or len(set(fields)) != len(fields):
+        raise RuntimeError('MSI ' + name + ' has invalid column names')
+    rows = []
+    for line in lines[3:]:
+        parts = line.split('\t')
+        if len(parts) != len(fields):
+            raise RuntimeError('MSI ' + name + ' has malformed IDT row: ' + line[:160])
+        rows.append(dict(zip(fields, parts)))
+    return rows
+
+
+def _verify_registration(cross, msi: Path, *, cwd: Path, smoke: bool) -> dict:
+    """Fail before distribution if the MSI cannot register or uninstall."""
+    property_rows = _msi_table(cross, msi, cwd=cwd, name='Property')
+    props = {row['Property']: row['Value'] for row in property_rows}
+    for key in ('ProductName', 'UpgradeCode', 'ProductCode', 'ProductVersion'):
+        if not props.get(key):
+            raise RuntimeError('MSI missing product identity: ' + key)
+    try:
+        uuid.UUID(props['ProductCode'].strip('{}'))
+    except (ValueError, AttributeError) as exc:
+        raise RuntimeError('MSI ProductCode is not a GUID') from exc
+    if props.get('ALLUSERS') != '1':
+        raise RuntimeError('MSI does not install per machine (ALLUSERS=1)')
+    for forbidden in ('ARPSYSTEMCOMPONENT', 'ARPNOREMOVE', 'MSIINSTALLPERUSER'):
+        if props.get(forbidden) not in (None, '', '0'):
+            raise RuntimeError('MSI suppresses registration or uninstall: ' + forbidden)
+    directories = {row['Directory']: row['Directory_Parent']
+                   for row in _msi_table(cross, msi, cwd=cwd, name='Directory')}
+    if (directories.get('ProgramFiles64Folder') != 'TARGETDIR' or
+            directories.get('CinterForgeDir') != 'ProgramFiles64Folder' or
+            directories.get('INSTALLDIR') != 'CinterForgeDir'):
+        raise RuntimeError('MSI INSTALLDIR does not default beneath ProgramFiles64Folder')
+    sequence_rows = _msi_table(cross, msi, cwd=cwd, name='InstallExecuteSequence')
+    actions = {row['Action'] for row in sequence_rows}
+    mandatory = {'InstallFiles', 'RemoveFiles', 'RegisterUser', 'RegisterProduct',
+                 'PublishFeatures', 'PublishProduct', 'ProcessComponents',
+                 'InstallFinalize', 'FindRelatedProducts', 'RemoveExistingProducts'}
+    missing = mandatory - actions
+    if missing:
+        raise RuntimeError('MSI cannot register/uninstall: missing actions ' + str(sorted(missing)))
+    arp_type = None
+    arp_value = None
+    if not smoke:
+        if props.get('Manufacturer') != 'CinterForge' or props.get('ProductName') != 'CinterForge Terminal':
+            raise RuntimeError('MSI missing Add/Remove Programs publisher or display name')
+        if props.get('ARPNOMODIFY') != '1' or not props.get('ARPURLINFOABOUT'):
+            raise RuntimeError('MSI missing explicit Add/Remove Programs metadata')
+        custom_actions = _msi_table(cross, msi, cwd=cwd, name='CustomAction')
+        location_actions = [row for row in custom_actions
+                            if row.get('Action') == 'SetARPINSTALLLOCATION']
+        if len(location_actions) != 1:
+            raise RuntimeError('MSI missing ARPINSTALLLOCATION assignment')
+        action = location_actions[0]
+        try:
+            arp_type = int(action.get('Type', '-1'))
+        except ValueError as exc:
+            raise RuntimeError('MSI ARPINSTALLLOCATION action has invalid type') from exc
+        arp_value = action.get('Target')
+        if (arp_type != 51 or action.get('Source') != 'ARPINSTALLLOCATION' or
+                arp_value != '[INSTALLDIR]'):
+            raise RuntimeError('MSI ARPINSTALLLOCATION must be Type 51 from [INSTALLDIR]')
+        custom_sequence = [row for row in sequence_rows
+                           if row.get('Action') == 'SetARPINSTALLLOCATION']
+        cost_sequence = [row for row in sequence_rows if row.get('Action') == 'CostFinalize']
+        if len(custom_sequence) != 1 or len(cost_sequence) != 1:
+            raise RuntimeError('MSI ARPINSTALLLOCATION action not scheduled after CostFinalize')
+        try:
+            ordered = (int(cost_sequence[0]['Sequence']), int(custom_sequence[0]['Sequence']))
+        except (KeyError, ValueError) as exc:
+            raise RuntimeError('MSI ARPINSTALLLOCATION action sequence is invalid') from exc
+        if not (0 < ordered[0] < ordered[1] < 6000):
+            raise RuntimeError('MSI ARPINSTALLLOCATION action must follow CostFinalize before product registration')
+        shortcuts = _msi_table(cross, msi, cwd=cwd, name='Shortcut')
+        if (len(shortcuts) != 1 or
+                shortcuts[0].get('Directory_') != 'ProgramMenuFolder'):
+            raise RuntimeError('MSI Start-menu shortcut is not MSI-owned')
+        if {'CreateShortcuts', 'RemoveShortcuts'} - actions:
+            raise RuntimeError('MSI has no Start-menu shortcut removal action')
+    return {'product_code': props['ProductCode'], 'allusers': props['ALLUSERS'],
+            'default_directory': 'ProgramFiles64Folder/CinterForge/CinterForge Terminal',
+            'registration_actions': sorted(mandatory),
+            'uninstall_supported': True,
+            'start_menu_managed': not smoke,
+            'arp_install_location': arp_value,
+            'arp_action_type': arp_type,
+            'native_windows_install_test': 'required-on-Windows'}
+
+
+def _verify_msi(cross, msi: Path, *, cwd: Path, smoke_file: str | None = None,
+                smoke: bool = False) -> dict:
+    # Real MSI table + cabinet inspection; not an in-memory authoring assertion.
+    # This does NOT certify native Windows Add/Remove Programs registration.
     tables = _run(cross, 'inspect tables', ['msiinfo', 'tables', cross.path(msi)], cwd=cwd)
-    for table in ('Property', 'File', 'Component', 'Feature', 'Upgrade', 'Media', 'Directory'):
-        if table not in tables.split():
-            raise RuntimeError('MSI missing required Windows Installer table: ' + table)
-    props = _run(cross, 'read properties', ['msiinfo', 'export', cross.path(msi), 'Property'], cwd=cwd)
-    if 'ProductName' not in props or 'UpgradeCode' not in props:
-        raise RuntimeError('MSI has no product or stable upgrade identity')
+    required = {'Property', 'File', 'Component', 'Feature', 'Upgrade', 'Media', 'Directory',
+                'InstallExecuteSequence'}
+    if not smoke:
+        required.update({'Shortcut', 'CustomAction'})
+    missing = required - set(tables.split())
+    if missing:
+        raise RuntimeError('MSI missing Windows Installer tables: ' + str(sorted(missing)))
+    registration = _verify_registration(cross, msi, cwd=cwd, smoke=smoke)
     if smoke_file:
         extracted = cwd / 'Extracted'
         if extracted.exists():
@@ -216,7 +358,8 @@ def _verify_msi(cross, msi: Path, *, cwd: Path, smoke_file: str | None = None) -
         if len(actual) != 1 or 'CinterForge MSI preflight' not in actual[0].read_text('utf-8'):
             raise RuntimeError('MSI preflight cabinet cannot extract its README payload')
     return {'bytes': msi.stat().st_size, 'sha256': _sha(msi),
-            'table_count': len(tables.split()), 'upgrade_code_present': True}
+            'table_count': len(tables.split()), 'upgrade_code_present': True,
+            'registration': registration}
 
 
 def setup(builds: Path) -> dict:
@@ -240,7 +383,7 @@ def setup(builds: Path) -> dict:
                           encoding='utf-8')
         output = _compile(builds, cross, work=work,
                           sources={'README.txt': readme}, release='2026.11.0', smoke=True)
-        checks = _verify_msi(cross, output, cwd=work, smoke_file='README.txt')
+        checks = _verify_msi(cross, output, cwd=work, smoke_file='README.txt', smoke=True)
         # Exercise the exact same minimal MSI schema with actual launcher filenames
         # during Setup so Publish cannot fail on an untested template variant.
         template_work = builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/TemplateSmoke'
@@ -255,13 +398,17 @@ def setup(builds: Path) -> dict:
                                      'CinterForge Terminal.exe': sample_exe},
                             release='2026.11.0', smoke=False)
         template_checks = _verify_msi(cross, template, cwd=template_work)
+        # Native Windows ARP visibility/uninstall cannot be inferred from Wine.
+        # The compiled MSI's property, action, sequence and shortcut tables are
+        # the Setup gate. Test the final package on Windows before release.
         report.update(status='passed', smoke_sha256=checks['sha256'],
                       smoke_file=str(output), checks=checks,
                       template_sha256=template_checks['sha256'],
                       template_file=str(template), template_checks=template_checks,
                       execution='native-linux-wixl-x64')
-        print('[WINDOWS MSI SETUP] PASS: real native wixl x64 MSI built and README extracted; '
-              'installer toolchain ready for Publish', flush=True)
+        print('[WINDOWS MSI SETUP] PASS: native wixl x64 MSI, ARPINSTALLLOCATION, '
+              'per-machine registration/uninstall action tables and managed shortcut verified; '
+              'native Windows install/uninstall remains external acceptance', flush=True)
     except Exception as error:
         report['error'] = repr(error)
         raise
@@ -308,7 +455,8 @@ def publish(builds: Path, *, release: str, entries: dict[str, dict]) -> dict:
                'filename': destination.name, 'sha256': evidence['sha256'],
                'bytes': evidence['bytes'], 'format': 'msi',
                'msi_version': _msi_version(release), 'upgrade_code': UPGRADE_CODE,
-               'file_count': len(sources), 'execution': 'native-linux-wixl-x64'}
+               'file_count': len(sources), 'execution': 'native-linux-wixl-x64',
+               'registration': evidence['registration']}
     (destination.parent / 'windows-msi.json').write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n',
                                                         encoding='utf-8')
     print('[TERMINAL PUBLISH] Windows MSI package verified: ' + str(destination), flush=True)

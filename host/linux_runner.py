@@ -8,6 +8,10 @@ native ELF/WebView/Python tests. A missing image or source is a hard failure.
 from __future__ import annotations
 
 import hashlib
+from collections import deque
+import os
+import signal
+import threading
 import json
 from pathlib import Path
 import shlex
@@ -35,6 +39,8 @@ def stage(builds: Path, *, docker: str, logfile: Path) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     executable = root / 'run'
     recipe_hash = linux_recipe_sha256()
+    from host.amd64_backend import docker_bind_source
+    guest_builds = docker_bind_source(builds)
     script = f'''#!/bin/sh
 set -eu
 # Actual Linux/x64 process, not a host-generated PASS receipt.
@@ -54,7 +60,7 @@ case "$BOOTSTRAP" in
 esac
 GUEST_SCRIPT=/builds/${{BOOTSTRAP#"$BUILDS"/}}
 exec "$DOCKER" run --rm --platform linux/amd64 --network none \\
-    --mount "type=bind,src=$BUILDS,dst=/builds" \\
+    --mount "type=bind,src={guest_builds},dst=/builds" \\
     --workdir /builds --env HOME=/builds/Run/CinterForgeTerminal/LinuxRunner/Home \\
     --env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 \\
     --env LIBGL_ALWAYS_SOFTWARE=1 \\
@@ -117,34 +123,57 @@ def build_terminal(builds: Path, *, docker: str, logfile: Path) -> Path:
     # build.ninja, repeatedly triggering CMake until Ninja aborts (100 tries).
     # We configure explicitly above and invalidate this CMake tree when pinned
     # build inputs change, so auto-regeneration is unnecessary for this runner.
+    from host.amd64_backend import docker_bind_source
     logfile.parent.mkdir(parents=True, exist_ok=True)
     for command in (args, ['cmake', '--build', '/builds/Intermediates/CinterForgeTerminal/LinuxNative/x64/cmake',
                             '--target', 'cinter-terminal', '--parallel', '4']):
         print('[LINUX NATIVE] $ ' + ' '.join(command), flush=True)
         docker_command = [docker, 'run', '--rm', '--platform', 'linux/amd64', '--network', 'none',
-                          '--mount', f'type=bind,src={repo},dst=/source,readonly',
-                          '--mount', f'type=bind,src={builds},dst=/builds',
+                          '--mount', f'type=bind,src={docker_bind_source(repo)},dst=/source,readonly',
+                          '--mount', f'type=bind,src={docker_bind_source(builds)},dst=/builds',
                           '--workdir', '/source', image, *command]
-        try:
-            process = subprocess.run(docker_command, capture_output=True, text=True,
-                                     timeout=1800, check=False)
-            transcript = process.stdout + process.stderr
-            rc = process.returncode
-        except subprocess.TimeoutExpired as error:
-            stdout = error.stdout or b''
-            stderr = error.stderr or b''
-            transcript = ((stdout.decode(errors='replace') if isinstance(stdout, bytes) else stdout) +
-                          (stderr.decode(errors='replace') if isinstance(stderr, bytes) else stderr))
-            rc = 'TIMEOUT after 1800s'
+        from host.setup_progress import progress_step
+        tail_lines = deque(maxlen=80)
         with logfile.open('a', encoding='utf-8') as output:
-            output.write('$ ' + ' '.join(command) + '\n' + transcript + '\nEXIT=' + str(rc) + '\n')
+            output.write('$ ' + ' '.join(docker_command) + '\n')
+            output.flush()
+            with progress_step('real Linux AMD64 CMake/ELF build',
+                               prefix='[LINUX NATIVE]', interval_seconds=10):
+                process = subprocess.Popen(docker_command, stdout=subprocess.PIPE,
+                                           stderr=subprocess.STDOUT, text=True,
+                                           bufsize=1, start_new_session=(os.name == 'posix'))
+                assert process.stdout is not None
+                def relay():
+                    for line in process.stdout:
+                        print(line, end='', flush=True)
+                        output.write(line)
+                        output.flush()
+                        tail_lines.append(line)
+                reader = threading.Thread(target=relay, daemon=True)
+                reader.start()
+                try:
+                    rc = process.wait(timeout=1800)
+                except subprocess.TimeoutExpired:
+                    if os.name == 'posix':
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        process.kill()
+                    process.wait(timeout=10)
+                    rc = -1
+                finally:
+                    reader.join(timeout=5)
+                    process.stdout.close()
+                output.write('EXIT=' + str(rc) + '\n')
+                output.flush()
         if rc != 0:
-            # The HOPE-DEV console previously hid this error completely. Print
-            # the compiler's actual message; never label the build successful.
-            tail = '\n'.join(transcript.splitlines()[-80:])
+            tail = ''.join(tail_lines)
             print('[LINUX NATIVE] failed (' + str(rc) + '):\n' + tail +
                   '\n[LINUX NATIVE] complete log: ' + str(logfile), flush=True)
-            raise RuntimeError('Linux native Terminal build failed (' + str(rc) + '); see ' + str(logfile))
+            raise RuntimeError('Linux native Terminal build failed (' + str(rc) +
+                               '); see ' + str(logfile))
         print('[LINUX NATIVE] command completed', flush=True)
     executable = out / 'CinterForgeTerminal'
     if not executable.is_file():
@@ -158,12 +187,12 @@ def build_terminal(builds: Path, *, docker: str, logfile: Path) -> Path:
 
 def main() -> int:
     import argparse
-    from host.mac_bootstrap import ensure_docker
+    from host.windows_environment import WindowsCrossEnvironment
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--builds', type=Path, required=True)
     args = parser.parse_args()
     builds = args.builds.resolve()
-    stage(builds, docker=ensure_docker(builds),
+    stage(builds, docker=WindowsCrossEnvironment(builds)._docker_available(),
           logfile=builds / 'Logs/CinterForgeTerminal/linux-runner.log')
     return 0
 

@@ -54,17 +54,34 @@ class WindowsMSIContracts(unittest.TestCase):
         self.assertIsNotNone(product.find('w:MajorUpgrade', ns))
         self.assertEqual(product.find('w:MediaTemplate', ns).attrib, {'EmbedCab': 'yes'})
         self.assertIsNotNone(xml.find('.//w:Directory[@Id="ProgramFiles64Folder"]', ns))
-        for unsupported in ('UIRef', 'WixVariable', 'Icon', 'Shortcut', 'RegistryValue'):
+        for unsupported in ('UIRef', 'WixVariable', 'Icon', 'RegistryValue'):
             self.assertFalse(xml.findall('.//w:' + unsupported, ns), unsupported)
         names = [item.attrib['Name'] for item in xml.findall('.//w:File', ns)]
         self.assertEqual(sorted(names), ['CinterForge Terminal.exe', 'Terminal.cmd'])
         self.assertNotIn('devtools', ET.tostring(xml).decode('utf-8').lower())
+        self.assertEqual(product.attrib['Id'], msi._product_code('2026.11.23'))
+        shortcut = xml.find('.//w:Shortcut', ns)
+        self.assertIsNotNone(shortcut)
+        self.assertEqual(shortcut.attrib['Directory'], 'ProgramMenuFolder')
+        self.assertEqual(shortcut.attrib['Advertise'], 'yes')
+        self.assertEqual(shortcut.attrib['Name'], 'CinterForge Terminal')
+        self.assertEqual([item.attrib['Id'] for item in xml.findall('.//w:Property', ns)],
+                         ['ARPNOMODIFY', 'ARPURLINFOABOUT'])
+        arp = product.find('w:CustomAction[@Id="SetARPINSTALLLOCATION"]', ns)
+        self.assertEqual(arp.attrib['Property'], 'ARPINSTALLLOCATION')
+        self.assertEqual(arp.attrib['Value'], '[INSTALLDIR]')
+        scheduled = product.find('w:InstallExecuteSequence/w:Custom[@Action="SetARPINSTALLLOCATION"]', ns)
+        self.assertEqual(scheduled.attrib['After'], 'CostFinalize')
         a = ET.fromstring(msi._document({'Terminal.cmd': readme}, release='2026.11.23'))
         b = ET.fromstring(msi._document({'Terminal.cmd': readme}, release='2026.11.24'))
         self.assertEqual(a.find('w:Product', ns).attrib['UpgradeCode'],
                          b.find('w:Product', ns).attrib['UpgradeCode'])
         self.assertEqual(a.find('.//w:Component', ns).attrib['Guid'],
                          b.find('.//w:Component', ns).attrib['Guid'])
+        self.assertEqual(a.find('w:Product', ns).attrib['Id'],
+                         msi._product_code('2026.11.23'))
+        self.assertNotEqual(a.find('w:Product', ns).attrib['Id'],
+                            b.find('w:Product', ns).attrib['Id'])
 
     def test_wix_version_rejects_unmappable_and_oversize_versions(self):
         self.assertEqual(msi._msi_version('2026.11.23'), '26.11.23')
@@ -79,6 +96,7 @@ class WindowsMSIContracts(unittest.TestCase):
         self.assertEqual(root.find('w:Product', ns).attrib['Name'], 'CinterForge MSI Preflight')
         self.assertEqual([x.attrib['Name'] for x in root.findall('.//w:File', ns)], ['README.txt'])
         self.assertIsNone(root.find('w:Product/w:UIRef', ns))
+        self.assertIsNone(root.find('.//w:Shortcut', ns))
 
     def test_publish_refuses_missing_setup_msi_preflight(self):
         with self.assertRaisesRegex(RuntimeError, 'Setup MSI tools missing'):
@@ -89,7 +107,7 @@ class WindowsMSIContracts(unittest.TestCase):
         self.assertIn('ghcr.io/msys2/msys2-docker-build-base@sha256:', dockerfile)
         self.assertIn('COPY --from=patched-wine /wine /', dockerfile)
         self.assertIn("wine-11.15", dockerfile)
-        self.assertIn('debian:trixie-slim', dockerfile)
+        self.assertIn('docker.io/library/debian@sha256:7378260c0a098d27ac206225db5e7d92b8c7c84ea7afccc86eeb513756bbd392', dockerfile)
         self.assertIn('xvfb xauth openbox x11vnc websockify novnc feh', dockerfile)
         self.assertIn('procps', dockerfile)
         self.assertIn('cabextract msitools wixl', dockerfile)
@@ -152,9 +170,10 @@ class WindowsMSIContracts(unittest.TestCase):
         self.assertNotIn('--ext', commands[0])
         self.assertNotIn('wine', commands[0])
         markup = (work / 'Installer.wxs').read_text('utf-8')
-        for unsupported in ('WixVariable', 'WixUI_', 'Platform=', 'CompressionLevel=', '<Shortcut', '<Icon'):
+        for unsupported in ('WixVariable', 'WixUI_', 'Platform=', 'CompressionLevel=', '<Icon'):
             self.assertNotIn(unsupported, markup)
         self.assertIn('ProgramFiles64Folder', markup)
+        self.assertIn('ProgramMenuFolder', markup)
 
     def test_setup_compiles_and_extracts_real_msi_before_pass(self):
         work = self.builds / 'Intermediates/CinterForgeTerminal/WindowsMSI/Smoke'
@@ -184,6 +203,7 @@ class WindowsMSIContracts(unittest.TestCase):
         self.assertEqual(inspector.call_args_list[0].kwargs['smoke_file'], 'README.txt')
         self.assertIn('CinterForge MSI preflight', (work / 'README.txt').read_text())
         self.assertTrue(checker.called)
+        self.assertNotIn('real_install_uninstall', receipt['template_checks'])
         self.assertEqual(json.loads((self.builds / 'Logs/CinterForgeTerminal/windows-msi-preflight.json').read_text())['status'], 'passed')
 
     def test_publish_requires_matching_setup_image_and_smoke_digest(self):
@@ -201,7 +221,11 @@ class WindowsMSIContracts(unittest.TestCase):
                  'wixl_package_version': msi.WIXL_PACKAGE_VERSION,
                  'wixl_version': 'wixl 0.106', 'image': 'image:expected',
                  'smoke_sha256': hashlib.sha256(smoke.read_bytes()).hexdigest(),
-                 'template_sha256': hashlib.sha256(template.read_bytes()).hexdigest()}
+                 'template_sha256': hashlib.sha256(template.read_bytes()).hexdigest(),
+            'template_checks': {'registration': {
+                'arp_install_location': '[INSTALLDIR]', 'arp_action_type': 51,
+                'allusers': '1', 'uninstall_supported': True,
+                'start_menu_managed': True}}}
         (stage / 'msi-preflight.json').write_text(json.dumps(proof))
         with mock.patch('host.windows_environment.WindowsCrossEnvironment.validate_staged',
                         return_value=(stage, {'image': 'image:expected'})):
@@ -220,6 +244,133 @@ class WindowsMSIContracts(unittest.TestCase):
                 msi.setup(self.builds)
         status = json.loads((self.builds / 'CinterForgeTerminal/Toolchains/WindowsMSI/msi-preflight.json').read_text())
         self.assertEqual(status['status'], 'failed')
+
+
+    def test_compiled_msi_must_register_install_to_program_files_and_support_uninstall(self):
+        product = msi._product_code('2026.11.23')
+        props = {'ProductName': 'CinterForge Terminal', 'Manufacturer': 'CinterForge',
+                 'ARPNOMODIFY': '1', 'ARPURLINFOABOUT': 'https://www.cinterforge.com/',
+                 'ProductCode': product, 'ProductVersion': '26.11.23',
+                 'UpgradeCode': msi.UPGRADE_CODE, 'ALLUSERS': '1'}
+        directory = {'ProgramFiles64Folder': 'TARGETDIR',
+                     'CinterForgeDir': 'ProgramFiles64Folder',
+                     'INSTALLDIR': 'CinterForgeDir'}
+        actions = {'InstallFiles', 'RemoveFiles', 'RegisterUser', 'RegisterProduct',
+                   'PublishFeatures', 'PublishProduct', 'ProcessComponents',
+                   'InstallFinalize', 'FindRelatedProducts', 'RemoveExistingProducts',
+                   'CreateShortcuts', 'RemoveShortcuts', 'CostFinalize',
+                   'SetARPINSTALLLOCATION'}
+
+        def idt(rows, fields):
+            return ('\t'.join(fields) + '\n' + '\t'.join('s255' for _ in fields) +
+                    '\nmetadata\n' + ''.join('\t'.join(str(row.get(f, '')) for f in fields) +
+                                             '\n' for row in rows))
+
+        def exports():
+            return {
+                'Property': idt([{'Property': k, 'Value': v} for k, v in props.items()],
+                                ['Property', 'Value']),
+                'Directory': idt([{'Directory': k, 'Directory_Parent': v} for k, v in directory.items()],
+                                 ['Directory', 'Directory_Parent']),
+                'InstallExecuteSequence': idt([{'Action': a,
+                    'Sequence': '1000' if a == 'CostFinalize' else
+                                '1001' if a == 'SetARPINSTALLLOCATION' else '5000'}
+                              for a in actions], ['Action', 'Sequence']),
+                'CustomAction': idt([{'Action': 'SetARPINSTALLLOCATION',
+                                      'Type': '51', 'Source': 'ARPINSTALLLOCATION',
+                                      'Target': '[INSTALLDIR]'}],
+                                    ['Action', 'Type', 'Source', 'Target']),
+                'Shortcut': idt([{'Shortcut': 'CinterForgeTerminalStartMenu',
+                                   'Directory_': 'ProgramMenuFolder'}],
+                                ['Shortcut', 'Directory_']),
+            }
+
+        with mock.patch.object(msi, '_run', side_effect=lambda c, msg, cmd, **kw: exports()[cmd[-1]]):
+            checks = msi._verify_registration(mock.Mock(), self.builds / 'template.msi',
+                                              cwd=self.builds, smoke=False)
+            self.assertTrue(checks['uninstall_supported'])
+            self.assertTrue(checks['start_menu_managed'])
+            self.assertEqual(checks['arp_install_location'], '[INSTALLDIR]')
+            self.assertEqual(checks['arp_action_type'], 51)
+            for key, value in (('ALLUSERS', ''), ('ARPSYSTEMCOMPONENT', '1'),
+                               ('ARPNOREMOVE', '1'), ('MSIINSTALLPERUSER', '1')):
+                with self.subTest(bad_property=key):
+                    changed = dict(props)
+                    props[key] = value
+                    with self.assertRaisesRegex(RuntimeError, 'ALLUSERS|suppress'):
+                        msi._verify_registration(mock.Mock(), self.builds / 'template.msi',
+                                                 cwd=self.builds, smoke=False)
+                    props.clear()
+                    props.update(changed)
+            actions.remove('RegisterProduct')
+            with self.assertRaisesRegex(RuntimeError, 'RegisterProduct'):
+                msi._verify_registration(mock.Mock(), self.builds / 'template.msi',
+                                         cwd=self.builds, smoke=False)
+            actions.add('RegisterProduct')
+            actions.remove('RemoveShortcuts')
+            with self.assertRaisesRegex(RuntimeError, 'shortcut removal'):
+                msi._verify_registration(mock.Mock(), self.builds / 'template.msi',
+                                         cwd=self.builds, smoke=False)
+            actions.add('RemoveShortcuts')
+            directory['INSTALLDIR'] = 'TARGETDIR'
+            with self.assertRaisesRegex(RuntimeError, 'ProgramFiles64Folder'):
+                msi._verify_registration(mock.Mock(), self.builds / 'template.msi',
+                                         cwd=self.builds, smoke=False)
+
+    def test_msi_compiled_registration_rejects_bad_arp_location_or_sequence(self):
+        code = msi._product_code('2026.11.23')
+        props = {'ProductName': 'CinterForge Terminal', 'Manufacturer': 'CinterForge',
+                 'ARPNOMODIFY': '1', 'ARPURLINFOABOUT': 'https://www.cinterforge.com/',
+                 'ProductCode': code, 'ProductVersion': '26.11.23',
+                 'UpgradeCode': msi.UPGRADE_CODE, 'ALLUSERS': '1'}
+        action = {'Action': 'SetARPINSTALLLOCATION', 'Type': '51',
+                  'Source': 'ARPINSTALLLOCATION', 'Target': '[INSTALLDIR]'}
+        actions = {name: 5000 for name in (
+            'InstallFiles', 'RemoveFiles', 'RegisterUser', 'RegisterProduct',
+            'PublishFeatures', 'PublishProduct', 'ProcessComponents',
+            'InstallFinalize', 'FindRelatedProducts', 'RemoveExistingProducts',
+            'CreateShortcuts', 'RemoveShortcuts')}
+        actions['CostFinalize'] = 1000
+        actions['SetARPINSTALLLOCATION'] = 1001
+
+        def idt(rows, fields):
+            return ('\t'.join(fields) + '\n' + '\t'.join('s255' for _ in fields) +
+                    '\nmetadata\n' + ''.join('\t'.join(str(row.get(f, '')) for f in fields) +
+                                           '\n' for row in rows))
+
+        def exports():
+            return {
+                'Property': idt([{'Property': k, 'Value': v} for k, v in props.items()],
+                                ['Property', 'Value']),
+                'Directory': idt([
+                    {'Directory': 'ProgramFiles64Folder', 'Directory_Parent': 'TARGETDIR'},
+                    {'Directory': 'CinterForgeDir', 'Directory_Parent': 'ProgramFiles64Folder'},
+                    {'Directory': 'INSTALLDIR', 'Directory_Parent': 'CinterForgeDir'}],
+                    ['Directory', 'Directory_Parent']),
+                'InstallExecuteSequence': idt([{'Action': k, 'Sequence': v}
+                                               for k, v in actions.items()], ['Action', 'Sequence']),
+                'CustomAction': idt([action], ['Action', 'Type', 'Source', 'Target']),
+                'Shortcut': idt([{'Shortcut': 'CinterForgeTerminalStartMenu',
+                                  'Directory_': 'ProgramMenuFolder'}],
+                                ['Shortcut', 'Directory_'])}
+
+        with mock.patch.object(msi, '_run', side_effect=lambda c, msg, cmd, **kw: exports()[cmd[-1]]):
+            msi._verify_registration(mock.Mock(), self.builds / 'template.msi',
+                                     cwd=self.builds, smoke=False)
+            action['Target'] = 'C:\\Program Files'
+            with self.assertRaisesRegex(RuntimeError, 'ARPINSTALLLOCATION'):
+                msi._verify_registration(mock.Mock(), self.builds / 'template.msi',
+                                         cwd=self.builds, smoke=False)
+            action['Target'] = '[INSTALLDIR]'
+            actions['SetARPINSTALLLOCATION'] = 999
+            with self.assertRaisesRegex(RuntimeError, 'CostFinalize'):
+                msi._verify_registration(mock.Mock(), self.builds / 'template.msi',
+                                         cwd=self.builds, smoke=False)
+            actions['SetARPINSTALLLOCATION'] = 1001
+            del props['Manufacturer']
+            with self.assertRaisesRegex(RuntimeError, 'publisher'):
+                msi._verify_registration(mock.Mock(), self.builds / 'template.msi',
+                                         cwd=self.builds, smoke=False)
 
 
 class TargetLifecycleContracts(unittest.TestCase):

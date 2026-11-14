@@ -27,6 +27,7 @@ MAC_TOOLS = (
     ('Apple Clang++', 'clang++', ('--version',)),
     ('Swift', 'swift', ('--version',)),
     ('Micromamba', 'micromamba', ('--version',)),
+    ('Git LFS', 'git-lfs', ('--version',)),
     ('Python', 'python3', ('--version',)),
     ('Node.js', 'node', ('--version',)),
     ('CMake', 'cmake', ('--version',)),
@@ -35,8 +36,11 @@ MAC_TOOLS = (
     ('Colima', 'colima', ('--version',)),
     ('Docker CLI', 'docker', ('--version',)),
     ('Docker Buildx', 'docker-buildx', ('version',)),
+    ('OCI registry downloader', 'skopeo', ('--version',)),
     ('7-Zip', '7zz', ('--help',)),
     ('Lima', 'limactl', ('--version',)),
+    ('QEMU x86-64 system', 'qemu-system-x86_64', ('--version',)),
+    ('QEMU disk image', 'qemu-img', ('--version',)),
 )
 LINUX_TOOLS = (
     ('Bash', 'bash', ('--version',)),
@@ -303,6 +307,8 @@ def ensure(builds: Path) -> Path:
                 path = prefix / 'mamba/bin/micromamba'
             elif name == 'Lima':
                 path = prefix / 'lima/bin/limactl'
+            elif name.startswith('QEMU '):
+                path = prefix / 'qemu/bin' / executable
             elif name == '7-Zip':
                 path = next((binaries / n for n in ('7zz', '7z') if (binaries / n).is_file()), binaries / '7zz')
             else:
@@ -327,10 +333,11 @@ def ensure(builds: Path) -> Path:
         # The native Linux WebView build uses its own retained Linux image.
         print('[DEVTOOLING] verifying Linux WebKitGTK build environment ...', flush=True)
         from host.three_samples import _docker_image
-        from host.mac_bootstrap import ensure_docker
-        docker = cross.docker or (ensure_docker(builds) if host == 'Darwin' else shutil.which('docker'))
+        docker = cross.docker if cross is not None else None
         image = None
         try:
+            if not docker:
+                raise RuntimeError('AMD64 guest Docker not available for Linux WebKitGTK checks')
             image = _docker_image(builds, str(docker), builds / 'Logs/CinterForgeTerminal/DevTooling-linux-image.log')
         except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
             print(f'[DEVTOOLING] Linux image unavailable: {exc}', flush=True)

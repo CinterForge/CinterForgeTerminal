@@ -150,28 +150,103 @@ class LagomorphClassicHFSTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'resource fork'):
                 self.lag._classic_application_metadata(game)
 
-    def test_hfsutils_tools_are_managed_and_in_devtools_asset_collector(self):
-        from host import universal_package
+    def test_hfs_media_uses_existing_linux_guest_not_homebrew(self):
+        # Mac only creates source MacBinary files; the Linux t guest builds HFS.
+        from unittest import mock
+        from host import lagomorph_setup as lag
+        import os
         builds = self.tmp / 'Builds'
-        bin_dir = builds / 'CinterForgeTerminal/Toolchains/mac/hfsutils/bin'
-        bin_dir.mkdir(parents=True)
-        for name in ('hformat', 'hmount', 'hcopy', 'hmkdir', 'hls', 'humount', 'hattrib'):
-            binary = bin_dir / name
-            binary.write_bytes(b'fake-executable')
-            binary.chmod(0o755)
-        tools = self.lag._managed_hfsutils(builds)
-        self.assertEqual(tools['hformat'], bin_dir / 'hformat')
-        for relative in ('CinterForgeTerminal/Toolchains/LinuxSample',
-                         'CinterForgeTerminal/Toolchains/WindowsCross',
-                         'CinterForgeTerminal/Toolchains/Windows/MSYS2',
-                         'Toolchains/WebView', 'Toolchains/WebView2'):
-            directory = builds / relative
-            directory.mkdir(parents=True, exist_ok=True)
-            (directory / 'fixture.txt').write_text('test')
-        assets = universal_package._devtools_assets(builds)
-        key = 'DevTools/Builds/CinterForgeTerminal/Toolchains/mac/hfsutils/bin/hformat'
-        self.assertIn(key, assets)
-        self.assertEqual(assets[key], bin_dir / 'hformat')
+        sdk = builds / 'CinterForgeTerminal/Toolchains/mac/env/bin'
+        sdk.mkdir(parents=True)
+        (sdk / 'docker').write_bytes(b'docker-cli')
+        package = builds / 'CinterForgeTerminal/Toolchains/Linux/hfsutils/3.2.6-15/hfsutils.deb'
+        package.parent.mkdir(parents=True)
+        package.write_bytes(b'pinned-debian-package-fixture')
+        (builds / 'Logs/CinterForgeTerminal').mkdir(parents=True)
+        scratch = builds / 'Intermediates/CinterForgeTerminal/Lagomorph/test'
+        scratch.mkdir(parents=True)
+        content = scratch / 'content'
+        content.mkdir()
+        (content / 'Lagomorph 1').write_bytes(b'game data')
+        image = scratch / 'Lagomorph-Application-1440K.img'
+        called = []
+
+        def fake_runner(command, **kwargs):
+            called.append(list(command))
+            self.assertIn('--network', command)
+            self.assertEqual(command[command.index('--network') + 1], 'none')
+            self.assertIn('host.lagomorph_hfs_linux', command)
+            job_file = scratch / 'hfs-linux-job.json'
+            data = json.loads(job_file.read_text())
+            self.assertEqual(len(data['images']), 1)
+            self.assertEqual(data['images'][0]['image'], image.relative_to(builds).as_posix())
+            with image.open('wb') as writer:
+                writer.truncate(lag.FLOPPY_BYTES)
+            with image.open('r+b') as writer:
+                writer.seek(1024)
+                writer.write(b'BD')
+            return mock.Mock(returncode=0)
+
+        def fake_macbinary(source, target):
+            target.write_bytes(b'encoded')
+        with mock.patch.dict(os.environ, {'DOCKER_CONTEXT': 'colima-t'}), \
+             mock.patch.object(lag, '_hfs_package', return_value=package), \
+             mock.patch.object(lag, '_macbinary', side_effect=fake_macbinary), \
+             mock.patch('host.three_samples._docker_image', return_value='pinned-debian-image'), \
+             mock.patch('host.windows_environment._run', side_effect=fake_runner), \
+             mock.patch('host.amd64_backend.docker_bind_source', lambda path: '/host/mac' + str(path)):
+            lag._stage_hfs_linux(builds, scratch, [(content, image, 'Lagomorph 1',
+                                                    lag.FLOPPY_BYTES, None)])
+        self.assertEqual(len(called), 1)
+        self.assertIn('pinned-debian-image', called[0])
+        self.assertNotIn('brew', ' '.join(called[0]))
+
+    def test_linux_hfs_worker_rejects_untrusted_package(self):
+        from host import lagomorph_hfs_linux as worker
+        builds = self.tmp / 'Builds'
+        builds.mkdir(exist_ok=True)
+        package = builds / 'hfsutils.deb'
+        package.write_bytes(b'tampered')
+        job = builds / 'job.json'
+        job.write_text(json.dumps({'schema': 'cinterforge.lagomorph.hfs-linux.v1',
+                                   'package': 'hfsutils.deb', 'package_sha256': '0'*64,
+                                   'images': [{'image': 'output.img'}]}))
+        with self.assertRaisesRegex(RuntimeError, 'checksum mismatch'):
+            worker.assemble(builds, job)
+
+    def test_linux_hfs_extracts_package_on_container_local_filesystem(self):
+        from host import lagomorph_hfs_linux as worker
+        builds = self.tmp / 'Builds'
+        builds.mkdir(exist_ok=True)
+        package = builds / 'hfsutils.deb'
+        package.write_bytes(b'pinned-fixture')
+        job = builds / 'job.json'
+        job.write_text(json.dumps({
+            'schema': 'cinterforge.lagomorph.hfs-linux.v1',
+            'package': 'hfsutils.deb', 'package_sha256': worker._sha(package),
+            'working': 'scratch', 'images': [{'image': 'output.img'}],
+        }))
+        observed = []
+
+        def extract(*args, home, **kwargs):
+            observed.append((args, home))
+            self.assertEqual(args[:2], ('dpkg-deb', '-x'))
+            destination = Path(args[3])
+            self.assertEqual(destination.parent, Path('/tmp'))
+            self.assertFalse(destination.is_relative_to(builds))
+            for name in worker.TOOLS:
+                binary = destination / 'usr/bin' / name
+                binary.parent.mkdir(parents=True, exist_ok=True)
+                binary.write_text('fixture')
+                binary.chmod(0o755)
+
+        with mock.patch.object(worker, '_run', side_effect=extract), \
+             mock.patch.object(worker, '_assemble_images') as images:
+            worker.assemble(builds, job)
+            images.assert_called_once()
+            self.assertEqual(set(images.call_args.args[2]), set(worker.TOOLS))
+        self.assertEqual(len(observed), 1)
+        self.assertFalse(Path(observed[0][0][3]).exists())
 
     def test_public_publish_rejects_old_hfs_plus_hybrid_even_with_matching_hash(self):
         from host import universal_package

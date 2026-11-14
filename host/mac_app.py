@@ -314,6 +314,23 @@ def _sign_and_verify_with_login_keychain(app: Path) -> None:
         sign_launcher(vm)
     sign_flags = (['--options', 'runtime', '--timestamp'] if identity
                   else ['--timestamp=none'])
+    # Diagnostic beta only: test all SIX Hardened Runtime exceptions at once.
+    # Debugging Tool means cs.debugger, NOT get-task-allow (notarization rejects
+    # get-task-allow on distributed software). Normal Release is unchanged.
+    diagnostic = os.environ.get('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS') == '1'
+    diagnostic_entitlements = Path(__file__).resolve().parents[1] / 'build/xcode/DiagnosticBeta.entitlements'
+    exception_flags = ['--entitlements', str(diagnostic_entitlements)] if diagnostic else []
+    if diagnostic:
+        import plistlib
+        claims = plistlib.loads(diagnostic_entitlements.read_bytes())
+        required = ('allow-jit', 'allow-unsigned-executable-memory',
+                    'allow-dyld-environment-variables', 'disable-library-validation',
+                    'disable-executable-page-protection', 'debugger')
+        if any(claims.get('com.apple.security.cs.' + key) is not True for key in required):
+            raise RuntimeError('Incomplete diagnostic Beta Hardened Runtime entitlements')
+        if claims.get('com.apple.security.get-task-allow'):
+            raise RuntimeError('Diagnostic Beta must not include get-task-allow (notarization)')
+        print('[MAC SIGN] DIAGNOSTIC BETA: all six Hardened Runtime exceptions enabled', flush=True)
     if identity:
         # Apple notarization inspects *all* nested Mach-O code, including the
         # private Python/Host runtime below Resources (which --deep alone does
@@ -330,11 +347,11 @@ def _sign_and_verify_with_login_keychain(app: Path) -> None:
                 if executable.read(4) not in macho_magic:
                     continue
             subprocess.run(['/usr/bin/codesign', '--force', '--sign', identity,
-                            '--preserve-metadata=entitlements', *sign_flags,
+                            '--preserve-metadata=entitlements', *exception_flags, *sign_flags,
                             str(nested)], check=True, capture_output=True, text=True)
     subprocess.run(['/usr/bin/codesign', '--force', '--deep',
                     '--preserve-metadata=entitlements', '--sign', identity or '-',
-                    *sign_flags, str(app)], check=True, capture_output=True, text=True)
+                    *exception_flags, *sign_flags, str(app)], check=True, capture_output=True, text=True)
     _verify_signature(app)
     if not has_virtualization_entitlement(vm):
         raise RuntimeError('VM entitlements missing after packaging; refusing broken release')

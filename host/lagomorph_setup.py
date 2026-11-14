@@ -19,6 +19,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import urllib.request
 import zipfile
 
 SCHEMA = 'cinterforge.lagomorph.stage.v1'
@@ -294,39 +295,102 @@ def _classic_hfs_signature(image: Path) -> None:
                            'previous staged ISO was preserved.')
 
 
-def _managed_hfsutils(builds: Path) -> dict[str, Path]:
-    """Provision a reproducible local copy of hfsutils for HFS Standard media.
+# Debian Bookworm provides hfsutils 3.2.6 for AMD64. Trixie (our pinned
+# Windows/Linux image) omits the package, so load its 79 KB, checksum-verified
+# Bookworm package into the SAME t container rather than changing the image.
+# The checksum is Debian's published package SHA-256.
+HFS_DEB_NAME = 'hfsutils_3.2.6-15_amd64.deb'
+HFS_DEB_URL = 'https://deb.debian.org/debian/pool/main/h/hfsutils/' + HFS_DEB_NAME
+HFS_DEB_SHA256 = '068f90fac9397de360e4673e117d0e3ee7e8c576649e6f2dc4752ba308f7d0c8'
 
-    Homebrew is a bootstrap source, never a runtime or packaging dependency.
-    The managed copies are included in the optional unified DevTools ZIP.
+
+def _hfs_package(builds: Path) -> Path:
+    """Setup-owned download only; no Homebrew or global host installation."""
+    folder = builds / 'CinterForgeTerminal/Toolchains/Linux/hfsutils/3.2.6-15'
+    folder.mkdir(parents=True, exist_ok=True)
+    package = folder / HFS_DEB_NAME
+    if package.is_file() and sha256(package) == HFS_DEB_SHA256:
+        return package
+    temporary = package.with_suffix('.candidate')
+    print('[LAGOMORPH] Downloading pinned Linux hfsutils 3.2.6 (78 KB)', flush=True)
+    try:
+        with urllib.request.urlopen(HFS_DEB_URL, timeout=45) as response, temporary.open('wb') as output:
+            shutil.copyfileobj(response, output)
+        if temporary.stat().st_size != 79532 or sha256(temporary) != HFS_DEB_SHA256:
+            raise RuntimeError('Debian hfsutils package SHA-256/size verification failed')
+        temporary.replace(package)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return package
+
+
+def _stage_hfs_linux(builds: Path, temp: Path,
+                     jobs: list[tuple[Path, Path, str, int | None, str | None]]) -> None:
+    """Mac encodes resource forks; the existing Debian AMD64 t guest writes HFS.
+
+    One Docker call prepares all three volumes, avoids rebuilding Wine/MSYS2,
+    and keeps the published media fully offline and unchanged until verified.
     """
-    dest = builds / 'CinterForgeTerminal/Toolchains/mac/hfsutils/bin'
-    names = ('hformat', 'hmount', 'hcopy', 'hmkdir', 'hls', 'humount', 'hattrib')
-    ready = {name: dest / name for name in names}
-    if all(p.is_file() and os.access(p, os.X_OK) for p in ready.values()):
-        return ready
-    found = {name: shutil.which(name) for name in names}
-    if any(not value for value in found.values()):
-        brew = shutil.which('brew')
-        if not brew:
-            raise RuntimeError('Classic HFS requires hfsutils 3.2.6. Install Homebrew or '
-                               'provide hfsutils in Builds/CinterForgeTerminal/Toolchains/mac/hfsutils/bin')
-        print('[LAGOMORPH] Provisioning hfsutils from Homebrew (one-time)', flush=True)
-        subprocess.run([brew, 'install', 'hfsutils'], check=True)
-        found = {name: shutil.which(name) for name in names}
-    if any(not value for value in found.values()):
-        raise RuntimeError('hfsutils provisioning incomplete: ' +
-                           ', '.join(name for name, value in found.items() if not value))
-    dest.mkdir(parents=True, exist_ok=True)
-    for name, source in found.items():
-        output = dest / name
-        # Homebrew often exposes symlinks into Cellar. Ship real executable
-        # bytes, not links to a machine-local installation.
-        candidate = dest / (name + '.candidate')
-        shutil.copy2(Path(source).resolve(), candidate)
-        candidate.chmod(candidate.stat().st_mode | 0o755)
-        candidate.replace(output)
-    return ready
+    if os.environ.get('DOCKER_CONTEXT') != 'colima-t':
+        raise RuntimeError('Lagomorph HFS Setup requires the existing AMD64 t guest')
+    package = _hfs_package(builds)
+    from host.amd64_backend import docker_bind_source
+    from host.three_samples import _docker_image
+    from host.windows_environment import _run
+    docker = builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/docker'
+    if not docker.is_file():
+        raise RuntimeError('Setup-owned t Docker CLI is missing')
+    log = builds / 'Logs/CinterForgeTerminal/lagomorph-linux-hfs.log'
+    image = _docker_image(builds, str(docker), log)
+    def rel(path: Path) -> str:
+        resolved = path.resolve()
+        if not resolved.is_relative_to(builds):
+            raise RuntimeError('Lagomorph input must reside under Builds: ' + str(path))
+        return resolved.relative_to(builds).as_posix()
+    specs = []
+    for index, (content, result, label, capacity, application_path) in enumerate(jobs):
+        files = _files(content)
+        total = sum(p.stat().st_size + (len(_getxattr(p, 'com.apple.ResourceFork'))
+                    if _has_resource_fork(p) else 0) for p in files)
+        size = capacity if capacity is not None else max(32, (total * 2 + 16 * 1048576 + 1048575) // 1048576) * 1048576
+        if size == FLOPPY_BYTES and total > FLOPPY_BYTES - 40 * 1024:
+            raise RuntimeError(f'{label} exceeds safe 1.44 MB HFS capacity ({total} bytes)')
+        encoded = temp / ('MacBinary-%d' % index)
+        encoded.mkdir()
+        input_files = []
+        for pos, source in enumerate(files):
+            binary = encoded / ('%04d.bin' % pos)
+            _macbinary(source, binary)
+            input_files.append({'target': source.relative_to(content).as_posix(),
+                                'macbinary': rel(binary), 'sha256': sha256(binary)})
+        dirs = [p.relative_to(content).as_posix() for p in sorted(
+            (p for p in content.rglob('*') if p.is_dir()),
+            key=lambda d: (len(d.relative_to(content).parts), str(d)))]
+        app = None
+        if application_path:
+            source_app = content / application_path.lstrip(':').replace(':', '/')
+            finder, fork = _classic_application_metadata(source_app)
+            app = {'target': source_app.relative_to(content).as_posix(),
+                   'finder8': finder[:8].hex(), 'fork_bytes': len(fork),
+                   'fork_sha256': hashlib.sha256(fork).hexdigest()}
+        specs.append({'image': rel(result), 'bytes': size, 'volume_name': label,
+                      'directories': dirs, 'files': input_files, 'application': app})
+    job_file = temp / 'hfs-linux-job.json'
+    job_file.write_text(json.dumps({'schema': 'cinterforge.lagomorph.hfs-linux.v1',
+                                    'package': rel(package), 'package_sha256': HFS_DEB_SHA256,
+                                    'working': rel(temp), 'images': specs},
+                                   indent=2, sort_keys=True) + '\n', encoding='utf-8')
+    cmd = [str(docker), 'run', '--rm', '--platform', 'linux/amd64', '--network', 'none',
+           '--mount', f'type=bind,src={docker_bind_source(builds)},dst=/builds',
+           '--mount', f'type=bind,src={docker_bind_source(Path(__file__).resolve().parents[1])},dst=/source,readonly',
+           '--workdir', '/source', image, 'python3', '-B', '-m', 'host.lagomorph_hfs_linux',
+           '--builds', '/builds', '--job', '/builds/' + rel(job_file)]
+    print('[LAGOMORPH] Building three HFS volumes inside existing Linux t container', flush=True)
+    completed = _run(cmd, timeout=1800, output_log=log)
+    if completed.returncode:
+        raise RuntimeError('Linux HFS assembly failed; see ' + str(log))
+    for _, result, _, _, _ in jobs:
+        _classic_hfs_signature(result)
 
 
 def _macbinary(source: Path, target: Path) -> None:
@@ -574,10 +638,9 @@ def stage(builds: Path, source: Path | None = None) -> dict:
     if builds.name != 'Builds' or not builds.is_dir():
         raise ValueError(f'Source output must be the sibling Builds root: {builds}')
     if platform.system() != 'Darwin':
-        raise RuntimeError('A classic HFS content disk requires the macOS Setup host (ditto + hfsutils)')
+        raise RuntimeError('Mac host required to preserve original Finder metadata and resource forks')
     if not shutil.which('ditto'):
         raise RuntimeError('macOS ditto is required to preserve resource forks')
-    tools = _managed_hfsutils(builds)
     raw = _source(builds, str(source) if source is not None else os.environ.get('CINTER_LAGOMORPH_SOURCE'))
     print(f'[LAGOMORPH] Using staged original source: {raw}', flush=True)
     intermediates = builds / 'Intermediates/CinterForgeTerminal/Lagomorph'
@@ -613,18 +676,12 @@ def stage(builds: Path, source: Path | None = None) -> dict:
             _copy_classic(battle, floppy_battles / battle.name)
         app_image = temp / APPLICATION_FLOPPY
         battle_image = temp / BATTLES_FLOPPY
-        _make_classic_hfs_image(floppy_app, app_image, temp, tools,
-                                volume_name='Lagomorph 1', image_bytes=FLOPPY_BYTES,
-                                application_path=':Lagomorph 1')
-        _make_classic_hfs_image(floppy_battles, battle_image, temp, tools,
-                                volume_name='Lagomorph Battles', image_bytes=FLOPPY_BYTES,
-                                application_path=None)
-        # Preserve the currently published combined-disk key as a fallback.
-        # It has a writable shadow overlay when mounted via disk_url, allowing
-        # Finder to create its Desktop database without a read-only CD alert.
         candidate_image = temp / IMAGE_NAME
-        _make_classic_hfs_image(content, candidate_image, temp, tools,
-                                application_path=':Lagomorph 1')
+        _stage_hfs_linux(builds, temp, [
+            (floppy_app, app_image, 'Lagomorph 1', FLOPPY_BYTES, ':Lagomorph 1'),
+            (floppy_battles, battle_image, 'Lagomorph Battles', FLOPPY_BYTES, None),
+            (content, candidate_image, 'Lagomorph 1', None, ':Lagomorph 1'),
+        ])
         for floppy in (app_image, battle_image):
             if floppy.stat().st_size != FLOPPY_BYTES:
                 raise RuntimeError(f'Unexpected floppy image size: {floppy}')

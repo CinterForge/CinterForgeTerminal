@@ -134,34 +134,37 @@ class MacBootstrapContractTests(unittest.TestCase):
         output = self.builds / 'Intermediates/CinterForgeTerminal/LinuxNative/x64/cmake'
         elf = output / 'CinterForgeTerminal'
         image = ['test-linux:1']
-        def fake_run(command, **kwargs):
-            if command[:2] == ['cmake', '-S']:
-                # The OCI bind mount's host/container timestamp mismatch can
-                # otherwise make Ninja rerun CMake 100 times without building.
-                self.assertIn('-DCMAKE_SUPPRESS_REGENERATION=ON', command)
-            if '--build' in command:
-                elf.write_bytes(b'\x7fELF' + b'linux-native-fixture')
-            return SimpleNamespace(stdout='configured\n', stderr='', returncode=0)
+        # Invoke a real child executable (not a subprocess.run mock) to
+        # verify live streaming and failure propagation through Popen.
+        docker = self.builds / 'fake-linux-docker'
+        docker.write_text('#!' + sys.executable + '\n'
+                          'import os,sys,pathlib\n'
+                          'if os.getenv("TEST_FAIL_DOCKER"):\n'
+                          '    print("fatal error: actual Linux compiler error",flush=True)\n'
+                          '    sys.exit(17)\n'
+                          'if "--build" in sys.argv:\n'
+                          '    pathlib.Path(os.environ["TEST_ELF_PATH"]).write_bytes('
+                          'b"\\x7fELF" + b"linux-native-fixture")\n'
+                          'print("configured",flush=True)\n')
+        docker.chmod(0o755)
         with (mock.patch.object(linux_runner, '_docker_image', side_effect=lambda *a: image[0]),
               mock.patch('host.webview.provision', return_value=source),
-              mock.patch.object(linux_runner.subprocess, 'run', side_effect=fake_run)):
-            self.assertEqual(linux_runner.build_terminal(self.builds, docker='docker', logfile=log), elf)
+              mock.patch.dict(os.environ, {'TEST_ELF_PATH': str(elf)})):
+            self.assertEqual(linux_runner.build_terminal(self.builds, docker=str(docker), logfile=log), elf)
             self.assertTrue((output / 'linux-native-inputs.json').is_file())
             retained = output / 'retained-marker'
             retained.write_text('same toolchain')
-            linux_runner.build_terminal(self.builds, docker='docker', logfile=log)
+            linux_runner.build_terminal(self.builds, docker=str(docker), logfile=log)
             self.assertTrue(retained.is_file())
             image[0] = 'test-linux:2'
-            linux_runner.build_terminal(self.builds, docker='docker', logfile=log)
+            linux_runner.build_terminal(self.builds, docker=str(docker), logfile=log)
             self.assertFalse(retained.exists())
-        def failed(command, **kwargs):
-            return SimpleNamespace(stdout='', stderr='fatal error: actual Linux compiler error\n', returncode=17)
         with (mock.patch.object(linux_runner, '_docker_image', return_value=image[0]),
               mock.patch('host.webview.provision', return_value=source),
-              mock.patch.object(linux_runner.subprocess, 'run', side_effect=failed),
+              mock.patch.dict(os.environ, {'TEST_ELF_PATH': str(elf), 'TEST_FAIL_DOCKER': '1'}),
               contextlib.redirect_stdout(io.StringIO()) as printed):
             with self.assertRaisesRegex(RuntimeError, r'failed \(17\)'):
-                linux_runner.build_terminal(self.builds, docker='docker', logfile=log)
+                linux_runner.build_terminal(self.builds, docker=str(docker), logfile=log)
             self.assertIn('actual Linux compiler error', printed.getvalue())
             self.assertIn('EXIT=17', log.read_text())
         self.assertTrue((self.builds / 'Toolchains').exists())
@@ -226,9 +229,11 @@ class SetupPreflightOrderingTests(unittest.TestCase):
              mock.patch.object(bootstrap_bundle, 'provision_zmachine'):
             self.assertEqual(cli.main(['setup', 'all']), 0)
         invoked = [' '.join(map(str, c.args)) for c in call.call_args_list]
-        self.assertIn('host.windows_dependencies', invoked[0])
-        self.assertIn('host.msi_installer', invoked[1])
-        self.assertIn('host.devtooling', invoked[2])
+        self.assertIn('linuxos/lifecycle.py setup', invoked[0])
+        self.assertIn('linuxos/lifecycle.py test', invoked[1])
+        self.assertIn('host.windows_dependencies', invoked[2])
+        self.assertIn('host.msi_installer', invoked[3])
+        self.assertIn('host.devtooling', invoked[4])
         guest = next(i for i,v in enumerate(invoked) if 'linuxos/lifecycle.py setup' in v)
         accept = next(i for i,v in enumerate(invoked) if 'linuxos/lifecycle.py test' in v)
         self.assertLess(guest, accept)
@@ -236,32 +241,53 @@ class SetupPreflightOrderingTests(unittest.TestCase):
 
     def test_mac_setup_prepares_everything_before_release_build(self):
         cli = self.cli_module()
-        from host import portable_python, universal_package, bootstrap_bundle, mac_bootstrap
+        from host import portable_python, universal_package, bootstrap_bundle, mac_bootstrap, amd64_backend
+        from contextlib import contextmanager
         sequence = []
         def invoke(*args):
             sequence.append(' '.join(map(str, args)))
+        @contextmanager
+        def fake_t_backend(builds, *, setup=True):
+            sequence.append('start-owned-t')
+            try:
+                yield '/mock/docker'
+            finally:
+                sequence.append('stop-owned-t')
         with tempfile.TemporaryDirectory() as directory, \
              mock.patch.object(cli, 'BUILDS', Path(directory) / 'Builds'), \
              mock.patch.object(cli, 'invoke', side_effect=invoke), \
+             mock.patch.object(amd64_backend, 'managed_amd64_backend', side_effect=fake_t_backend), \
              mock.patch.object(cli.platform, 'system', return_value='Darwin'), \
              mock.patch.object(mac_bootstrap, 'managed_environment', return_value={}), \
              mock.patch.object(mac_bootstrap, 'stop_linuxkit_build_backend',
                                side_effect=lambda builds: sequence.append('stop-owned-c')), \
+             mock.patch.object(mac_bootstrap, 'stop_setup_build_vms',
+                               side_effect=lambda builds: sequence.append('stop-owned-builders')), \
              mock.patch.object(portable_python, 'provision'), \
              mock.patch.object(universal_package, 'provision_release_runtimes'), \
              mock.patch.object(bootstrap_bundle, 'provision_zmachine'):
             self.assertEqual(cli.main(['setup', 'all']), 0)
-        invoked = [x for x in sequence if x not in ('stop-owned-w', 'stop-owned-c')]
+        invoked = [x for x in sequence if x not in ('stop-owned-c', 'stop-owned-builders', 'start-owned-t', 'stop-owned-t')]
         self.assertIn('host.mac_bootstrap', invoked[0])
-        self.assertIn('host.windows_dependencies', invoked[1])
-        self.assertIn('host.msi_installer', invoked[2])
-        self.assertIn('host.devtooling', invoked[3])
+        self.assertIn('linuxos/lifecycle.py setup', invoked[1])
+        self.assertIn('linuxos/lifecycle.py test', invoked[2])
+        self.assertIn('host.windows_dependencies', invoked[3])
+        self.assertIn('host.msi_installer', invoked[4])
+        self.assertIn('host.devtooling', invoked[5])
         guest = next(x for x in sequence if 'linuxos/lifecycle.py setup' in x)
         accept = next(x for x in sequence if 'linuxos/lifecycle.py test' in x)
-        # w is released within LinuxKit Setup, *after* its custom-kernel
-        # producer used Docker, not before the kernel has been constructed.
+        # c is released after LinuxKit Setup built its complete kernel/guest
+        # closure and before Bedrock acceptance.
         self.assertLess(sequence.index(guest), sequence.index('stop-owned-c'))
         self.assertLess(sequence.index('stop-owned-c'), sequence.index(accept))
+        self.assertLess(sequence.index(accept), sequence.index('start-owned-t'))
+        self.assertLess(sequence.index('start-owned-t'),
+                        next(i for i, x in enumerate(sequence) if 'host.windows_dependencies' in x))
+        self.assertEqual(sequence[-1], 'stop-owned-t')
+        runtime_accept = next(x for x in sequence if 'host.guest_runtime_acceptance' in x)
+        self.assertLess(sequence.index('stop-owned-builders'), sequence.index(runtime_accept))
+        lagomorph_setup = next(x for x in sequence if 'host.lagomorph_setup' in x)
+        self.assertLess(sequence.index(lagomorph_setup), sequence.index(runtime_accept))
         self.assertFalse(any('host.universal_package build' in x or 'build win' in x for x in invoked))
 
     def test_all_all_setup_pulls_lagomorph_internal_source_before_staging(self):
@@ -325,7 +351,7 @@ class SetupPreflightOrderingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'cmake: missing'):
                 cli.main(['setup', 'all'])
         self.assertEqual(call.call_count, 1)
-        self.assertEqual(call.call_args.args[3], 'host.windows_dependencies')
+        self.assertEqual(call.call_args.args[-2:], (str(cli.REPO / 'linuxos/lifecycle.py'), 'setup'))
 
 class EnvironmentTests(unittest.TestCase):
     def setUp(self):

@@ -38,11 +38,10 @@ def _linuxkit() -> Path:
 
 
 def managed_setup_docker() -> tuple[str, dict[str, str]]:
-    """Provision the dedicated short-lived ``c`` Ubuntu guest-image backend.
+    """Start the single disposable c Docker producer for LinuxKit inputs.
 
-    Windows cross compilation uses a separate ``w`` VM. Neither instance is
-    a substitute for the other; both use Setup's pinned Colima/Lima tools and
-    both are shut down by the outer Setup/Build owner.
+    Setup also reuses this producer for Linux/Windows toolchain image builds
+    after Bedrock acceptance. No w VM is needed or permitted.
     """
     if platform.system() != 'Darwin' or platform.machine() != 'arm64':
         raise RuntimeError('LinuxKit guest provisioning requires Apple Silicon macOS')
@@ -221,19 +220,19 @@ def verify_guest() -> Path:
 
 
 def setup() -> None:
-    setup_kernel()
     if platform.system() == 'Darwin':
-        # The custom VirtioFS kernel producer needs the w Docker image cache.
-        # Once that output is fully built and verified, release w before c
-        # starts (both reserve substantial VZ memory). This also ensures a
-        # fresh empty Builds can reconstruct the kernel before the handoff.
-        # The outer lifecycle watchdog still owns crash/error cleanup.
-        from host.mac_bootstrap import stop_managed_colima
-        print('[CinterForgeTerminal LinuxKit] Kernel prepared; releasing Windows cross-builder w before c', flush=True)
-        stop_managed_colima(BUILDS)
+        # A clean LinuxKit kernel build needs Docker. Start its existing c
+        # backend directly, never boot the former w cross-builder. Use this
+        # *same* Docker context for the kernel and guest loader/probe.
+        docker, environment = managed_setup_docker()
+        os.environ.pop('DOCKER_CONTEXT', None)
+        os.environ.update(environment)
+        print('[CinterForgeTerminal LinuxKit] Docker producer c ready for kernel and guest inputs',
+              flush=True)
+    setup_kernel()
     prepare_guest()
     verify_guest()
-    # Official Bedrock server bytes are Setup-owned too, not downloaded by Test.
+    # Official Bedrock bytes belong to Setup, never the later offline Test.
     _licensed()
     from tests.acceptance_linuxkit import prepare_official_bedrock_archive
     prepare_official_bedrock_archive(REPO)

@@ -770,10 +770,10 @@ class FourArtifactSteamReleaseTests(unittest.TestCase):
         from host.unpacked_release import setup_restore_if_needed
         for relative in ('CinterForgeTerminal/Toolchains/mac/env/bin/colima',
                          'CinterForgeTerminal/Toolchains/Windows/MSYS2/usr/bin/bash.exe',
-                         'CinterForgeTerminal/Toolchains/LinuxSample'):
+                         'CinterForgeTerminal/Toolchains/WindowsCross'):
             path = self.builds / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            if path.name == 'LinuxSample': path.mkdir()
+            if path.name == 'WindowsCross': path.mkdir()
             else: path.write_bytes(b'fixture')
         with mock.patch('urllib.request.urlopen', side_effect=AssertionError('Setup redownload')):
             result = setup_restore_if_needed(self.builds, release=self.release)

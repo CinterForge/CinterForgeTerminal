@@ -277,8 +277,8 @@ def ensure_backend(source: Path) -> tuple[str, dict[str, str]]:
     # global PATH or tool installation.
     host_bins = []
     # The pinned, Setup-signed Lima CLI must precede any Conda-provided
-    # limactl; only the staged binary has verified VZ entitlements. The w
-    # builder already uses this order, and c must use exactly the same host.
+    # limactl; only the staged binary has verified VZ entitlements.
+    # This c producer is also the shared Mac cross-build backend.
     for binary in (str(lima_cli), docker, colima):
         if binary:
             directory = str(Path(binary).parent)

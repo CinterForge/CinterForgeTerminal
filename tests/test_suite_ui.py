@@ -324,45 +324,36 @@ class OptionalGuestBashTests(unittest.TestCase):
         installer.assert_called_once_with()
         start.assert_not_called()
 
-    def test_installed_linux_attaches_bash_without_creating_second_container(self):
+    def test_installed_linux_reuses_app_owned_bash_not_another_docker_exec(self):
         with mock.patch.object(self.adapter.platform, 'system', return_value='Darwin'), \
              mock.patch.object(self.adapter, 'sdk_root', return_value=Path('/sdk')), \
-             mock.patch.object(self.adapter, '_env', return_value={'PATH':'p'}), \
-             mock.patch.object(self.adapter, '_guest_workspace', return_value=Path('/Source')), \
              mock.patch.object(self.adapter, '_wait_for_app_guests') as boot, \
-             mock.patch.object(self.adapter, '_image_archive') as image, \
-             mock.patch.object(self.adapter, 'install_devtools') as installer, \
              mock.patch.object(self.adapter.subprocess, 'Popen') as popen:
-            popen.return_value.wait.return_value=0
-            self.assertEqual(self.adapter.guest_shell_main('linux'),0)
-            args=popen.call_args.args[0]
+            self.assertEqual(self.adapter.guest_shell_main('linux'), 0)
+            args = self.adapter._runtime_guest_shell_command(Path('/sdk'), 'linux', Path('/Source'))
         boot.assert_called_once_with('linux')
-        image.assert_not_called()  # Image lifecycle belongs to app bootstrap
-        installer.assert_not_called()
+        popen.assert_not_called()  # Only app launch owns the one interactive Bash PTY.
         self.assertEqual(args[:5], ['/sdk/mac/env/bin/docker', 'exec', '-it', '-e', 'DISPLAY=:99'])
-        self.assertIn(r'PS1=\u@\h \w \$ ', args)
-        self.assertEqual(args[-6:-3], ['--workdir', '/host/mac/Source', 'cinterforge-terminal-t-linux'])
+        self.assertEqual(args[-6:-3], ['--workdir', '/host/mac/Source', self.adapter._guest_name('linux')])
         self.assertEqual(args[-3:], ['/bin/bash','--noprofile','-i'])
-        self.assertNotIn('run',args)
+        self.assertNotIn('run', args)
 
-    def test_installed_windows_attaches_actual_msys2_under_wine(self):
+    def test_installed_windows_reuses_app_owned_msys2_bash(self):
         with mock.patch.object(self.adapter.platform, 'system', return_value='Darwin'), \
              mock.patch.object(self.adapter, 'sdk_root', return_value=Path('/sdk')), \
-             mock.patch.object(self.adapter, '_env', return_value={'PATH':'p'}), \
-             mock.patch.object(self.adapter, '_guest_workspace', return_value=Path('/Source')), \
              mock.patch.object(self.adapter, '_wait_for_app_guests') as boot, \
              mock.patch.object(self.adapter.subprocess, 'Popen') as popen:
-            popen.return_value.wait.return_value=0
-            self.assertEqual(self.adapter.guest_shell_main('win'),0)
-            args=popen.call_args.args[0]
+            self.assertEqual(self.adapter.guest_shell_main('win'), 0)
+            args = self.adapter._runtime_guest_shell_command(Path('/sdk'), 'win', Path('/Source'))
         boot.assert_called_once_with('win')
-        self.assertEqual(args[:5], ['/sdk/mac/env/bin/docker', 'exec', '-it', '-e', 'DISPLAY=:99'])
-        self.assertIn(r'PS1=\u@\h \w \$ ', args)
+        popen.assert_not_called()
         self.assertIn('WINEPREFIX=/tmp/.wine', args)
-        self.assertEqual(args[-7:-4], ['--workdir', '/host/mac/Source', 'cinterforge-terminal-t-win'])
-        self.assertEqual(args[-4:], ['wine', r'Z:\msys2\usr\bin\bash.exe', '--login', '-i'])
-        self.assertNotIn('/bin/bash',args)
-        self.assertNotIn('run',args)
+        self.assertEqual(args[-9:-6], ['--workdir', '/host/mac/Source', self.adapter._guest_name('win')])
+        self.assertEqual(args[-6:-2], ['wine', r'Z:\msys2\usr\bin\bash.exe', '--noprofile', '--norc'])
+        self.assertEqual(args[-2], '-c')
+        self.assertIn('exec /usr/bin/bash --noprofile --norc -i', args[-1])
+        self.assertNotIn('--login', args)
+        self.assertNotIn('run', args)
 
     def test_windows_guest_tmp_write_probe_is_at_persistent_container_boot(self):
         from types import SimpleNamespace
@@ -373,15 +364,23 @@ class OptionalGuestBashTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0,stdout='',stderr='')
             if args[:2] == ('container','inspect'):
                 return SimpleNamespace(returncode=1,stdout='',stderr='not present')
+            if '/bin/bash' in args:
+                return SimpleNamespace(returncode=0, stdout='GNU bash 5.2\n', stderr='')
+            if 'cmd.exe' in args:
+                return SimpleNamespace(returncode=0, stdout='CINTER_WINE_PE_READY\n', stderr='')
             if 'wine' in args:
+                if '--version' in args:
+                    return SimpleNamespace(returncode=0, stdout='wine-11.15\n', stderr='')
                 return SimpleNamespace(returncode=0, stdout='MSYS_NT-10.0\n', stderr='')
             return SimpleNamespace(returncode=0,stdout='',stderr='')
         with mock.patch.object(self.adapter,'_docker_call',side_effect=docker_call), \
+             mock.patch.object(self.adapter,'_activate_guest_vnc') as vnc, \
              mock.patch.object(self.adapter,'_run_checked') as checked, \
              mock.patch.object(self.adapter,'_guest_host_binds',return_value=[]), \
              mock.patch.object(self.adapter,'_image_archive',return_value=(Path('/image.tar'),'image:123')):
             self.adapter._start_guest_locked(sdk,{},'/docker','win',Path('/Source'))
         self.assertEqual(checked.call_count,1)
+        vnc.assert_called_once()  # VNC is prewarmed in the same container.
         run=checked.call_args_list[0].args[0]
         probe=['/docker', *calls[-1]]
         self.assertEqual(run[:3],['/docker','run','-d'])
@@ -465,8 +464,12 @@ class WorkspaceGuestAndHtmlMenuTests(unittest.TestCase):
             self.assertEqual(self.app._ensure_docker(Path('/sdk'),{},Path('/code/Source')), '/sdk/mac/env/bin/docker')
         start=next(cmd for cmd in calls if 'start' in cmd)
         self.assertIn('--mount-type',start)
-        self.assertIn('virtiofs',start)
-        self.assertNotIn('--mount',start)
+        self.assertIn('9p',start)
+        self.assertIn('qemu',start)
+        self.assertIn('x86_64',start)
+        # First boot must pass the custom mount point explicitly, because
+        # Colima --save-config can replace a prewritten profile's mount list.
+        self.assertEqual(start[start.index('--mount') + 1], '/:/host/mac:w')
         self.assertIn('--save-config',start)
         self.assertNotIn('stop',sum(calls,[]))
 
@@ -549,42 +552,43 @@ class WorkspaceGuestAndHtmlMenuTests(unittest.TestCase):
                 self.app._ensure_docker(Path('/sdk'),{},Path('/code/Source'))
         checked.assert_not_called()
 
-    def test_code_guest_shell_execs_existing_linux_container_with_workspace(self):
-        TOOLCHAIN_SIGN_OF_LIFE_ROOT.mkdir(parents=True,exist_ok=True)
+    def test_code_guest_shell_reuses_linux_container_with_workspace(self):
+        TOOLCHAIN_SIGN_OF_LIFE_ROOT.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TOOLCHAIN_SIGN_OF_LIFE_ROOT) as temp:
             source=Path(temp)
             with mock.patch.dict(os.environ,{'CINTER_CODE_WORKSPACE':str(source)}), \
                  mock.patch.object(self.app.platform,'system',return_value='Darwin'), \
                  mock.patch.object(self.app,'sdk_root',return_value=Path('/sdk')), \
-                 mock.patch.object(self.app,'_env',return_value={}), \
                  mock.patch.object(self.app,'_wait_for_app_guests') as boot, \
                  mock.patch.object(self.app.subprocess,'Popen') as popen:
-                popen.return_value.wait.return_value=0
                 self.assertEqual(self.app.guest_shell_main('linux'),0)
+                args = self.app._runtime_guest_shell_command(Path('/sdk'), 'linux', source)
             boot.assert_called_once_with('linux')
-            args=popen.call_args.args[0]
+            popen.assert_not_called()
             self.assertIn('--workdir',args)
             self.assertIn('/host/mac'+str(source),args)
-            self.assertIn('cinterforge-terminal-t-linux',args)
+            self.assertIn(self.app._guest_name('linux'),args)
             self.assertNotIn('run',args)
 
-    def test_code_guest_shell_execs_existing_windows_container_with_workspace(self):
-        TOOLCHAIN_SIGN_OF_LIFE_ROOT.mkdir(parents=True,exist_ok=True)
+    def test_code_guest_shell_reuses_windows_container_with_workspace(self):
+        TOOLCHAIN_SIGN_OF_LIFE_ROOT.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TOOLCHAIN_SIGN_OF_LIFE_ROOT) as temp:
             source=Path(temp)
             with mock.patch.dict(os.environ,{'CINTER_CODE_WORKSPACE':str(source)}), \
                  mock.patch.object(self.app.platform,'system',return_value='Darwin'), \
                  mock.patch.object(self.app,'sdk_root',return_value=Path('/sdk')), \
-                 mock.patch.object(self.app,'_env',return_value={}), \
                  mock.patch.object(self.app,'_wait_for_app_guests') as boot, \
                  mock.patch.object(self.app.subprocess,'Popen') as popen:
-                popen.return_value.wait.return_value=0
                 self.assertEqual(self.app.guest_shell_main('win'),0)
+                args = self.app._runtime_guest_shell_command(Path('/sdk'), 'win', source)
             boot.assert_called_once_with('win')
-            args=popen.call_args.args[0]
+            popen.assert_not_called()
             self.assertIn('/host/mac'+str(source),args)
-            self.assertIn('cinterforge-terminal-t-win',args)
-            self.assertEqual(args[-4:],['wine',r'Z:\msys2\usr\bin\bash.exe','--login','-i'])
+            self.assertIn(self.app._guest_name('win'),args)
+            self.assertEqual(args[-6:-2],['wine',r'Z:\msys2\usr\bin\bash.exe','--noprofile','--norc'])
+            self.assertEqual(args[-2],'-c')
+            self.assertIn('exec /usr/bin/bash --noprofile --norc -i',args[-1])
+            self.assertNotIn('--login',args)
             self.assertNotIn('run',args)
 
     def test_htmlmenus_command_uses_authenticated_host_request(self):
@@ -687,6 +691,8 @@ class AppOwnedGuestWarmupTests(unittest.TestCase):
         logs=[]
         server=SimpleNamespace(guest_start_lock=threading.Lock(),
                                guest_start_state='not-installed', guest_start_error='',
+                               guest_shells_lock=threading.RLock(), guest_shells={},
+                               guest_ready=[], guest_errors={},
                                native_parent_pid=1234, mutable_builds=Path('/test/Builds'),
                                _stopping=False, log_event=logs.append)
         return server, logs
@@ -702,10 +708,14 @@ class AppOwnedGuestWarmupTests(unittest.TestCase):
             thread.assert_called_once()
             thread.return_value.start.assert_called_once()
         with mock.patch.object(self.app,'_start_runtime_watchdog'), \
+             mock.patch.object(self.app,'sdk_root',return_value=Path('/sdk')), \
+             mock.patch.object(self.app,'_new_owned_guest_shell',side_effect=lambda *args: mock.Mock()), \
+             mock.patch.object(self.app.threading,'Thread') as thread, \
              mock.patch.object(self.app,'_runtime_logs_root',return_value=Path('/logs')), \
              mock.patch.object(self.app,'boot_runtime_guests',return_value={
                 'installed':True,'guests':['linux','win']}) as boot:
             self.app._boot_guests_logged(server)
+        self.assertEqual(len(server.guest_shells), 2)
         boot.assert_called_once()
         self.assertEqual(self.app._guest_boot_snapshot(server)['state'],'ready')
         self.assertIn('ready',logs[-1])
@@ -724,8 +734,10 @@ class AppOwnedGuestWarmupTests(unittest.TestCase):
         server.guest_start_state='starting'
         with mock.patch.object(self.app,'_start_runtime_watchdog'), \
              mock.patch.object(self.app,'_runtime_logs_root',return_value=Path('/logs')), \
+             mock.patch.object(self.app,'stop_runtime_vm') as cleanup, \
              mock.patch.object(self.app,'boot_runtime_guests',side_effect=RuntimeError('Colima mount failed')) as boot:
             self.app._boot_guests_logged(server)
+        cleanup.assert_called_once_with()
         boot.assert_called_once()
         self.assertEqual(self.app._guest_boot_snapshot(server)['state'],'failed')
         with mock.patch.object(self.app,'_api',return_value=self.app._guest_boot_snapshot(server)) as api, \
