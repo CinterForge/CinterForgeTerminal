@@ -552,8 +552,16 @@ namespace cinterforge {
                 }
                 std::cout << "TERMINAL_UI_PASS ready=1 museum=mac-plus terminal=vt100-terminal callback=native" << std::endl;
             }
-            if (started) { host->call("stop", "{}", std::chrono::seconds(5)); started = false; }
+            // After every normal Quit, the macOS event loop must return here
+            // rather than letting Cocoa terminate the process mid-cleanup.
+            std::cerr << "[CinterForgeTerminal] WebView stopped; releasing native-owned resources\n";
+            if (started) {
+                std::cerr << "[CinterForgeTerminal] Stopping owned HTTP service\n";
+                host->call("stop", "{}", std::chrono::seconds(5));
+                started = false;
+            }
             if (hostRunning && runtimeOwner) {
+                std::cerr << "[CinterForgeTerminal] Stopping app-owned guest runtime\n";
                 try { host->call("shutdown_runtime", "{}", std::chrono::seconds(125)); }
                 catch (const std::exception& e) {
                     // Detached owner watchdog independently retries when the
@@ -562,6 +570,7 @@ namespace cinterforge {
                 }
             }
             if (hostRunning) host->stop();
+            std::cerr << "[CinterForgeTerminal] Native shutdown completed\n";
             // Only launch the updated executable AFTER the old HTTP host has
             // released 20300. Never run two live owners during replacement.
             if (relaunchRequested.load() && !config.accept_ui && config.connect_url.empty())

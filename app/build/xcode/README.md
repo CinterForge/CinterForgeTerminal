@@ -128,8 +128,15 @@ runtime, **Build & Run** in Xcode is sufficient for edits to authored `.c`,
 `.cpp`, `.h`, `.js`, `.html`, `.css`, and `.py` source files. Debug uses the
 existing Host CMake producer, refreshes the Host stage and our Code-OSS
 extension, and copies the current source runtime into the Xcode product.
-It does not rebuild the Windows/Linux distributions or run Setup, Test,
-Publish, notarization, or another release packaging pass.
+Xcode also reconciles the installed Windows and Linux launcher resources:
+source-only changes refresh their unpacked Build inventories and the existing
+copy-only Stage copies only changed files into the Steam app folders the VNC
+launchers execute. Edited C/C++ sources trigger actual Windows/Linux cross-builds
+using Setup-provisioned tools before the resources are staged. The first
+Xcode Build & Run establishes a native SHA-256 Build receipt, then subsequent
+source-only edits reuse verified native binaries, even when ZIPs preserve mtimes. This path does not generate distribution ZIPs, run Setup,
+Test, Publish, or notarization. If a required build input is missing it fails
+rather than launching stale Linux/Windows source code.
 
 Open `app/CinterForgeTerminal.xcodeproj`, select the shared **CinterForge Terminal**
 scheme, and use Product → Run. Its Run configuration is **Debug**. Ordinary

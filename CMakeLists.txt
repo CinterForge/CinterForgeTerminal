@@ -69,6 +69,17 @@ if(CPH_BUILD_APPLICATION_SHELL)
         if(NOT MSWebView2_ROOT OR NOT EXISTS "${MSWebView2_ROOT}/build/native/include/WebView2.h")
             message(FATAL_ERROR "WebView2 headers must be staged in Builds during Setup; set MSWebView2_ROOT")
         endif()
+        # webview/webview 0.12.0's built-in loader ignores the documented
+        # WEBVIEW2_BROWSER_EXECUTABLE_FOLDER override. Our packaged Windows
+        # application intentionally uses a Fixed Version browser, so it MUST
+        # ship Microsoft's official x64 WebView2Loader.dll from the same SDK.
+        # Keep upstream library and pinned SDK; do not fetch during Build.
+        set(_cinter_webview2_loader "${MSWebView2_ROOT}/build/native/x64/WebView2Loader.dll")
+        if(NOT EXISTS "${_cinter_webview2_loader}")
+            message(FATAL_ERROR "Pinned Microsoft WebView2Loader.dll missing from Setup SDK: ${_cinter_webview2_loader}; rerun Setup")
+        endif()
+        # Keep upstream's built-in SDK header integration; the official DLL,
+        # when present, is preferred by upstream's runtime loader.
     endif()
     # WebView embeds with this option OFF by default. MinGW needs its own
     # EventToken.h compatibility header when compiling Microsoft WebView2.h
@@ -117,6 +128,13 @@ if(CPH_BUILD_APPLICATION_SHELL)
         set_target_properties(cinter-terminal PROPERTIES WIN32_EXECUTABLE TRUE)
     endif()
     target_link_libraries(cinter-terminal PRIVATE CinterForgeApplicationShell)
+    if(WIN32)
+        # Both product and smoke PE targets use this same single-config Ninja
+        # output directory. Copy during configuration exactly once, avoiding
+        # competing parallel post-build copies to the same destination.
+        configure_file("${_cinter_webview2_loader}"
+            "${CMAKE_CURRENT_BINARY_DIR}/WebView2Loader.dll" COPYONLY)
+    endif()
     # One user-authored icon source for every platform. The PNG must be in
     # Terminal itself; never build by reaching into a sibling source checkout.
     set(_cinter_icon "${CMAKE_CURRENT_SOURCE_DIR}/app/build/resources/AppIcon.png")

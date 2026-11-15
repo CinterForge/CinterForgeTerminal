@@ -128,44 +128,32 @@ def provision(builds: Path) -> Path:
 # nondeterministic. Fetch and seal the exact upstream pin at Setup time instead.
 WEBVIEW2_VERSION = '1.0.1150.38'  # webview 0.12.0 cmake/webview.cmake
 WEBVIEW2_URL = f'https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/{WEBVIEW2_VERSION}'
-WEBVIEW2_SCHEMA = 'cinterforge.terminal.webview2-headers.v1'
+WEBVIEW2_SCHEMA = 'cinterforge.terminal.webview2-sdk.v2'
+WEBVIEW2_OLD_SCHEMA = 'cinterforge.terminal.webview2-headers.v1'
+WEBVIEW2_LOADER = 'build/native/x64/WebView2Loader.dll'
 
 
-def _webview2_files(root: Path) -> dict[str, str]:
+def _webview2_files(root: Path, *, legacy_headers_only: bool = False) -> dict[str, str]:
     included = root / 'build/native/include'
     if not (included / 'WebView2.h').is_file():
         raise RuntimeError('Upstream WebView2 SDK header WebView2.h missing')
+    loader = root / WEBVIEW2_LOADER
+    if not legacy_headers_only and (not loader.is_file() or loader.read_bytes()[:2] != b'MZ'):
+        raise RuntimeError('Official x64 WebView2Loader.dll missing from pinned SDK')
     files = {}
     for p in root.rglob('*'):
         if p.is_symlink():
-            raise RuntimeError(f'WebView2 headers include a symlink: {p}')
+            raise RuntimeError(f'WebView2 SDK contains a symlink: {p}')
         if p.is_file() and p.name != 'manifest.json':
-            files[p.relative_to(root).as_posix()] = _sha(p)
+            relative = p.relative_to(root).as_posix()
+            if legacy_headers_only and relative == WEBVIEW2_LOADER:
+                continue
+            files[relative] = _sha(p)
     return dict(sorted(files.items()))
 
 
-def provision_webview2(builds: Path) -> Path:
-    """Stage upstream WebView2 headers once, then verify every byte offline.
-
-    The upstream CMake FindMSWebView2 module consumes MSWebView2_ROOT pointing
-    at this folder. WebView2Loader.dll is not required by webview's default
-    built-in loader; the installed Windows WebView2 runtime remains required
-    to execute the native window.
-    """
-    builds = builds.resolve()
-    if builds.name != 'Builds' or not builds.is_dir():
-        raise ValueError('WebView2 headers must be staged within sibling Builds')
-    output = builds / 'Toolchains/WebView2' / WEBVIEW2_VERSION / 'source'
-    manifest = output / 'manifest.json'
-    if output.exists():
-        if not manifest.is_file():
-            raise RuntimeError(f'Incomplete WebView2 SDK stage: {output}')
-        data = json.loads(manifest.read_text(encoding='utf-8'))
-        if (data.get('schema') != WEBVIEW2_SCHEMA or
-                data.get('version') != WEBVIEW2_VERSION or
-                data.get('files') != _webview2_files(output)):
-            raise RuntimeError(f'WebView2 SDK stage changed: {output}')
-        return output
+def _webview2_archive(builds: Path) -> Path:
+    """Acquire only during Setup; check the pinned upstream NuGet identity."""
     cache = builds / 'Intermediates/CinterForgeTerminal/WebView2' / f'Microsoft.Web.WebView2.{WEBVIEW2_VERSION}.nupkg'
     cache.parent.mkdir(parents=True, exist_ok=True)
     if not cache.is_file():
@@ -175,34 +163,82 @@ def provision_webview2(builds: Path) -> Path:
             request = urllib.request.Request(WEBVIEW2_URL, headers={'User-Agent': 'CinterForgeTerminal/1.0'})
             with urllib.request.urlopen(request, timeout=90) as response, temporary.open('wb') as dest:
                 if response.status != 200:
-                    raise RuntimeError(f'WebView2 NuGet request returned HTTP {response.status}')
+                    raise RuntimeError('WebView2 NuGet request returned HTTP ' + str(response.status))
                 shutil.copyfileobj(response, dest)
             temporary.replace(cache)
         finally:
             temporary.unlink(missing_ok=True)
+    return cache
+
+
+def _extract_webview2(archive: Path, destination: Path, *, loader_only: bool = False) -> None:
+    """Copy only the sealed native headers and official 64-bit loader."""
+    with zipfile.ZipFile(archive) as package:
+        members = [m for m in package.infolist() if
+                   (not loader_only and m.filename.startswith('build/native/include/')) or
+                   m.filename == WEBVIEW2_LOADER]
+        if len(members) > 501 or sum(m.file_size for m in members) > 85 * 1024 * 1024:
+            raise RuntimeError('WebView2 SDK archive exceeds expected size')
+        if sum(m.filename == WEBVIEW2_LOADER for m in members) != 1:
+            raise RuntimeError('Pinned Microsoft WebView2Loader.dll missing from official NuGet')
+        for member in members:
+            parts = PurePosixPath(member.filename)
+            if (parts.is_absolute() or '..' in parts.parts or '\\' in member.filename or
+                    not (parts.parts[:3] == ('build', 'native', 'include') or
+                             member.filename == WEBVIEW2_LOADER)):
+                raise RuntimeError('Unsafe WebView2 SDK path: ' + member.filename)
+            if member.is_dir():
+                continue
+            mode = (member.external_attr >> 16) & 0o170000
+            if mode not in (0, 0o100000):
+                raise RuntimeError('Nonregular WebView2 SDK entry: ' + member.filename)
+            dest = destination.joinpath(*parts.parts)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with package.open(member) as source, dest.open('wb') as target:
+                shutil.copyfileobj(source, target)
+        loader = destination / WEBVIEW2_LOADER
+        if not loader.is_file() or loader.read_bytes()[:2] != b'MZ':
+            raise RuntimeError('Official WebView2Loader.dll is not a valid Windows PE')
+
+
+def provision_webview2(builds: Path) -> Path:
+    """Setup: seal SDK headers + official loader and migrate old header-only stages."""
+    builds = builds.resolve()
+    if builds.name != 'Builds' or not builds.is_dir():
+        raise ValueError('WebView2 SDK must be staged within sibling Builds')
+    output = builds / 'Toolchains/WebView2' / WEBVIEW2_VERSION / 'source'
+    manifest = output / 'manifest.json'
+    if output.exists():
+        if not manifest.is_file():
+            raise RuntimeError(f'Incomplete WebView2 SDK stage: {output}')
+        data = json.loads(manifest.read_text(encoding='utf-8'))
+        if data.get('version') != WEBVIEW2_VERSION or data.get('source') != WEBVIEW2_URL:
+            raise RuntimeError(f'WebView2 SDK stage changed: {output}')
+        if data.get('schema') == WEBVIEW2_SCHEMA:
+            if data.get('files') != _webview2_files(output):
+                raise RuntimeError(f'WebView2 SDK stage changed: {output}')
+            return output
+        # The previous Setup deliberately extracted headers only. Keep their
+        # verified bytes and recover the official loader from the SAME pinned
+        # archive, rather than re-downloading during Build or Stage.
+        if (data.get('schema') != WEBVIEW2_OLD_SCHEMA or
+                data.get('files') != _webview2_files(output, legacy_headers_only=True)):
+            raise RuntimeError(f'Legacy WebView2 SDK stage changed: {output}')
+        cache = _webview2_archive(builds)
+        if data.get('archive_sha256') != _sha(cache):
+            raise RuntimeError('WebView2 NuGet archive differs from the verified legacy stage')
+        _extract_webview2(cache, output, loader_only=True)
+        data['schema'] = WEBVIEW2_SCHEMA
+        data['files'] = _webview2_files(output)
+        manifest.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+        print('[WEBVIEW2 SETUP] Upgraded pinned SDK with official x64 WebView2Loader.dll', flush=True)
+        return output
+    cache = _webview2_archive(builds)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='WebView2-', dir=output.parent) as scratch:
         candidate = Path(scratch) / 'source'
         candidate.mkdir()
-        with zipfile.ZipFile(cache) as archive:
-            members = [m for m in archive.infolist() if m.filename.startswith('build/native/include/')]
-            if len(members) > 500 or sum(m.file_size for m in members) > 80 * 1024 * 1024:
-                raise RuntimeError('WebView2 SDK header archive exceeds expected size')
-            for member in members:
-                parts = PurePosixPath(member.filename)
-                if (parts.is_absolute() or '..' in parts.parts or '\\' in member.filename or
-                        not parts.parts[:3] == ('build', 'native', 'include')):
-                    raise RuntimeError(f'Unsafe WebView2 SDK path: {member.filename}')
-                if member.is_dir():
-                    continue
-                # NuGet header files must be regular entries, not symlinks.
-                mode = (member.external_attr >> 16) & 0o170000
-                if mode not in (0, 0o100000):
-                    raise RuntimeError(f'Nonregular WebView2 SDK entry: {member.filename}')
-                dest = candidate.joinpath(*parts.parts)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(member) as source, dest.open('wb') as target:
-                    shutil.copyfileobj(source, target)
+        _extract_webview2(cache, candidate)
         receipt = {'schema': WEBVIEW2_SCHEMA, 'version': WEBVIEW2_VERSION,
                    'source': WEBVIEW2_URL, 'archive_sha256': _sha(cache),
                    'files': _webview2_files(candidate)}

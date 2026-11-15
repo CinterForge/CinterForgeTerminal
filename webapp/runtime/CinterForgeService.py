@@ -78,14 +78,24 @@ def _watch_native_http_parent(server: _CinterForgeHTTP.CinterForgeHTTPServer, pa
         time.sleep(0.5)
     if _server is not server:
         return
-    server.log_event('Native HTTP owner exited; releasing managed listener')
+    server.log_event('Native HTTP owner exited; releasing managed listener and worker')
     try:
         server.stop()
-    except (OSError, RuntimeError) as error:
-        server.log_event('Native listener cleanup failed: ' + str(error))
+    except Exception as error:
+        # The native parent is gone; the worker must not survive just because
+        # an inherited stdin pipe is still open in another child process.
+        try:
+            server.log_event('Native listener cleanup failed: ' + str(error))
+        except (OSError, ValueError):
+            pass
     finally:
         if _server is server:
             _server = None
+        # This is our OWN orphaned worker, not an attached listener or another
+        # native owner's process. The independent native-PID watchdog owns VM
+        # cleanup, even when Xcode Stop makes C++ destructors impossible.
+        # No Python main-loop RPC can arrive from the dead native parent.
+        os._exit(0)
 
 
 def handle(method: str, params: dict) -> dict:

@@ -71,11 +71,24 @@ window.addEventListener('message', event => {
     if (message.action !== 'launch' || !CinterForgeState.launcherApps.has(message.app) ||
         CinterForgeState.activeTab?.kind !== 'launcher' || CinterForgeState.activeTab.backend !== message.platform) return;
     const tab = CinterForgeState.activeTab;
-    CinterForgeState.sendLauncherState(tab, {message: 'Starting ' + message.app + ' — checking the X11 window…'});
+    tab.launcherResult = {message: 'Starting ' + message.app + ' — checking the X11 window…'};
+    CinterForgeState.sendLauncherState(tab, tab.launcherResult);
     void CinterForgeState.api('/api/launcher/launch', {platform: tab.backend, app: message.app})
-      .then(result => CinterForgeState.sendLauncherState(tab, {message: result.message ||
-        (result.opened ? message.app + ' window visible' : message.app + ' did not open')}))
-      .catch(error => CinterForgeState.sendLauncherState(tab, {error: error.message}));
+      .then(result => {
+        if (tab.closed) return;
+        tab.launcherResult = {message: result.message ||
+          (result.opened ? message.app + ' window visible' : message.app + ' did not open')};
+        CinterForgeState.sendLauncherState(tab, tab.launcherResult);
+      })
+      .catch(error => {
+        if (tab.closed) return;
+        // Retain the actual launch error across tab switches; do not only
+        // record it in the Server log or discard an inactive iframe message.
+        tab.launcherResult = {error: error.message};
+        CinterForgeState.sendLauncherState(tab, tab.launcherResult);
+        if (CinterForgeState.activeTab === tab)
+          CinterForgeState.notice(tab.label + ': ' + error.message);
+      });
   });
 
 })();

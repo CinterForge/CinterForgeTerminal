@@ -63,6 +63,30 @@ extern char **environ;
     if (quitAction)
         quitAction();
 }
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
+{
+    // Cocoa's normal terminate: exits the process directly; that bypasses the
+    // PythonHost and VM cleanup after window.run(). Stop the WebView event loop
+    // instead, then allow runApplicationShell() to unwind its owned resources.
+    (void)sender;
+    std::cerr << "[CinterForgeTerminal] Native Quit requested; stopping WebView run loop for owned cleanup\n";
+    if (quitAction)
+        quitAction();
+    else
+        [NSApp stop:nil];
+    return NSTerminateCancel;
+}
+- (BOOL)respondsToSelector:(SEL)selector
+{
+    return [super respondsToSelector:selector] ||
+           (originalApplicationDelegate && [originalApplicationDelegate respondsToSelector:selector]);
+}
+- (id)forwardingTargetForSelector:(SEL)selector
+{
+    if (originalApplicationDelegate && [originalApplicationDelegate respondsToSelector:selector])
+        return originalApplicationDelegate;
+    return [super forwardingTargetForSelector:selector];
+}
 - (void)openDebugger:(id)sender
 {
     (void)sender;
@@ -245,8 +269,16 @@ namespace CinterForgePlatformMenus {
                 window.dispatch([&window, kind]
                                 { window.eval("window.CinterTerminalNewTab && window.CinterTerminalNewTab(\"" + CinterForgeApplicationPaths::jsonEscape(kind) + "\")"); });
             };
-            target->quitAction = []
-            { [NSApp terminate:nil]; };
+            // Stop NSApplication.run, do not call terminate: (which bypasses
+            // runApplicationShell's C++ destructor and process cleanup).
+            target->quitAction = [] { [NSApp stop:nil]; };
+            // webview/webview installs its own application delegate. Proxy its
+            // optional callbacks so Dock Quit, Cmd+Q and close-window requests
+            // all unwind through the same native shutdown path.
+            if ([NSApp delegate] != target) {
+                target->originalApplicationDelegate = [[NSApp delegate] retain];
+                [NSApp setDelegate:target];
+            }
             target->codeMenuAction = [&window](const std::string &action) {
                 window.dispatch([&window, action] {
                     window.eval("window.CinterMenuDispatch && window.CinterMenuDispatch(\"" +
@@ -303,8 +335,8 @@ namespace CinterForgePlatformMenus {
             [[appMenu itemAtIndex:3] setKeyEquivalentModifierMask:(NSEventModifierFlagCommand | NSEventModifierFlagOption)];
             [appMenu addItemWithTitle:@"Show All" action:@selector(unhideAllApplications:) keyEquivalent:@""];
             [appMenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *appQuit = [appMenu addItemWithTitle:@"Quit CinterForge Terminal" action:@selector(terminate:) keyEquivalent:@"q"];
-            [appQuit setTarget:NSApp];
+            NSMenuItem *appQuit = [appMenu addItemWithTitle:@"Quit CinterForge Terminal" action:@selector(quitTerminal:) keyEquivalent:@"q"];
+            [appQuit setTarget:target];
             [appItem setSubmenu:appMenu];
             [bar addItem:appItem];
 

@@ -374,6 +374,30 @@ HOST_ASSETS = (
 )
 
 
+def _authored_webapp_assets(repo: Path) -> tuple[str, ...]:
+    """Inventory all first-party browser/service resources used by guest apps.
+
+    The module split creates new runtime/client files without editing a fixed
+    allowlist. Match Host Stage's actual authored webapp closure so Build/Stage
+    cannot ship a stale service entry with missing sibling modules. Code-OSS
+    production remains independently owned by host/codeoss.
+    """
+    base = repo / 'webapp'
+    result = set(HOST_ASSETS)
+    for child in base.iterdir():
+        if child.is_file() and child.suffix.lower() in ('.py', '.js', '.css', '.html', '.json'):
+            result.add(child.name)
+    for folder in ('client', 'runtime', 'data', 'views', 'launcher', 'joshua'):
+        root = base / folder
+        for child in root.rglob('*'):
+            if child.is_file() and not _python_cache_member(child.relative_to(base)) and not child.name.startswith('._') and child.name != '.DS_Store':
+                result.add(child.relative_to(base).as_posix())
+    for name in result:
+        if not (base / name).is_file():
+            raise FileNotFoundError('Authored webapp resource missing: ' + name)
+    return tuple(sorted(result))
+
+
 def _files_under(source: Path, prefix: str, *, require: bool = True) -> dict[str, Path]:
     """Flatten only in-tree symlinks into regular release files.
 
@@ -635,6 +659,16 @@ def _app_assets(builds: Path, target: str, release: str) -> dict[str, Path | byt
                 b'MSYS2 startup directory only. Writable temp is redirected to '
                 b'the per-user OS runtime cache via TMPDIR.\n')
             # All recursive non-system DLLs were resolved by cross_build.
+            # Unlike the upstream built-in loader, Microsoft's official DLL
+            # honors WEBVIEW2_BROWSER_EXECUTABLE_FOLDER for our Fixed Runtime.
+            from host.lifecycle.webview import WEBVIEW2_VERSION
+            sdk_loader = (builds / 'Toolchains/WebView2' / WEBVIEW2_VERSION /
+                          'source/build/native/x64/WebView2Loader.dll')
+            binary_loader = binary.parent / 'WebView2Loader.dll'
+            if (not sdk_loader.is_file() or not binary_loader.is_file() or
+                    _hash(binary_loader) != _hash(sdk_loader)):
+                raise RuntimeError('Windows Build must copy the pinned Microsoft WebView2Loader.dll ' +
+                                   'next to CinterForge Terminal.exe; rerun Build after Setup')
             for dll in binary.parent.glob('*.dll'):
                 assets[prefix + '/' + dll.name] = dll
             from host.windows.windows_fixed_runtime import verify
@@ -679,12 +713,8 @@ exec "$HERE/CinterForge Terminal" --builds "$BUILDS" --python "$BUILDS/Python/En
         host_root = builds_prefix + f'/Python/Host/{target}/{arch}/{release}'
         repo = Path(__file__).resolve().parents[2]
         assets[host_root + '/python/worker.py'] = repo / 'host/worker.py'
-        for name in HOST_ASSETS:
+        for name in _authored_webapp_assets(repo):
             assets[host_root + '/webapp/' + name] = repo / 'webapp' / name
-        assets.update(_files_under(repo / 'webapp/joshua',
-                                   host_root + '/webapp/joshua'))
-        assets.update(_files_under(repo / 'webapp/launcher',
-                                   host_root + '/webapp/launcher'))
     if any('/Servers/Bedrock/' in k or k.endswith('/bedrock_server') or k.endswith('/bedrock_server.exe')
            for k in assets):
         raise RuntimeError('Bedrock server must never ship in Setup/Build/Stage')

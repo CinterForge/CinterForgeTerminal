@@ -361,6 +361,21 @@ def _launcher_launch(kind: str, app: str, server=None) -> dict:
     if app not in _LAUNCHER_APPS or kind not in ('mac', 'linux', 'win'):
         raise ValueError('Unknown CinterForge launcher application')
     staged = _launcher_staged_app(kind)
+    if kind == 'win':
+        # Windows WebView2 is an actual runtime dependency, not merely SDK
+        # headers. Check the staged official loader and Fixed Runtime before
+        # waiting for Wine/X11, so the user sees a useful immediate error.
+        required = (staged.parent / 'WebView2Loader.dll',
+                    staged.parent / 'Builds/CinterForgeTerminal/Dependencies/WebView2FixedRuntime/msedgewebview2.exe')
+        for path in required:
+            valid = path.is_file() and not path.is_symlink()
+            if valid:
+                with path.open('rb') as binary:
+                    valid = binary.read(2) == b'MZ'
+            if not valid:
+                raise RuntimeError('Staged Windows CinterForge Terminal is missing a valid ' +
+                                   path.name + '; rerun Setup, Build and Stage to restore ' +
+                                   'the pinned Microsoft WebView2 runtime')
     if kind == 'mac':
         # Launch/focus the real staged .app on the host, never in the WebView.
         if platform.system() != 'Darwin':

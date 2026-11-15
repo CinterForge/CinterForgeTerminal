@@ -16,7 +16,7 @@
 #include "webview/webview.h"
 #ifdef __APPLE__
 #import <Cocoa/Cocoa.h>
-@interface CinterForgeFileMenuTarget : NSObject
+@interface CinterForgeFileMenuTarget : NSObject <NSApplicationDelegate>
 {
 @public
     std::function<void(const std::string &)> newTerminalAction;
@@ -26,9 +26,13 @@
     std::function<void()> pasteAction;
     std::function<void(const std::string &)> codeMenuAction;
     NSMenuItem *minecraftItem;
+    // Keep webview/webview's original Cocoa delegate alive and forward all of
+    // its other optional callbacks: only native termination is intercepted.
+    id<NSApplicationDelegate> originalApplicationDelegate;
 }
 - (void)newTerminal:(id)sender;
 - (void)quitTerminal:(id)sender;
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender;
 - (void)openDebugger:(id)sender;
 - (void)copyTerminal:(id)sender;
 - (void)pasteTerminal:(id)sender;

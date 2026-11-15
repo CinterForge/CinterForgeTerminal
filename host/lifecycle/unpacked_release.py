@@ -143,6 +143,16 @@ def _snapshot_authored(builds: Path, target: str, name: str, value: Path | bytes
     prepared = builds / 'CinterForgeTerminal/Prepared/Authored' / target / name
     if prepared.is_symlink():
         raise RuntimeError('Unsafe Build authored snapshot: ' + str(prepared))
+    # Preserve unchanged source snapshots and their timestamps. Rewriting all
+    # authored inputs for one changed JS/Python file makes Stage think every
+    # managed file has changed on each Xcode Run.
+    if prepared.is_file():
+        target_mode = _up()._release_file_mode(name, value)
+        if (prepared.stat().st_mode & 0o777) == target_mode:
+            expected = (hashlib.sha256(value).hexdigest() if isinstance(value, bytes)
+                        else _sha(value))
+            if prepared.stat().st_size == (len(value) if isinstance(value, bytes) else value.stat().st_size) and _sha(prepared) == expected:
+                return prepared
     prepared.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix='Input-', dir=prepared.parent)
     try:

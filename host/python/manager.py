@@ -835,9 +835,11 @@ def stage_host(builds: Path) -> dict:
         # CinterForgeTerminal is a separately deployable, authenticated HTTP/PTy
         # application service. Never omit its JS, terminal bindings or EULA
         # manager from the immutable artifact consumed by product applications.
-        for name in ('CinterForgeTerminal.py', 'index.html',
-                     'CinterForgeTerminal.js', 'terminal.css', 'startup.js'):
-            shutil.copy2(repo / 'webapp' / name, candidate / 'webapp' / name)
+        # Ship every authored top-level browser/server entry automatically;
+        # new .py/.js/.html/.css modules must not require a second allowlist.
+        for source in (repo / 'webapp').iterdir():
+            if source.is_file() and source.suffix.lower() in ('.py', '.js', '.html', '.css', '.json'):
+                shutil.copy2(source, candidate / 'webapp' / source.name)
         for directory in ('data', 'views', 'client', 'runtime'):
             shutil.copytree(repo / 'webapp' / directory,
                             candidate / 'webapp' / directory,
