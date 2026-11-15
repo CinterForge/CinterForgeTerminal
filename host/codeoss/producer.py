@@ -175,6 +175,10 @@ def validate_codeoss_web(web: Path) -> None:
             missing_refs.append(value)
     if missing_refs:
         raise RuntimeError("Code - OSS static workbench references missing local resources: " + ", ".join(missing_refs[:20]))
+    # A cached Web product can pass the HTML audit while its built-in browser
+    # extension was pruned. Validate the on-disk entrypoints even on Setup's
+    # reuse path, not only when rebuilding Web in _stage_web().
+    _validate_required_browser_extensions(web)
 
 
 def codeoss_is_installed(repo_root: Path | None = None) -> bool:
@@ -941,7 +945,12 @@ def _build_web(source: Path) -> None:
 
 
 CODEOSS_NONPRODUCTION_EXTENSIONS = frozenset({"vscode-test-resolver", "copilot"})
-CODEOSS_REQUIRED_BROWSER_EXTENSIONS = ("github-authentication", "emmet", "merge-conflict")
+# These are activated by the pinned workbench scanner even though their manifest
+# categories do not all match our programming-language pruning heuristic. Never
+# discard their staged browser scripts: the worker would otherwise 404 at runtime.
+CODEOSS_REQUIRED_BROWSER_EXTENSIONS = (
+    "github-authentication", "emmet", "merge-conflict", "mermaid-markdown-features",
+)
 
 
 def _missing_packaged_browser_extensions(source: Path) -> list[tuple[str, str]]:

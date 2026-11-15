@@ -149,7 +149,7 @@ class CinterForgeHTTPRoutes:
                 self.send_header('Content-Security-Policy',
                     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
                     "img-src 'self' data:; connect-src 'self'; "
-                    "frame-src http://127.0.0.1:20601 http://127.0.0.1:20602; "
+                    "frame-src http://*:20301 http://*:20302; "
                     "object-src 'none'; base-uri 'none'; frame-ancestors 'self'")
                 self.end_headers()
                 self.wfile.write(body)
@@ -734,6 +734,10 @@ class CinterForgeHTTPRoutes:
                         self.server.mutable_builds, username, password)
                     # Force already logged-in browsers to use the new credentials.
                     self.server.lan_cookie = secrets.token_urlsafe(36)
+                # Existing anonymous WebSockets must not remain connected
+                # indefinitely after setpass enables browser authentication.
+                if self.server.sidecars is not None:
+                    self.server.sidecars.disconnect_clients()
                 self.server.log_event('LAN login updated through Terminal command')
                 self._json(200, {'updated': True})
                 return

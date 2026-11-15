@@ -388,6 +388,42 @@ def stage_four(builds: Path, *, release: str | None = None,
     return steam / 'common/CinterForge/Applications'
 
 
+def _check_stage_files(root: Path, files: dict[str, dict], target: str) -> str | None:
+    """Verify bytes if Stage's fast metadata receipt changed after installation.
+
+    Staged ctime can change without a single byte changing (e.g. filesystem
+    metadata/extended-attribute updates). Only use this slower content check
+    when a previously written Stage stat receipt does not match. Test remains
+    strictly read-only and must never repair an installation itself.
+
+    Return a precise first mismatch for the existing lifecycle Test failure.
+    """
+    for name, detail in sorted(files.items()):
+        _safe_name(name, target)
+        path = root / name
+        if path.is_symlink() or not path.is_file():
+            return f'missing or unsafe staged file: {path}'
+        # Do not trust a symlinked intermediate directory in the Steam tree.
+        ancestor = path.parent
+        while ancestor != root:
+            if ancestor.is_symlink():
+                return f'unsafe staged directory symlink: {ancestor}'
+            if ancestor == ancestor.parent:
+                return f'staged file outside release root: {path}'
+            ancestor = ancestor.parent
+        observed = path.stat()
+        if observed.st_size != detail['bytes']:
+            return (f'{name}: size {observed.st_size} != '
+                    f'Build {detail["bytes"]}')
+        if (observed.st_mode & 0o777) != detail['mode']:
+            return (f'{name}: permissions {oct(observed.st_mode & 0o777)} != '
+                    f'Build {oct(detail["mode"])}')
+        actual = _sha(path)
+        if actual != detail['sha256']:
+            return (f'{name}: SHA-256 {actual} != Build {detail["sha256"]}')
+    return None
+
+
 def status_four(builds: Path, *, release: str | None = None, steamapps: Path | None = None) -> dict:
     up = _up()
     release = release or up.HOST_RELEASE
@@ -404,16 +440,52 @@ def status_four(builds: Path, *, release: str | None = None, steamapps: Path | N
     for target in up.FOUR_TARGETS:
         info = record.get('targets', {}).get(target, {})
         root = up._steam_release_path(steam, target, release) if steam else None
-        try:
-            receipt = json.loads((root / 'stage-receipt.json').read_text()) if root else {}
-        except (OSError, ValueError, TypeError):
-            receipt = {}
-        correct = bool(info and root and receipt.get('build_fingerprint') == info.get('fingerprint')
-                       and receipt.get('installed_state') == _installed_state(root, info['files']))
+        reason = None
+        receipt = {}
+        if not info:
+            reason = 'missing unpacked Build inventory for ' + target
+        elif root is None:
+            reason = 'Steam library could not be resolved'
+        elif root.is_symlink():
+            reason = 'unsafe symlink at Steam Stage release root: ' + str(root)
+        else:
+            try:
+                receipt_path = root / 'stage-receipt.json'
+                if receipt_path.is_symlink():
+                    reason = 'unsafe symlink at Stage receipt: ' + str(receipt_path)
+                else:
+                    receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
+            except (OSError, ValueError, TypeError) as error:
+                reason = 'missing or invalid Stage receipt: ' + str(error)
+            if reason is None and (receipt.get('schema') != BUILT_SCHEMA or
+                                   receipt.get('release') != release or
+                                   receipt.get('target') != target):
+                reason = 'Stage receipt schema/release/target does not match Build'
+            if reason is None and receipt.get('build_fingerprint') != info['fingerprint']:
+                reason = 'Stage fingerprint does not match latest Build; rerun Stage'
+            if reason is None and not isinstance(receipt.get('installed_state'), str):
+                reason = 'Stage receipt has no installed file inventory'
+            if reason is None:
+                # Fast path: no hashing for stable Stage metadata (important for
+                # the multi-GiB DevTools closure). Content-check ONLY when
+                # metadata drifted, rather than fail on an unrelated ctime.
+                try:
+                    if receipt.get('installed_state') != _installed_state(root, info['files']):
+                        reason = _check_stage_files(root, info['files'], target)
+                except (OSError, ValueError, KeyError, RuntimeError) as error:
+                    reason = 'Stage file inspection failed: ' + str(error)
+        correct = reason is None
+        app_present = bool(correct and root is not None and
+                           (root / up.APP_ROOTS[target]).is_dir() and
+                           not (root / up.APP_ROOTS[target]).is_symlink())
+        if correct and not app_present:
+            correct = False
+            reason = 'staged application root is absent or unsafe'
         states[target] = {'build_present': bool(info), 'build_bytes': info.get('bytes'),
                           'steam_root': str(root) if root else None,
-                          'steam_receipt_matches': correct, 'steam_app_root_present': bool(
-                              correct and (root / up.APP_ROOTS[target]).is_dir()) if root else False}
+                          'steam_receipt_matches': correct,
+                          'steam_app_root_present': app_present,
+                          'steam_receipt_error': reason}
     return {'release': release,
             'distribution': str(builds / 'CinterForgeTerminal/Distribution'),
             'steam_destination': str(steam / 'common/CinterForge/Applications') if steam else None,

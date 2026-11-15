@@ -170,7 +170,29 @@ namespace cinterforge {
             std::cerr << "[CinterForgeTerminal] managed HTTP service ready: " << url << '\n';
             // One cross-platform webview/webview implementation; platform browser
             // engines are provided by the OS rather than bundled with the product.
+#ifdef _WIN32
+            std::cerr << "[CinterForgeTerminal] WebView2 constructor starting\n";
+#endif
             webview::webview window(true, nullptr); // Native Inspector is a Terminal command, not a build flag.
+#ifdef _WIN32
+            std::cerr << "[CinterForgeTerminal] WebView2 constructor returned\n";
+            auto *controller = static_cast<ICoreWebView2Controller *>(
+                webview_get_native_handle(static_cast<webview_t>(&window),
+                                          WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER));
+            if (!controller) {
+                std::cerr << "[CinterForgeTerminal] WebView2 controller FAILED: native handle unavailable\n";
+            } else {
+                ICoreWebView2 *browser = nullptr;
+                const HRESULT result = controller->get_CoreWebView2(&browser);
+                if (FAILED(result) || !browser) {
+                    std::cerr << "[CinterForgeTerminal] WebView2 controller FAILED: HRESULT="
+                              << static_cast<unsigned long>(result) << "\n";
+                } else {
+                    std::cerr << "[CinterForgeTerminal] WebView2 controller READY\n";
+                    browser->Release();
+                }
+            }
+#endif
 #ifdef __APPLE__
             // `inspectable` must be set before the page starts navigating, or the
             // app may never appear in Safari's Develop > Applications listing.
@@ -277,6 +299,8 @@ namespace cinterforge {
             std::atomic<bool> returned{false};
             std::atomic<bool> failed{false};
             std::atomic<bool> finished{false};
+            // Log native menu transitions, never identical browser heartbeat events.
+            std::atomic<int> lastLoggedCodeMenuMode{-1};
             window.bind("cinterNative", [&](const std::string &args) -> std::string
                         {
 #ifdef __APPLE__
@@ -291,14 +315,8 @@ namespace cinterforge {
             }
 #endif
 #ifdef __APPLE__
-            if (args.find("\"event\":\"code-menu-mode\"") != std::string::npos) {
-                const bool enabled = args.find("\"enabled\":true") != std::string::npos;
-                window.dispatch([enabled] {
-                    // Keep menu headings in place in both Code and Session.
-                    // Unsupported leaves are disabled by code-menu-model.
-                    (void)enabled;
-                });
-            }
+            // code-menu-mode has no Cocoa action: the real menu state is
+            // provided by code-menu-model. Do not queue a no-op UI dispatch.
             if (args.find("\"event\":\"code-menu-model\"") != std::string::npos) {
                 const std::string payload = args;
                 window.dispatch([payload] {
@@ -400,6 +418,9 @@ namespace cinterforge {
             }
 #endif
             const bool isReady = args.find("\"event\":\"ready\"") != std::string::npos;
+#ifdef _WIN32
+            if (isReady) std::cerr << "[CinterForgeTerminal] WebView2 page-ready JS callback received\n";
+#endif
             const bool isMuseum = args.find("\"event\":\"machine\"") != std::string::npos &&
                 args.find("\"id\":\"mac-plus\"") != std::string::npos &&
                 args.find("\"kind\":\"emulator\"") != std::string::npos;
@@ -410,8 +431,15 @@ namespace cinterforge {
             if (isMuseum) museum.store(true);
             if (isTerminal) returned.store(true);
             if (isError) failed.store(true);
+            const bool codeMenuMode = args.find("\"event\":\"code-menu-mode\"") != std::string::npos;
+            bool changedCodeMenuMode = true;
+            if (codeMenuMode) {
+                const int mode = args.find("\"enabled\":true") != std::string::npos ? 1 : 0;
+                changedCodeMenuMode = lastLoggedCodeMenuMode.exchange(mode) != mode;
+            }
             if (args.find("\"event\":\"code-menu-model\"") == std::string::npos &&
-                args.find("\"event\":\"lan-peers\"") == std::string::npos)
+                args.find("\"event\":\"lan-peers\"") == std::string::npos &&
+                (!codeMenuMode || changedCodeMenuMode))
                 std::cerr << "[CinterForgeTerminal] UI event: " << args << '\n';
             if (config.accept_ui && (isError || (ready.load() && museum.load() && returned.load())))
                 window.dispatch([&window] { window.terminate(); });
@@ -419,6 +447,10 @@ namespace cinterforge {
             // The acceptance flag is part of the real loopback page navigation.
             // Unlike WebView init scripts, URL parameters have consistent timing
             // on WKWebView, WebKitGTK and WebView2. It grants no host privileges.
+#ifdef _WIN32
+            // Never log native-bootstrap URLs: they include authentication grants.
+            std::cerr << "[CinterForgeTerminal] WebView2 navigation requested (URL redacted)\n";
+#endif
             window.navigate(config.accept_ui
                 ? navigationUrl + (navigationUrl.find('?') == std::string::npos ? "?" : "&") + "accept-ui=1"
                 : navigationUrl);

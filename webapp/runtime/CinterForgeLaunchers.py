@@ -65,7 +65,8 @@ _launcher_lock = threading.RLock()
 
 
 def _launcher_guest_env(kind: str) -> list[str]:
-    result = ['-e', 'DISPLAY=' + (':100' if kind == 'win' else ':99'),
+    result = ['-e', 'CINTER_GUEST_APP_HTTP=1',
+              '-e', 'DISPLAY=' + (':100' if kind == 'win' else ':99'),
               '-e', r'PS1=\u@\h \w \$ ']
     if kind == 'win':
         # Match the guest's existing MSYS2 Bash environment and prefix, not
@@ -228,11 +229,12 @@ fi
                 pass
             raise RuntimeError(str(error) + ('\nGuest display logs:\n' + details
                                              if details else '')) from error
-        port = _LAUNCHER_PORTS[kind]
-        # A forwarded Colima localhost port is not an Internet service.
-        # Its browser frame appears only after an explicit Launcher action.
-        return {'platform': kind, 'viewer_url':
-                f'http://127.0.0.1:{port}/vnc.html?autoconnect=true&resize=scale&show_dot=true'}
+        from runtime.CinterForgeWebSockets import VIEWER_HTTP_PORTS
+        # The browser supplies its own hostname (including LAN clients).
+        # Report backend readiness only; the browser must independently
+        # verify the actual RFB connection before displaying 'connected'.
+        return {'platform': kind, 'viewer_port': VIEWER_HTTP_PORTS[kind],
+                'vnc_backend_ready': True}
 
 
 def _launcher_start(kind: str, server=None) -> dict:
@@ -396,7 +398,7 @@ def _launcher_launch(kind: str, app: str, server=None) -> dict:
         window, error = _launcher_x11_window(docker, env, kind, name)
         if window:
             return {'opened': True, 'platform': kind, 'external': False,
-                    'window_id': window, 'message': 'CinterForge Terminal window already visible'}
+                    'window_id': window, 'message': 'CinterForge Terminal X11 window mapped; checking VNC viewer'}
         if error:
             raise RuntimeError(kind + ' guest display is unavailable: ' + error)
         guest_executable = '/host/mac' + str(staged)
@@ -425,8 +427,38 @@ def _launcher_launch(kind: str, app: str, server=None) -> dict:
         # when both are started in the one shared container.  The wrapper
         # records the ACTUAL native process exit, which docker exec -d cannot.
         ident = secrets.token_hex(6)
-        base = '/tmp/cinterforge-launch-' + kind + '-' + ident
-        logfile, statusfile = base + '.log', base + '.exit'
+        if kind == 'win':
+            from runtime import CinterForgeSessions as _CinterForgeSessions
+            if server is None:
+                raise RuntimeError('Windows guest launch requires its owning Terminal server for persistent logs')
+            runtime_logs = _CinterForgeSessions._runtime_logs_root(server.mutable_builds)
+            # Developer mode: Builds/Logs/CinterForgeTerminal/Runtime;
+            # installed mode: steamapps/common/CinterForge/Logs/CinterForgeTerminal.
+            logs_root = runtime_logs.parent if runtime_logs.name == 'Runtime' else runtime_logs
+            launch_logs = logs_root / 'Guests' / 'Launch'
+            for folder in (logs_root, launch_logs.parent, launch_logs):
+                if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
+                    raise RuntimeError('Unsafe guest launch log directory: ' + str(folder))
+            launch_logs.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime('%Y%m%d-%H%M%S') + '-' + ident
+            host_logfile = launch_logs / ('win-' + stamp + '.log')
+            host_statusfile = launch_logs / ('win-' + stamp + '.exit')
+            host_nativefile = launch_logs / ('win-' + stamp + '-native.log')
+            # The owned VM exposes the Mac filesystem at /host/mac; stream
+            # directly into persistent Logs while Wine/WebView2 are running.
+            logfile = '/host/mac' + str(host_logfile)
+            statusfile = '/host/mac' + str(host_statusfile)
+            native_windows_log = 'Z:' + ('/host/mac' + str(host_nativefile)).replace('/', '\\')
+            with host_logfile.open('x', encoding='utf-8') as stream:
+                stream.write('CinterForge Windows guest launch; native_log=' + str(host_nativefile) + '\n')
+            visible_log, visible_status = str(host_logfile), str(host_statusfile)
+        else:
+            # Preserve the proven Linux launch path; this fix only changes
+            # Windows evidence capture, not Linux's GUI or VNC startup.
+            base = '/tmp/cinterforge-launch-' + kind + '-' + ident
+            logfile, statusfile = base + '.log', base + '.exit'
+            native_windows_log = ''
+            visible_log, visible_status = logfile, statusfile
         win_path = 'Z:' + guest_executable.replace('/', '\\') if kind == 'win' else ''
         script = r"""set -u
 platform=$1
@@ -434,18 +466,43 @@ launcher=$2
 windows_path=$3
 log=$4
 status=$5
+native_windows_log=$6
+export CINTER_GUEST_APP_HTTP=1
+if [ "$platform" = win ]; then
+  export CINTER_WINDOWS_NATIVE_LOG="$native_windows_log"
+fi
 (
   cd "$(dirname "$launcher")" || exit 126
   printf '[CinterForge Terminal %s] DISPLAY=%s launcher=%s\n' "$platform" "$DISPLAY" "$launcher"
   if [ "$platform" = linux ]; then
     /bin/sh "$launcher"
   else
+    # WineHQ bug 58921: the WebView2 Chromium process attempts unsupported
+    # DirectComposition when it reports Windows 8.1+.  Change ONLY the
+    # msedgewebview2.exe Wine application override, in the same WINEPREFIX
+    # used by the staged Windows launcher.  Never change the global version,
+    # install graphics packages here, or affect native Windows builds.
+    webview_key='HKEY_CURRENT_USER\Software\Wine\AppDefaults\msedgewebview2.exe'
+    if ! wine reg add "$webview_key" /v Version /t REG_SZ /d win8 /f; then
+      printf '[CinterForge Terminal win] FAIL setting Wine WebView2 Windows 8 override (prefix=%s)\n' "$WINEPREFIX" >&2
+      exit 81
+    fi
+    # Leave unambiguous evidence in the persistent Windows guest launch log.
+    webview_override=$(wine reg query "$webview_key" /v Version) || exit 81
+    if ! printf '%s\n' "$webview_override" | grep -Eqi 'REG_SZ[[:space:]]+win8([[:space:]]|$)'; then
+      printf '[CinterForge Terminal win] FAIL verifying Wine WebView2 override: %s\n' "$webview_override" >&2
+      exit 81
+    fi
+    printf '[CinterForge Terminal win] Wine WebView2 override verified: msedgewebview2.exe=win8 (prefix=%s)\n' "$WINEPREFIX"
     # Use the genuine packaged .cmd: it resolves the Windows Python runtime,
     # worker, WebView2 fixed browser and required resource paths.
     wine cmd.exe /c "$windows_path"
   fi
 ) >"$log" 2>&1
 rc=$?
+if [ "$platform" = win ]; then
+  printf '[CinterForge Terminal %s] Wine launcher returned; status=%s\n' "$platform" "$rc" >>"$log"
+fi
 printf '%s\n' "$rc" >"$status.tmp"
 mv -f "$status.tmp" "$status"
 exit "$rc"
@@ -453,11 +510,12 @@ exit "$rc"
         if server is not None:
             server.log_event('Staged ' + kind + ' GUI launching on DISPLAY=' +
                              (':99' if kind == 'linux' else ':100') +
-                             ' in managed container ' + name + '; guest log=' + logfile)
+                             ' in managed container ' + name + '; guest log=' + visible_log +
+                             ('; native WebView2 log=' + str(host_nativefile) if kind == 'win' else ''))
         launched = _CinterForgeContainers._docker_call(docker, env, 'exec', '-d', *_launcher_guest_env(kind),
                                 name, '/bin/sh', '-c', script, 'cinterforge-launch',
                                 kind, guest_executable, win_path, logfile, statusfile,
-                                timeout=45)
+                                native_windows_log, timeout=45)
         if launched.returncode:
             raise RuntimeError('Could not execute staged ' + kind + ' CinterForge Terminal: ' +
                                (launched.stderr or launched.stdout or '').strip()[-400:])
@@ -472,15 +530,15 @@ exit "$rc"
             window, error = _launcher_x11_window(docker, env, kind, name, statusfile)
             if window:
                 if server is not None:
-                    server.log_event('Staged ' + kind + ' GUI window VISIBLE on X11: ' + window)
+                    server.log_event('Staged ' + kind + ' GUI window MAPPED on X11 (browser viewer not yet confirmed): ' + window + '; guest diagnostics=' + visible_log + '; exit receipt=' + visible_status)
                 return {'opened': True, 'platform': kind, 'external': False,
-                        'window_id': window, 'message': 'CinterForge Terminal window visible'}
+                        'window_id': window, 'message': 'CinterForge Terminal X11 window mapped; checking VNC viewer'}
             if error:
                 last_error = error
                 if error.startswith('Process exited with status ') or error.startswith('X11 inspection:'):
                     break
             if server is not None and time.monotonic() - last_heartbeat >= 10:
-                server.log_event('Waiting for staged ' + kind + ' X11 window; guest log=' + logfile)
+                server.log_event('Waiting for staged ' + kind + ' X11 window; guest log=' + visible_log)
                 last_heartbeat = time.monotonic()
             time.sleep(0.6)
         details = _launcher_guest_diagnostics(docker, env, name, logfile, statusfile)

@@ -52,11 +52,24 @@ window.addEventListener('message', event => {
   }
   if (platform !== 'mac' && event.data.viewer_url) {
     const target = new URL(event.data.viewer_url);
-    // The VNC bridge is forwarded by the owned Colima guest to loopback only.
-    if (target.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(target.hostname) ||
-        !['20601', '20602'].includes(target.port)) return;
+    // The viewer is an HTTP page on the SAME hostname, but a distinct
+    // port. Its RFB client connects over WS 20304/20305.
+    if (target.protocol !== 'http:' || target.hostname !== location.hostname ||
+        target.port !== (platform === 'linux' ? '20301' : '20302')) return;
     if (viewer.src !== target.href) viewer.src = target.href;
     surface.hidden = false;
   }
   if (event.data.message) showToast(event.data.message);
+});
+
+// Do not claim an X11 window is user-visible until the iframe's actual noVNC
+// RFB client has completed its connection to the corresponding guest display.
+window.addEventListener('message', event => {
+  const port = platform === 'linux' ? '20301' : '20302';
+  if (platform === 'mac' || event.source !== viewer.contentWindow ||
+      event.origin !== `http://${location.hostname}:${port}` ||
+      event.data?.type !== 'cinter-vnc-state' || event.data?.platform !== platform) return;
+  showToast(event.data.message, event.data.phase !== 'connected');
+  window.parent.postMessage({type:'cinter-launcher-viewer', platform,
+    phase:event.data.phase, message:event.data.message}, location.origin);
 });

@@ -47,9 +47,16 @@ CinterForgeState.openLauncherTab = async function openLauncherTab(kind) {
     try {
       const result = await CinterForgeState.api('/api/launcher/start', {platform: kind});
       if (tab.closed) return tab;
-      tab.launcherResult = result;
-      CinterForgeState.sendLauncherState(tab, result);
-      if (CinterForgeState.activeTab === tab) CinterForgeState.notice(tab.label + ' ready');
+      tab.launcherResult = {...result};
+      if (kind !== 'mac') {
+        const expected = kind === 'linux' ? '20301' : '20302';
+        if (String(result.viewer_port) !== expected) throw new Error('Unexpected guest viewer port');
+        const viewer = new URL(location.href);
+        viewer.port = expected; viewer.pathname = '/'; viewer.search = ''; viewer.hash = '';
+        tab.launcherResult.viewer_url = viewer.href;
+      }
+      CinterForgeState.sendLauncherState(tab, tab.launcherResult);
+      if (CinterForgeState.activeTab === tab) CinterForgeState.notice(tab.label + ' VNC backend ready; connecting viewer…');
     } catch (error) {
       if (tab.closed) return tab;
       tab.launcherResult = {error: error.message};
@@ -63,7 +70,13 @@ CinterForgeState.openLauncherTab = async function openLauncherTab(kind) {
 window.addEventListener('message', event => {
     const message = event.data;
     if (event.origin !== location.origin || event.source !== CinterForgeState.frame.contentWindow ||
-        message?.type !== 'cinter-launcher') return;
+        !['cinter-launcher', 'cinter-launcher-viewer'].includes(message?.type)) return;
+    if (message.type === 'cinter-launcher-viewer' &&
+        CinterForgeState.activeTab?.backend === message.platform) {
+      CinterForgeState.activeTab.viewerConnected = message.phase === 'connected';
+      CinterForgeState.notice(message.message);
+      return;
+    }
     if (message.action === 'open' && Object.hasOwn(CinterForgeState.launcherKinds, message.platform)) {
       void CinterForgeState.openLauncherTab(message.platform);
       return;
@@ -71,20 +84,20 @@ window.addEventListener('message', event => {
     if (message.action !== 'launch' || !CinterForgeState.launcherApps.has(message.app) ||
         CinterForgeState.activeTab?.kind !== 'launcher' || CinterForgeState.activeTab.backend !== message.platform) return;
     const tab = CinterForgeState.activeTab;
-    tab.launcherResult = {message: 'Starting ' + message.app + ' — checking the X11 window…'};
+    tab.launcherResult = {...tab.launcherResult, error: null, message: 'Starting ' + message.app + ' — checking the X11 window…'};
     CinterForgeState.sendLauncherState(tab, tab.launcherResult);
     void CinterForgeState.api('/api/launcher/launch', {platform: tab.backend, app: message.app})
       .then(result => {
         if (tab.closed) return;
-        tab.launcherResult = {message: result.message ||
-          (result.opened ? message.app + ' window visible' : message.app + ' did not open')};
+        tab.launcherResult = {...tab.launcherResult, error: null, message: result.message ||
+          (result.opened ? message.app + ' X11 window mapped' : message.app + ' did not open')};
         CinterForgeState.sendLauncherState(tab, tab.launcherResult);
       })
       .catch(error => {
         if (tab.closed) return;
         // Retain the actual launch error across tab switches; do not only
         // record it in the Server log or discard an inactive iframe message.
-        tab.launcherResult = {error: error.message};
+        tab.launcherResult = {...tab.launcherResult, error: error.message};
         CinterForgeState.sendLauncherState(tab, tab.launcherResult);
         if (CinterForgeState.activeTab === tab)
           CinterForgeState.notice(tab.label + ': ' + error.message);

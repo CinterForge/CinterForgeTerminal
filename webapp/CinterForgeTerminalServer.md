@@ -97,7 +97,9 @@ connections must still be observed before claiming recovery.
 ```mermaid
 flowchart TB
     NATIVE["Native C++ PythonHost"] <-->|"JSON-lines worker RPC"| HANDLER["handle() start / stop / health"]
-    HANDLER --> HTTP["CinterForgeHTTPServer / CinterForgeHTTPRequestHandler\nHTTP :20300"]
+    HANDLER --> HTTP["CinterForgeHTTPServer / CinterForgeHTTPRequestHandler\nTerminal HTTP :20300"]
+    HANDLER --> VIEWS["Linux/Windows desktop HTTP\n20301/20302"]
+    HANDLER --> WS["PTY/Linux RFB/Windows RFB sockets\n20303/20304/20305"]
     BROWSER["CinterForgeTerminal.js / Code-OSS / Launcher"] <-->|"token-authenticated HTTP"| HTTP
     HTTP --> SESSIONS["TerminalSession\nPTY / ConPTY"]
     HTTP --> CODE["CodeWorkspace / shell bridge"]
@@ -188,3 +190,19 @@ For a failure, follow the first broken boundary in the existing Server Log: **na
 - `webapp/runtime/CinterForgeVMOperations.py` — independent app-owned Python component; callers use explicit module methods
 `webapp/CinterForgeTerminal.py` remains the 37-line PythonHost/CLI entry. No lifecycle code is imported.
 **Runtime connection status:** live Bash/VNC still requires macOS acceptance; the refactor is not a boot fix.
+
+## Browser network ports
+
+The application-owned HTTP/API listener is **20300**. A Linux VNC webpage is
+served on **20301**, a Windows VNC webpage on **20302**. The interactive
+Terminal PTY WebSocket is **20303**, the Linux VNC WebSocket **20304**, and the
+Windows VNC WebSocket **20305**. All six are reachable on the hosting LAN IP
+while the Terminal owns the services. There is no extra VM or container.
+The existing Docker localhost-forwarded noVNC endpoints (20601/20602) remain
+internal transport backends and are not browser addresses. Actual native
+Linux/Windows guest application HTTP servers use individually assigned guest
+loopback ports to avoid stealing the parent Terminal's 20300 listener.
+
+A mapped guest X11 window is not by itself a successful browser display.
+The page reports connection only after noVNC has established its RFB session.
+Closing the native owner closes the two HTTP viewers and three WebSockets.

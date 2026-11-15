@@ -1,0 +1,9 @@
+<!doctype html>
+<!-- Actual guest framebuffer, provided by the existing pinned noVNC RFB client. -->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CinterForge __PLATFORM__ desktop</title>
+<style>html,body,#desktop{margin:0;width:100%;height:100%;overflow:hidden;background:#17191c;color:#ddd}
+#desktop{position:absolute;inset:0}#state{position:absolute;top:10px;left:10px;padding:8px 12px;
+background:#17191cee;color:#f3f3f3;font:14px system-ui;z-index:2;pointer-events:none}</style></head>
+<body data-platform="__PLATFORM__" data-ws-port="__WS_PORT__"><div id="desktop"></div><div id="state" role="status">Connecting to __PLATFORM__ VNC…</div>
+<script type="module" src="/desktop.js"></script></body></html>

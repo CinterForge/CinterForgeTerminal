@@ -61,9 +61,17 @@ The default Code-OSS terminal layout on macOS is **Mac Bash + Server Log**, plus
 
 ## LAN remote development and Discord
 
-One Terminal-owned Python HTTP server serves the existing full UI and its
-PTY/ConPTY/Host RPC on private LAN port **20300**, with session login before
-remote content or APIs are served. Its local native WebView uses loopback and
+One Terminal-owned Python HTTP server serves the Terminal UI and APIs
+on **20300**. The same runtime owner serves the Linux desktop webpage on
+**20301** and the Windows desktop webpage on **20302**. The browser connects
+using three dedicated WebSockets: **20303** for Terminal PTYs, **20304** for
+Linux VNC, and **20305** for Windows VNC. HTTP pages and WebSocket listeners
+bind to publicly accessible interfaces, retaining the existing optional
+`setpass` login. Guest noVNC bridges retain the existing Docker-internal
+6080/6081 and host-forwarded 20601/20602 paths, without adding any VMs or
+containers. Staged Linux and Windows GUI app processes use distinct, dynamically
+assigned guest-local HTTP ports, not the parent service's 20300.
+Its local native WebView uses loopback and
 the existing per-process token; remote browsers have an additional session
 cookie and the same per-origin API token. There is no separate remote-only UI,
 backend, proxy, or fake shell.

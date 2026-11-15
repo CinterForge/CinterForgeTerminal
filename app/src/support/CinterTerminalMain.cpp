@@ -46,6 +46,55 @@
 #include <cstdlib>
 #endif
 
+#ifdef _WIN32
+namespace {
+    // A Windows-subsystem GUI executable does not reliably inherit cmd.exe's
+    // stderr/stdout handles. Record native WebView2 diagnostics independently
+    // under the host-owned guest Logs mount selected by the launcher.
+    class WindowsGuestLogBuffer final : public std::streambuf {
+    public:
+        explicit WindowsGuestLogBuffer(const std::filesystem::path &path)
+            : stream_(path, std::ios::binary | std::ios::app) {}
+        bool ready() const { return stream_.is_open(); }
+    protected:
+        int_type overflow(int_type ch) override {
+            if (traits_type::eq_int_type(ch, traits_type::eof())) return traits_type::not_eof(ch);
+            std::lock_guard<std::mutex> lock(mutex_);
+            stream_.put(traits_type::to_char_type(ch));
+            stream_.flush();
+            return ch;
+        }
+        std::streamsize xsputn(const char *data, std::streamsize n) override {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stream_.write(data, n);
+            stream_.flush();
+            return n;
+        }
+        int sync() override {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stream_.flush();
+            return stream_ ? 0 : -1;
+        }
+    private:
+        std::mutex mutex_;
+        std::ofstream stream_;
+    };
+
+    void beginWindowsGuestLogging() {
+        const char *name = std::getenv("CINTER_WINDOWS_NATIVE_LOG");
+        if (!name || !*name) return;
+        // Never derive/create Logs from a downloaded Windows app by default.
+        // The Mac-owned guest launcher explicitly supplies this persistent path.
+        static auto *buffer = new WindowsGuestLogBuffer(std::filesystem::path(name));
+        if (!buffer->ready())
+            throw std::runtime_error(std::string("Cannot open managed Windows native log: ") + name);
+        std::cerr.rdbuf(buffer);
+        std::cout.rdbuf(buffer);
+        std::cerr << "[CinterForgeTerminal] Windows native guest log opened\n";
+    }
+}
+#endif
+
 #ifdef __APPLE__
 namespace
 {
@@ -139,6 +188,11 @@ namespace
             (fs::exists(folder) && !fs::is_directory(folder)))
             throw std::runtime_error("Unsafe native log folder: " + folder.string());
         fs::create_directories(folder);
+        const fs::path runtimeFolder = root / "Runtime";
+        if (fs::is_symlink(runtimeFolder) ||
+            (fs::exists(runtimeFolder) && !fs::is_directory(runtimeFolder)))
+            throw std::runtime_error("Unsafe Python worker log folder: " + runtimeFolder.string());
+        fs::create_directories(runtimeFolder);
         const std::time_t now = std::time(nullptr);
         std::string stamp = std::to_string(static_cast<long long>(now));
         const fs::path logfile = folder / ("launch-" + stamp + "-" +
@@ -152,6 +206,11 @@ namespace
         std::cerr.rdbuf(errors);
         std::cout.rdbuf(output);
         std::cerr << "[CinterForgeTerminal] Native launch log: " << logfile << '\n';
+        const fs::path workerLog = runtimeFolder / ("python-worker-" + stamp + "-" +
+                                       std::to_string(static_cast<long long>(getpid())) + ".log");
+        if (setenv("CINTER_PYTHON_WORKER_STDERR_LOG", workerLog.string().c_str(), 1))
+            throw std::runtime_error("Cannot configure Python worker diagnostics");
+        std::cerr << "[CinterForgeTerminal] Python worker stderr log: " << workerLog << '\n';
     }
 
     void useIfUnset(const char *name, const std::string &value)
@@ -447,6 +506,9 @@ int main(int argc, char **argv)
         beginNativeLogging(cfg);
 #elif defined(_WIN32) || defined(__linux__)
         fillPackagedDefaults(cfg);
+#ifdef _WIN32
+        beginWindowsGuestLogging();
+#endif
 #endif
         return cinterforge::runApplicationShell(cfg);
     }

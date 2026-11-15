@@ -75,6 +75,7 @@ class CinterForgeHTTPServer(ThreadingHTTPServer):
         self.lan = lan
         self.lan_id = uuid.uuid4().hex
         self.discovery = None
+        self.sidecars = None  # Same owner; HTTP viewer ports + browser WS ports.
         self.builds = builds
         self.mutable_builds = _CinterForgeSessions._terminal_mutable_root(builds)
         self.system = _CinterForgeSessions.target_platform()
@@ -197,6 +198,10 @@ class CinterForgeHTTPServer(ThreadingHTTPServer):
         # independent watchdog both need it to release the Colima lock before
         # attempting their own owned-VM shutdown.
         _CinterForgeService._guest_boot_cancel.set()
+        # Stop every owned browser listener, including VNC and PTY sockets.
+        if self.sidecars is not None:
+            self.sidecars.stop()
+            self.sidecars = None
         # Release the listener FIRST. Slow PTY/Bedrock cleanup must not hold
         # 20300 after a native Quit, Xcode Stop, or an authenticated recovery.
         try:

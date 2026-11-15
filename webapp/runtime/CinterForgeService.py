@@ -115,14 +115,15 @@ def handle(method: str, params: dict) -> dict:
             raise ValueError('Shell resources must be staged inside the shared Builds directory')
         # Opening a second native window should reuse the running local Host,
         # rather than trying to bind a second listener to the reserved port.
-        existing = _CinterForgeAuthentication._existing_lan_owner(builds)
+        guest_http = os.environ.get('CINTER_GUEST_APP_HTTP') == '1'
+        existing = None if guest_http else _CinterForgeAuthentication._existing_lan_owner(builds)
         if existing is not None:
             return {'url': f'http://127.0.0.1:{_CinterForgeAuthentication.LAN_HTTP_PORT}/',
                     'native_grant': existing['native_grant'], 'attached': True}
         try:
-            _server = _CinterForgeHTTP.CinterForgeHTTPServer(builds, lan=True)
+            _server = _CinterForgeHTTP.CinterForgeHTTPServer(builds, lan=not guest_http)
         except OSError as error:
-            if getattr(error, 'errno', None) not in (48, 98, 10048):
+            if guest_http or getattr(error, 'errno', None) not in (48, 98, 10048):
                 raise
             # On abrupt native/Xcode exit a previous worker can survive past
             # the old four-second grace period. Ask only an authenticated,
@@ -138,7 +139,7 @@ def handle(method: str, params: dict) -> dict:
                     return {'url': f'http://127.0.0.1:{_CinterForgeAuthentication.LAN_HTTP_PORT}/',
                             'native_grant': existing['native_grant'], 'attached': True}
                 try:
-                    _server = _CinterForgeHTTP.CinterForgeHTTPServer(builds, lan=True)
+                    _server = _CinterForgeHTTP.CinterForgeHTTPServer(builds, lan=not guest_http)
                     break
                 except OSError as again:
                     if getattr(again, 'errno', None) not in (48, 98, 10048):
@@ -166,7 +167,11 @@ def handle(method: str, params: dict) -> dict:
                     os.environ['CINTER_STEAMAPPS'] = str(steam)
                     os.environ['CINTER_TERMINAL_RUNTIME_MODE'] = 'installed'
             os.environ['CINTER_CODE_WORKSPACE'] = str(Path(_server.code_workspace.details()['cwd']))
-            _CinterForgeAuthentication._write_lan_owner(_server)
+            if not guest_http:
+                from runtime.CinterForgeWebSockets import CinterForgeSidecarPorts
+                _server.sidecars = CinterForgeSidecarPorts(_server)
+                _server.sidecars.start()
+                _CinterForgeAuthentication._write_lan_owner(_server)
             _server_thread = threading.Thread(target=_server.serve_forever, name='cinter-http', daemon=True)
             _server_thread.start()
             threading.Thread(target=_watch_native_http_parent,

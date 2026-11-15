@@ -104,7 +104,9 @@ CinterForgeState.activateTab = async function activateTab(tab) {
       } else if (tab.launcherResult) {
         CinterForgeState.sendLauncherState(tab, tab.launcherResult);
       }
-      CinterForgeState.notice(tab.launcherResult ? tab.label + ' ready' : 'Opening ' + tab.label + '…');
+      CinterForgeState.notice(tab.launcherResult?.error ? tab.label + ': ' + tab.launcherResult.error :
+        tab.viewerConnected ? tab.label + ' VNC connected' :
+        tab.launcherResult ? tab.label + ' viewer connecting…' : 'Opening ' + tab.label + '…');
       CinterForgeState.renderTabs();
       return;
     }
@@ -155,7 +157,7 @@ CinterForgeState.activateTab = async function activateTab(tab) {
       CinterForgeState.focusTerminal();
       if (tab.session) {
         const size = CinterForgeState.terminalSize();
-        void CinterForgeState.api('/api/terminal/resize', { id: tab.session.id, ...size }).catch(e => CinterForgeState.notice(e.message));
+        CinterForgeState.terminalSocketCommand(tab, {type:'resize', ...size});
       }
     } else {
       await CinterForgeState.showComputer(profile);
@@ -205,6 +207,7 @@ CinterForgeState.closeTab = async function closeTab(tab) {
     } else CinterForgeState.renderTabs();
     CinterForgeState.saveTerminalLayout();
     if (closingSession) try {
+      CinterForgeState.closeTerminalSocket(tab);
       await CinterForgeState.api('/api/terminal/close', { id: closingSession.id });
     }
       catch (_) {/* already closed */ }

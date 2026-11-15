@@ -38,36 +38,85 @@ CinterForgeState.terminalSize = () => {
   };
 
   // Original source lines 1797–1827
-CinterForgeState.pollTab = async function pollTab(tab) {
+CinterForgeState.closeTerminalSocket = function closeTerminalSocket(tab) {
+    const connection = tab.sessionSocket;
+    tab.sessionSocket = null;
+    tab.sessionSocketReady = false;
+    tab.pendingTerminalFrames = [];
+    if (connection) connection.close();
+  };
+
+  // 20300 remains HTTP/API for create and close. 20303 exclusively carries
+  // normal live PTY input, output and window resize commands.
+  CinterForgeState.terminalSocketCommand = function terminalSocketCommand(tab, command) {
+    if (!tab?.session?.id) return false;
+    if (tab.sessionSocketReady && tab.sessionSocket?.readyState === WebSocket.OPEN) {
+      tab.sessionSocket.send(JSON.stringify(command));
+    } else {
+      const pending = tab.pendingTerminalFrames || (tab.pendingTerminalFrames = []);
+      if (pending.length >= 256) {
+        if (CinterForgeState.activeTab === tab) CinterForgeState.notice('Terminal transport is not connected; input queue full');
+        return false;
+      }
+      pending.push(command);
+    }
+    return true;
+  };
+
+  CinterForgeState.pollTab = function pollTab(tab) {
     const id = tab.session?.id;
-    while (id && !tab.closed && tab.session?.id === id) {
-      try {
-        const result = await CinterForgeState.api('/api/terminal/poll', { id, wait_ms: 300 });
-        if (tab.closed || tab.session?.id !== id) return;
-        if (result.output) {
-          const bytes = CinterForgeState.decode(result.output);
-          tab.display.push(bytes);
-        }
-        if (result.bedrock_eula_requested && CinterForgeState.activeTab === tab) CinterForgeState.requestLicense();
-        if (result.closed) {
-          // Release the host-side PTY slot after shutdown, while preserving
-          // this tab's transcript for the player to inspect.
-          if (tab.kind === 'bedrock') void CinterForgeState.api('/api/terminal/close', { id }).catch(() => { });
+    if (!id || tab.closed) return;
+    if (tab.sessionSocket) CinterForgeState.closeTerminalSocket(tab);
+    const socket = new WebSocket(`ws://${location.hostname}:20303/session`);
+    tab.sessionSocket = socket;
+    tab.sessionSocketReady = false;
+    tab.pendingTerminalFrames = tab.pendingTerminalFrames || [];
+    tab.terminalReconnects = tab.terminalReconnects || 0;
+    socket.addEventListener('open', () => {
+      if (tab.closed || tab.session?.id !== id || tab.sessionSocket !== socket) return socket.close();
+      socket.send(JSON.stringify({type:'attach', id, token:CinterForgeState.token}));
+    });
+    socket.addEventListener('message', event => {
+      if (tab.closed || tab.session?.id !== id || tab.sessionSocket !== socket) return;
+      let message;
+      try { message = JSON.parse(event.data); }
+      catch (_) { CinterForgeState.notice('Invalid terminal WebSocket message'); return; }
+      if (message.type === 'attached') {
+        tab.sessionSocketReady = true;
+        tab.terminalReconnects = 0;
+        for (const command of (tab.pendingTerminalFrames || []))
+          socket.send(JSON.stringify(command));
+        tab.pendingTerminalFrames = [];
+        if (CinterForgeState.activeTab === tab) CinterForgeState.notice('Terminal connected on 20303');
+      } else if (message.type === 'output') {
+        if (message.output) tab.display.push(CinterForgeState.decode(message.output));
+        if (message.bedrock_eula_requested && CinterForgeState.activeTab === tab) CinterForgeState.requestLicense();
+        if (message.closed) {
+          CinterForgeState.closeTerminalSocket(tab);
+          if (tab.kind === 'bedrock') void CinterForgeState.api('/api/terminal/close', {id}).catch(() => {});
           if (CinterForgeState.activeTab === tab) CinterForgeState.notice(tab.kind === 'bedrock' ? 'Bedrock server exited' : 'Shell exited');
           tab.session = null;
           if (CinterForgeState.activeTab === tab) CinterForgeState.session = null;
           CinterForgeState.renderTabs();
-          return;
         }
-      } catch (e) {
-        if (tab.closed || tab.session?.id !== id) return;
-        if (CinterForgeState.activeTab === tab) CinterForgeState.notice(e.message);
-        tab.session = null;
-        if (CinterForgeState.activeTab === tab) CinterForgeState.session = null;
-        CinterForgeState.renderTabs();
-        return;
+      } else if (message.error) {
+        if (CinterForgeState.activeTab === tab) CinterForgeState.notice(message.error);
+        CinterForgeState.closeTerminalSocket(tab);
       }
-    }
+    });
+    socket.addEventListener('close', () => {
+      if (tab.sessionSocket !== socket || tab.closed || tab.session?.id !== id) return;
+      tab.sessionSocket = null;
+      tab.sessionSocketReady = false;
+      if (tab.terminalReconnects++ < 3) {
+        setTimeout(() => {
+          if (!tab.closed && tab.session?.id === id && !tab.sessionSocket)
+            CinterForgeState.pollTab(tab);
+        }, 500 * tab.terminalReconnects);
+      } else if (CinterForgeState.activeTab === tab) {
+        CinterForgeState.notice('Terminal WebSocket 20303 disconnected; use Reconnect');
+      }
+    });
   };
 
   // Original source lines 1832–1952
@@ -263,6 +312,7 @@ CinterForgeState.reconnectTab = async function reconnectTab() {
       await CinterForgeState.showComputer(CinterForgeState.profiles.find(p => p.id === tab.profileId));
       return;
     }
+    CinterForgeState.closeTerminalSocket(tab);
     if (tab.session) try {
       await CinterForgeState.api('/api/terminal/close', { id: tab.session.id });
     } catch (_) {/* closed */ }
@@ -287,13 +337,10 @@ CinterForgeState.reconnectTab = async function reconnectTab() {
   };
 
   // Original source lines 2052–2059
-CinterForgeState.send = async function send(data) {
+CinterForgeState.send = function send(data) {
     if (CinterForgeState.activeTab?.kind === 'if' || CinterForgeState.activeTab?.kind === 'discord') return;
-    if (CinterForgeState.session) try {
-      await CinterForgeState.api('/api/terminal/input', { id: CinterForgeState.session.id, data });
-    } catch (e) {
-      CinterForgeState.notice(e.message);
-    }
+    const tab = CinterForgeState.activeTab;
+    if (tab?.session) CinterForgeState.terminalSocketCommand(tab, {type:'input', data});
   };
 
   // Original source lines 2064–2072

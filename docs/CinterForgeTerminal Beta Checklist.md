@@ -29,7 +29,7 @@
 - [X] Check Bash executable paths and argument construction.
 - [X] Confirm tab close/reopen/reconnect behavior using native WebView2/ConPTY.
 - [X] Real Linux App Launch In App.
-- [-] Real Win App Launch In App.
+- [X] Real Win App Launch In App.
 
 ## 2. Critical CodeOSS issues
 - [X] Cut is Broken - The whole Edit menu is messed up.  We are damaging the CodeOSS Edit menu

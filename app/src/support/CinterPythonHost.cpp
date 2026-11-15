@@ -22,6 +22,7 @@
 #include "CinterPythonHostC.h"
 
 #include <stdexcept>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -36,6 +37,7 @@
 #include <csignal>
 #include <cstring>
 #include <poll.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -47,6 +49,10 @@ namespace cinterforge
     struct PythonProcess::State
     {
         std::string pending;
+        // Keep the OS termination reason even after running() reaps a child.
+        // Native/Xcode logs must distinguish SIGKILL (e.g. memory pressure)
+        // from a Python exception, successful exit, or an IPC disconnect.
+        std::string last_exit;
 #ifdef _WIN32
         HANDLE process = nullptr;
         HANDLE input = nullptr;  // Parent-side write handle.
@@ -138,6 +144,7 @@ namespace cinterforge
         if (!state_)
             state_ = std::make_unique<State>();
         state_->pending.clear();
+        state_->last_exit.clear();
 #ifdef _WIN32
         SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
         HANDLE childStdin = nullptr, childStdout = nullptr;
@@ -155,7 +162,7 @@ namespace cinterforge
         startup.hStdInput = childStdin;
         startup.hStdOutput = childStdout;
         startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-        std::string command = quote_windows(interpreter) + " -B -u " + quote_windows(script);
+        std::string command = quote_windows(interpreter) + " -X faulthandler -B -u " + quote_windows(script);
         for (const auto &arg : arguments)
             command += " " + quote_windows(arg);
         std::vector<char> mutableCommand(command.begin(), command.end());
@@ -192,11 +199,28 @@ namespace cinterforge
         {
             dup2(toChild[0], STDIN_FILENO);
             dup2(fromChild[1], STDOUT_FILENO);
+#ifdef __APPLE__
+            // The native std::cerr tee does not redirect OS fd 2 inherited by
+            // fork/exec. Preserve Python fatal signals/tracebacks in the same
+            // developer-or-Steam Logs tree chosen by the native owner.
+            if (const char *log = std::getenv("CINTER_PYTHON_WORKER_STDERR_LOG")) {
+                if (*log) {
+                    const int fd = open(log, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0600);
+                    if (fd < 0)
+                        _exit(126);
+                    if (fd != STDERR_FILENO) {
+                        if (dup2(fd, STDERR_FILENO) < 0)
+                            _exit(126);
+                        close(fd);
+                    }
+                }
+            }
+#endif
             close(toChild[0]);
             close(toChild[1]);
             close(fromChild[0]);
             close(fromChild[1]);
-            std::vector<std::string> values{interpreter, "-B", "-u", script};
+            std::vector<std::string> values{interpreter, "-X", "faulthandler", "-B", "-u", script};
             values.insert(values.end(), arguments.begin(), arguments.end());
             std::vector<char *> argv;
             for (auto &value : values)
@@ -220,7 +244,14 @@ namespace cinterforge
 #ifdef _WIN32
         if (!state_->process)
             return false;
-        return WaitForSingleObject(state_->process, 0) == WAIT_TIMEOUT;
+        if (WaitForSingleObject(state_->process, 0) == WAIT_TIMEOUT)
+            return true;
+        DWORD status = 0;
+        if (GetExitCodeProcess(state_->process, &status))
+            state_->last_exit = "Windows worker exit code " + std::to_string(status);
+        else
+            state_->last_exit = "Windows worker terminated; exit code unavailable";
+        return false;
 #else
         if (state_->child <= 0)
             return false;
@@ -228,8 +259,26 @@ namespace cinterforge
         const pid_t result = waitpid(state_->child, &status, WNOHANG);
         if (result == 0)
             return true;
-        if (result == state_->child || (result < 0 && errno == ECHILD))
+        if (result == state_->child) {
+            const pid_t pid = state_->child;
             state_->child = -1;
+            if (WIFSIGNALED(status))
+                state_->last_exit = "worker PID " + std::to_string(pid) +
+                    " killed by signal " + std::to_string(WTERMSIG(status));
+            else if (WIFEXITED(status))
+                state_->last_exit = "worker PID " + std::to_string(pid) +
+                    " exited with status " + std::to_string(WEXITSTATUS(status));
+            else
+                state_->last_exit = "worker PID " + std::to_string(pid) +
+                    " ended with wait status " + std::to_string(status);
+        } else if (result < 0 && errno == ECHILD) {
+            state_->last_exit = "worker PID " + std::to_string(state_->child) +
+                " was reaped outside its owner";
+            state_->child = -1;
+        } else if (result < 0) {
+            state_->last_exit = "cannot inspect Python worker PID " +
+                std::to_string(state_->child) + ": " + std::strerror(errno);
+        }
         return false;
 #endif
     }
@@ -237,7 +286,9 @@ namespace cinterforge
     void PythonProcess::send(const std::string &jsonLine)
     {
         if (!state_ || !running())
-            throw std::runtime_error("Python worker is not running");
+            throw std::runtime_error("Python worker is not running" +
+                                     (state_ && !state_->last_exit.empty()
+                                          ? ": " + state_->last_exit : std::string()));
         if (jsonLine.find('\n') != std::string::npos || jsonLine.find('\r') != std::string::npos)
             throw std::invalid_argument("Protocol requires one JSON value per line");
         std::string data = jsonLine + "\n";
@@ -301,8 +352,15 @@ namespace cinterforge
                 throw std::runtime_error("Python poll failed");
             }
             const ssize_t received = read(state_->output, data, sizeof(data));
-            if (received <= 0)
-                throw std::runtime_error("Python stdout closed");
+            if (received <= 0) {
+                // The pipe closing is not necessarily a Python exception.
+                // Preserve the child's actual OS exit status in the native log.
+                const bool alive = running();
+                throw std::runtime_error("Python stdout closed" +
+                    (!state_->last_exit.empty() ? ": " + state_->last_exit :
+                     alive ? std::string(" while worker process remains alive") :
+                             std::string("; exit status unavailable")));
+            }
 #endif
             state_->pending.append(data, static_cast<size_t>(received));
             if (state_->pending.size() > 8 * 1024 * 1024)
