@@ -9,10 +9,31 @@ On the macOS orchestrator, Setup only provisions native and registered target
 runners. The separate Test phase executes actual smoke and seals bundles. A
 missing runner or failing native acceptance is a hard failure in its own phase.
 """
+# CINTERFORGE SOURCE HEADER — host/lifecycle/bootstrap_bundle.py
+# PURPOSE: Builds and verifies a self-contained Host+webapp runtime bundle without running Setup in Build or Stage.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _native: Handle native through this component's established interfaces.
+#   _sha: Handle sha through this component's established interfaces.
+#   _require_builds: Handle require builds through this component's established interfaces.
+#   _checked_tree: Handle checked tree through this component's established interfaces.
+#   _host_stage: Handle host stage through this component's established interfaces.
+#   _powershell: Handle powershell through this component's established interfaces.
+#   _portable_python: Handle portable python through this component's established interfaces.
+#   _load: Load load for this module.
+#   _smoke_http: Exercise the actual staged server in a child of its *portable* Python.
+#   _smoke_powershell: Handle smoke powershell through this component's established interfaces.
+#   ...and 23 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -139,15 +160,6 @@ def _portable_python(builds: Path, system: str, arch: str) -> Path:
     return root
 
 
-def _load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f'Unable to load staged service: {path}')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def _smoke_http(builds: Path, stage: Path, executable: Path) -> dict:
     """Exercise the actual staged server in a child of its *portable* Python.
 
@@ -157,9 +169,12 @@ def _smoke_http(builds: Path, stage: Path, executable: Path) -> dict:
     server_py = stage / 'webapp/CinterForgeTerminal.py'
     assets = stage / 'webapp'
     for name in ('CinterForgeTerminal.py', 'data/if_titles.json', 'data/mac_games.json', 'index.html',
-                 'terminal.js', 'terminal.css', 'data/terminal_styles.json', 'views/startup.html', 'startup.js', 'views/discord.html'):
+                 'CinterForgeTerminal.js', 'terminal.css', 'data/terminal_styles.json', 'views/startup.html', 'startup.js', 'views/discord.html'):
         if not (assets / name).is_file():
             raise RuntimeError(f'HTTP service asset missing: {name}')
+    for component in (*sorted(assets.glob('client/CinterForge*.js')), *sorted(assets.glob('runtime/CinterForge*.py'))):
+        if not component.is_file():
+            raise RuntimeError('Required component missing: ' + str(component))
     if not executable.is_file():
         raise RuntimeError(f'Packaged Python executable missing: {executable}')
     run_dir = builds / 'Run/CinterForgeTerminal/BootstrapHttp'
@@ -289,7 +304,8 @@ def _smoke_linuxkit_bedrock(builds: Path, arch: str) -> dict:
 def _smoke_bedrock(builds: Path, stage: Path, system: str) -> dict:
     if system == 'mac':
         return _smoke_linuxkit_bedrock(builds, _native()[1])
-    manager = _load('cinter_bootstrap_bedrock', stage / 'webapp/CinterForgeTerminal.py').BedrockManager(builds, system)
+    from host.lifecycle.CinterForgeLifecycleBedrock import CinterForgeLifecycleBedrock
+    manager = CinterForgeLifecycleBedrock(builds, system)
     if not manager.accepted():
         raise RuntimeError('Bedrock EULA not accepted in WebView; cannot download or smoke server during Setup')
     if not manager.installed():

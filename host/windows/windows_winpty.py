@@ -5,6 +5,22 @@ Windows GUI application runs its own verified CPython 3.11 interpreter, which
 must have this compatible wheel embedded before Build. Never pip-install at
 runtime, reach into developer machines, or download dependencies during Build.
 """
+# CINTERFORGE SOURCE HEADER — host/windows/windows_winpty.py
+# PURPOSE: Implements the Windows windows winpty owner for the existing compiler, MSI and Wine/native runtime closure.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _sha: Handle sha through this component's established interfaces.
+#   _target: Handle target through this component's established interfaces.
+#   verify: Read-only verification for Build/Stage; no network or mutation.
+#   _fetch: Fetch fetch for this module.
+#   ensure: Provision wheel into the target Python only during Setup.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

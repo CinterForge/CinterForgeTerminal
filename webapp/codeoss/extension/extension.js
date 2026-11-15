@@ -1,3 +1,27 @@
+/*
+ * CINTERFORGE SOURCE HEADER — webapp/codeoss/extension/extension.js
+ * PURPOSE: Registers Code-OSS integration commands, workbench panels and service-backed terminal interfaces.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   loadClassicScripts: Load load classic scripts for this module.
+ *   activateCoordinator: Handle activate coordinator through this component's established interfaces.
+ *   activate: Handle activate through this component's established interfaces.
+ *   deactivate: Handle deactivate through this component's established interfaces.
+ *   AssetServerTerminal: Handle asset server terminal through this component's established interfaces.
+ *   AssetTaskTerminal: Handle asset task terminal through this component's established interfaces.
+ *   openHostPath: Open open host path for this module.
+ *   requestInitialTheme: Request request initial theme for this module.
+ *   syncHostTheme: Handle sync host theme through this component's established interfaces.
+ *   changeWorkspace: Handle change workspace through this component's established interfaces.
+ *   ...and 11 additional internal entry points; see their local documentation.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 /* CinterForge Code - OSS web extension coordinator. ASCII source only. */
 
 const vscode = require('vscode');

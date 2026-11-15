@@ -1,4 +1,26 @@
 #!/usr/bin/env python3
+# CINTERFORGE SOURCE HEADER — host/linux/build_linux.py
+# PURPOSE: Implements the Linux build linux owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   cfos_builds_root: Resolve the sole sibling Builds location using the CFOS source identity.
+#   linuxkit_bootstrap_root: Resolve CFOS-owned LinuxKit artifacts, safely relocating old Builds/Linux.
+#   ensure_arm64_boot_kernel: Ensure the VZLinuxBootLoader receives a raw ARM64 Image, not Image.gz.
+#   validate_linuxkit_images: Do not send unexpanded local package placeholders to linuxkit build.
+#   _render_kernel_image: Render render kernel image for this module.
+#   _staged_kernel_image: Handle staged kernel image through this component's established interfaces.
+#   _clone_kernel_source: Provision the original v1.8.2 LinuxKit kernel sources solely in Builds.
+#   _linuxkit_build_environment: Use only the Setup-managed Docker backend and Builds-scoped LinuxKit cache.
+#   ensure_custom_kernel_image: Restore the original LinuxKit pkg producer; rebuild absent/dirty OCI images.
+#   stage_sources: Stage stage sources for this module.
+#   ...and 4 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 """Prepare the shared Linux runtime from checked-in Linux source.
 
 All LinuxKit outputs are under Builds/CreativeSuite/CFOS/LinuxKit. Application packages are not

@@ -1,3 +1,19 @@
+/*
+ * CINTERFORGE SOURCE HEADER — webapp/codeoss/extension/filesystem/WorkspaceSearch.js
+ * PURPOSE: Provides the WorkspaceSearch integration within the existing Code-OSS extension and authenticated Terminal host bridge.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   searchPatternMatch: Handle search pattern match through this component's established interfaces.
+ *   walkWorkspace: Handle walk workspace through this component's established interfaces.
+ *   registerSearchProviders: Handle register search providers through this component's established interfaces.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 /* CinterForge Code - OSS classic front-end script. ASCII source only. */
 (function (C) {
     'use strict';

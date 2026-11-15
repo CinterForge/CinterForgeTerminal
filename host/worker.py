@@ -5,10 +5,24 @@ An application supplies ``handle(method, params)`` or
 structured notifications (progress, logs, status) before the final response.
 Only RPC records go to stdout; diagnostics must go to stderr.
 """
+# CINTERFORGE SOURCE HEADER — host/worker.py
+# PURPOSE: Implements the generic JSON-lines RPC child process used to import and call the Python service.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   send: Send send for this module.
+#   main: Start the current executable and return its status.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 import importlib.util
 import inspect
 import json
+from pathlib import Path
 import sys
 
 
@@ -25,6 +39,14 @@ def main(argv=None) -> int:
         spec = importlib.util.spec_from_file_location('cinterforge_host_service', location)
         if spec is None or spec.loader is None:
             raise ValueError(f'Invalid service module: {location}')
+        # A service loaded by absolute filename is not a Python script launch:
+        # its directory is NOT automatically placed on sys.path. Keep the
+        # service's own package tree importable for the lifetime of this worker
+        # (e.g. staged webapp/runtime/CinterForge*.py beside the entry file).
+        # This stays within the staged service closure; no repository lookup.
+        service_dir = str(Path(location).resolve().parent)
+        if service_dir not in sys.path:
+            sys.path.insert(0, service_dir)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         handler = getattr(module, 'handle', None)

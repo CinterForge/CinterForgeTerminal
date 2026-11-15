@@ -1,3 +1,14 @@
+# CINTERFORGE SOURCE HEADER — host/docker/windows-cross.Dockerfile
+# PURPOSE: Maintains windows cross within CinterForgeTerminal without duplicating external ownership.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# INTERFACE: This file declares presentation/build rules rather than callable methods.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 # CinterForgeTerminal Setup-only Windows cross/guest image (linux/amd64).
 # Use MSYS2's patched Wine binary toolchain, NOT the experimental MSYS2 image:
 # the latter disables pacman signature checks and is unsuitable for staging.

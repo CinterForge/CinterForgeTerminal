@@ -5,6 +5,19 @@ The upstream webview/webview CMake target uses WebView2 SDK headers at compile
 Evergreen bootstrap acquisition is for native Windows first-run setup ONLY.
 The offline universal distribution still requires its own sealed runtime closure.
 """
+# CINTERFORGE SOURCE HEADER — host/windows/windows_webview2_runtime.py
+# PURPOSE: Implements the Windows windows webview2 runtime owner for the existing compiler, MSI and Wine/native runtime closure.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   installed_version: Return a real installed version, never infer from a checked-in SDK.
+#   ensure: Windows uses the self-contained browser staged under Builds, not registry.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import json

@@ -1,4 +1,24 @@
 #pragma once
+/*
+ * CINTERFORGE SOURCE HEADER — app/include/CinterHostUtilities.h
+ * PURPOSE: Declares the CinterHostUtilities native interface shared across supported C++/C platform builds.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   enqueue: Handle enqueue through this component's established interfaces.
+ *   try_dequeue: Handle try dequeue through this component's established interfaces.
+ *   pending: Handle pending through this component's established interfaces.
+ *   clear: Clear clear for this module.
+ *   post: Handle post through this component's established interfaces.
+ *   call: Handle call through this component's established interfaces.
+ *   run: Run run for this module.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 
 // Application-neutral primitives extracted from the Steam Python bridge's
 // dispatch-thread and Python->C++ message-queue responsibilities. This header

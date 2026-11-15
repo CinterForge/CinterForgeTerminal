@@ -2,6 +2,19 @@
 
 Never mutate the user's default Colima profile or global Docker context.
 """
+# CINTERFORGE SOURCE HEADER — host/linux/rosetta_backend.py
+# PURPOSE: Implements the Linux rosetta backend owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   docker_environment: Handle docker environment through this component's established interfaces.
+#   configure: Configure configure for this module.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import os

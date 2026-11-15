@@ -4,6 +4,20 @@ This runner MUST execute on Windows. Wine and a Mac-hosted cross-compile are
 separate evidence, and cannot create a native Windows acceptance receipt.
 Uses the verified MSYS2 UCRT64 closure, CMake/Ninja, and one authored C++ source.
 """
+# CINTERFORGE SOURCE HEADER — host/windows/windows_native.py
+# PURPOSE: Implements the Windows windows native owner for the existing compiler, MSI and Wine/native runtime closure.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _run: Run run for this module.
+#   run: Run run for this module.
+#   main: Start the current executable and return its status.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import argparse

@@ -5,6 +5,26 @@ need three staged platforms; production additionally requires matching native
 acceptance receipts and explicit promotion approval. Only the Cloudflare target
 bucket changes with channel. No credentials or upload state enter the archives.
 """
+# CINTERFORGE SOURCE HEADER — host/publishing/release.py
+# PURPOSE: Publishes stable release artifacts and manifests through the existing Cloudflare client and integrity checks.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _digest: Handle digest through this component's established interfaces.
+#   _canonical: Handle canonical through this component's established interfaces.
+#   _safe_files: Handle safe files through this component's established interfaces.
+#   _test_receipt: Handle test receipt through this component's established interfaces.
+#   _stage_entries: Stage stage entries for this module.
+#   _zip_stage: Handle zip stage through this component's established interfaces.
+#   prepare: Verify staged files and prepare deterministic immutable upload inputs under Builds.
+#   _verify_existing_remote: Never overwrite immutable build objects, even if an R2 ETag isn't MD5.
+#   publish: Publish publish for this module.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

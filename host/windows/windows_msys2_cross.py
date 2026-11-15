@@ -6,6 +6,27 @@ from the native Windows Setup path. Do not execute pacman for Setup in Wine.  Th
 transitive UCRT64 packages are installed in Builds without executing any
 Windows installers.  Native Windows acceptance remains a separate gate.
 """
+# CINTERFORGE SOURCE HEADER — host/windows/windows_msys2_cross.py
+# PURPOSE: Implements the Windows windows msys2 cross owner for the existing compiler, MSI and Wine/native runtime closure.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _sha: Handle sha through this component's established interfaces.
+#   _fetch: Cache by SHA-256; never replace a mismatching existing input.
+#   _repo_desc: Handle repo desc through this component's established interfaces.
+#   _repo_packages: Handle repo packages through this component's established interfaces.
+#   _read_repository_tar: Read repository tar from the existing project data.
+#   _dependency_name: Handle dependency name through this component's established interfaces.
+#   _resolve: Resolve both UCRT64 and MSYS dependencies, including virtual providers.
+#   _extract_base: Extract official msys64/ tarball safely; recover a stalled Qt install.
+#   _unpack_ucrt: Use the already-staged Linux/amd64 7z+tar tools, never Windows pacman.
+#   ensure: Ensure ensure for this module.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

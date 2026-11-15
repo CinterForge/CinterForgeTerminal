@@ -4,6 +4,24 @@ Never infer a target from a host-built exe or a marker file. This module runs
 commands on the current OS; Linux and Windows execution uses the actual
 registered target runner. All evidence is written under sibling Builds.
 """
+# CINTERFORGE SOURCE HEADER — host/devtools/toolchain.py
+# PURPOSE: Implements the toolchain DevTools owner: existing optional SDK and verified guest capabilities without automatic user installation.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   target: Handle target through this component's established interfaces.
+#   msys2_root: Find a complete UCRT64 installation, preferring an already staged copy.
+#   stage_windows_msys2: Reuse a complete preinstalled MSYS2; copy it once into shared Builds.
+#   msys2_env: Handle msys2 env through this component's established interfaces.
+#   _probe: Handle probe through this component's established interfaces.
+#   probe_local: Handle probe local through this component's established interfaces.
+#   main: Start the current executable and return its status.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import argparse

@@ -1,3 +1,16 @@
+/*
+ * CINTERFORGE SOURCE HEADER — app/include/CinterPythonHostC.h
+ * PURPOSE: Declares the CinterPythonHostC native interface shared across supported C++/C platform builds.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * INTERFACE: This file declares presentation/build rules rather than callable methods.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 #ifndef CINTER_PYTHON_HOST_C_H
 #define CINTER_PYTHON_HOST_C_H
 

@@ -1,4 +1,15 @@
 @echo off
+REM CINTERFORGE SOURCE HEADER — Cinter.cmd
+REM PURPOSE: Windows entry for the same Cinter lifecycle contract without introducing a second build system.
+REM OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+REM STARTUP: Called or loaded by the existing lifecycle/entry point; no
+REM          hidden dependency provisioning or alternate VM is allowed.
+REM SHUTDOWN: Release only resources explicitly owned by this component.
+REM CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+REM LABELS: :provision retains the preexisting Windows MSYS2 bootstrap; :launch invokes the same Cinter lifecycle; :error returns the command failure.
+REM MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+REM Steam library; do not change Lagomorph timings, user assets or guest
+REM readiness without tracing their real callers and failure boundaries.
 setlocal EnableExtensions
 rem CinterForgeTerminal native Windows bootstrap. Requires only Windows built-in cmd/curl.
 rem Keep all provisioned tools in the sibling Builds directory.

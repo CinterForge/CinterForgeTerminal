@@ -5,6 +5,23 @@ Inspect imported names of both applications AND each copied dependency. Windows
 OS DLLs remain OS-provided; every other DLL must resolve to the exact toolchain
 used for the build and be copied beside the EXE, or acceptance fails.
 """
+# CINTERFORGE SOURCE HEADER — host/windows/windows_runtime_dlls.py
+# PURPOSE: Implements the Windows windows runtime dlls owner for the existing compiler, MSI and Wine/native runtime closure.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _sha: Handle sha through this component's established interfaces.
+#   _names: Handle names through this component's established interfaces.
+#   _os_provided: Handle os provided through this component's established interfaces.
+#   _verify_pe: Verify verify pe for this module.
+#   stage_cross: Stage stage cross for this module.
+#   stage_native: Stage stage native for this module.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

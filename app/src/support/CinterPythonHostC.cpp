@@ -1,3 +1,27 @@
+/*
+ * CINTERFORGE SOURCE HEADER — app/src/support/CinterPythonHostC.cpp
+ * PURPOSE: Implements the native CinterPythonHostC helper for the existing CinterForgeTerminal application and Python Host.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   quote: Handle quote through this component's established interfaces.
+ *   member: Handle member through this component's established interfaces.
+ *   error: Handle error through this component's established interfaces.
+ *   remaining: Handle remaining through this component's established interfaces.
+ *   deliver_event: Handle deliver event through this component's established interfaces.
+ *   cph_destroy: Handle cph destroy through this component's established interfaces.
+ *   cph_set_event_callback: Handle cph set event callback through this component's established interfaces.
+ *   cph_api_version: Handle cph api version through this component's established interfaces.
+ *   cph_free_string: Handle cph free string through this component's established interfaces.
+ *   cph_running: Handle cph running through this component's established interfaces.
+ *   ...and 3 additional internal entry points; see their local documentation.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 #include "CinterPythonHostC.h"
 #include "CinterPythonHost.h"
 

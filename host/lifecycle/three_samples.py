@@ -5,6 +5,25 @@ Linux ELF and Windows PE. Mac and Linux require a live WebView JS callback;
 Windows must execute its directory probe under real Wine. Native Windows
 WebView2 acceptance remains distinct from Wine compatibility.
 """
+# CINTERFORGE SOURCE HEADER — host/lifecycle/three_samples.py
+# PURPOSE: Owns the three samples stage of the existing CinterForgeTerminal lifecycle; generated files remain in sibling Builds.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   linux_recipe_sha256: The shared WindowsCross Debian AMD64 recipe is also the Linux build ABI.
+#   _exec: Stream evidence as it arrives, but never hang indefinitely on a WebView.
+#   _assert_probe: Handle assert probe through this component's established interfaces.
+#   _sha_file: Handle sha file through this component's established interfaces.
+#   _docker_image: Use Setup's one portable Debian AMD64 Linux+Windows image.
+#   _container_exec: Handle container exec through this component's established interfaces.
+#   run: Run run for this module.
+#   main: Start the current executable and return its status.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import argparse

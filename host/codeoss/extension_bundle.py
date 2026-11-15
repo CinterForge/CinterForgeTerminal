@@ -4,6 +4,19 @@ VS Code web extension workers cannot fetch and evaluate separate source modules
 through vscode.workspace.fs during activation. Keep the readable source split,
 but publish one deterministic classic CommonJS entry point instead.
 """
+# CINTERFORGE SOURCE HEADER — host/codeoss/extension_bundle.py
+# PURPOSE: Owns Code-OSS extension bundle setup/staging and host integration, not a second editor or command service.
+# OWNERSHIP: This is Setup/Build-owned producer code; no runtime imports.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   render_extension_bundle: Return exactly the worker source the producer will stage, without writes.
+#   build_extension_bundle: Build build extension bundle for this module.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 
 import json
 from pathlib import Path

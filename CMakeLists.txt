@@ -1,3 +1,14 @@
+# CINTERFORGE SOURCE HEADER — CMakeLists.txt
+# PURPOSE: Defines native C++ libraries, CLI executables and the single cross-platform Application Shell from Setup-provisioned WebView dependencies.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# TARGETS: CinterForgePythonHost (static/shared), application shell, native executable and existing smoke CLIs; links only pinned WebView when enabled.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 cmake_minimum_required(VERSION 3.16)
 project(CinterForgePythonHost VERSION 0.3.0 LANGUAGES CXX)
 
@@ -72,13 +83,19 @@ if(CPH_BUILD_APPLICATION_SHELL)
     set(WEBVIEW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(WEBVIEW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
     add_subdirectory("${_cph_webview_source}" "${CMAKE_CURRENT_BINARY_DIR}/webview" EXCLUDE_FROM_ALL)
-    # Apple's real File menu lives in the existing shell source. Compile that
-    # unit as Objective-C++ on macOS instead of introducing a separate .mm file.
+    # Native Cocoa menu and WebView shell both require Objective-C++ on macOS.
     if(APPLE)
         enable_language(OBJCXX)
-        set_source_files_properties(app/src/CinterForgeTerminal.cpp PROPERTIES LANGUAGE OBJCXX)
+        set_source_files_properties(
+            app/src/CinterForgeTerminal.cpp
+            app/src/CinterForgePlatformMenus.cpp
+            PROPERTIES LANGUAGE OBJCXX)
     endif()
-    add_library(CinterForgeApplicationShell STATIC app/src/CinterForgeTerminal.cpp)
+    add_library(CinterForgeApplicationShell STATIC
+        app/src/CinterForgeTerminal.cpp
+        app/src/CinterForgePlatformMenus.cpp
+        app/src/CinterForgeApplicationPaths.cpp
+        app/src/CinterForgePythonServiceHandshake.cpp)
     if(APPLE)
         target_link_libraries(CinterForgeApplicationShell PUBLIC "-framework Cocoa")
     endif()

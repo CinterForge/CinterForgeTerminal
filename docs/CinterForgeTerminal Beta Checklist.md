@@ -12,10 +12,10 @@
 ## 0. CRITICAL BLOCKERS
 
 - [X] MAC-BUILDER missing tools - setup is not installing all needed tools
-- [-] Installed Mac build does not launch.  Build needs testing.
-- [X] Installed Windows build does not register in Add/Remove Programs
-- [X] Installed Windows build does not add to start menu
-- [X] Installed Windows build installer defaults to the Downloads folder
+- [-] Installed Mac build does not launch.  No idea how to debug this.
+- [-] Installed Windows build does not register in Add/Remove Programs
+- [-] Installed Windows build does not add to start menu
+- [-] Installed Windows build installer defaults to the Downloads folder
 
 ## 1. Windows/Linux — MSYS2 Bash startup — BUG
 
@@ -23,7 +23,7 @@
 - [X] Verify the MSYS2 package closure copied into the Windows release.
 - [X] Make package contents relocatable.
 - [X] Confirm Windows GUI application launch without an extra console window.
-- [X] Add a real Bash startup smoke test to the Linux and Windows release checks.
+- [-] Add a real Bash startup smoke test to the Linux and Windows release checks.
 - [-] Real Linux/Win Bash prompt appears inside Terminal.
 - [-] Provide writable temporary runtime state.
 - [-] Check Bash executable paths and argument construction.

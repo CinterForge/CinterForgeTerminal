@@ -4,6 +4,20 @@ The ARM64 LinuxKit producer (c) is separate and must be stopped after Bedrock
 acceptance. Wine, MinGW, Linux WebKitGTK and both VNC sessions run on t, never c.
 No unrelated Colima profile, user Docker engine, or Windows VM is selected.
 """
+# CINTERFORGE SOURCE HEADER — host/lifecycle/amd64_backend.py
+# PURPOSE: Owns the amd64 backend stage of the existing CinterForgeTerminal lifecycle; generated files remain in sibling Builds.
+# OWNERSHIP: This source belongs strictly to the lifecycle layer and uses CinterForgeLifecycleVM.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   require_managed_t_docker: Reject foreign/legacy Docker endpoints before Windows/Linux Setup work.
+#   docker_bind_source: Docker bind mounts use paths on the *daemon*, not on the Mac client.
+#   managed_amd64_backend: Start/reuse the single t guest after Bedrock and stop it on every exit.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -28,7 +42,7 @@ def require_managed_t_docker(builds: Path) -> str:
             Path(configured).expanduser().resolve() != builds or
             os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') != 'developer'):
         raise RuntimeError('Setup/Build must own the developer Builds t backend')
-    # The managed runtime picks the shortest real Builds ancestor so Lima
+    # The lifecycle VM picks the shortest real Builds ancestor so Lima
     # stays under macOS's Unix socket length limit.
     roots = [parent / 'CFTVM/T' for parent in reversed((builds, *builds.parents))
              if parent.name == 'Builds' and parent.is_dir() and not parent.is_symlink()]
@@ -79,9 +93,10 @@ def managed_amd64_backend(builds: Path, *, setup: bool = True):
         yield None
         return
     from host.mac.mac_bootstrap import _ensure_buildx_plugin
-    from webapp import CinterForgeTerminal as runtime
+    from host.lifecycle.CinterForgeLifecycleVM import CinterForgeLifecycleVM
 
     builds = builds.resolve(strict=True)
+    vm = CinterForgeLifecycleVM(builds)
     sdk = builds / 'CinterForgeTerminal/Toolchains'
     previous = {key: os.environ.get(key) for key in (
         'CINTER_BUILDS_ROOT', 'CINTER_TERMINAL_RUNTIME_MODE',
@@ -93,35 +108,30 @@ def managed_amd64_backend(builds: Path, *, setup: bool = True):
     try:
         os.environ['CINTER_BUILDS_ROOT'] = str(builds)
         os.environ['CINTER_TERMINAL_RUNTIME_MODE'] = 'developer'
-        env = runtime._env(sdk)
+        env = vm.environment(sdk)
         # Never silently take an actively running developer app's Docker engine.
-        with runtime._managed_vm_lock(env):
-            owner = runtime._runtime_watchdog_owner(env)
-            if owner.is_file():
-                import json
-                record = json.loads(owner.read_text(encoding='utf-8'))
-                pid = record.get('native_pid')
-                if isinstance(pid, int) and runtime._live_runtime_watchdog(pid, env):
-                    raise RuntimeError('Native CinterForgeTerminal owns the t guest; '
-                                       'refusing to stop or repurpose its containers')
+        with vm.managed_vm_lock(env):
+            if vm.native_owner_active(env):
+                raise RuntimeError('Native CinterForgeTerminal owns the t guest; '
+                                   'refusing to stop or repurpose its containers')
             if setup:
                 _ensure_buildx_plugin(builds, env)
             else:
                 # Build may start a provisioned VM, not repair/recreate its disk.
-                profile_file = Path(env['COLIMA_HOME']) / runtime.PROFILE / 'colima.yaml'
+                profile_file = Path(env['COLIMA_HOME']) / vm.profile / 'colima.yaml'
                 plugin = Path(env['DOCKER_CONFIG']) / 'cli-plugins/docker-buildx'
                 if not profile_file.is_file() or not plugin.is_file():
                     raise RuntimeError('Setup-provisioned x86-64 Terminal guest/Buildx missing; '
                                        'run ./Cinter setup all')
-                if (runtime._configure_colima_runtime_emulation(env, dry_run=True) or
-                        runtime._configure_colima_host_mounts(env, runtime._mac_host_mounts(),
+                if (vm.configure_colima_runtime_emulation(env, dry_run=True) or
+                        vm.configure_colima_host_mounts(env, vm.mac_host_mounts(),
                                                               dry_run=True)):
                     raise RuntimeError('Setup-provisioned Terminal guest config changed; '
                                        'Build cannot repair it')
             # Set ownership before start: even a partially booted VM is ours
             # to stop if an exception or timeout interrupts the start.
             owns_vm = True
-            docker = runtime._ensure_docker_locked(sdk, env, builds.parent)
+            docker = vm.ensure_docker_locked(sdk, env, builds.parent)
             arch = subprocess.run([docker, 'info', '--format', '{{.Architecture}}'],
                                   env=env, capture_output=True, text=True,
                                   timeout=45, check=False)
@@ -144,7 +154,7 @@ def managed_amd64_backend(builds: Path, *, setup: bool = True):
         try:
             if owns_vm:
                 print('[TERMINAL AMD64] Releasing Setup/Build-owned t guest', flush=True)
-                runtime.stop_runtime_vm(setup_sdk=sdk)
+                vm.stop(sdk)
         finally:
             for key, value in previous.items():
                 if value is None:

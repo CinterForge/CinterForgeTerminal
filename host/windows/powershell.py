@@ -3,6 +3,20 @@
 The application defines exact URL and SHA-256 in sibling Builds/CinterForgeTerminal/Input/powershell.json.
 No bootstrap script, shell profile, package manager or source checkout is modified.
 """
+# CINTERFORGE SOURCE HEADER — host/windows/powershell.py
+# PURPOSE: Implements the Windows powershell owner for the existing compiler, MSI and Wine/native runtime closure.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _sha: Handle sha through this component's established interfaces.
+#   _unpack: Handle unpack through this component's established interfaces.
+#   provision: Reuse installed portable runtime or install exactly a configured immutable release.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

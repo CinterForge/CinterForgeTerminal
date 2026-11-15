@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+# CINTERFORGE SOURCE HEADER — host/linux/craftmaster/craftmaster_mac_bootstrap.py
+# PURPOSE: Implements the Linux craftmaster mac bootstrap owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _nethernet_probe_source_path: Resolve the authored Linux probe shared with the CinterForgeOS build.
+#   _compiled_source_payloads: Return only source inputs that determine the compiled Mac guest/runtime.
+#   source_fingerprint: Fingerprint only inputs that are compiled into or launch the Mac guest.
+#   bootstrap_sources_match: True when an existing generated bootstrap has the current compiled inputs.
+#   build: Build build for this module.
+#   smoke: Exercise real BDS via serial console, NetherNet, list and graceful stop.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 """Construct the Apple-Silicon CraftMaster Bedrock bootstrap payload.
 
 The payload contains no Microsoft BDS bytes.  A macOS host exposes a locally

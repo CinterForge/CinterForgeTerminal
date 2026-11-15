@@ -1,4 +1,17 @@
 """Sign and validate the macOS Virtualization.framework launcher."""
+# CINTERFORGE SOURCE HEADER — host/linux/launcher_signing.py
+# PURPOSE: Implements the Linux launcher signing owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   has_virtualization_entitlement: Handle has virtualization entitlement through this component's established interfaces.
+#   sign_launcher: Handle sign launcher through this component's established interfaces.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import plistlib

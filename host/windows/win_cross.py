@@ -3,6 +3,18 @@
 Logs the actual cross-compiler and Wine commands, combined process output,
 exit codes, mount evidence, and missing assertions for failed smoke tests.
 """
+# CINTERFORGE SOURCE HEADER — host/windows/win_cross.py
+# PURPOSE: Implements the Windows win cross owner for the existing compiler, MSI and Wine/native runtime closure.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   smoke: Compile and execute a real Windows PE using Wine and Win32 filesystem APIs.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import json

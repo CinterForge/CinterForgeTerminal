@@ -4,6 +4,24 @@ The macOS producer encodes Finder metadata and resource forks into MacBinary II
 files before crossing into Linux. This worker never reads original Mac metadata,
 changes the authored source, or requires any extra VM or Docker image.
 """
+# CINTERFORGE SOURCE HEADER — host/lagomorph/lagomorph_hfs_linux.py
+# PURPOSE: Implements the Lagomorph lagomorph hfs linux pipeline while preserving release gating, emulator assets and save-image integrity.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _sha: Handle sha through this component's established interfaces.
+#   _under: Handle under through this component's established interfaces.
+#   _run: Run run for this module.
+#   assemble: Handle assemble through this component's established interfaces.
+#   _assemble_images: Handle assemble images through this component's established interfaces.
+#   _sha_bytes: Handle sha bytes through this component's established interfaces.
+#   main: Start the current executable and return its status.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import argparse

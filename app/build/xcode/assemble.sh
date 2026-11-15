@@ -1,4 +1,15 @@
 #!/bin/bash
+# CINTERFORGE SOURCE HEADER — app/build/xcode/assemble.sh
+# PURPOSE: Runs Xcode source-edit Build & Run against the existing staged Host tools and prepares only the current app bundle.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# INTERFACE: This file declares presentation/build rules rather than callable methods.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 # Xcode is a native UI front-end to the existing CinterForgeTerminal lifecycle.
 # This phase requires Setup to have provisioned all dependencies. It does not
 # download tools, install SDKs, run Setup, or mutate source files.
@@ -60,7 +71,7 @@ if [[ "$XCODE_ARCHIVE" == 0 ]]; then
   # Existing Code-OSS was acquired by Setup. Refresh only our authored
   # extension, which may also have changed since the last release build.
   echo "[Xcode] Refreshing authored Code-OSS extension" >&2
-  python3 -B -c 'from pathlib import Path; from webapp.codeoss.producer import _stage_cinterforge_extension; import sys; _stage_cinterforge_extension(Path(sys.argv[1]))' \
+  python3 -B -c 'from pathlib import Path; from host.codeoss.producer import _stage_cinterforge_extension; import sys; _stage_cinterforge_extension(Path(sys.argv[1]))' \
     "$BUILDS/InteractiveFiction/CodeOSS/Web"
   echo "[Xcode] Updating local app bundle resources" >&2
   mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"

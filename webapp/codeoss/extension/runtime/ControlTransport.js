@@ -1,3 +1,21 @@
+/*
+ * CINTERFORGE SOURCE HEADER — webapp/codeoss/extension/runtime/ControlTransport.js
+ * PURPOSE: Provides the ControlTransport integration within the existing Code-OSS extension and authenticated Terminal host bridge.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   terminalParentRequest: Handle terminal parent request through this component's established interfaces.
+ *   runtimeBase: Handle runtime base through this component's established interfaces.
+ *   request: Request request for this module.
+ *   detectTerminalHost: Handle detect terminal host through this component's established interfaces.
+ *   setRuntimeBaseForTests: Set set runtime base for tests for this module.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 /* CinterForge Code - OSS classic front-end script. ASCII source only. */
 (function (C) {
     'use strict';

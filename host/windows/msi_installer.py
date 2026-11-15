@@ -6,6 +6,28 @@ verified unpacked Windows Build files using the prevalidated OCI image.
 No WiX 3 executable, PE32 loader, Wine Mono, provisioning, or extraction is
 needed by MSI packaging. Other Windows guest testing still uses patched Wine.
 """
+# CINTERFORGE SOURCE HEADER — host/windows/msi_installer.py
+# PURPOSE: Packages and verifies a real Windows MSI and its installation/uninstall registration tables.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _builds: Handle builds through this component's established interfaces.
+#   _stage: Stage stage for this module.
+#   _sha: Handle sha through this component's established interfaces.
+#   _check_tools: Publish requires Test's real compiler acceptance, never installs tools.
+#   _cross: Handle cross through this component's established interfaces.
+#   _MacNativeMSITools: class responsible for  macnativemsitools
+#   _MacNativeMSITools.path: Handle path through this component's established interfaces.
+#   _MacNativeMSITools.execute: Execute execute for this module.
+#   _native_receipt: Handle native receipt through this component's established interfaces.
+#   _native_compiler: Publish must not install tools; select only Setup-accepted macOS arm64.
+#   ...and 21 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

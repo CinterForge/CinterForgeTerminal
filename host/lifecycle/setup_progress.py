@@ -4,6 +4,18 @@ The lifecycle already persists console output in Builds/Logs. A subprocess can
 legitimately buffer its output for minutes, so report time elapsed without
 changing the command, exit code, timeout, or captured diagnostic output.
 """
+# CINTERFORGE SOURCE HEADER — host/lifecycle/setup_progress.py
+# PURPOSE: Owns the setup progress stage of the existing CinterForgeTerminal lifecycle; generated files remain in sibling Builds.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   progress_step: Announce a blocking operation and emit a heartbeat until it completes.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 from contextlib import contextmanager

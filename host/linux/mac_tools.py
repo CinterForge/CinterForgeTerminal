@@ -4,6 +4,18 @@ The only generated output is a sourceable shell environment in sibling Builds.
 Missing external host executables are diagnosed, never secretly installed into
 $HOME or the source repository. Xcode Command Line Tools are a prerequisite.
 """
+# CINTERFORGE SOURCE HEADER — host/linux/mac_tools.py
+# PURPOSE: Implements the Linux mac tools owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   expose: Handle expose through this component's established interfaces.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import os

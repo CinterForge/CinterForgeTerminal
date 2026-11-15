@@ -1,3 +1,27 @@
+/*
+ * CINTERFORGE SOURCE HEADER — app/src/support/CinterTerminalMain.cpp
+ * PURPOSE: Resolves macOS/Windows/Linux executable and resource locations, native launch diagnostics and developer versus installed mode.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   currentExecutable: Handle current executable through this component's established interfaces.
+ *   console_: Handle console through this component's established interfaces.
+ *   ready: Handle ready through this component's established interfaces.
+ *   nativeLogRoot: Handle native log root through this component's established interfaces.
+ *   beginNativeLogging: Handle begin native logging through this component's established interfaces.
+ *   useIfUnset: Handle use if unset through this component's established interfaces.
+ *   fillMacAppDefaults: Handle fill mac app defaults through this component's established interfaces.
+ *   ownExecutable: Handle own executable through this component's established interfaces.
+ *   pathString: Handle path string through this component's established interfaces.
+ *   fillPackagedDefaults: Handle fill packaged defaults through this component's established interfaces.
+ *   ...and 2 additional internal entry points; see their local documentation.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 #include "CinterApplicationShell.h"
 #include <iostream>
 #include <stdexcept>

@@ -4,6 +4,28 @@ Only the three staged HFS media images go to the public CDN. All original
 Builds/Lagomorph bytes, including the staging manifest metadata, stay on the
 authenticated internal (cdn-assets-dev) R2 bucket. Never run from Setup/Build.
 """
+# CINTERFORGE SOURCE HEADER — host/lagomorph/lagomorph_cloudflare.py
+# PURPOSE: Implements the Lagomorph lagomorph cloudflare pipeline while preserving release gating, emulator assets and save-image integrity.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _sha: Handle sha through this component's established interfaces.
+#   _regular_tree: Handle regular tree through this component's established interfaces.
+#   _safe_rel: Handle safe rel through this component's established interfaces.
+#   _guard_parent: Handle guard parent through this component's established interfaces.
+#   _copy_remote: Download and hash-verify before overwriting any existing source file.
+#   _write_index: Write write index for this module.
+#   _read_mac_metadata: Encode classic Mac forks explicitly; ZIP does not preserve Darwin xattrs.
+#   _apply_mac_metadata: Restore the xattrs after data-copy, including when data was already current.
+#   _make_source_zip: Make one complete, deterministic snapshot, hashing the actual archived bytes.
+#   _validated_source_tree: Reject traversal, symlinks, duplicates, archive bombs and altered bytes.
+#   ...and 3 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

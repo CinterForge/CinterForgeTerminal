@@ -1,4 +1,18 @@
+/*
+ * CinterForgeTerminal.cpp — native application owner and WebView lifecycle.
+ * PURPOSE: Own exactly one PythonHost worker, authenticated HTTP start/stop,
+ * WebView creation, native callback authorization, debugger dispatch,
+ * connection health monitoring, service reboot and orderly VM shutdown.
+ * METHODS: smokeWebViewJavaScript, runApplicationShell.
+ * STARTUP: Called by CinterTerminalMain.cpp; resolves staged worker and
+ * waits for Python service readiness before creating/navigating WebView.
+ * SHUTDOWN: Stop owned runtime and worker, never kill an attached service.
+ * PLATFORM: CinterForgePlatformMenus.cpp owns OS menu, clipboard, spawning
+ * and native inspector implementations; no duplicate OS implementations.
+ */
 #include "CinterApplicationShell.h"
+#include "CinterForgeApplicationPaths.h"
+#include "CinterForgePythonServiceHandshake.h"
 #include "CinterPythonHost.h"
 #include "webview/webview.h"
 
@@ -37,615 +51,10 @@ extern char **environ;
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include "CinterForgePlatformMenus.h"
 
-#ifdef __APPLE__
-// Genuine macOS File menu, anchored in the one existing WebView window.
-// No second app/framework or separate source unit is introduced.
-@interface CinterFileMenuTarget : NSObject
-{
-@public
-    std::function<void(const std::string &)> newTerminalAction;
-    std::function<void()> quitAction;
-    std::function<void()> debuggerAction;
-    std::function<void()> copyAction;
-    std::function<void()> pasteAction;
-    std::function<void(const std::string &)> codeMenuAction;
-    NSMenuItem *minecraftItem;
-}
-- (void)newTerminal:(id)sender;
-- (void)quitTerminal:(id)sender;
-- (void)openDebugger:(id)sender;
-- (void)copyTerminal:(id)sender;
-- (void)pasteTerminal:(id)sender;
-- (void)dispatchCodeMenu:(id)sender;
-@end
-@implementation CinterFileMenuTarget
-- (void)newTerminal:(id)sender
-{
-    NSString *kind = [sender representedObject];
-    if (newTerminalAction && [kind isKindOfClass:[NSString class]])
-        newTerminalAction(std::string([kind UTF8String]));
-}
-- (void)quitTerminal:(id)sender
-{
-    (void)sender;
-    if (quitAction)
-        quitAction();
-}
-- (void)openDebugger:(id)sender
-{
-    (void)sender;
-    if (debuggerAction)
-        debuggerAction();
-}
-- (void)copyTerminal:(id)sender
-{
-    (void)sender;
-    if (copyAction)
-        copyAction();
-}
-- (void)pasteTerminal:(id)sender
-{
-    (void)sender;
-    if (pasteAction)
-        pasteAction();
-}
-- (void)dispatchCodeMenu:(id)sender
-{
-    NSString *action = [sender representedObject];
-    // Terminal Edit always uses the native pasteboard. Code-OSS owns only its
-    // own code:* actions; they must not replace the Terminal clipboard route.
-    if ([action isEqualToString:@"edit:copy"]) { [self copyTerminal:sender]; return; }
-    if ([action isEqualToString:@"edit:paste"]) { [self pasteTerminal:sender]; return; }
-    if (codeMenuAction && [action isKindOfClass:[NSString class]])
-        codeMenuAction(std::string([action UTF8String]));
-}
-@end
-#endif
-
-namespace cinterforge
-{
-    namespace
-    {
-        namespace fs = std::filesystem;
-
-        std::string jsonEscape(const std::string &value)
-        {
-            std::string result;
-            for (const unsigned char c : value)
-            {
-                if (c == '\\' || c == '"')
-                {
-                    result += '\\';
-                    result += static_cast<char>(c);
-                }
-                else if (c < 32)
-                {
-                    constexpr char digits[] = "0123456789abcdef";
-                    result += "\\u00";
-                    result += digits[(c >> 4) & 15];
-                    result += digits[c & 15];
-                }
-                else
-                    result += static_cast<char>(c);
-            }
-            return result;
-        }
-
-        // A CinterForge Bonjour service advertises its own HTTP port.
-        // Connect only to literal LAN addresses in the reserved 20300-20399 range.
-        bool validLanUrl(const std::string &url)
-        {
-            const std::regex urlPattern(R"(^http://(([0-9]{1,3}\.){3}[0-9]{1,3}):(203[0-9]{2})(/[A-Za-z0-9/_-]*)?$)");
-            std::smatch match;
-            if (!std::regex_match(url, match, urlPattern))
-                return false;
-            const std::string ip = match[1].str();
-            std::vector<int> octets;
-            std::size_t start = 0;
-            for (int i = 0; i < 4; ++i)
-            {
-                const std::size_t dot = ip.find('.', start);
-                const std::string part = ip.substr(start, dot == std::string::npos ? dot : dot - start);
-                if (part.empty() || part.size() > 3)
-                    return false;
-                const int value = std::stoi(part);
-                if (value > 255)
-                    return false;
-                octets.push_back(value);
-                if (dot == std::string::npos && i != 3)
-                    return false;
-                start = dot == std::string::npos ? ip.size() : dot + 1;
-            }
-            return octets[0] == 10 || octets[0] == 127 ||
-                (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) ||
-                (octets[0] == 192 && octets[1] == 168) ||
-                (octets[0] == 169 && octets[1] == 254);
-        }
-
-        void validateStaged(const ApplicationShellConfig &config)
-        {
-            if (config.builds.empty())
-                throw std::invalid_argument("Missing packaged runtime root (--builds); launch the extracted app from its complete release folder");
-            if (config.python.empty())
-                throw std::invalid_argument("Missing packaged Python interpreter (--python)");
-            if (config.worker.empty())
-                throw std::invalid_argument("Missing packaged Python worker (--worker)");
-            if (config.service.empty())
-                throw std::invalid_argument("Missing packaged HTTP service (--service)");
-            const fs::path builds = fs::weakly_canonical(config.builds);
-            if (builds.filename() != "Builds" || !fs::is_directory(builds))
-                throw std::runtime_error("Application Shell requires an existing sibling Builds directory");
-            for (const std::string *item : {&config.worker, &config.service})
-            {
-                const fs::path file = fs::weakly_canonical(*item);
-                if (!fs::is_regular_file(file) || file.string().compare(0, builds.string().size(), builds.string()) != 0 ||
-                    file.string().size() <= builds.string().size() ||
-                    (file.string()[builds.string().size()] != fs::path::preferred_separator))
-                    throw std::runtime_error("Application Shell worker and service must be staged inside Builds: " + *item);
-            }
-            if (!fs::is_regular_file(fs::weakly_canonical(config.python)))
-                throw std::runtime_error("Application Shell Python interpreter is missing: " + config.python);
-        }
-
-        // Spawn a fresh application *process*: each window gets an independent PTY,
-        // Python service, session token and machine selection. No shell command is
-        // constructed from WebView data; all arguments come from validated config.
-        std::vector<std::string> terminalArgs(const ApplicationShellConfig &cfg)
-        {
-            std::vector<std::string> args = {"CinterForgeTerminal", "--python", cfg.python,
-                                             "--worker", cfg.worker, "--service", cfg.service,
-                                             "--builds", cfg.builds, "--title", cfg.title};
-            if (cfg.developer)
-                args.push_back("--developer");
-            if (!cfg.connect_url.empty()) { args.push_back("--connect"); args.push_back(cfg.connect_url); }
-            return args;
-        }
-
-#ifdef _WIN32
-        std::wstring utf8(const std::string &value)
-        {
-            const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.c_str(), -1, nullptr, 0);
-            if (!count)
-                throw std::runtime_error("Unable to encode Windows Terminal path");
-            std::wstring output(static_cast<std::size_t>(count), L'\0');
-            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.c_str(), -1, output.data(), count);
-            output.pop_back();
-            return output;
-        }
-        // Win32 clipboard text is the reliable fallback for WebView2's restricted
-        // navigator.clipboard.readText on a loopback-origin packaged application.
-        // Only the installed page invokes this user-gesture-bound paste bridge.
-        std::string windowsClipboardText()
-        {
-            if (!OpenClipboard(nullptr))
-                throw std::runtime_error("Windows clipboard is busy");
-            HANDLE handle = GetClipboardData(CF_UNICODETEXT);
-            if (!handle)
-            {
-                CloseClipboard();
-                return {};
-            }
-            const wchar_t *wide = static_cast<const wchar_t *>(GlobalLock(handle));
-            if (!wide)
-            {
-                CloseClipboard();
-                throw std::runtime_error("Cannot read Windows clipboard");
-            }
-            const int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
-                                                  wide, -1, nullptr, 0, nullptr, nullptr);
-            if (!bytes)
-            {
-                GlobalUnlock(handle);
-                CloseClipboard();
-                throw std::runtime_error("Windows clipboard has invalid Unicode text");
-            }
-            std::string value(static_cast<std::size_t>(bytes), '\0');
-            const int written = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
-                                                    wide, -1, value.data(), bytes, nullptr, nullptr);
-            GlobalUnlock(handle);
-            CloseClipboard();
-            if (!written)
-                throw std::runtime_error("Cannot decode Windows clipboard");
-            value.pop_back(); // trailing NUL returned by WideCharToMultiByte
-            return value;
-        }
-        std::wstring quoteWindows(const std::wstring &value)
-        {
-            std::wstring result = L"\"";
-            std::size_t slash = 0;
-            for (wchar_t c : value)
-            {
-                if (c == L'\\')
-                {
-                    ++slash;
-                    continue;
-                }
-                if (c == L'\"')
-                {
-                    result.append(slash * 2 + 1, L'\\');
-                    result += c;
-                    slash = 0;
-                    continue;
-                }
-                result.append(slash, L'\\');
-                slash = 0;
-                result += c;
-            }
-            result.append(slash * 2, L'\\');
-            return result + L'\"';
-        }
-        void spawnNewTerminal(const ApplicationShellConfig &cfg)
-        {
-            std::vector<wchar_t> path(32768);
-            DWORD count = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-            if (!count || count >= path.size())
-                throw std::runtime_error("Cannot locate Windows Terminal executable");
-            const std::wstring exe(path.data(), count);
-            auto args = terminalArgs(cfg);
-            std::wstring command = quoteWindows(exe);
-            for (std::size_t i = 1; i < args.size(); ++i)
-                command += L" " + quoteWindows(utf8(args[i]));
-            STARTUPINFOW startup{};
-            startup.cb = sizeof(startup);
-            PROCESS_INFORMATION process{};
-            if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE,
-                                CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &startup, &process))
-                throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "New Terminal");
-            CloseHandle(process.hThread);
-            CloseHandle(process.hProcess);
-        }
-#else
-        void spawnNewTerminal(const ApplicationShellConfig &cfg)
-        {
-#ifdef __APPLE__
-            uint32_t size = 4096;
-            std::vector<char> buffer(size);
-            if (_NSGetExecutablePath(buffer.data(), &size))
-            {
-                buffer.resize(size + 1);
-                if (_NSGetExecutablePath(buffer.data(), &size))
-                    throw std::runtime_error("Cannot locate macOS Terminal executable");
-            }
-            const std::string executable = buffer.data();
-#else
-            const std::string executable = fs::read_symlink("/proc/self/exe").string();
-#endif
-            auto args = terminalArgs(cfg);
-            args[0] = executable;
-            std::vector<char *> argv;
-            for (auto &part : args)
-                argv.push_back(part.data());
-            argv.push_back(nullptr);
-            pid_t pid = 0;
-            const int code = posix_spawn(&pid, executable.c_str(), nullptr, nullptr, argv.data(), environ);
-            if (code)
-                throw std::system_error(code, std::generic_category(), "New Terminal");
-        }
-#endif
-
-#ifdef __APPLE__
-        bool openNativeInspector(webview::webview &window);
-        void installMacFileMenu(webview::webview &window, const ApplicationShellConfig &cfg)
-        {
-            // Keep the selector target alive. NSMenuItem.target is not an owning ref.
-            static CinterFileMenuTarget *target = nil;
-            if (!target)
-                target = [[CinterFileMenuTarget alloc] init];
-            target->newTerminalAction = [&window, cfg](const std::string &kind)
-            {
-                if (kind.rfind("lan:", 0) == 0) {
-                    const std::string url = kind.substr(4);
-                    if (validLanUrl(url)) {
-                        auto remote = cfg; remote.connect_url = url;
-                        remote.title = "CinterForge Terminal — " + url;
-                        spawnNewTerminal(remote);
-                    }
-                    return;
-                }
-                if (kind == "lan-popup") {
-                    window.dispatch([&window] { window.eval("window.CinterShowLAN && window.CinterShowLAN()"); });
-                    return;
-                }
-                window.dispatch([&window, kind]
-                                { window.eval("window.CinterTerminalNewTab && window.CinterTerminalNewTab(\"" + jsonEscape(kind) + "\")"); });
-            };
-            target->quitAction = []
-            { [NSApp terminate:nil]; };
-            target->codeMenuAction = [&window](const std::string &action) {
-                window.dispatch([&window, action] {
-                    window.eval("window.CinterMenuDispatch && window.CinterMenuDispatch(\"" +
-                                jsonEscape(action) + "\")");
-                });
-            };
-            target->debuggerAction = [&window]
-            { window.dispatch([&window]
-                              { openNativeInspector(window); }); };
-            // The native menu must copy reliably even when WKWebView's asynchronous
-            // navigator.clipboard API lacks permission (or a DOM user gesture).
-            target->copyAction = [&window]
-            { window.dispatch([&window]
-                              {
-        WKWebView *browser=(WKWebView*)webview_get_native_handle(
-            static_cast<webview_t>(&window),
-            WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER);
-        if (!browser) return;
-        // Do not steal standard clipboard commands from a separate Web Inspector.
-        if (NSApp.keyWindow && NSApp.keyWindow != browser.window) {
-            [NSApp sendAction:@selector(copy:) to:nil from:nil];
-            return;
-        }
-        [browser evaluateJavaScript:@"window.CinterEdit ? window.CinterEdit.transcript() : ''"
-                   completionHandler:^(id value, NSError *error) {
-            if (error || ![value isKindOfClass:[NSString class]]) return;
-            NSPasteboard *pasteboard=[NSPasteboard generalPasteboard];
-            [pasteboard clearContents];
-            [pasteboard setString:(NSString*)value forType:NSPasteboardTypeString];
-        }]; }); };
-            target->pasteAction = [&window]
-            {
-                WKWebView *browser=(WKWebView*)webview_get_native_handle(
-                    static_cast<webview_t>(&window),
-                    WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER);
-                if (browser && NSApp.keyWindow && NSApp.keyWindow != browser.window) {
-                    [NSApp sendAction:@selector(paste:) to:nil from:nil];
-                    return;
-                }
-                NSString *value = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
-                if (!value)
-                    return;
-                const std::string utf8 = [value UTF8String] ?: "";
-                window.dispatch([&window, utf8]
-                                { window.eval("window.CinterEdit && window.CinterEdit.insert(\"" + jsonEscape(utf8) + "\")"); });
-            };
-            NSMenu *bar = [[NSMenu alloc] initWithTitle:@""];
-            NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"CinterForge Terminal" action:nil keyEquivalent:@""];
-            NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"CinterForge Terminal"];
-            [appMenu addItemWithTitle:@"About CinterForge Terminal" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
-            [appMenu addItem:[NSMenuItem separatorItem]];
-            [appMenu addItemWithTitle:@"Hide CinterForge Terminal" action:@selector(hide:) keyEquivalent:@"h"];
-            [appMenu addItemWithTitle:@"Hide Others" action:@selector(hideOtherApplications:) keyEquivalent:@"h"];
-            [[appMenu itemAtIndex:3] setKeyEquivalentModifierMask:(NSEventModifierFlagCommand | NSEventModifierFlagOption)];
-            [appMenu addItemWithTitle:@"Show All" action:@selector(unhideAllApplications:) keyEquivalent:@""];
-            [appMenu addItem:[NSMenuItem separatorItem]];
-            NSMenuItem *appQuit = [appMenu addItemWithTitle:@"Quit CinterForge Terminal" action:@selector(terminate:) keyEquivalent:@"q"];
-            [appQuit setTarget:NSApp];
-            [appItem setSubmenu:appMenu];
-            [bar addItem:appItem];
-
-            // Every app-wide editor menu is represented once. Code-OSS sends the
-            // live actions when its workbench is ready; these native items are
-            // enabled only in Code mode. Terminal and the quit/copy/paste items
-            // remain usable in the historical terminal modes.
-            NSArray<NSString *> *codeGroups = @[@"File", @"Edit", @"Selection", @"View",
-                                                @"Go", @"Run", @"Terminal", @"Help"];
-            NSMutableDictionary<NSString *, NSMenu *> *menus = [NSMutableDictionary dictionary];
-            for (NSString *group in codeGroups)
-            {
-                NSMenuItem *entry = [[NSMenuItem alloc] initWithTitle:group action:nil keyEquivalent:@""];
-                NSMenu *menu = [[NSMenu alloc] initWithTitle:group];
-                [entry setSubmenu:menu];
-                [entry setEnabled:YES]; // All modes share the same menu skeleton.
-                [bar addItem:entry];
-                menus[group] = menu;
-            }
-            const auto addAction = [&](NSString *group, NSString *name, NSString *action) {
-                NSMenuItem *item = [menus[group] addItemWithTitle:name
-                                                           action:@selector(dispatchCodeMenu:)
-                                                    keyEquivalent:@""];
-                [item setRepresentedObject:action];
-                [item setTarget:target];
-                return item;
-            };
-            addAction(@"File", @"Relaunch CinterForge Terminal", @"app:relaunch");
-            addAction(@"File", @"Quit CinterForge Terminal", @"app:quit");
-            // Native Edit menu owns the standard macOS keyboard equivalents.
-            // Route them to the same working actions used by mouse selection.
-            NSMenuItem *copyItem = addAction(@"Edit", @"Copy", @"edit:copy");
-            NSMenuItem *pasteItem = addAction(@"Edit", @"Paste", @"edit:paste");
-            [copyItem setAction:@selector(copyTerminal:)];
-            [pasteItem setAction:@selector(pasteTerminal:)];
-            [copyItem setKeyEquivalent:@"c"];
-            [pasteItem setKeyEquivalent:@"v"];
-            NSDictionary *terminalLabels = @{
-                @"code": @"New CinterForge Code Terminal", @"mac": @"New Mac Bash",
-                @"linux": @"Open Linux Bash in Code-OSS", @"win": @"Open Windows Bash in Code-OSS",
-                @"launcher:mac": @"Mac Launcher", @"launcher:win": @"Windows Launcher",
-                @"launcher:linux": @"Linux Launcher",
-                @"server": @"New Server Log Terminal", @"if": @"New Z-Machine Terminal",
-                @"minecraft": @"New Minecraft Terminal"
-            };
-            for (NSString *kind in @[@"code", @"mac", @"linux", @"win", @"launcher:mac",
-                                    @"launcher:win", @"launcher:linux", @"server", @"if", @"minecraft"])
-            {
-                NSMenuItem *item = addAction(@"Terminal", terminalLabels[kind],
-                    [@"terminal:" stringByAppendingString:kind]);
-                if ([kind isEqualToString:@"minecraft"])
-                {
-                    target->minecraftItem = item;
-                    [item setEnabled:NO];
-                }
-            }
-            // Finder/Explorer opens the active writable Logs tree. The
-            // authenticated native WebView calls the host, which resolves the
-            // actual installed Steam library or developer sibling Builds.
-            addAction(@"Terminal", @"Open Logs Folder", @"app:open-logs");
-            // These CinterForge catalogs stay at the far right of both bars.
-            for (NSString *group in @[@"LAN", @"Macintosh", @"BeOS", @"NeXTSTEP", @"Machines"])
-            {
-                NSMenuItem *entry = [[NSMenuItem alloc] initWithTitle:group action:nil keyEquivalent:@""];
-                NSMenu *menu = [[NSMenu alloc] initWithTitle:group];
-                [entry setSubmenu:menu];
-                [bar addItem:entry];
-                menus[group] = menu;
-            }
-            NSMenuItem *connect = [menus[@"LAN"] addItemWithTitle:@"Connect / Refresh…"
-                                                            action:@selector(newTerminal:) keyEquivalent:@""];
-            [connect setRepresentedObject:@"lan-popup"];
-            [connect setTarget:target];
-            fs::path stagedProfiles = fs::path(cfg.service).parent_path() / "data/terminal_styles.json";
-            NSData *data = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:stagedProfiles.string().c_str()]];
-            NSDictionary *catalog = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-            NSMutableArray<NSDictionary *> *entries = [NSMutableArray array];
-            if ([catalog isKindOfClass:[NSDictionary class]])
-            {
-                for (NSString *source in @[ @"profiles", @"emulators" ])
-                {
-                    NSArray *items = catalog[source];
-                    if ([items isKindOfClass:[NSArray class]])
-                        for (id entry in items)
-                            if ([entry isKindOfClass:[NSDictionary class]])
-                                [entries addObject:entry];
-                }
-                if ([catalog[@"codeoss"] isKindOfClass:[NSDictionary class]])
-                    [entries addObject:catalog[@"codeoss"]];
-            }
-            [entries sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
-              NSInteger ay = [a[@"year"] respondsToSelector:@selector(integerValue)] ? [a[@"year"] integerValue] : 0;
-              NSInteger by = [b[@"year"] respondsToSelector:@selector(integerValue)] ? [b[@"year"] integerValue] : 0;
-              if (ay != by)
-                  return ay < by ? NSOrderedAscending : NSOrderedDescending;
-              return [a[@"name"] compare:b[@"name"]];
-            }];
-            NSMutableSet<NSString *> *added = [NSMutableSet set];
-            for (NSDictionary *entry in entries)
-            {
-                NSString *identifier = entry[@"id"], *name = entry[@"name"];
-                if (![identifier isKindOfClass:[NSString class]] ||
-                    ![name isKindOfClass:[NSString class]] || identifier.length > 100 || !identifier.length ||
-                    [identifier rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyz0123456789-"] invertedSet]].location != NSNotFound)
-                    continue;
-                if ([identifier isEqualToString:@"quadra-650"] || [added containsObject:identifier])
-                    continue;
-                [added addObject:identifier];
-                NSString *group = @"Machines";
-                if ([entry[@"kind"] isEqualToString:@"emulator"])
-                {
-                    if ([identifier hasPrefix:@"beos-"])
-                        group = @"BeOS";
-                    else if ([identifier hasPrefix:@"next-"])
-                        group = @"NeXTSTEP";
-                    else
-                        group = @"Macintosh";
-                }
-                NSNumber *year = entry[@"year"];
-                NSString *title = [NSString stringWithFormat:@"%@ %@", year ?: @"", name];
-                NSMenuItem *item = [menus[group] addItemWithTitle:title action:@selector(newTerminal:) keyEquivalent:@""];
-                [item setRepresentedObject:[@"profile:" stringByAppendingString:identifier]];
-                [item setTarget:target];
-            }
-            [NSApp setMainMenu:bar];
-        }
-
-#endif
-
-        // A typed `debugger` command is handled by the real native browser engine,
-        // not by JavaScript `debugger;` (which merely pauses an attached inspector).
-        // Called exclusively on the WebView UI thread.
-        bool openNativeInspector(webview::webview &window)
-        {
-            void *handle = webview_get_native_handle(static_cast<webview_t>(&window),
-                                                     WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER);
-            if (!handle)
-            {
-                std::cerr << "[TERMINAL DEBUGGER] native browser controller unavailable\n";
-                return false;
-            }
-#ifdef _WIN32
-            auto *controller = static_cast<ICoreWebView2Controller *>(handle);
-            ICoreWebView2 *browser = nullptr;
-            const HRESULT acquired = controller->get_CoreWebView2(&browser);
-            if (FAILED(acquired) || !browser)
-            {
-                std::cerr << "[TERMINAL DEBUGGER] WebView2 browser unavailable: " << acquired << '\n';
-                return false;
-            }
-            const HRESULT opened = browser->OpenDevToolsWindow();
-            browser->Release();
-            if (FAILED(opened))
-            {
-                std::cerr << "[TERMINAL DEBUGGER] WebView2 OpenDevToolsWindow failed: " << opened << '\n';
-                return false;
-            }
-            std::cerr << "[TERMINAL DEBUGGER] WebView2 DevTools opened\n";
-            return true;
-#elif defined(__linux__)
-            auto *browser = WEBKIT_WEB_VIEW(handle);
-            auto *settings = webkit_web_view_get_settings(browser);
-            g_object_set(G_OBJECT(settings), "enable-developer-extras", TRUE, nullptr);
-            auto *inspector = webkit_web_view_get_inspector(browser);
-            if (!inspector)
-            {
-                std::cerr << "[TERMINAL DEBUGGER] WebKitGTK inspector unavailable\n";
-                return false;
-            }
-            webkit_web_inspector_show(inspector);
-            std::cerr << "[TERMINAL DEBUGGER] WebKitGTK inspector requested\n";
-            return true;
-#elif defined(__APPLE__)
-            WKWebView *browser = (WKWebView *)handle;
-            if (@available(macOS 13.3, *))
-                browser.inspectable = YES;
-            // macOS exposes inspectability publicly, but no public WKWebView API
-            // directly opens the inspector. Try the installed WebKit inspector SPI;
-            // if Apple removes it, preserve the official Safari Develop fallback.
-            SEL accessor = NSSelectorFromString(@"_inspector");
-            // WebKit's _WKInspector does NOT implement `show` in current SDKs.
-            // Its private connect/attach entry points are checked dynamically and
-            // never assumed to succeed. Public inspectable remains the fallback.
-            SEL connect = NSSelectorFromString(@"connect");
-            SEL attach = NSSelectorFromString(@"attach");
-            SEL isVisible = NSSelectorFromString(@"isVisible");
-            if ([browser respondsToSelector:accessor])
-            {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                id inspector = [browser performSelector:accessor];
-                if (inspector && [inspector respondsToSelector:connect] &&
-                    [inspector respondsToSelector:attach])
-                {
-                    [inspector performSelector:connect];
-                    [inspector performSelector:attach];
-                    BOOL visible = [inspector respondsToSelector:isVisible] &&
-                                   ((BOOL (*)(id, SEL))objc_msgSend)(inspector, isVisible);
-                    std::cerr << "[TERMINAL DEBUGGER] WKWebView inspector connect/attach; visible="
-                              << visible << '\n';
-                    if (visible)
-                        return true;
-                }
-#pragma clang diagnostic pop
-            }
-            std::cerr << "[TERMINAL DEBUGGER] WKWebView is inspectable; open Safari > Develop > "
-                         "CinterForge Terminal to inspect (no public macOS direct-open API)\n";
-            return false;
-#else
-            return false;
-#endif
-        }
-
-        std::string nativeBootstrapUrl(const std::string &rpc, const std::string &base)
-        {
-            // The private Host RPC returns this grant only to a local native
-            // launch. Never print it, persist it, or expose it to remote windows.
-            static const std::regex grant(R"re("native_grant"\s*:\s*"([A-Za-z0-9_-]{40,128})")re");
-            std::smatch match;
-            if (!std::regex_search(rpc, match, grant))
-                throw std::runtime_error("Native Terminal startup grant is missing");
-            return base + "_native_open?key=" + match[1].str();
-        }
-
-        std::string readyUrl(const std::string &rpc)
-        {
-            // An application RPC error is a valid JSONL response. Never navigate to
-            // arbitrary/untrusted URLs from it or accept a forged readiness message.
-            static const std::regex url(R"re("url"\s*:\s*"(http://127\.0\.0\.1:[0-9]{1,5}/?)")re");
-            std::smatch match;
-            if (rpc.find("\"error\"") != std::string::npos || !std::regex_search(rpc, match, url))
-                throw std::runtime_error("Hosted Python HTTP service did not return a loopback URL: " + rpc);
-            return match[1];
-        }
-    } // namespace
-
+namespace cinterforge {
+    namespace fs = std::filesystem;
     int smokeWebViewJavaScript()
     {
         // Do not mistake linking WebView for a working browser. This creates the
@@ -704,7 +113,7 @@ namespace cinterforge
 
     int runApplicationShell(const ApplicationShellConfig &config)
     {
-        validateStaged(config);
+        CinterForgeApplicationPaths::validateStaged(config);
         // The authenticated terminal's `debugger` command must work without a
         // separate environment flag supplied by the user at launch time.
 #ifdef _WIN32
@@ -714,7 +123,7 @@ namespace cinterforge
         if (setenv("CPH_ENABLE_DEBUGGER", "1", 1))
             throw std::runtime_error("Cannot enable native Terminal debugger");
 #endif
-        if (!config.connect_url.empty() && !validLanUrl(config.connect_url))
+        if (!config.connect_url.empty() && !CinterForgeApplicationPaths::validLanUrl(config.connect_url))
             throw std::invalid_argument("CinterForge LAN service requires a private IPv4 address on HTTP port 20300-20399");
         auto host = std::make_unique<PythonHost>();
         bool started = false;
@@ -750,10 +159,10 @@ namespace cinterforge
                     throw;
                 }
                 hostRunning = true;
-                const std::string reply = host->call("start", "{\"builds\":\"" + jsonEscape(config.builds) + "\"}",
+                const std::string reply = host->call("start", "{\"builds\":\"" + CinterForgeApplicationPaths::jsonEscape(config.builds) + "\"}",
                                                     std::chrono::seconds(wineGuest ? 60 : 15));
-                url = readyUrl(reply);
-                navigationUrl = nativeBootstrapUrl(reply, url);
+                url = CinterForgePythonServiceHandshake::readyUrl(reply);
+                navigationUrl = CinterForgePythonServiceHandshake::nativeBootstrapUrl(reply, url);
                 runtimeOwner = reply.find("\"attached\": true") == std::string::npos &&
                                reply.find("\"attached\":true") == std::string::npos;
                 started = true;
@@ -776,7 +185,7 @@ namespace cinterforge
             window.set_title(config.title);
             window.set_size(config.width, config.height, WEBVIEW_HINT_NONE);
 #ifdef __APPLE__
-            installMacFileMenu(window, config);
+            CinterForgePlatformMenus::installMacFileMenu(window, config);
 #elif defined(__linux__) && GTK_MAJOR_VERSION < 4
             // GTK 3 desktop/taskbar window icon; GTK 4 uses the generated .desktop
             // application's Icon/StartupWMClass entry instead.
@@ -798,11 +207,11 @@ namespace cinterforge
                 if (!std::regex_search(args, match, std::regex(R"re("url"\s*:\s*"(http://[^"\\]+)")re")))
                     return R"("invalid LAN URL")";
                 const std::string remoteUrl = match[1].str();
-                if (!validLanUrl(remoteUrl)) return R"("invalid LAN URL")";
+                if (!CinterForgeApplicationPaths::validLanUrl(remoteUrl)) return R"("invalid LAN URL")";
                 auto remote = config;
                 remote.connect_url = remoteUrl;
                 remote.title = "CinterForge Terminal — " + remoteUrl;
-                spawnNewTerminal(remote);
+                CinterForgePlatformMenus::spawnNewTerminal(remote);
                 return R"("window-opened")";
             });
             // Real File commands create a complete independent native Terminal or
@@ -840,7 +249,7 @@ namespace cinterforge
                 NSPasteboard *board = [NSPasteboard generalPasteboard];
                 if ([action isEqualToString:@"paste"]) {
                     NSString *value = [board stringForType:NSPasteboardTypeString] ?: @"";
-                    return "\"" + jsonEscape([value UTF8String] ?: "") + "\"";
+                    return "\"" + CinterForgeApplicationPaths::jsonEscape([value UTF8String] ?: "") + "\"";
                 }
                 if ([action isEqualToString:@"copy"]) {
                     NSString *value = request[@"text"];
@@ -858,7 +267,7 @@ namespace cinterforge
                         {
             if (args.find("\"action\":\"paste\"") == std::string::npos)
                 return "null";
-            return "\"" + jsonEscape(windowsClipboardText()) + "\""; });
+            return "\"" + CinterForgeApplicationPaths::jsonEscape(CinterForgePlatformMenus::windowsClipboardText()) + "\""; });
 #endif
             // Native bridge on the real staged application (not a synthetic smoke page).
             // This binding accepts telemetry only; privileged terminal commands continue
@@ -903,7 +312,7 @@ namespace cinterforge
                     NSMenu *menu = [[NSApp.mainMenu itemWithTitle:name] submenu];
                     if (!menu || ![items isKindOfClass:[NSArray class]]) return;
                     [menu removeAllItems];
-                    CinterFileMenuTarget *target = (CinterFileMenuTarget *)
+                    CinterForgeFileMenuTarget *target = (CinterForgeFileMenuTarget *)
                         [[[NSApp.mainMenu itemWithTitle:@"LAN"] submenu] itemAtIndex:0].target;
                     // Reproduce Monaco submenus recursively; all leaf commands
                     // route back to the Code workbench, never native substitutes.
@@ -976,12 +385,12 @@ namespace cinterforge
                     NSMenu *list = [[[NSApp mainMenu] itemWithTitle:@"LAN"] submenu];
                     if (!list) return;
                     while ([list numberOfItems] > 1) [list removeItemAtIndex:1];
-                    CinterFileMenuTarget *target = (CinterFileMenuTarget *)[[list itemAtIndex:0] target];
+                    CinterForgeFileMenuTarget *target = (CinterForgeFileMenuTarget *)[[list itemAtIndex:0] target];
                     for (id peer in peers) {
                         if (![peer isKindOfClass:[NSDictionary class]]) continue;
                         NSString *url = peer[@"url"];
                         NSString *name = peer[@"name"];
-                        if (![url isKindOfClass:[NSString class]] || !validLanUrl([url UTF8String])) continue;
+                        if (![url isKindOfClass:[NSString class]] || !CinterForgeApplicationPaths::validLanUrl([url UTF8String])) continue;
                         NSMenuItem *item = [list addItemWithTitle:[NSString stringWithFormat:@"%@ — %@", name ?: @"Terminal", url]
                                                          action:@selector(newTerminal:) keyEquivalent:@""];
                         [item setRepresentedObject:[@"lan:" stringByAppendingString:url]];
@@ -1032,7 +441,7 @@ namespace cinterforge
                     const auto response = host->call("next_debugger_request", "{}", std::chrono::seconds(3));
                     if (response.find("\"requested\": true") != std::string::npos ||
                         response.find("\"requested\":true") != std::string::npos) {
-                        window.dispatch([&window] { openNativeInspector(window); });
+                        window.dispatch([&window] { CinterForgePlatformMenus::openNativeInspector(window); });
                     }
                     // The HTTP server and Colima share this native owner's
                     // lifetime. If the Python listener dies while the WebView
@@ -1077,13 +486,13 @@ namespace cinterforge
                         auto replacement = std::make_unique<PythonHost>();
                         replacement->start(config.python, config.worker, activeService,
                                            std::chrono::seconds(10));
-                        const std::string startArgs = "{\"builds\":\"" + jsonEscape(config.builds) + "\"}";
+                        const std::string startArgs = "{\"builds\":\"" + CinterForgeApplicationPaths::jsonEscape(config.builds) + "\"}";
                         host->call("stop", "{}", std::chrono::seconds(12));
                         try {
                             const std::string ready = replacement->call("start", startArgs,
                                                                           std::chrono::seconds(30));
-                            const std::string renewedUrl = readyUrl(ready);
-                            const std::string renewedNavigation = nativeBootstrapUrl(ready, renewedUrl);
+                            const std::string renewedUrl = CinterForgePythonServiceHandshake::readyUrl(ready);
+                            const std::string renewedNavigation = CinterForgePythonServiceHandshake::nativeBootstrapUrl(ready, renewedUrl);
                             host->stop();
                             host = std::move(replacement);
                             window.dispatch([&window, renewedNavigation] {
@@ -1156,7 +565,7 @@ namespace cinterforge
             // Only launch the updated executable AFTER the old HTTP host has
             // released 20300. Never run two live owners during replacement.
             if (relaunchRequested.load() && !config.accept_ui && config.connect_url.empty())
-                spawnNewTerminal(config);
+                CinterForgePlatformMenus::spawnNewTerminal(config);
             return 0;
         }
         catch (...)

@@ -1,4 +1,26 @@
 #!/usr/bin/env python3
+# CINTERFORGE SOURCE HEADER — host/linux/craftmaster/craftmaster_serve.py
+# PURPOSE: Implements the Linux craftmaster serve owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _safe_members: Handle safe members through this component's established interfaces.
+#   _read_level_name: Read level name from the existing project data.
+#   _set_property: Set set property for this module.
+#   _read_world_game_mode: Return the authored Bedrock GameType from level.dat (0..3), failing loudly.
+#   prepare_world: Prepare prepare world for this module.
+#   prepare_world_directory: Deploy a local Bedrock world directory into BDS without modifying the source save.
+#   _safe_pack_members: Handle safe pack members through this component's established interfaces.
+#   _read_pack_manifest: Read pack manifest from the existing project data.
+#   install_mcaddon: Install one generated .mcaddon into BDS and bind its packs to one deployed world.
+#   install_cinter_utility_pack: Create the world-level Cinter command pack from the Cinter items installed in this world.
+#   ...and 3 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 """Prepare a converted .mcworld for an interactive CraftMaster BDS session."""
 from __future__ import annotations
 

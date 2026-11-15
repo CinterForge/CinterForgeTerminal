@@ -5,6 +5,20 @@ Linux environment used to compile the WebKitGTK sample. It never creates an
 acceptance receipt itself: only bootstrap_bundle.setup_local may do so after
 native ELF/WebView/Python tests. A missing image or source is a hard failure.
 """
+# CINTERFORGE SOURCE HEADER — host/linux/linux_runner.py
+# PURPOSE: Implements the Linux linux runner owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   stage: Stage stage for this module.
+#   build_terminal: Cross-build the real Linux/x64 ELF and expose the failing compiler output.
+#   main: Start the current executable and return its status.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

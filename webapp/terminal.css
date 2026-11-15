@@ -1,3 +1,16 @@
+/*
+ * CINTERFORGE SOURCE HEADER — webapp/terminal.css
+ * PURPOSE: Styles the cross-platform Terminal tab strip, native-inspired menus, terminal output, iframe emulators and notices.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * RULES: Root theme variables, CRT visual effects, terminal text/scrollback, tab and menu layout, keyboard targets and emulator iframe sizing.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 /* CinterForgeTerminal's Kevin Terminal Sessions presentation.
  * Ported visual treatment from CinterForgeWebApp/IFPlayer/Style/04-session.css:
  * the selectable original palettes, CRT scanlines, screen-glass falloff and

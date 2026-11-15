@@ -1,4 +1,16 @@
 #!/usr/bin/env python3
+# CINTERFORGE SOURCE HEADER — host/linux/craftmaster/validate_minecraft_server.py
+# PURPOSE: Implements the Linux validate minecraft server owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   main: Start the current executable and return its status.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 """Minecraft Bedrock runtime acceptance, invoked by the owning CFOS/Cinter Test.
 
 The CFOS LinuxKit test uses its own isolated official BDS installation under

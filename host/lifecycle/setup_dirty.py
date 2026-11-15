@@ -10,6 +10,24 @@ repository.  Metadata inventories detect normal additions, removals and writes
 without rehashing several GiB of verified runtime files on every invocation.
 Build/Stage/Test still perform their own strict content checks.
 """
+# CINTERFORGE SOURCE HEADER — host/lifecycle/setup_dirty.py
+# PURPOSE: Tracks authored Setup inputs and dependency provenance to avoid unnecessary reprovisioning.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _excluded: Handle excluded through this component's established interfaces.
+#   _sources: Handle sources through this component's established interfaces.
+#   _output_state: Inventory the actual closure using lstat; never follow outside links.
+#   _receipt: Handle receipt through this component's established interfaces.
+#   is_current: Return True only for a prior fully accepted and unchanged Setup.
+#   invalidate: A dirty or interrupted retry cannot reuse an earlier success receipt.
+#   commit: Persist a positive gate only after *every* existing Setup step passed.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib
@@ -25,7 +43,7 @@ SCHEMA = 'cinterforge.terminal.setup-dirty.v1'
 # This deliberately includes the Setup implementations, pinned recipes,
 # bundled extensions and LinuxKit inputs, but NOT UI changes, tests, docs,
 # Git objects, or generated source-checkout metadata.
-SOURCE_TREES = ('host', 'webapp/codeoss', 'webapp/data', 'webapp/views', 'app/build', 'app/include', 'app/src')
+SOURCE_TREES = ('host', 'webapp/codeoss', 'webapp/client', 'webapp/runtime', 'webapp/data', 'webapp/views', 'app/build', 'app/include', 'app/src')
 SOURCE_FILES = ('Cinter', 'Cinter.cmd', 'webapp/CinterForgeTerminal.py')
 # These are Setup-produced, BUILD-READ-ONLY closures.  No Builds/Logs,
 # Intermediates compiler trees, application builds, or Steam stages are here.

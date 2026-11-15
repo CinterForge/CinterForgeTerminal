@@ -5,6 +5,26 @@ executes this module locally after its own application build, then writes a
 version-bound log and receipt to sibling Builds. Directory listings are also
 shown automatically when opening an interactive CinterForgeTerminal session.
 """
+# CINTERFORGE SOURCE HEADER — host/lifecycle/terminal_probe.py
+# PURPOSE: Owns the terminal probe stage of the existing CinterForgeTerminal lifecycle; generated files remain in sibling Builds.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   native: Handle native through this component's established interfaces.
+#   msys_path: Convert Windows drive paths for MSYS2 bash (no global cygpath needed).
+#   msys_root: Reuse a *complete* installed MSYS2 UCRT64 tree staged under Builds.
+#   shell: Return an actual native Bash invocation with deterministic UCRT64 PATH.
+#   receipt_path: Handle receipt path through this component's established interfaces.
+#   directory_log_path: Handle directory log path through this component's established interfaces.
+#   run_native: Run run native for this module.
+#   verify: Verify verify for this module.
+#   main: Start the current executable and return its status.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import argparse

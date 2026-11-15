@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# CINTERFORGE SOURCE HEADER — host/linux/legacy/cfos-build-setup.sh
+# PURPOSE: Implements the Linux cfos build setup owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   cfos_setup: Handle cfos setup through this component's established interfaces.
+#   cfos_colima_healthy: Handle cfos colima healthy through this component's established interfaces.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 # Setup: prepare host toolchains, private Colima profile, and guest sources.
 # Sourced by ../CFOS. Nothing in this file runs until cfos_setup is called.
 cfos_setup() {

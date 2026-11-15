@@ -1,4 +1,22 @@
 #!/usr/bin/env bash
+# CINTERFORGE SOURCE HEADER — host/linux/legacy/colima-runtime.sh
+# PURPOSE: Implements the Linux colima runtime owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   cfos_colima_environment: Handle cfos colima environment through this component's established interfaces.
+#   cfos_colima_build_memory_gib: Handle cfos colima build memory gib through this component's established interfaces.
+#   cfos_colima_check_host_memory: Handle cfos colima check host memory through this component's established interfaces.
+#   cfos_colima_ensure_memory: Handle cfos colima ensure memory through this component's established interfaces.
+#   cfos_colima_start: Handle cfos colima start through this component's established interfaces.
+#   cfos_colima_ensure_disk: Handle cfos colima ensure disk through this component's established interfaces.
+#   cfos_colima_activate: Handle cfos colima activate through this component's established interfaces.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 # Shared CFOS Docker configuration and reboot-safe runtime activation.
 # Setup provisions the profile; Build and Xcode activate it on demand.
 cfos_colima_environment() {

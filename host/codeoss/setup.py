@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Invoke the copied, pinned Code-OSS browser production pipeline from Setup.
+# CINTERFORGE SOURCE HEADER — host/codeoss/setup.py
+# PURPOSE: Owns Code-OSS setup setup/staging and host integration, not a second editor or command service.
+# OWNERSHIP: This is Setup/Build-owned producer code; no runtime imports.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _extension_matches_source: Check that the verified Web product contains the current authored extension.
+#   setup: Handle setup through this component's established interfaces.
+#   main: Start the current executable and return its status.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
+"""Run the pinned Code-OSS browser producer from Setup, not the app runtime.
 
 A complete existing Builds/InteractiveFiction/CodeOSS/Web is reused.  When
 missing or invalid, the existing Server producer is called with refresh=True:
@@ -30,7 +44,7 @@ def _extension_matches_source(web: Path, *, authored: Path | None = None) -> boo
     changed. Compare its actual staged bytes, not timestamps or a stored receipt.
     Bundling is deterministic and this check does not write to source or Builds.
     """
-    source = Path(authored) if authored is not None else Path(__file__).resolve().parent / 'extension'
+    source = Path(authored) if authored is not None else Path(__file__).resolve().parents[2] / 'webapp/codeoss/extension'
     staged = Path(web) / 'extensions/cinterforge-if'
     if not staged.is_dir():
         return False

@@ -6,6 +6,24 @@ never manufacture a release runtime by copying a developer virtualenv or
 linking to ~/.pyenv. Setup may download an exact checked archive; a packaged
 application contains the verified result and never downloads it at launch.
 """
+# CINTERFORGE SOURCE HEADER — host/python/portable_python.py
+# PURPOSE: Maintains portable python within CinterForgeTerminal without duplicating external ownership.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _sha: Handle sha through this component's established interfaces.
+#   _binary: Handle binary through this component's established interfaces.
+#   _validate_package: Validate validate package for this module.
+#   _extract_portable: Flatten internal symlinks; omit only cyclic optional terminfo aliases.
+#   _inspect: Handle inspect through this component's established interfaces.
+#   _download_verified: Handle download verified through this component's established interfaces.
+#   provision: Provision and execute the target-native runtime; never accept a foreign stub.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

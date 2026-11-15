@@ -1,4 +1,26 @@
 #!/usr/bin/env python3
+# CINTERFORGE SOURCE HEADER — host/linux/craftmaster/build_craftmaster_server.py
+# PURPOSE: Implements the Linux build craftmaster server owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   sha: Handle sha through this component's established interfaces.
+#   discover: Discover discover for this module.
+#   _download: Handle download through this component's established interfaces.
+#   _replace_server_from_archive_preserving_state: Handle replace server from archive preserving state through this component's established interfaces.
+#   extract_pristine_acceptance_server: Handle extract pristine acceptance server through this component's established interfaces.
+#   acquire: Handle acquire through this component's established interfaces.
+#   _server_port: Handle server port through this component's established interfaces.
+#   raknet_ping: Handle raknet ping through this component's established interfaces.
+#   _kill_smoke_process: Handle kill smoke process through this component's established interfaces.
+#   smoke: Handle smoke through this component's established interfaces.
+#   ...and 6 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 """Acquire and prove the official Bedrock Dedicated Server build artifact.
 
 macOS cannot execute Microsoft's Linux BDS natively: preflight acquires the exact

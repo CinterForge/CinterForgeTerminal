@@ -3,6 +3,23 @@
 Windows publishes the verified WiX MSI inside a second installer-only ZIP.
 The canonical Windows product ZIP remains unchanged. This is Publish-only.
 """
+# CINTERFORGE SOURCE HEADER — host/lifecycle/target_publish.py
+# PURPOSE: Selects validated distribution destinations/channels and verifies their release inputs.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _sha: Handle sha through this component's established interfaces.
+#   _zip_contains_msi: Verify the actual uncompressed MSI bytes, not just the ZIP CRC/header.
+#   package_msi_zip: Wrap a verified MSI in its own browser-downloadable ZIP, atomically.
+#   _reusable: Use the small committed remote manifest only when object age/size agrees.
+#   _publish_files: Publish publish files for this module.
+#   publish: Prepare/publish one app; Windows also publishes its verified MSI ZIP.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 from datetime import datetime

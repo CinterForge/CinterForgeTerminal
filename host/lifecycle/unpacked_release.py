@@ -7,6 +7,28 @@ straight into Steam (no archive operations). Publish alone creates the Mac DMG a
 The inventories refer to immutable Build-produced files and snapshot small
 source-authored resources into Builds; they do not duplicate the multi-GB SDK.
 """
+# CINTERFORGE SOURCE HEADER — host/lifecycle/unpacked_release.py
+# PURPOSE: Records immutable unpacked build receipts, validates content hashes, then assembles release packages during Publish only.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _up: Handle up through this component's established interfaces.
+#   _safe_builds: Handle safe builds through this component's established interfaces.
+#   _fingerprint: Handle fingerprint through this component's established interfaces.
+#   _stat: Handle stat through this component's established interfaces.
+#   _sha: Handle sha through this component's established interfaces.
+#   _atomic_json: Handle atomic json through this component's established interfaces.
+#   _built_receipt: Handle built receipt through this component's established interfaces.
+#   _load: Load load for this module.
+#   _safe_name: Handle safe name through this component's established interfaces.
+#   _source: Handle source through this component's established interfaces.
+#   ...and 11 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+# CINTERFORGE SOURCE HEADER — host/linux/prepare_debian.py
+# PURPOSE: Implements the Linux prepare debian owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   cfos_builds_root: Resolve the sole sibling Builds location using the CFOS source identity.
+#   release_orphaned_debian_disk_holders: Reap abandoned Apple VM services, never an active VM or unknown owner.
+#   grow_ext4_disk: Expand an existing Debian disk without replacing its installed contents.
+#   ensure_ext4_disk: Build the writable Linux-owned Debian filesystem once, from the base image.
+#   remove_host_extracted_rootfs: Remove only the generated rootfs, including inaccessible Linux directories.
+#   main: Start the current executable and return its status.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 """Prepare a persistent Debian base userspace under Builds/Linux/Debian.
 
 Requires Docker or Podman on the build Mac. This does not install Creative Suite

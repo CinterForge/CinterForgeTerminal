@@ -1,3 +1,16 @@
+/*
+ * CINTERFORGE SOURCE HEADER — webapp/launcher/style.css
+ * PURPOSE: Implements the existing style launcher presentation and native guest desktop routing.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * RULES: Native-launcher-like desktop surface, OS wallpaper alignment and accessible app controls.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 /* One staged-app launcher and three replaceable platform background PNGs.
    No wallpaper includes toolbar/dock pixels; Kevin can replace a file as-is. */
 * { box-sizing: border-box; }

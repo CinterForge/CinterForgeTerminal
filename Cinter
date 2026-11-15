@@ -1,4 +1,26 @@
 #!/usr/bin/env python3
+# CINTERFORGE SOURCE HEADER — Cinter
+# PURPOSE: Dispatches Setup, Build, Stage, Test and Publish to existing lifecycle owners, while preserving phase separation and streamed logs.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _archive_cmake_diagnostics: Copy CMake's own error/configuration traces to the Terminal log root.
+#   _run_with_persistent_lifecycle_log: Stream all child output to both console and a persistent, dated log.
+#   invoke: Implement invoke for this module.
+#   _run_automated_regression_tests: Execute the single real staged-system smoke suite in the Test phase only.
+#   _temporary_build_services: Lifecycle phase owns only its Colima helpers, including crash cleanup.
+#   _reboot_running_terminal: Private local command; native app owns the restart, never the CLI.
+#   main: Dispatch the supported developer/user commands; returns a process exit code.
+#   _source_destination_for: Resolve the maintained fork name from the app ID, not the upstream URL.
+#   _source_fork_destination: Implement source fork destination for this module.
+#   _source_create_github_fork: Create upstream fork and rename only when the registry requests a distinct name.
+#   ...and 11 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 """CinterForgeTerminal: documented entry point for developers and builders.
 
 This script is the *single user-facing command driver* for the Terminal repo.
@@ -228,8 +250,8 @@ def _run_automated_regression_tests() -> None:
     if (not node_executable.is_file() or node_executable.is_symlink() or
             not os.access(node_executable, os.X_OK)):
         raise RuntimeError('Managed Node.js unavailable in Test; run ./Cinter setup all')
-    invoke(str(node_executable), '--check', str(REPO / 'webapp/terminal.js'))
-    print('[Cinter test] PASS root smoke suite and terminal.js syntax', flush=True)
+    invoke(str(node_executable), '--check', str(REPO / 'webapp/CinterForgeTerminal.js'))
+    print('[Cinter test] PASS root smoke suite and CinterForgeTerminal.js syntax', flush=True)
 
 
 @contextmanager
@@ -288,10 +310,10 @@ def _reboot_running_terminal(component: str) -> int:
     import time
     from urllib.request import Request, urlopen
     from urllib.error import HTTPError, URLError
-    from webapp.CinterForgeTerminal import _existing_lan_owner, LAN_HTTP_PORT
+    from host.lifecycle.CinterForgeNativeOwner import existing_native_owner, LAN_HTTP_PORT
     if component not in ('server', 'docker', 'colima', 'app'):
         raise ValueError('Usage: ./Cinter reboot server|docker|colima|app')
-    owner = _existing_lan_owner(BUILDS)
+    owner = existing_native_owner(BUILDS)
     if owner is None:
         raise RuntimeError('No verified running CinterForge Terminal native app to reboot')
     origin = f'http://127.0.0.1:{LAN_HTTP_PORT}'
@@ -320,7 +342,7 @@ def _reboot_running_terminal(component: str) -> int:
     print('[Cinter reboot] ' + component + ' restart accepted; awaiting native readiness', flush=True)
     for _ in range(120):
         time.sleep(1)
-        next_owner = _existing_lan_owner(BUILDS)
+        next_owner = existing_native_owner(BUILDS)
         if next_owner is not None and next_owner.get('instance') != owner.get('instance'):
             print('[Cinter reboot] ' + component + ' PASS: new Terminal listener ready', flush=True)
             return 0
@@ -449,7 +471,7 @@ def main(argv: list[str]) -> int:
             provision(BUILDS, 'mac', 'arm64')
             from host.lifecycle.universal_package import provision_release_runtimes
             provision_release_runtimes(BUILDS)
-            invoke(sys.executable, '-B', str(REPO / 'webapp/codeoss/setup.py'),
+            invoke(sys.executable, '-B', str(REPO / 'host/codeoss/setup.py'),
                    '--workspace', str(REPO.parent))
             invoke(sys.executable, '-B', '-m', 'host.lagomorph.lagomorph_setup', '--builds', str(BUILDS))
             if platform.system() == 'Darwin':
@@ -615,8 +637,10 @@ def main(argv: list[str]) -> int:
         # The same self-contained command is bundled into each native app.
         # It retrieves the optional shared SDK from the published public URLs
         # ONLY after showing size/path and receiving explicit confirmation.
-        from webapp.CinterForgeTerminal import install_devtools
-        return install_devtools()
+        # Explicit app command runs as its own process, not as a Host import.
+        invoke(sys.executable, '-B', str(REPO / 'webapp/CinterForgeTerminal.py'),
+               '--terminal-cli', 'install', 'devtools')
+        return 0
     if argv in (['verify', 'public'], ['verify', 'release'], ['verify', 'beta']):
         from host.lifecycle.universal_package import verify_public_four, update_readme_public_downloads
         selected = 'beta' if argv[1] == 'beta' else 'public'

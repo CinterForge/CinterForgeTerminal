@@ -5,6 +5,21 @@ WebView MinGW toolchain and WebView2 SDK headers are consumed directly from
 Builds, so the native and cross-target applications share the same C++ shell
 and JS binding code. Wine CLI testing is not native WebView2 acceptance.
 """
+# CINTERFORGE SOURCE HEADER — host/lifecycle/cross_build.py
+# PURPOSE: Owns the cross build stage of the existing CinterForgeTerminal lifecycle; generated files remain in sibling Builds.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _prepare_cross_cache: Invalidate only an old Windows CMake tree when its compiler toolchain changed.
+#   _run: Run run for this module.
+#   build: Build build for this module.
+#   main: Start the current executable and return its status.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import json

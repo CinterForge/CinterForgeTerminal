@@ -1,3 +1,18 @@
+/*
+ * CINTERFORGE SOURCE HEADER — app/build/terminal_bootstrap/main.cpp
+ * PURPOSE: Maintains main within CinterForgeTerminal without duplicating external ownership.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   main: Start the current executable and return its status.
+ *   watchdog: Handle watchdog through this component's established interfaces.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 // Exactly one C++ example for macOS, Linux and Windows.  Compile against
 // upstream webview/webview; the browser engine is supplied by each OS.
 #ifndef CINTER_BOOTSTRAP_CONSOLE_ONLY

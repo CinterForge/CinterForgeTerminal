@@ -4,6 +4,23 @@ This is the redistributable browser runtime, NOT the NuGet headers or the
 Evergreen installer. Initial Setup downloads Microsoft's official CAB and
 unpacks it inside Builds. Rebuild/launch uses only the verified local files.
 """
+# CINTERFORGE SOURCE HEADER — host/windows/windows_fixed_runtime.py
+# PURPOSE: Implements the Windows windows fixed runtime owner for the existing compiler, MSI and Wine/native runtime closure.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _first_bytes: Handle first bytes through this component's established interfaces.
+#   sha: Handle sha through this component's established interfaces.
+#   _files: Handle files through this component's established interfaces.
+#   verify: Verify verify for this module.
+#   _source: Handle source through this component's established interfaces.
+#   ensure: Ensure ensure for this module.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

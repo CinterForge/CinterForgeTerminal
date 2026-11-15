@@ -10,12 +10,14 @@
 		A00000000000000000000005 /* CinterForge Terminal.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "CinterForge Terminal.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A00000000000000000000030 /* CinterTerminalMain.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = support/CinterTerminalMain.cpp; sourceTree = "<group>"; };
 		A00000000000000000000031 /* CinterForgeTerminal.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CinterForgeTerminal.cpp; sourceTree = "<group>"; };
+		A00000000000000000000047 /* CinterForgePlatformMenus.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CinterForgePlatformMenus.cpp; sourceTree = "<group>"; };
+		A00000000000000000000048 /* CinterForgePlatformMenus.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = ../include/CinterForgePlatformMenus.h; sourceTree = "<group>"; };
 		A00000000000000000000032 /* CinterPythonHost.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = support/CinterPythonHost.cpp; sourceTree = "<group>"; };
 		A00000000000000000000033 /* CinterPythonHostC.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = support/CinterPythonHostC.cpp; sourceTree = "<group>"; };
 		A00000000000000000000034 /* CinterZeroconf.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = support/CinterZeroconf.cpp; sourceTree = "<group>"; };
 		A00000000000000000000035 /* ../include/CinterApplicationShell.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = ../include/CinterApplicationShell.h; sourceTree = "<group>"; };
 		A00000000000000000000036 /* index.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = index.html; sourceTree = "<group>"; };
-		A00000000000000000000037 /* terminal.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = terminal.js; sourceTree = "<group>"; };
+		A00000000000000000000037 /* CinterForgeTerminal.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = CinterForgeTerminal.js; sourceTree = "<group>"; };
 		A00000000000000000000038 /* terminal.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; path = terminal.css; sourceTree = "<group>"; };
 		A00000000000000000000039 /* CinterForgeTerminal.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = CinterForgeTerminal.py; sourceTree = "<group>"; };
 		A00000000000000000000040 /* resources */ = {isa = PBXFileReference; lastKnownFileType = folder; path = resources; sourceTree = "<group>"; };
@@ -52,6 +54,8 @@
 			children = (
 				A00000000000000000000030 /* CinterTerminalMain.cpp */,
 				A00000000000000000000031 /* CinterForgeTerminal.cpp */,
+				A00000000000000000000047 /* CinterForgePlatformMenus.cpp */,
+				A00000000000000000000048 /* CinterForgePlatformMenus.h */,
 				A00000000000000000000032 /* CinterPythonHost.cpp */,
 				A00000000000000000000033 /* CinterPythonHostC.cpp */,
 				A00000000000000000000034 /* CinterZeroconf.cpp */,
@@ -64,7 +68,7 @@
 			isa = PBXGroup;
 			children = (
 				A00000000000000000000036 /* index.html */,
-				A00000000000000000000037 /* terminal.js */,
+				A00000000000000000000037 /* CinterForgeTerminal.js */,
 				A00000000000000000000038 /* terminal.css */,
 				A00000000000000000000039 /* CinterForgeTerminal.py */,
 			);

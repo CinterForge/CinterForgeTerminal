@@ -1,3 +1,25 @@
+/*
+ * CINTERFORGE SOURCE HEADER — app/include/CinterZeroconf.h
+ * PURPOSE: Declares the CinterZeroconf native interface shared across supported C++/C platform builds.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   Zeroconf: Handle zeroconf through this component's established interfaces.
+ *   publish: Publish publish for this module.
+ *   browse: Handle browse through this component's established interfaces.
+ *   poll: Poll poll for this module.
+ *   unpublish: Handle unpublish through this component's established interfaces.
+ *   stopBrowsing: Stop stop browsing for this module.
+ *   stop: Stop stop for this module.
+ *   check: Check check for this module.
+ *   deliver: Handle deliver through this component's established interfaces.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 #ifndef CINTER_ZEROCONF_H
 #define CINTER_ZEROCONF_H
 

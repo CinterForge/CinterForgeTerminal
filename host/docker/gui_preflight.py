@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+# CINTERFORGE SOURCE HEADER — host/docker/gui_preflight.py
+# PURPOSE: Maintains gui preflight within CinterForgeTerminal without duplicating external ownership.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _tail: Handle tail through this component's established interfaces.
+#   _wait: Handle wait through this component's established interfaces.
+#   _xdpyinfo: Handle xdpyinfo through this component's established interfaces.
+#   _vnc_banner: Handle vnc banner through this component's established interfaces.
+#   _novnc_page: Handle novnc page through this component's established interfaces.
+#   main: Start the current executable and return its status.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 """Setup-only, real X11/VNC/noVNC smoke, optionally followed by a GUI command.
 
 Runs *inside* either pinned Linux OCI image.  The optional command (Wine in

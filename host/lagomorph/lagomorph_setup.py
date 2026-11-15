@@ -4,6 +4,28 @@ Never downloads game/OS assets. Only reads a user-owned source within sibling
 Builds, preserves classic resource forks using macOS ditto, and creates a
 separate HFS/ISO content disk for Infinite Mac. No Apple OS disk is repackaged.
 """
+# CINTERFORGE SOURCE HEADER — host/lagomorph/lagomorph_setup.py
+# PURPOSE: Implements the Lagomorph lagomorph setup pipeline while preserving release gating, emulator assets and save-image integrity.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _macos_xattr_get: Read macOS extended attributes even when the selected Python omits os.getxattr.
+#   _macos_xattr_set: Write resource forks through Darwin libc without Python xattr support.
+#   _getxattr: Handle getxattr through this component's established interfaces.
+#   _setxattr: Handle setxattr through this component's established interfaces.
+#   sha256: Handle sha256 through this component's established interfaces.
+#   within: Handle within through this component's established interfaces.
+#   _source: Handle source through this component's established interfaces.
+#   _validate_zip: Validate validate zip for this module.
+#   _appledouble_metadata: Recover classic Finder info and resource fork from macOS ZIP sidecars.
+#   _recover_zip_forks: Restore AppleDouble forks explicitly; modern ZIP tools can lose them.
+#   ...and 18 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import argparse

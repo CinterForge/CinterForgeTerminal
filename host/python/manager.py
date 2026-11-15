@@ -5,6 +5,28 @@ manifests, requirements and service code there instead of referring to sibling
 source repositories. Host-installed Python is a Setup tool, never a release
 runtime closure. Never mutate an existing healthy cinterenv during adoption.
 """
+# CINTERFORGE SOURCE HEADER — host/python/manager.py
+# PURPOSE: Compiles and stages the reusable Python Host, portable interpreter and all immutable Terminal webapp resources.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   current_platform: Handle current platform through this component's established interfaces.
+#   architecture: Handle architecture through this component's established interfaces.
+#   builds_root: Handle builds root through this component's established interfaces.
+#   python_root: Handle python root through this component's established interfaces.
+#   environment_dir: Handle environment dir through this component's established interfaces.
+#   python_executable: Handle python executable through this component's established interfaces.
+#   inside: Reject untrusted config paths pointing into a sibling source checkout.
+#   read_projects: Read projects from the existing project data.
+#   requirements: Handle requirements through this component's established interfaces.
+#   requirements_fingerprint: Handle requirements fingerprint through this component's established interfaces.
+#   ...and 23 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import argparse
@@ -814,9 +836,9 @@ def stage_host(builds: Path) -> dict:
         # application service. Never omit its JS, terminal bindings or EULA
         # manager from the immutable artifact consumed by product applications.
         for name in ('CinterForgeTerminal.py', 'index.html',
-                     'terminal.js', 'terminal.css', 'startup.js'):
+                     'CinterForgeTerminal.js', 'terminal.css', 'startup.js'):
             shutil.copy2(repo / 'webapp' / name, candidate / 'webapp' / name)
-        for directory in ('data', 'views'):
+        for directory in ('data', 'views', 'client', 'runtime'):
             shutil.copytree(repo / 'webapp' / directory,
                             candidate / 'webapp' / directory,
                             ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store'))

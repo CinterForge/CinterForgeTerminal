@@ -1,3 +1,27 @@
+/*
+ * CINTERFORGE SOURCE HEADER — app/src/support/CinterZeroconf.cpp
+ * PURPOSE: Implements the native CinterZeroconf helper for the existing CinterForgeTerminal application and Python Host.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   closeSocket: Close close socket for this module.
+ *   socketError: Handle socket error through this component's established interfaces.
+ *   lower: Handle lower through this component's established interfaces.
+ *   labelValid: Handle label valid through this component's established interfaces.
+ *   normalizeType: Handle normalize type through this component's established interfaces.
+ *   validInstanceName: Handle valid instance name through this component's established interfaces.
+ *   write16: Handle write16 through this component's established interfaces.
+ *   write32: Handle write32 through this component's established interfaces.
+ *   read16: Handle read16 through this component's established interfaces.
+ *   read32: Handle read32 through this component's established interfaces.
+ *   ...and 16 additional internal entry points; see their local documentation.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 #include "CinterZeroconf.h"
 
 #include <algorithm>

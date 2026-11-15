@@ -4,6 +4,19 @@ MSYS2's official versioned installer and pacman are the authoritative
 implementation; do not reconstruct a hand-picked collection of DLLs. Initial
 acquisition may use network; finished application rebuilds use staged files.
 """
+# CINTERFORGE SOURCE HEADER — host/windows/windows_install.py
+# PURPOSE: Implements the Windows windows install owner for the existing compiler, MSI and Wine/native runtime closure.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _execute: Execute execute for this module.
+#   ensure: Ensure ensure for this module.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import json

@@ -171,3 +171,16 @@ Authoritative Terminal source is in `CinterForgeTerminal`; other repositories re
 Build records **four unpacked outputs** under sibling `Builds`: Mac, Windows, Linux and unified DevTools. Stage copies and verifies those unpacked outputs directly into Steam with no ZIP/UnZIP. Publish alone creates the Mac DMG, the Windows MSI-only ZIP, and the Linux/DevTools ZIPs; Setup alone downloads, verifies and unpacks published packages into their canonical `Builds` paths when required. Test validates staged products offline, and atomic reboot operations never recompile or package. See [Build and Release](Build%20and%20Release.md).
 
 An optional Steam adapter and permissioned Creative Mesh can consume the Host interfaces without making Steamworks or untrusted inter-app commands core requirements. See [Integrating the Host](Integrating%20the%20Host.md).
+
+## Lifecycle and runtime independence (Phase 4)
+
+The application runtime is maintained in `webapp/` and owns its HTTP service,
+native app VM lifetime and live terminal sessions. Setup, Build, Stage, Test
+and Publish are maintained by `host/` and do **not** import the application
+service. In particular, `CinterForgeLifecycleVM` and
+`CinterForgeLifecycleGuests` deliberately implement the same verified x86-64
+Colima and Bash/VNC behavior independently of `CinterForgeVM`; their state
+paths intentionally remain the existing developer `Builds/CFTVM/T` location.
+Code-OSS source acquisition/staging lives in `host/codeoss` while its authored
+browser extension remains in `webapp/codeoss/extension`. Future changes to
+VM locations can be made in either layer without runtime/lifecycle imports.

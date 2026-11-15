@@ -1,4 +1,16 @@
 #!/bin/sh
+# CINTERFORGE SOURCE HEADER — host/linux/headless_contract.sh
+# PURPOSE: Implements the Linux headless contract owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   cleanup_cfos_smoke: Handle cleanup cfos smoke through this component's established interfaces.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 # Shipping CFOS Ubuntu AMD64 acceptance: real Linux and Windows execution.
 # Called within the installed OCI rootfs; no source repo or external files.
 set -eu

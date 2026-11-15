@@ -5,6 +5,24 @@ The initial source is fetched from the upstream versioned archive; subsequent
 builds verify the entire staged source tree and never invoke FetchContent or
 reach into another repository. Native SDKs remain OS-specific prerequisites.
 """
+# CINTERFORGE SOURCE HEADER — host/lifecycle/webview.py
+# PURPOSE: Owns the webview stage of the existing CinterForgeTerminal lifecycle; generated files remain in sibling Builds.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _sha: Handle sha through this component's established interfaces.
+#   _files: Handle files through this component's established interfaces.
+#   _extract: Handle extract through this component's established interfaces.
+#   provision: Handle provision through this component's established interfaces.
+#   _webview2_files: Handle webview2 files through this component's established interfaces.
+#   provision_webview2: Stage upstream WebView2 headers once, then verify every byte offline.
+#   upstream_windows_toolchain: Use webview/webview's pinned MinGW toolchain, with a macOS sysroot shim.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

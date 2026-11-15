@@ -5,6 +5,28 @@ Docker storage and caches live on the build volume when the CinterForge checkout
 is on an external volume; never silently fill the internal disk.
 Application build products remain under Builds/CreativeSuite/Built.
 """
+# CINTERFORGE SOURCE HEADER — host/linux/managed_backend.py
+# PURPOSE: Owns the managed Linux/Windows guest environment, its Docker process selection and startup shutdown contracts.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   host_executable: Find a host tool when Finder launches Swift without Homebrew on PATH.
+#   storage_root: Isolate Terminal's disposable Ubuntu/guest builder from the Windows VM.
+#   source_directory: Keep the original Ubuntu Source contract without sharing VM state.
+#   managed_colima_settings: Always use a short, independent, disposable ``c`` profile.
+#   managed_colima_home: Handle managed colima home through this component's established interfaces.
+#   backend_environment: All child commands use the isolated Ubuntu builder and its own socket.
+#   print_shell_environment: Expose one owner for paths/profile across bash and Python consumers.
+#   _managed_startup_diagnostics: Report the actual Lima/VZ failure, not just Colima's generic exit 1.
+#   _mirror_lima_logs: Expose Lima host-agent/serial logs beside the owning lifecycle log.
+#   _run_colima_start_live: Stream the managed c VM's actual boot output with a bounded wait.
+#   ...and 2 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import codecs

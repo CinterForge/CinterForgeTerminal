@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+# CINTERFORGE SOURCE HEADER — host/linux/guest_inputs.py
+# PURPOSE: Implements the Linux guest inputs owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _run: Run run for this module.
+#   _require_elf: Handle require elf through this component's established interfaces.
+#   prepare_official_bedrock_archive: Setup-only acquisition of official Bedrock acceptance bytes.
+#   provision_guest_runtime: Build the LinuxKit guest loader/probe without downloading Bedrock.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 """Production LinuxKit input provisioning for Setup, never acceptance tests.
 
 Only Setup calls ``provision_guest_runtime`` and ``prepare_official_bedrock_archive``.

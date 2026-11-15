@@ -5,6 +5,28 @@ are independently checksummed. The historical universal ZIP
 reader remains for older archives, but is not the active release lifecycle.
 Bedrock server bytes are never included before app-side EULA acceptance.
 """
+# CINTERFORGE SOURCE HEADER — host/lifecycle/universal_package.py
+# PURPOSE: Owns the universal package stage of the existing CinterForgeTerminal lifecycle; generated files remain in sibling Builds.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _hash: Handle hash through this component's established interfaces.
+#   _check_regular: Check check regular for this module.
+#   _native_binary: Handle native binary through this component's established interfaces.
+#   _contents_launcher: Handle contents launcher through this component's established interfaces.
+#   _linux_launcher: Handle linux launcher through this component's established interfaces.
+#   _windows_launcher: Handle windows launcher through this component's established interfaces.
+#   _write_launcher: Write write launcher for this module.
+#   _manifest_files: Handle manifest files through this component's established interfaces.
+#   assemble: Handle assemble through this component's established interfaces.
+#   verify_universal_zip: Read back the actual ZIP payload and verify every declared byte.
+#   ...and 61 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import argparse
@@ -296,8 +318,60 @@ def _progress(label: str, done: int, total: int) -> None:
     print(f'[TERMINAL PROGRESS] {label} {percent:.1f}% '
           f'({done / 1048576:.1f}/{total / 1048576:.1f} MiB)', flush=True)
 
-HOST_ASSETS = ('CinterForgeTerminal.py', 'data/if_titles.json', 'data/mac_games.json', 'index.html',
-               'data/terminal_styles.json', 'terminal.js', 'terminal.css', 'views/startup.html', 'startup.js', 'views/discord.html')
+HOST_ASSETS = (
+    'CinterForgeTerminal.py',
+    'data/if_titles.json',
+    'data/mac_games.json',
+    'index.html',
+    'data/terminal_styles.json',
+    'CinterForgeTerminal.js',
+    'terminal.css',
+    'views/startup.html',
+    'startup.js',
+    'views/discord.html',
+    'runtime/__init__.py',
+    'runtime/CinterForgeLogging.py',
+    'runtime/CinterForgeCode.py',
+    'runtime/CinterForgeGuest.py',
+    'runtime/CinterForgeVM.py',
+    'client/CinterForgeClientState.js',
+    'client/CinterForgeCodeOSS.js',
+    'client/CinterForgeEmulators.js',
+    'client/CinterForgeSessions.js',
+    'client/CinterForgeLaunchers.js',
+    'client/CinterForgeDiscord.js',
+    'client/CinterForgeLAN.js',
+    'client/CinterForgeIF.js',
+    'client/CinterForgeSessionIO.js',
+    'client/CinterForgeInput.js',
+    'client/CinterForgeMenus.js',
+    'client/CinterForgeLayout.js',
+    'client/CinterForgeKeyboard.js',
+    'client/CinterForgeBedrock.js',
+    'client/CinterForgeGuestStatus.js',
+    'client/CinterForgeCommands.js',
+    'runtime/CinterForgeApplication.py',
+    'runtime/CinterForgeAuthentication.py',
+    'runtime/CinterForgeBedrock.py',
+    'runtime/CinterForgeCommands.py',
+    'runtime/CinterForgeContainers.py',
+    'runtime/CinterForgeDevTools.py',
+    'runtime/CinterForgeDiscord.py',
+    'runtime/CinterForgeDiscovery.py',
+    'runtime/CinterForgeGuestShells.py',
+    'runtime/CinterForgeHTTP.py',
+    'runtime/CinterForgeIF.py',
+    'runtime/CinterForgeLaunchers.py',
+    'runtime/CinterForgeRuntimeBootstrap.py',
+    'runtime/CinterForgeRuntimeWatchdog.py',
+    'runtime/CinterForgeService.py',
+    'runtime/CinterForgeSessions.py',
+    'runtime/CinterForgeSettings.py',
+    'runtime/CinterForgeVMOperations.py',
+    'runtime/CinterForgeHTTPAuthorization.py',
+    'runtime/CinterForgeHTTPCode.py',
+    'runtime/CinterForgeHTTPRoutes.py',
+)
 
 
 def _files_under(source: Path, prefix: str, *, require: bool = True) -> dict[str, Path]:

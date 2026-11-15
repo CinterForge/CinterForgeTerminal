@@ -1,3 +1,18 @@
+/*
+ * CINTERFORGE SOURCE HEADER — host/linux/probes/cinter_nethernet_probe.c
+ * PURPOSE: Implements the Linux cinter nethernet probe owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   probe: Handle probe through this component's established interfaces.
+ *   main: Start the current executable and return its status.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 #include <arpa/inet.h>
 #include <errno.h>
 #include <stdio.h>

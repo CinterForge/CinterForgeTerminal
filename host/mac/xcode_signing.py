@@ -5,6 +5,28 @@ certificate kind; secrets and private keys stay in the system Keychain.
 Only the existing Cinter Build phase consumes these settings. No provisioning,
 certificate generation, or notarization is done here.
 """
+# CINTERFORGE SOURCE HEADER — host/mac/xcode_signing.py
+# PURPOSE: Implements the macOS xcode signing adapter, packaging, signing or bootstrap boundary used by the native Terminal lifecycle.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _project_release_settings: Handle project release settings through this component's established interfaces.
+#   _macos_release_setting: Resolve the macOS SDK-specific Xcode setting before its generic value.
+#   _developer_id_identity: Handle developer id identity through this component's established interfaces.
+#   release_signing_environment: Return inherited signing *references*, not credentials, for Build.
+#   login_keychain_environment: Run Apple's signing/notary tools as the login user, not Colima HOME.
+#   _notary_history: Validate an actual saved notarytool profile with Apple's service.
+#   _profile_receipt: Handle profile receipt through this component's established interfaces.
+#   _remember_notary_profile: Persist only a profile *name*, under Builds; never a password or key.
+#   _remembered_notary_profile: Handle remembered notary profile through this component's established interfaces.
+#   _missing_notary_item: Handle missing notary item through this component's established interfaces.
+#   ...and 2 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import argparse

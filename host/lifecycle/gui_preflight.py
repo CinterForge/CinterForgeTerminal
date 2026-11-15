@@ -3,6 +3,18 @@
 Run independently of Wine, fail closed, and save durable per-platform logs.
 Build, Stage, Test and the installed application never provision GUI packages.
 """
+# CINTERFORGE SOURCE HEADER — host/lifecycle/gui_preflight.py
+# PURPOSE: Owns the gui preflight stage of the existing CinterForgeTerminal lifecycle; generated files remain in sibling Builds.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   verify_guest_gui: Prove X11, real RFB handshake and browser endpoint before Wine starts.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import json

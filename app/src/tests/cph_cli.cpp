@@ -1,3 +1,18 @@
+/*
+ * CINTERFORGE SOURCE HEADER — app/src/tests/cph_cli.cpp
+ * PURPOSE: Implements the native cph cli helper for the existing CinterForgeTerminal application and Python Host.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   print_event: Print print event for this module.
+ *   main: Start the current executable and return its status.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 #include "CinterPythonHostC.h"
 #include <cstdlib>
 #include <iostream>

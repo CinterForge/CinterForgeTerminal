@@ -1,14 +1,14 @@
 # CinterForge Terminal Client — Browser UI and JavaScript
 
-**Primary source:** `webapp/terminal.js` (the file referred to as “CinterForgeTerminal.js” in the original request).  
+**Primary orchestrator:** `webapp/CinterForgeTerminal.js`. **Owners:** `webapp/client/CinterForge*.js` (19 modules loaded in the documented order).  
 **Supporting files:** `webapp/index.html`, `webapp/terminal.css`, `webapp/startup.js`, `webapp/launcher/`, `webapp/joshua/`, `webapp/data/`, `webapp/views/`, and the separately staged `webapp/codeoss/` workbench.  
-**Scope:** the current implementation and a proposed refactor, not a rewrite.
+**Scope:** current implemented split. The previous `webapp/terminal.js` no longer exists.
 
 ## Role and system boundary
 
 The client is the **one served Terminal user interface** on Mac, Windows, Linux and supported LAN browsers. It renders tabs, terminal output, native-inspired menus, Code-OSS, machine emulators, the game/IF catalog, Bedrock EULA interactions, Discord and Launcher views. It does **not** own host processes or declare VM readiness. It asks the Python service to create/verify sessions and reads the resulting capability state. Native window, menu, clipboard and inspector operations use narrowly defined C++ WebView bindings when present.
 
-## Major areas in `terminal.js`
+## Browser owner responsibilities
 
 | Area | Current code responsibilities |
 | --- | --- |
@@ -23,18 +23,18 @@ The client is the **one served Terminal user interface** on Mac, Windows, Linux 
 | PTY sessions | `openSession()`, `pollTab()`, `send()`, resize, close, reconnect and output generation/offset handling |
 | Input, clipboard, keys | Focus/keyboard target, key translation, paste/copy and native clipboard integration |
 | Menus | Shared menu actions, native/HTML menu dispatch, Code-OSS commands and action availability |
-| Initialization and restoration | Fetch status and profiles, choose default Mac Bash or Server Log, poll guest capabilities, restore only supported saved tabs |
+| Initialization and restoration | Fetch status and profiles, choose default Mac Bash, poll guest capabilities, restore only supported saved tabs |
 
 ## Architecture diagram
 
 ```mermaid
 flowchart LR
-    USER["Keyboard / menu / tabs"] --> CLIENT["terminal.js\nUI state + VT renderer"]
-    CLIENT --> API["Authenticated same-origin\n/api/* HTTP requests"]
-    API --> SERVER["CinterForgeTerminal.py\nHTTP Handler"]
-    SERVER --> PTY["PTY / ConPTY\nTerminalSession"]
+    USER["Keyboard / menu / tabs"] --> CLIENT["CinterForgeTerminal.js\ninitialization only"]
+    CLIENT --> API["CinterForgeAPI.js\nauthenticated same-origin /api/*"]
+    API --> SERVER["CinterForgeTerminal.py\nCinterForgeHTTPRequestHandler"]
+    SERVER --> PTY["PTY / ConPTY\nCinterForgeTerminalSession"]
     SERVER --> STATE["Guest status\nBash and VNC readiness"]
-    SERVER --> LOG["ServerRuntimeLog"]
+    SERVER --> LOG["CinterForgeRuntimeLog"]
     CLIENT --> CODE["Code-OSS iframe\nexisting extension bridge"]
     CLIENT --> EMULATOR["Machine / IF / Launcher\nSession content"]
     CLIENT <-->|"authorized native callbacks"| NATIVE["C++ WebView shell"]
@@ -46,7 +46,7 @@ flowchart LR
 ## Data flow: a shell keystroke
 
 1. The user types into the focusable Terminal input. The client translates control keys and routes them to the **active tab**, not a global shell process.
-2. `send()` uses the real terminal session ID and makes `/api/terminal/input` requests. The host-owned `TerminalSession` writes to its PTY/ConPTY (or verified guest PTY for that backend).
+2. `send()` uses the real terminal session ID and makes `/api/terminal/input` requests. The host-owned `CinterForgeTerminalSession` writes to its PTY/ConPTY (or verified guest PTY for that backend).
 3. `pollTab()` requests `/api/terminal/poll` and uses its generation/offset to append output to the tab's renderer. A tab switch preserves the session and transcript without creating another worker.
 4. Resize and close operations travel through `/api/terminal/resize` and `/api/terminal/close`. Code-OSS terminal requests use the existing `/host/code-shell-*` bridge and must not be confused with normal HTML Session tabs.
 
@@ -57,7 +57,7 @@ flowchart LR
 The script first calls `/api/status`, obtains the platform and installed DevTools/guest state, then loads `/terminal_styles.json` and `/mac_games.json`. It populates the shared profile/menu model and initializes tabs.
 
 - **Mac without verified installed DevTools:** immediately open real **Mac Bash** Session mode. The optional guest VM is not required.
-- **Mac with DevTools:** immediately show **Server Log**. Boot is managed by Python, not by JS; the UI polls `/api/lifecycle/guest-status` and displays live output.
+- **Mac with DevTools:** immediately open real **Mac Bash**; Server Log remains a background tab. Boot is managed by Python, not by JS; the UI polls `/api/lifecycle/guest-status` and displays live output without stealing focus.
 - **Linux/Windows native app:** open the normal native terminal session.
 - **Code-OSS, guest Bash, and VNC:** disabled until their **own live** readiness condition is met. Installation receipt, started VM, or active Docker container is not proof of a usable terminal or VNC socket.
 - **Saved layout:** preserve the prior layout during the temporary Server Log view; reopen only the tabs whose connections have been established. A failed endpoint remains closed/unavailable while other healthy endpoints continue.
@@ -68,24 +68,35 @@ This is the intended contract and the current code already has separate `guestRe
 
 The browser saves its tab layout through `saveTerminalLayout()` and the `pagehide` hook. Switching or closing tabs should detach/close only the correct session; it must not stop another tab's shell or an app-owned VM. `beforeunload` is **not** the VM shutdown owner: Python and the native shell are. On the next launch, the client rehydrates the saved view only after server status says the endpoint is live. Connection failure must visibly update the menu and Server Log, not leave a blank VNC iframe or stale Code-OSS terminal.
 
-## Proposed JavaScript refactor — staged, no parallel UI
+## Browser module split — implemented
 
-The present `terminal.js` coordinates too many independently stateful features. Move code **within the existing webapp**, preserving DOM IDs, API routes, native bindings, state schema, and the same entry point. Recommended boundaries:
+The old `webapp/terminal.js` has been removed. `webapp/CinterForgeTerminal.js` is the approximately 174-line final-loaded entry point for initial status, saved-tab restoration and DOM event registrations. All client behavior is in `webapp/client/CinterForge*.js` modules: API, VT renderer, capabilities, client state, Code-OSS, emulators, sessions, launchers, Discord, LAN, IF, session I/O, input, menus, layout, keyboard, Bedrock, guest status and commands. The modules share one `window.CinterForgeClientState` namespace and load in their original dependency order, not as competing UIs.
 
-| Responsibility | Suggested module | Single source of truth |
-| --- | --- | --- |
-| Server communication/auth/response errors | `client/CinterForgeAPI.js` | Current `api()` token protocol |
-| Readiness and platform capabilities | `client/CinterForgeCapabilities.js` | Response from Python `/api/status` and `/api/lifecycle/guest-status` |
-| Tab/session ownership and restoration | `client/CinterForgeSessions.js` | One active tab registry and persisted layout |
-| VT output rendering | `client/CinterForgeTerminals.js` | One VT buffer per real terminal tab |
-| Menu commands and enabled states | `client/mCinterForgeMenus.js` | One action registry reused by native and HTML presentations |
-| Code/Launcher/Emulator integration | Focused feature modules | Existing Code extension, Launcher and museum runtimes; do not fork them |
-| Main initialization | Thin `CinterForgeTerminal.js` orchestration | Starts subscriptions and first view once |
-
-Do **not** create new transport protocols, duplicate menu models, or move shell/VM decisions into JS. Prefer one typed capability snapshot and explicit transitions—`not-installed`, `starting`, per-endpoint `ready`, `failed`, `stopping`—over scattered booleans. Treat each retry as a new generation so late responses cannot revive a stale tab. Keep restoration idempotent: opening an already-open Code-OSS or guest session focuses it rather than allocating a second instance. Preserve existing acceptance and navigation rather than introducing a test framework.
+Both `index.html` and the Discord view use the same ordered script list. The Python HTTP static-file allowlist, embedded IF player, Host staging, Mac signing stage, release verifier and Xcode's authored resource copying all use the named files. Do not reintroduce `terminal.js`, separate browser state stores, or a second native transport.
 
 ## Maintenance contract and failure visibility
 
 When changing the client, trace the whole action: UI event → API/binding → server state change → log/result → tab/menu state. Failures should show the endpoint, stage, cause, and the Server Log location. An empty VNC viewer is never a success state. Browser-only views must not pretend a local PTY or native capability exists. Never put tokens or secrets in JavaScript logs or persisted layouts.
 
 **Related:** [Python server](CinterForgeTerminalServer.md), [native shell](../app/CinterForgeTerminal.md), [architecture](../docs/Architecture.md).
+
+
+## All browser owners (completed refactor)
+
+- `webapp/client/CinterForgeClientState.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeCodeOSS.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeEmulators.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeSessions.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeLaunchers.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeDiscord.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeLAN.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeIF.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeSessionIO.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeInput.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeMenus.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeLayout.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeKeyboard.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeBedrock.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeGuestStatus.js` — component-owned UI code, loaded in declared original order
+- `webapp/client/CinterForgeCommands.js` — component-owned UI code, loaded in declared original order
+- `webapp/CinterForgeTerminal.js` — thin browser startup entry; the old `terminal.js` is removed

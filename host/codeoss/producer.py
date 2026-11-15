@@ -1,9 +1,31 @@
 """Build and stage the pinned Code - OSS browser workbench for CinterForge.
 
-Only the maintainer ``--update-data`` producer path may acquire/build upstream
+Only the Setup producer path may acquire/build upstream
 Code - OSS. Consumer machines receive ``Builds/InteractiveFiction/CodeOSS/Web`` through the shared
 third-party-web-tool package and never require Git, Node, npm, or node_modules.
 """
+# CINTERFORGE SOURCE HEADER — host/codeoss/producer.py
+# PURPOSE: Owns Code-OSS producer setup/staging and host integration, not a second editor or command service.
+# OWNERSHIP: This is Setup/Build-owned producer code; no runtime imports.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _log: Handle log through this component's established interfaces.
+#   _project_root: Handle project root through this component's established interfaces.
+#   codeoss_build_root: Resolve Code-OSS from the product's authoritative storage root.
+#   codeoss_web_root: Handle codeoss web root through this component's established interfaces.
+#   validate_codeoss_web: Validate the staged tree exactly as a static consumer sees it.
+#   codeoss_is_installed: Handle codeoss is installed through this component's established interfaces.
+#   _run_checked: Run run checked for this module.
+#   _sync_checkout: Handle sync checkout through this component's established interfaces.
+#   _patch_cinterforge_bootstrap_provider: Register CinterForge's virtual filesystem before Code resolves workspace.
+#   _patch_codeoss_menubar_bridge: Expose Code-OSS's own live MenubarControl actions to its embedding host.
+#   ...and 41 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import base64
@@ -1161,7 +1183,7 @@ def _stage_cinterforge_extension(web: Path) -> None:
     """Refresh the CinterForge-owned extension without rebuilding upstream Code - OSS."""
     # The actual authored extension and its bundler are copied with this
     # established producer, so a clean Terminal checkout is self-contained.
-    extension_source = Path(__file__).resolve().parent / "extension"
+    extension_source = Path(__file__).resolve().parents[2] / "webapp/codeoss/extension"
     extension_target = web / "extensions" / "cinterforge-if"
     if not (extension_source / "package.json").is_file() or not (extension_source / "extension.js").is_file():
         raise RuntimeError(f"CinterForge Code - OSS extension is incomplete: {extension_source}")

@@ -1,3 +1,18 @@
+/*
+ * CINTERFORGE SOURCE HEADER — webapp/startup.js
+ * PURPOSE: Manages the startup screen and transitions while native assets and services become available.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   enterTerminal: Handle enter terminal through this component's established interfaces.
+ *   check: Check check for this module.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 /* Only the native UI's loading gate. No boot/download or other privileged
  * operation starts in the browser: the native-owned Python supervisor does it.
  */

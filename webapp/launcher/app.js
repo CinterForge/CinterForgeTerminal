@@ -1,3 +1,17 @@
+/*
+ * CINTERFORGE SOURCE HEADER — webapp/launcher/app.js
+ * PURPOSE: Implements the existing app launcher presentation and native guest desktop routing.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   showToast: Show show toast for this module.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 /* Shared CFOS launcher presentation. The parent Terminal owns all native or
  * guest process execution; this unprivileged iframe only emits allowlisted IDs.
  * No simulated desktop/process claims are made when the host is unavailable.

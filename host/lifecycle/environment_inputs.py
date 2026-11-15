@@ -5,6 +5,18 @@ version selection, venv creation, dependency installation, fingerprint and
 runtime injection already implemented in host.manager. Stage inputs inside
 Builds/Python instead of importing anything from a sibling source checkout.
 """
+# CINTERFORGE SOURCE HEADER — host/lifecycle/environment_inputs.py
+# PURPOSE: Owns the environment inputs stage of the existing CinterForgeTerminal lifecycle; generated files remain in sibling Builds.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   stage_requirements: Stage stage requirements for this module.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

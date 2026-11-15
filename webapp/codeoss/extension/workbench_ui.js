@@ -1,3 +1,27 @@
+/*
+ * CINTERFORGE SOURCE HEADER — webapp/codeoss/extension/workbench_ui.js
+ * PURPOSE: Connects Code-OSS workbench menus and UI actions to the established Terminal service.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   normalize: Handle normalize through this component's established interfaces.
+ *   cleanMenuLabel: Handle clean menu label through this component's established interfaces.
+ *   post: Handle post through this component's established interfaces.
+ *   requestGameMenu: Request request game menu for this module.
+ *   saveLabel: Save save label for this module.
+ *   showGameSaveMenu: Show show game save menu for this module.
+ *   closeCinterForgeMenu: Close close cinter forge menu for this module.
+ *   openCinterForgeMenu: Open open cinter forge menu for this module.
+ *   isTerminalWrapperHost: Handle is terminal wrapper host through this component's established interfaces.
+ *   installCinterForgeMenu: Install install cinter forge menu for this module.
+ *   ...and 10 additional internal entry points; see their local documentation.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 /* CinterForge-owned Code-OSS workbench UI. Current source; no generated copy. */
 (function () {
     'use strict';

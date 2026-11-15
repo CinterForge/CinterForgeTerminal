@@ -3,6 +3,28 @@
 Setup provisions the kernel, signed VM launcher with LAN relay, guest glibc and native
 NetherNet probe. Stage is read-only; Test starts only the completed runtime for acceptance.
 """
+# CINTERFORGE SOURCE HEADER — host/linux/lifecycle.py
+# PURPOSE: Implements the Linux lifecycle owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _call: Handle call through this component's established interfaces.
+#   _linuxkit: Handle linuxkit through this component's established interfaces.
+#   managed_setup_docker: Start the single disposable c Docker producer for LinuxKit inputs.
+#   setup_kernel: Build the LinuxKit kernel/initrd in Setup, never in Build/Stage/Test.
+#   verify: Verify verify for this module.
+#   prepare_guest: Produce the Terminal's complete guest closure during Setup only.
+#   verify_guest: Read-only closure verification; never starts Docker, Colima or a compiler.
+#   setup: Handle setup through this component's established interfaces.
+#   stage_guest: Read-only check of the Setup-produced closure (no VM, writes or builds).
+#   _licensed: Handle licensed through this component's established interfaces.
+#   ...and 3 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import argparse

@@ -1,11 +1,23 @@
 """Bedrock EULA gate for interactive developer Setup.
 
 Packaged applications retain the WebView acceptance flow. Both flows write the
-same BedrockManager receipt under sibling Builds; neither downloads anything.
+same EULA receipt format under sibling Builds; neither downloads anything.
+Lifecycle uses its own CinterForgeLifecycleBedrock implementation.
 """
+# CINTERFORGE SOURCE HEADER — host/linux/bedrock_consent.py
+# PURPOSE: Implements the Linux bedrock consent owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   require_bedrock_eula: Require recorded consent before the existing Bedrock installer runs.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
-from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
 from typing import Callable
@@ -21,20 +33,17 @@ def require_bedrock_eula(builds: Path, platform_name: str = 'mac', *,
     receipt (for example, one collected in the trusted app WebView).
     """
     builds = Path(builds).resolve()
-    source = Path(__file__).resolve().parents[2] / 'webapp/CinterForgeTerminal.py'
-    spec = spec_from_file_location('cinterforge_terminal_bedrock_license', source)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f'Bedrock license manager missing: {source}')
-    module = module_from_spec(spec)
-    spec.loader.exec_module(module)
-    manager = module.BedrockManager(builds, platform_name)
+    from host.lifecycle.CinterForgeLifecycleBedrock import (
+        CinterForgeLifecycleBedrock, EULA_URL, PRIVACY_URL, DOWNLOAD_URL,
+    )
+    manager = CinterForgeLifecycleBedrock(builds, platform_name)
     if manager.accepted():
         return
 
     print('\n[CinterForgeTerminal] Minecraft Bedrock Dedicated Server license', flush=True)
-    print(f'Official EULA:          {module.EULA_URL}', flush=True)
-    print(f'Official Privacy Policy: {module.PRIVACY_URL}', flush=True)
-    print(f'Official server download: {module.DOWNLOAD_URL}', flush=True)
+    print(f'Official EULA:          {EULA_URL}', flush=True)
+    print(f'Official Privacy Policy: {PRIVACY_URL}', flush=True)
+    print(f'Official server download: {DOWNLOAD_URL}', flush=True)
     print('Review these terms before accepting. No server download has started.', flush=True)
 
     if interactive is None:

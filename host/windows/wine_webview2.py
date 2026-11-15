@@ -5,6 +5,21 @@ browser engine. Keep the standalone installer and Wine prefix in Builds, never
 use Wine's browser substitutes as WebView2 acceptance, and fail closed if the
 Microsoft WebView2 registry version is not present after installation.
 """
+# CINTERFORGE SOURCE HEADER — host/windows/wine_webview2.py
+# PURPOSE: Implements the Windows wine webview2 owner for the existing compiler, MSI and Wine/native runtime closure.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _hash: Handle hash through this component's established interfaces.
+#   _install_archive: Install install archive for this module.
+#   _installed_version: Handle installed version through this component's established interfaces.
+#   ensure: Select verified fixed browser under Wine; the JS callback proves launch.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

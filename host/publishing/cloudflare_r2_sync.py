@@ -1,4 +1,26 @@
 #!/usr/bin/env python3
+# CINTERFORGE SOURCE HEADER — host/publishing/cloudflare_r2_sync.py
+# PURPOSE: Streams authenticated R2 uploads/downloads, multipart progress, hashes and remote verification.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _log: Handle log through this component's established interfaces.
+#   _verbose_log: Handle verbose log through this component's established interfaces.
+#   _fmt_bytes: Handle fmt bytes through this component's established interfaces.
+#   _heartbeat_seconds: Handle heartbeat seconds through this component's established interfaces.
+#   _with_heartbeat: Run a blocking network operation while emitting periodic progress logs.
+#   _trim_slashes: Handle trim slashes through this component's established interfaces.
+#   _md5_file: Handle md5 file through this component's established interfaces.
+#   _sha256_file: Handle sha256 file through this component's established interfaces.
+#   _load_hash_cache: Load load hash cache for this module.
+#   _save_hash_cache: Save save hash cache for this module.
+#   ...and 26 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 """
 Shared Cloudflare R2 folder sync transport, migrated from the proven Companion uploader.
 

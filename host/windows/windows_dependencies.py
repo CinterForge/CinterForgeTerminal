@@ -12,6 +12,26 @@ transient receipts are not portable dependencies.
 A saved image is not native Windows acceptance, nor an operational Docker
 engine. No Setup manifest is marked passed without the executable checks.
 """
+# CINTERFORGE SOURCE HEADER — host/windows/windows_dependencies.py
+# PURPOSE: Implements the Windows windows dependencies owner for the existing compiler, MSI and Wine/native runtime closure.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _sha: Handle sha through this component's established interfaces.
+#   _download_msys2: Acquire the existing official MSYS2 installer without losing a good retry.
+#   _verify_image: Verify verify image for this module.
+#   _verify_staged_closure: Verify Setup's local dependency closure without packaging a running VM.
+#   _transfer_archive: Make a transfer ZIP that contains exactly the recorded build tool inputs.
+#   _mac_transfer_entries: Verify portable Mac Setup tools, never a live or disposable VM disk.
+#   _verify_wine_runtime: Functional Setup acceptance; never repair or provision in Build/Publish.
+#   ensure: Ensure ensure for this module.
+#   main: Start the current executable and return its status.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import argparse

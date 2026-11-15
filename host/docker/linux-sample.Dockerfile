@@ -1,3 +1,14 @@
+# CINTERFORGE SOURCE HEADER — host/docker/linux-sample.Dockerfile
+# PURPOSE: Maintains linux sample within CinterForgeTerminal without duplicating external ownership.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# INTERFACE: This file declares presentation/build rules rather than callable methods.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 # The Linux counterpart to the exact same authored WebView C++ example.
 # Built and exported once by Mac Setup; subsequent builds reuse the image.
 FROM --platform=linux/amd64 debian:bookworm-slim

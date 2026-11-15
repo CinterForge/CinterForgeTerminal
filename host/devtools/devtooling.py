@@ -5,6 +5,28 @@ names. A missing tool, failed version command, or unknown binary size fails Setu
 Xcode is the sole size exception because its SDK installation footprint varies.
 All evidence and generated content live in the sibling Builds directory.
 """
+# CINTERFORGE SOURCE HEADER — host/devtools/devtooling.py
+# PURPOSE: Supervises the existing optional DevTools installation, local SDK, one managed t VM and real guest capability probes.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   VersionProbeError: class responsible for versionprobeerror
+#   _version: Require version output from a successful process, not a Wine warning.
+#   _local: Handle local through this component's established interfaces.
+#   _guest: Handle guest through this component's established interfaces.
+#   _pacman_fields: Handle pacman fields through this component's established interfaces.
+#   _staged_windows_versions: Verify the installed Windows version inventory without executing Wine.
+#   _windows: Handle windows through this component's established interfaces.
+#   _write_report: Write write report for this module.
+#   ensure: Ensure ensure for this module.
+#   _windows_unavailable: Handle windows unavailable through this component's established interfaces.
+#   ...and 2 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import argparse

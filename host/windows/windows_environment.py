@@ -5,6 +5,28 @@ Linux/amd64 Docker image (MinGW-w64 + Wine + CMake + Ninja), export that exact
 image into sibling Builds for offline reuse, and execute real PE binaries there.
 The Wine smoke does NOT establish native Windows WebView2 acceptance.
 """
+# CINTERFORGE SOURCE HEADER — host/windows/windows_environment.py
+# PURPOSE: Implements the Windows windows environment owner for the existing compiler, MSI and Wine/native runtime closure.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _image_recipe_sha256: Handle image recipe sha256 through this component's established interfaces.
+#   _run: Stream actual guest/Windows build output as it happens (and keep logs).
+#   _logged: Stream and log native subprocess output with a 10-second heartbeat.
+#   WindowsCrossEnvironment: class responsible for windowscrossenvironment
+#   WindowsCrossEnvironment._native_ready: Find complete host tools in PATH OR their existing Builds stage.
+#   WindowsCrossEnvironment.stage: Stage stage for this module.
+#   WindowsCrossEnvironment._docker_available: Reuse an already operational Docker or Podman engine.
+#   WindowsCrossEnvironment._image_identity: Handle image identity through this component's established interfaces.
+#   WindowsCrossEnvironment._has_image: Handle has image through this component's established interfaces.
+#   WindowsCrossEnvironment.validate_staged: Verify the offline Docker image without consulting the Docker daemon.
+#   ...and 17 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import hashlib

@@ -1,3 +1,23 @@
+# CINTERFORGE SOURCE HEADER — host/devtools/discord.py
+# PURPOSE: Implements the discord DevTools owner: existing optional SDK and verified guest capabilities without automatic user installation.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   connect_to_discord: Connect connect to discord for this module.
+#   disconnect_from_discord: Handle disconnect from discord through this component's established interfaces.
+#   discord_status: Handle discord status through this component's established interfaces.
+#   on_ready: Handle on ready through this component's established interfaces.
+#   isDiscordCommand: Handle is discord command through this component's established interfaces.
+#   channels: Handle channels through this component's established interfaces.
+#   hello: Handle hello through this component's established interfaces.
+#   hopeai: Handle hopeai through this component's established interfaces.
+#   cinter: Handle cinter through this component's established interfaces.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 #
 # HopeDiscord.py
 # Copyright 2025 CinterForge, Inc.

@@ -1,3 +1,21 @@
+/*
+ * CINTERFORGE SOURCE HEADER — webapp/codeoss/extension/terminals/NativeTerminal.js
+ * PURPOSE: Provides the NativeTerminal integration within the existing Code-OSS extension and authenticated Terminal host bridge.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   NativeTerminal: Handle native terminal through this component's established interfaces.
+ *   start: Start start for this module.
+ *   delay: Handle delay through this component's established interfaces.
+ *   poll: Poll poll for this module.
+ *   loop: Handle loop through this component's established interfaces.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 /* CinterForge Code - OSS classic front-end script. ASCII source only. */
 (function (C) {
     'use strict';

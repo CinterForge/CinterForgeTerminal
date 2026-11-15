@@ -1,4 +1,26 @@
 #!/usr/bin/env python3
+# CINTERFORGE SOURCE HEADER — host/lifecycle/test.py
+# PURPOSE: Owns the test stage of the existing CinterForgeTerminal lifecycle; generated files remain in sibling Builds.
+# OWNERSHIP: This source belongs only to lifecycle; guest acceptance uses lifecycle-owned VM and PTYs.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _run: Run run for this module.
+#   _sha256: Handle sha256 through this component's established interfaces.
+#   _install_prepared_runtime: Populate a disposable Bedrock test fixture using Setup's verified closure.
+#   test_linuxkit: Handle test linuxkit through this component's established interfaces.
+#   _remove_acceptance_workspace: Remove only this test's generated workspace after the VM has exited.
+#   _execute_acceptance: Execute execute acceptance for this module.
+#   run_managed_guest_acceptance: Run run managed guest acceptance for this module.
+#   _run_with_guest_test_environment: Run run with guest test environment for this module.
+#   RepositoryContractSmoke: class responsible for repositorycontractsmoke
+#   RepositoryContractSmoke.test_01_single_root_smoke_file: All repository smoke tests are physically here, not merely excluded.
+#   ...and 14 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 """Single real-system smoke/acceptance suite for CinterForge Terminal.
 
 The Test phase consumes completed Setup, Build and Stage artifacts. Bedrock
@@ -207,13 +229,12 @@ GUEST_CHECKS = ('linux_vm', 'linux_guest', 'linux_bash', 'linux_vnc',
 
 def run_managed_guest_acceptance(builds: Path) -> dict:
     # The Test stage runs actual VM/Bash/VNC acceptance after Stage; however
-    # in-process regression callers must not leak developer path overrides
-    # into later installed-app tests or service lifetimes.
+    # Lifecycle never imports the application HTTP server; leave environment
+    # overrides only for the duration of actual guest acceptance.
     keys = ('CINTER_BUILDS_ROOT', 'CINTER_TERMINAL_RUNTIME_MODE')
     previous = {key: os.environ.get(key) for key in keys}
     try:
-        from webapp import CinterForgeTerminal as runtime
-        return _run_with_guest_test_environment(builds, runtime)
+        return _run_with_guest_test_environment(builds)
     finally:
         for key, value in previous.items():
             if value is None:
@@ -222,7 +243,13 @@ def run_managed_guest_acceptance(builds: Path) -> dict:
                 os.environ[key] = value
 
 
-def _run_with_guest_test_environment(builds: Path, runtime) -> dict:
+def _run_with_guest_test_environment(builds: Path) -> dict:
+    from host.lifecycle.CinterForgeLifecycleVM import CinterForgeLifecycleVM
+    from host.lifecycle.CinterForgeLifecycleGuests import (
+        CinterForgeLifecycleGuestShell, _image_archive, _docker_call,
+        _start_guest_locked, _lifecycle_guest_shell_command,
+        _verify_persistent_guest_shell)
+    vm = CinterForgeLifecycleVM(builds)
     builds = builds.resolve(strict=True)
     if builds.name != 'Builds':
         raise RuntimeError('Guest runtime acceptance must use the existing sibling Builds')
@@ -238,11 +265,14 @@ def _run_with_guest_test_environment(builds: Path, runtime) -> dict:
     os.environ['CINTER_BUILDS_ROOT'] = str(builds)
     os.environ['CINTER_TERMINAL_RUNTIME_MODE'] = 'developer'
     workspace = builds.parent
-    env = runtime._env(sdk)
-    # Fail before booting QEMU if a future runtime edit breaks the real
-    # persistent Bash child environment again. The same selector must serve
+    env = vm.environment(sdk)
+    # Use the same isolated Docker socket in the lifecycle's real
+    # persistent Bash environment; no runtime service import is needed. The same selector must serve
     # Docker management and both long-lived PTYs; no mocked Docker context.
-    shell_env = runtime._guest_docker_context(sdk)
+    shell_env = {key: env[key] for key in ('HOME', 'COLIMA_HOME', 'LIMA_HOME',
+                                           'COLIMA_CACHE_HOME', 'DOCKER_CONFIG',
+                                           'XDG_CONFIG_HOME', 'XDG_CACHE_HOME',
+                                           'DOCKER_HOST', 'TMPDIR', 'PATH')}
     if (shell_env.get('DOCKER_HOST') != env.get('DOCKER_HOST') or
             'DOCKER_CONTEXT' in shell_env):
         raise RuntimeError('Managed guest Bash environment must inherit the '
@@ -253,7 +283,7 @@ def _run_with_guest_test_environment(builds: Path, runtime) -> dict:
     transcript = logs / 'guest-connections-test.log'
     state = {'schema': GUEST_SCHEMA, 'status': 'failed', 'checks': {key: 'not-run' for key in GUEST_CHECKS},
              'timestamp': time.time(), 'sdk': str(sdk), 'logs': str(transcript)}
-    shells: list[runtime.TerminalSession] = []
+    shells: list[CinterForgeLifecycleGuestShell] = []
     owns_vm = False
 
     def passed(check: str) -> None:
@@ -264,40 +294,33 @@ def _run_with_guest_test_environment(builds: Path, runtime) -> dict:
 
     transcript.write_text('Test real guest / Bash / VNC acceptance\n', encoding='utf-8')
     try:
-        with runtime._managed_vm_lock(env):
-            owner = runtime._runtime_watchdog_owner(env)
-            if owner.is_file():
-                record = json.loads(owner.read_text(encoding='utf-8'))
-                native_pid = record.get('native_pid')
-                if isinstance(native_pid, int) and runtime._live_runtime_watchdog(native_pid, env):
-                    raise RuntimeError('An active native Terminal owns this VM; '
-                                       'Test must not adopt or stop its running connections')
+        with vm.managed_vm_lock(env):
+            if vm.native_owner_active(env):
+                raise RuntimeError('An active native Terminal owns this VM; '
+                                   'Test must not adopt or stop its running connections')
             # No live app owns this profile; Test accepts cleanup
             # responsibility even if VM startup fails halfway.
             owns_vm = True
-            # These functions are the same ones used at native app launch.
-            docker = runtime._ensure_docker_locked(sdk, env, workspace)
+            # Lifecycle owns a separate copy of the existing behavior.
+            docker = vm.ensure_docker_locked(sdk, env, workspace)
             passed('linux_vm')
             for kind, label in (('linux', 'linux'), ('win', 'windows')):
-                _image_tar, image = runtime._image_archive(sdk, kind)
-                present = runtime._docker_call(docker, env, 'image', 'inspect', image)
+                _image_tar, image = _image_archive(sdk, kind)
+                present = _docker_call(docker, env, 'image', 'inspect', image)
                 if present.returncode:
                     raise RuntimeError('Test cannot load/provision a missing guest OCI image: ' +
                                        image + '; rerun Setup')
-                runtime._start_guest_locked(sdk, env, docker, kind, workspace)
+                _start_guest_locked(sdk, env, docker, kind, workspace)
                 # Existing pinned OCI image exercises the real guest's Bash and
                 # activated and checked its actual VNC and noVNC endpoints.
                 passed(label + '_guest')
                 passed(label + '_vnc')
-                session = runtime.TerminalSession(
-                    builds, 'mac', 100, 30,
-                    url='http://127.0.0.1:20300', token='test-local-only',
-                    command=runtime._runtime_guest_shell_command(sdk, kind, workspace),
-                    child_env=shell_env,
-                    working_directory=workspace,
+                session = CinterForgeLifecycleGuestShell(
+                    _lifecycle_guest_shell_command(sdk, kind, workspace),
+                    env=shell_env, working_directory=workspace,
                     output_log=logs / ('guest-test-' + kind + '-bash.log'))
                 shells.append(session)
-                runtime._verify_persistent_guest_shell(session, kind)
+                _verify_persistent_guest_shell(session, kind)
                 passed(label + '_bash')
     except BaseException as error:
         state['error'] = str(error)
@@ -314,8 +337,8 @@ def _run_with_guest_test_environment(builds: Path, runtime) -> dict:
         # t profile. Stop only its verified labeled containers, then the VM.
         if owns_vm:
             try:
-                runtime.stop_runtime_vm(setup_sdk=sdk)
-                status = subprocess.run([str(sdk / 'mac/env/bin/colima'), 'status', runtime.PROFILE],
+                vm.stop(sdk)
+                status = subprocess.run([str(sdk / 'mac/env/bin/colima'), 'status', vm.profile],
                                         capture_output=True, text=True, env=env, timeout=25)
                 if status.returncode == 0:
                     raise RuntimeError('Test-owned runtime VM remains running after cleanup')
@@ -381,7 +404,7 @@ class RepositoryContractSmoke(unittest.TestCase):
         self.assertEqual(len(games['games']), 67)
         self.assertEqual(len(titles['titles']), 16)
         self.assertEqual(len({item['command'] for item in games['games']}), 67)
-        terminal = (REPO / 'webapp/CinterForgeTerminal.py').read_text()
+        terminal = (REPO / 'webapp/runtime/CinterForgeCommands.py').read_text() + (REPO / 'webapp/runtime/CinterForgeIF.py').read_text()
         self.assertIn('lagomorph', terminal.lower())
         self.assertTrue((REPO / 'webapp/index.html').is_file())
         self.assertIn('codeoss', (REPO / 'webapp/data/terminal_styles.json').read_text().lower())

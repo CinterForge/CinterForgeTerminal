@@ -1,8 +1,23 @@
-"""Path/process adapters for the copied IF Code-OSS producer.
+"""Path/process adapters for the lifecycle-owned Code-OSS producer.
 
 Long-running maintainer commands must stream progress and have a bounded idle
 period. This is exclusively a Setup-time process adapter, not a new producer.
 """
+# CINTERFORGE SOURCE HEADER — host/codeoss/adapters.py
+# PURPOSE: Owns Code-OSS adapters setup/staging and host integration, not a second editor or command service.
+# OWNERSHIP: This is Setup/Build-owned producer code; no runtime imports.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   codeoss_root: Handle codeoss root through this component's established interfaces.
+#   _stop_owned_process: Stop the command and its children, not another user's processes.
+#   _run_with_progress: Show real command output plus periodic health signals; fail closed on stalls.
+#   run_process: Run run process for this module.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 import codecs
 from collections import deque

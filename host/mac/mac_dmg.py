@@ -4,6 +4,26 @@ Publish owns DMG creation and notarization. Setup owns verified extraction.
 Neither Build, Stage nor Test calls this module. The OS/keychain own signing
 credentials; never copy profiles or private keys into a release image.
 """
+# CINTERFORGE SOURCE HEADER — host/mac/mac_dmg.py
+# PURPOSE: Implements the macOS mac dmg adapter, packaging, signing or bootstrap boundary used by the native Terminal lifecycle.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _require_mac: Handle require mac through this component's established interfaces.
+#   _run: Run run for this module.
+#   _sha: Handle sha through this component's established interfaces.
+#   _validate_app: Validate validate app for this module.
+#   mounted_dmg: Mount only inside Builds, always detach; do not touch global /Volumes.
+#   verify_dmg: Verify actual mounted contents; for public DMGs also verify Apple ticket.
+#   _notarize_dmg: Handle notarize dmg through this component's established interfaces.
+#   create_dmg: Create app + Applications shortcut + README, optionally notarize DMG.
+#   restore_dmg: Setup-only: safely restore an app from an already SHA-verified DMG.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 from contextlib import contextmanager

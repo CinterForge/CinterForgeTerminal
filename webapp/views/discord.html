@@ -1,11 +1,43 @@
 <!doctype html>
+<!--
+ * CINTERFORGE SOURCE HEADER — webapp/views/discord.html
+ * PURPOSE: Declares the served discord view, with IDs and form interfaces consumed by the main Terminal JavaScript.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * ELEMENTS: Discord channel surface, Terminal tab mount points and the shared authenticated client scripts.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+-->
 <html lang="en" data-cph-token="__CPH_TOKEN__">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CinterForgeTerminal — Computer History Museum</title>
   <link rel="stylesheet" href="/terminal.css">
-  <script defer src="/terminal.js"></script>
+  <script defer src="/client/CinterForgeAPI.js"></script>
+  <script defer src="/client/CinterForgeTerminals.js"></script>
+  <script defer src="/client/CinterForgeCapabilities.js"></script>
+  <script defer src="/client/CinterForgeClientState.js"></script>
+  <script defer src="/client/CinterForgeCodeOSS.js"></script>
+  <script defer src="/client/CinterForgeEmulators.js"></script>
+  <script defer src="/client/CinterForgeSessions.js"></script>
+  <script defer src="/client/CinterForgeLaunchers.js"></script>
+  <script defer src="/client/CinterForgeDiscord.js"></script>
+  <script defer src="/client/CinterForgeLAN.js"></script>
+  <script defer src="/client/CinterForgeIF.js"></script>
+  <script defer src="/client/CinterForgeSessionIO.js"></script>
+  <script defer src="/client/CinterForgeInput.js"></script>
+  <script defer src="/client/CinterForgeMenus.js"></script>
+  <script defer src="/client/CinterForgeLayout.js"></script>
+  <script defer src="/client/CinterForgeKeyboard.js"></script>
+  <script defer src="/client/CinterForgeBedrock.js"></script>
+  <script defer src="/client/CinterForgeGuestStatus.js"></script>
+  <script defer src="/client/CinterForgeCommands.js"></script>
+  <script defer src="/CinterForgeTerminal.js"></script>
 </head>
 <body>
   <!-- The main product is Kevin's retro Terminal Sessions presentation, not
@@ -80,7 +112,7 @@
       <div id="terminal-screen" tabindex="0" role="textbox" aria-label="Native terminal output; type to send input to the shell" aria-multiline="true"><pre id="terminal-output" aria-live="off"></pre></div>
       <div id="computer-view" class="computer-view" hidden>
         <iframe id="computer-frame" title="Computer History Museum emulator" referrerpolicy="no-referrer" allow="cross-origin-isolated"></iframe>
-        <!-- Required by terminal.js to report workbench errors without breaking PTY startup. -->
+        <!-- Required by CinterForgeTerminal.js to report workbench errors without breaking PTY startup. -->
         <div id="computer-error" class="computer-error" role="alert" hidden></div>
       </div>
       <textarea id="terminal-input" aria-label="Terminal input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>

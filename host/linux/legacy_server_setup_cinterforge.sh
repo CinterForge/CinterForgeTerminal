@@ -1,4 +1,26 @@
 #!/usr/bin/env bash
+# CINTERFORGE SOURCE HEADER — host/linux/legacy_server_setup_cinterforge.sh
+# PURPOSE: Implements the Linux legacy server setup cinterforge owner for guest VM tooling, Bedrock runtime and cross-platform launcher integration.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   repair_builds_preflight: Handle repair builds preflight through this component's established interfaces.
+#   generate_builds_report: Handle generate builds report through this component's established interfaces.
+#   ensure_openrpgtools_subtree: Ensure ensure openrpgtools subtree for this module.
+#   ensure_fbx2gltf_runtime: Ensure ensure fbx2gltf runtime for this module.
+#   command_exists: Handle command exists through this component's established interfaces.
+#   linux_install_packages: Handle linux install packages through this component's established interfaces.
+#   brew_install_unattended: Handle brew install unattended through this component's established interfaces.
+#   prepare_homebrew_for_unattended_setup: Prepare prepare homebrew for unattended setup for this module.
+#   ensure_pyenv_init: Ensure ensure pyenv init for this module.
+#   if_runtime_platform_key: Handle if runtime platform key through this component's established interfaces.
+#   ...and 8 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 set -euo pipefail
 
 # Setup is a consumer/download path. Never allow setup or tester machines to publish local artifacts.

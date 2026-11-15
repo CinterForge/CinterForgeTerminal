@@ -7,6 +7,28 @@ a Docker client and the Buildx/BuildKit CLI plugin. A verified Lima distribution
 VM state, tools, caches and installer archives remain inside sibling Builds.
 Docker Desktop and Homebrew are not prerequisites. Never tell a user to run brew or install MinGW/Wine.
 """
+# CINTERFORGE SOURCE HEADER — host/mac/mac_bootstrap.py
+# PURPOSE: Implements the macOS mac bootstrap adapter, packaging, signing or bootstrap boundary used by the native Terminal lifecycle.
+# OWNERSHIP: Host-side Setup/Build owner; never imports the installed app runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _run: Run run for this module.
+#   _download: Handle download through this component's established interfaces.
+#   _file_sha256: Handle file sha256 through this component's established interfaces.
+#   _sha512_matches: Handle sha512 matches through this component's established interfaces.
+#   _verify_qemu: Execute both prebuilt emulators; don't accept empty npm placeholders.
+#   ensure_qemu: Install pinned, hash-verified prebuilt QEMU into sibling Builds only.
+#   _mamba: Handle mamba through this component's established interfaces.
+#   ensure_macos_tools: Ensure ensure macos tools for this module.
+#   _probe: Handle probe through this component's established interfaces.
+#   managed_state_root: Validate the *actual* short LinuxKit c state tree in sibling Builds.
+#   ...and 13 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import json
@@ -560,31 +582,14 @@ def cleanup_watchdog(builds: Path) -> int:
             # never stop a live native-app owner's session or foreign guests.
             state = builds / 'CFTVM/T'
             if state.is_dir() and (state / 'c/t/colima.yaml').is_file():
-                from webapp import CinterForgeTerminal as runtime
-                previous = {k: os.environ.get(k) for k in
-                            ('CINTER_BUILDS_ROOT', 'CINTER_TERMINAL_RUNTIME_MODE')}
-                os.environ['CINTER_BUILDS_ROOT'] = str(builds)
-                os.environ['CINTER_TERMINAL_RUNTIME_MODE'] = 'developer'
-                try:
-                    sdk = builds / 'CinterForgeTerminal/Toolchains'
-                    env = runtime._env(sdk)
-                    owner = runtime._runtime_watchdog_owner(env)
-                    occupied = False
-                    if owner.is_file():
-                        record = json.loads(owner.read_text(encoding='utf-8'))
-                        pid = record.get('native_pid')
-                        occupied = (isinstance(pid, int) and
-                                    runtime._live_runtime_watchdog(pid, env))
-                    if not occupied:
-                        print('[MAC BOOTSTRAP] Recovering interrupted x86-64 t Setup VM',
-                              flush=True)
-                        runtime.stop_runtime_vm(setup_sdk=sdk)
-                finally:
-                    for key, value in previous.items():
-                        if value is None:
-                            os.environ.pop(key, None)
-                        else:
-                            os.environ[key] = value
+                from host.lifecycle.CinterForgeLifecycleVM import CinterForgeLifecycleVM
+                vm = CinterForgeLifecycleVM(builds)
+                sdk = builds / 'CinterForgeTerminal/Toolchains'
+                env = vm.environment(sdk)
+                if not vm.native_owner_active(env):
+                    print('[MAC BOOTSTRAP] Recovering interrupted x86-64 t Setup VM',
+                          flush=True)
+                    vm.stop(sdk)
         finally:
             stop_setup_build_vms(builds)
     return 0

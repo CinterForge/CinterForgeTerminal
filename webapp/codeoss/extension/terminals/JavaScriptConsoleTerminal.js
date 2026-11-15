@@ -1,3 +1,17 @@
+/*
+ * CINTERFORGE SOURCE HEADER — webapp/codeoss/extension/terminals/JavaScriptConsoleTerminal.js
+ * PURPOSE: Provides the JavaScriptConsoleTerminal integration within the existing Code-OSS extension and authenticated Terminal host bridge.
+ * OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+ * STARTUP: Called or loaded by the existing lifecycle/entry point; no
+ *          hidden dependency provisioning or alternate VM is allowed.
+ * SHUTDOWN: Release only resources explicitly owned by this component.
+ * CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+ * KEY CLASSES / METHODS:
+ *   JavaScriptConsoleTerminal: Handle java script console terminal through this component's established interfaces.
+ * MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+ * Steam library; do not change Lagomorph timings, user assets or guest
+ * readiness without tracing their real callers and failure boundaries.
+*/
 /* CinterForge Code - OSS classic front-end script. ASCII source only. */
 (function (C) {
     'use strict';

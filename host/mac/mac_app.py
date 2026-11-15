@@ -2,6 +2,28 @@
 
 Cloudflare distribution packaging is a separate release lifecycle.
 """
+# CINTERFORGE SOURCE HEADER — host/mac/mac_app.py
+# PURPOSE: Implements the macOS mac app adapter, packaging, signing or bootstrap boundary used by the native Terminal lifecycle.
+# OWNERSHIP: This authored source is part of one canonical Terminal runtime.
+# STARTUP: Called or loaded by the existing lifecycle/entry point; no
+#          hidden dependency provisioning or alternate VM is allowed.
+# SHUTDOWN: Release only resources explicitly owned by this component.
+# CALLERS: Preserve existing APIs, filenames, CLI flags and data formats.
+# KEY CLASSES / METHODS:
+#   _icon_source: Handle icon source through this component's established interfaces.
+#   _png_chunk: Handle png chunk through this component's established interfaces.
+#   _rgba_png: Decode ordinary 8-bit RGB/RGBA non-interlaced PNGs without Pillow.
+#   _resize_png: Handle resize png through this component's established interfaces.
+#   build_ico: Build build ico for this module.
+#   build_icns: Build build icns for this module.
+#   _copy_runtime_tree: Copy copy runtime tree for this module.
+#   _stage_complete_resources: Assemble complete runtime before codesign; ZIP never edits the .app.
+#   _sign_and_verify: Sign in the real login user's Keychain context, never Colima's HOME.
+#   _sign_and_verify_with_login_keychain: Seal the *finished* app, after the executable, icon and plist are written.
+#   ...and 7 additional internal entry points; see their local documentation.
+# MAINTENANCE: Keep generated outputs in sibling Builds or the actual
+# Steam library; do not change Lagomorph timings, user assets or guest
+# readiness without tracing their real callers and failure boundaries.
 from __future__ import annotations
 
 import argparse
@@ -184,7 +206,9 @@ def _stage_complete_resources(builds: Path, app: Path) -> None:
     # the embedded Host manifest consistent with the exact bytes shipped.
     authored = Path(__file__).resolve().parents[2] / 'webapp'
     required = ('CinterForgeTerminal.py', 'data/if_titles.json', 'data/mac_games.json',
-                'index.html', 'terminal.js', 'terminal.css', 'data/terminal_styles.json', 'views/startup.html', 'startup.js', 'views/discord.html')
+                'index.html', 'CinterForgeTerminal.js', 'terminal.css', 'data/terminal_styles.json', 'views/startup.html', 'startup.js', 'views/discord.html')
+    required += tuple('client/' + name.name for name in sorted((authored / 'client').glob('CinterForge*.js')))
+    required += tuple('runtime/' + name.name for name in sorted((authored / 'runtime').glob('CinterForge*.py')))
     for name in required:
         if not (authored / name).is_file():
             raise RuntimeError('Missing authored Terminal shell asset in repository: ' + name)
@@ -196,7 +220,7 @@ def _stage_complete_resources(builds: Path, app: Path) -> None:
     # Build uses the already-provisioned Code-OSS Web tree but must package
     # CURRENT authored extension source. Setup's verified upstream build cache
     # is not evidence that Terminal's own extension.js is unchanged.
-    from webapp.codeoss.producer import _stage_cinterforge_extension
+    from host.codeoss.producer import _stage_cinterforge_extension
     _stage_cinterforge_extension(payload / 'CodeOSS')
     embedded_host = payload / 'Python/Host/mac/arm64' / HOST_RELEASE
     embedded = embedded_host / 'webapp'
