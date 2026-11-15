@@ -6402,8 +6402,7 @@ def _lima_boot_log_directory() -> Path | None:
 
 def _follow_lima_boot_diagnostics(env: dict[str, str], stop: threading.Event,
                                   report: Callable[[str], None],
-                                  archive: Path | None,
-                                  cloud_final_failed: threading.Event) -> None:
+                                  archive: Path | None) -> None:
     """Forward *new* Lima host-agent and serial output while Colima waits for SSH.
 
     These files are where the actual guest/kernel/SSH failure appears; Colima's
@@ -6455,10 +6454,14 @@ def _follow_lima_boot_diagnostics(env: dict[str, str], stop: threading.Event,
                 for line in lines[-160:]:
                     clean = line.decode('utf-8', errors='replace').strip()[:1200]
                     if clean:
+                        report('[DEVTOOLS BOOT ' + name + '] ' + clean)
                         if ('cloud-final.service' in clean and
                                 ('Failed to start' in clean or '[FAILED]' in clean)):
-                            cloud_final_failed.set()
-                        report('[DEVTOOLS BOOT ' + name + '] ' + clean)
+                            # A cloud-init final-stage failure alone does
+                            # not establish that Lima's SSH connection is
+                            # impossible. Let the real Colima result decide.
+                            report('[DEVTOOLS] Guest cloud-final reported failure; '
+                                   'waiting for the actual Colima/SSH result')
             except (OSError, ValueError):
                 continue  # Lima can replace its logs while booting.
     try:
@@ -6515,8 +6518,6 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str,
                 pass
     report('[DEVTOOLS] ' + title)
     diagnostic_stop = threading.Event()
-    cloud_final_failed = threading.Event()
-    ssh_ready = threading.Event()
     diagnostic_thread = None
     archive = None
     if title == 'Starting managed guest VM with host volumes':
@@ -6528,7 +6529,7 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str,
             report('[DEVTOOLS] Could not open VM diagnostics folder: ' + str(error))
         diagnostic_thread = threading.Thread(
             target=_follow_lima_boot_diagnostics,
-            args=(env, diagnostic_stop, report, archive, cloud_final_failed),
+            args=(env, diagnostic_stop, report, archive),
             daemon=True, name='cinter-lima-boot-log')
         diagnostic_thread.start()
         report('[DEVTOOLS] Lima boot diagnostics: ' + str(archive) if archive else
@@ -6554,11 +6555,6 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str,
                             raise RuntimeError(title + ' cancelled: native app is closing')
                         elapsed = time.monotonic() - started
                         remaining = timeout - elapsed
-                        if (cloud_final_failed.is_set() and not ssh_ready.is_set() and
-                                elapsed >= 165 and process.poll() is None):
-                            raise RuntimeError(title + ': cloud-final.service failed and '
-                                               'guest SSH did not become ready in 165 seconds; '
-                                               'original VM diagnostics: ' + str(archive))
                         if remaining <= 0:
                             raise subprocess.TimeoutExpired(command, timeout)
                         for key, _ in selector.select(timeout=min(1, remaining)):
@@ -6572,9 +6568,6 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str,
                             raw_log.write(chunk)
                             raw_log.flush()
                             message = chunk.decode('utf-8', errors='replace')
-                            if '( 1/5) ✅ SSH connection' in tail[-2048:].decode(
-                                    'utf-8', errors='replace'):
-                                ssh_ready.set()
                             print(message, end='', flush=True)
                             # The native worker's stdout is not the persistent
                             # Server Log. Mirror Colima errors there so a stuck
@@ -6594,7 +6587,8 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str,
                         process.wait()
                     detail = tail.decode('utf-8', errors='replace').strip()[-3200:]
                     raise RuntimeError(title + ' timed out after ' + str(timeout) +
-                                       's; last guest output: ' + (detail or '(none)')) from error
+                                       's; VM boot logs: ' + str(archive or '(see Server Log)') +
+                                       '; last Colima output: ' + (detail or '(none)')) from error
                 except BaseException:
                     if process.poll() is None:
                         process.kill()
@@ -6602,7 +6596,9 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str,
                     raise
         if returncode:
             detail = tail.decode('utf-8', errors='replace').strip()[-3200:]
-            raise RuntimeError(title + ' failed (exit ' + str(returncode) + '): ' +
+            raise RuntimeError(title + ' failed (exit ' + str(returncode) + '); '
+                               'VM boot logs: ' + str(archive or '(see Server Log)') +
+                               '; last Colima output: ' +
                                (detail or 'process exited without diagnostics'))
 
     finally:
@@ -6947,25 +6943,12 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
              '--cpus', '4', '--memory', '8', '--disk', '32', '--save-config'])
     if installed and not installed_profile:
         _app_devtools_progress('Initializing new x86-64 t profile (no existing VM to replace)')
-    try:
-        _run_checked(args, env, title='Starting managed guest VM with host volumes',
-                     timeout=240 if installed and installed_profile else 1200,
-                     cancel_event=cancel_event)
-    except RuntimeError as error:
-        if (not installed or not installed_profile or
-                'cloud-final.service failed' not in str(error) or
-                (cancel_event is not None and cancel_event.is_set())):
-            raise
-        # The installed app's *existing* disposable t VM booted Ubuntu but
-        # cloud-init finalization stalled SSH. Stop/restart that SAME profile
-        # once. Never remove its disk, reset its config or download an image.
-        _app_devtools_progress('Guest cloud-init failed before SSH; stopping and '
-                               'restarting the existing t VM once (no rebuild)')
-        _run_checked([colima, 'stop', PROFILE], env,
-                     title='Stopping failed owned guest boot', timeout=120,
-                     cancel_event=cancel_event)
-        _run_checked(args, env, title='Starting managed guest VM with host volumes',
-                     timeout=240, cancel_event=cancel_event)
+    # The saved installed t profile may require several minutes to bring SSH
+    # up even when cloud-init reports a failed final-stage unit. Let Colima's
+    # actual SSH result, not that message alone, determine readiness.
+    # Do not replace its disk or repeatedly boot the same broken guest.
+    _run_checked(args, env, title='Starting managed guest VM with host volumes',
+                 timeout=600, cancel_event=cancel_event)
     daemon = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=45)
     if daemon.returncode:
         raise RuntimeError('Managed Terminal Docker socket still unavailable after VM start: ' +
