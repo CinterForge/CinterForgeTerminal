@@ -101,9 +101,8 @@ def _source(builds: Path, name: str, data: dict, target: str, *, verify: bool = 
         raise RuntimeError('Stage/Publish input escaped canonical Builds: ' + str(real))
     current_stat = _stat(real)
     if current_stat != data['stat']:
-        # st_ctime_ns includes metadata updates (chmod, xattrs, etc.), not
-        # just file-content changes. A changed timestamp alone must not
-        # invalidate an otherwise byte-identical, already-built release.
+        # st_ctime_ns changes when metadata changes without touching bytes.
+        # Preserve the verified Build when its content hash still matches.
         actual_sha = _sha(real)
         if actual_sha != data['sha256']:
             raise RuntimeError('Build input contents changed after Build: ' + name +
@@ -113,7 +112,6 @@ def _source(builds: Path, name: str, data: dict, target: str, *, verify: bool = 
         print('[TERMINAL RELEASE] Build input metadata changed but SHA-256 matches: ' + name,
               flush=True)
     elif verify and _sha(real) != data['sha256']:
-        # Publish verifies bytes even when timestamps did not change.
         raise RuntimeError('Build input SHA-256 mismatch: ' + name)
     return real
 
@@ -427,10 +425,16 @@ def prepare_publish_packages(builds: Path, *, release: str | None = None,
                            os.environ.get('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS') == '1')
         package_fingerprint = (hashlib.sha256((info['fingerprint'] + '|diagnostic-beta-v1').encode()).hexdigest()
                                if diagnostic_beta else info['fingerprint'])
+        if target == 'win':
+            # Invalidate any earlier MSI-only archive, while retaining the
+            # canonical ZIP of the staged Windows product folder.
+            package_fingerprint = hashlib.sha256(
+                (info['fingerprint'] + '|windows-product-zip-v2').encode()).hexdigest()
         name = up.artifact_filename(target)
         old = previous.get('artifacts', {}).get(target, {})
         path = root / name
         if (old.get('build_fingerprint') == package_fingerprint and
+                (target != 'win' or old.get('format') != 'zip-msi') and
                 (target != 'mac' or (old.get('format') == 'dmg' and
                  (not notarize or not os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip() or
                   old.get('notarized') is True))) and
@@ -460,7 +464,8 @@ def prepare_publish_packages(builds: Path, *, release: str | None = None,
                 print('[TERMINAL PUBLISH] devtools unchanged on R2; '
                       'skipping local ZIP (0 bytes compressed)', flush=True)
                 continue
-        inputs = {n: _source(builds, n, d, target, verify=True) for n,d in info['files'].items()}
+        inputs = {n: _source(builds, n, d, target, verify=True)
+                  for n, d in info['files'].items()}
         if target == 'mac':
             # Build supplied a sealed, signed .app; Publish alone builds DMG.
             # Staple a Publish-only copy so Stage never changes signed bytes.
@@ -495,7 +500,18 @@ def prepare_publish_packages(builds: Path, *, release: str | None = None,
         if target == 'devtools':
             artifact['archive_identity'] = up._release_archive_identity(path)
         artifacts[target] = artifact
+    # Publish produces the MSI from already-built Windows inputs, wraps it in
+    # its own ZIP, and records it separately from the four standard artifacts.
+    installers = {}
+    if 'win' in selected:
+        from host.windows.msi_installer import publish as publish_msi
+        from host.lifecycle.target_publish import package_msi_zip
+        win_info = record['targets']['win']
+        installer = publish_msi(builds, release=release, entries=win_info['files'])
+        zip_info = package_msi_zip(builds, installer)
+        installers['win-msi'] = {**zip_info, 'msi_bytes': installer['bytes']}
     receipt = {'schema': up.FOUR_SCHEMA, 'release': release, 'artifacts': artifacts,
+               'installers': installers,
                'bedrock': 'excluded-until-app-eula-acceptance',
                'native_acceptance': 'separate-target-tests-required'}
     _atomic_json(root / receipt_name, receipt)
@@ -512,7 +528,7 @@ def setup_unpack_published(builds: Path, *, release: str | None = None) -> dict:
     release = release or up.HOST_RELEASE
     builds = _safe_builds(builds)
     root = builds / 'CinterForgeTerminal/Distribution'
-    _, report, paths = up._distribution_files(builds, release)
+    _, report, paths = up._distribution_files(builds, release, verify_installers=False)
     count = {}
     for target in up.FOUR_TARGETS:
         archive = paths[up.artifact_filename(target)]
@@ -604,7 +620,7 @@ def setup_restore_if_needed(builds: Path, *, release: str | None = None,
     receipt_path = destination / 'four-artifacts.json'
     if receipt_path.is_file() and not receipt_path.is_symlink():
         try:
-            if up._distribution_files(builds, release):
+            if up._distribution_files(builds, release, verify_installers=False):
                 return {'source': 'verified-cache', **setup_unpack_published(builds, release=release)}
         except (OSError, RuntimeError, ValueError, KeyError, TypeError):
             pass

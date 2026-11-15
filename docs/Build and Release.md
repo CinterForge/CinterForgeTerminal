@@ -5,7 +5,7 @@ If you want to get started right away:
 ```bash
 ./Cinter all all               # Setup -> Build -> Stage -> Test
 ./Cinter all all publish       # Same phases, then dryrun Publish; never uploads
-./Cinter all win publish internal  # Only Windows: app ZIP + MSI ZIP to private R2
+./Cinter all win publish internal  # Only Windows: MSI-only ZIP to private R2
 ./Cinter all mac publish beta     # macOS only to beta
 ./Cinter all linux publish internal  # Linux only to private R2
 ```
@@ -187,10 +187,10 @@ Start-menu removal, upgrade, and uninstall must be checked on a Windows PC
 before promoting the MSI to production. Publish refuses an invalid Setup
 receipt, but the receipt must not be represented as native Windows acceptance.
 
-The existing portable Windows ZIP stays unchanged. Publish additionally places the
-verified `CinterForgeTerminal-win.msi` inside `CinterForgeTerminal-win-msi.zip`
-(with one archive member, no directory wrapping) and uploads **only the MSI ZIP**,
-not the bare MSI. The Windows scoped `win-artifacts.json` records the ZIP hash,
+The canonical Windows download `CinterForgeTerminal-win.zip` contains **only**
+`CinterForgeTerminal-win.msi` (one archive member, no directory wrapping),
+not the entire staged Windows product folder or the bare MSI. The Windows
+scoped `win-artifacts.json` records the ZIP hash,
 its size, and the enclosed MSI SHA-256. Both target-scoped Windows Publish and
 full four-artifact Publish use this same route. Local ZIP construction and
 byte-for-byte extraction verification must finish before full-channel uploads.
@@ -217,9 +217,9 @@ Target-only publishing writes `mac-artifacts.json`, `linux-artifacts.json`, or
 `win-artifacts.json` to the existing channel root; separate local
 `<target>-packages.json` receipts cache unchanged archives without modifying the
 original all-platform `four-artifacts.json`. Windows `win-artifacts.json`
-covers the portable application ZIP and separate MSI ZIP. Full publishing retains `four-artifacts.json` for the
-original four products and publishes the MSI with an auxiliary scoped
-manifest; it verifies the MSI **before uploading any full-release artifacts**.
+covers the single MSI-only Windows ZIP. Full publishing includes that same
+installer ZIP as the Windows entry in `four-artifacts.json`, verifying the MSI
+**before uploading any full-release artifacts**.
 Only changed scoped artifacts need R2 transfer/round-trip checks, and DevTools
 are not consulted in a scoped run. Internal testing publishes to private
 `cdn-assets-dev/CinterForgeTerminal/Distribution/`.
@@ -318,7 +318,7 @@ substitute for native interactive acceptance.
 ./Cinter all all publish beta   # explicit beta upload after Test PASS
 ./Cinter all all publish release # explicit production upload after Test PASS
 ./Cinter all mac                # macOS-only Build / Stage / Test after shared Setup
-./Cinter all win publish internal   # Windows app ZIP + MSI ZIP only, private Cloudflare
+./Cinter all win publish internal   # Windows MSI-only ZIP, private Cloudflare
 ./Cinter all linux publish internal # Linux ZIP only, private Cloudflare
 ./Cinter all mac publish beta       # Mac DMG only, public beta
 ./Cinter windows cross-test     # Windows PE / Wine cross-compatibility evidence

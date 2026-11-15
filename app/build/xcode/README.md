@@ -120,3 +120,25 @@ After public verification, the publisher updates the **managed download section 
 ## Licenses, content and security
 
 CinterForge Terminal source, external game media, historical operating-system images, JOSHUA and the official Minecraft Bedrock server may have **different licenses and redistribution terms**. Availability of an interface or catalog item does not imply that third-party content is bundled. The local service binds to loopback and authenticates its control API; do not expose it as an unrestricted public service. Build artifacts, caches, worlds and lifecycle logs remain outside the authored source tree in their designated `Builds` or `steamapps` locations.
+
+## Xcode Debug Build & Run
+
+After the initial lifecycle has provisioned dependencies and staged the macOS
+runtime, **Build & Run** in Xcode is sufficient for edits to authored `.c`,
+`.cpp`, `.h`, `.js`, `.html`, `.css`, and `.py` source files. Debug uses the
+existing Host CMake producer, refreshes the Host stage and our Code-OSS
+extension, and copies the current source runtime into the Xcode product.
+It does not rebuild the Windows/Linux distributions or run Setup, Test,
+Publish, notarization, or another release packaging pass.
+
+Open `app/CinterForgeTerminal.xcodeproj`, select the shared **CinterForge Terminal**
+scheme, and use Product → Run. Its Run configuration is **Debug**. Ordinary
+Build & Run stays on the fast path even if Release is selected manually;
+**Product → Archive** is the only Xcode action that invokes the signed
+`./Cinter build mac` release producer. Neither Xcode action notarizes—public
+notarization belongs exclusively to explicit `./Cinter publish`.
+
+The app started from `Builds/Xcode/Products` automatically chooses the sibling
+**developer Builds** tree for services, guest VM state, and logging, never the
+installed Steam application tree. New toolchains or guest images still
+require their owning Setup lifecycle; Build & Run does not download dependencies.

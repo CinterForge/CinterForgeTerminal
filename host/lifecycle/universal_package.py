@@ -829,6 +829,22 @@ def _verify_release_zip(path: Path, *, target: str, release: str,
                         hash_files: bool = True, progress_label: str = '') -> dict:
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
+        if target == 'win' and names == ['CinterForgeTerminal-win.msi']:
+            # Windows distribution is an installer, not a ZIP of the staged
+            # product folder. Read all bytes to check the ZIP CRC and SHA.
+            member = archive.getinfo(names[0])
+            digest = hashlib.sha256()
+            size = 0
+            with archive.open(names[0]) as stream:
+                for block in iter(lambda: stream.read(4 * 1024 * 1024), b''):
+                    digest.update(block)
+                    size += len(block)
+            if member.is_dir() or size != member.file_size or size < 1024:
+                raise RuntimeError('Invalid Windows MSI download')
+            return {'schema': FOUR_SCHEMA, 'target': 'win', 'release': release,
+                    'root': '', 'format': 'zip-msi', 'files': {
+                        names[0]: {'sha256': digest.hexdigest(), 'bytes': size,
+                                   'mode': 0o644}}}
         if len(names) != len(set(names)) or 'release-manifest.json' not in names:
             raise RuntimeError('Release ZIP missing manifest or contains duplicate names')
         manifest = json.loads(archive.read('release-manifest.json'))
@@ -1804,7 +1820,8 @@ def artifact_filename(target: str) -> str:
     return f'CinterForgeTerminal-{target}' + ('.dmg' if target == 'mac' else '.zip')
 
 
-def _distribution_files(builds: Path, release: str) -> tuple[Path, dict, dict[str, Path]]:
+def _distribution_files(builds: Path, release: str, *,
+                        verify_installers: bool = True) -> tuple[Path, dict, dict[str, Path]]:
     root = builds.resolve() / CLOUDFLARE_OBJECT_ROOT
     receipt_path = root / 'four-artifacts.json'
     if not receipt_path.is_file() or receipt_path.is_symlink():
@@ -1846,6 +1863,26 @@ def _distribution_files(builds: Path, release: str) -> tuple[Path, dict, dict[st
         else:
             _verify_release_zip(path, target=target, release=release, hash_files=False)
         files[name] = path
+    # The MSI is a separate sidecar ZIP, never the bare .msi and never a
+    # replacement for the standard Windows product ZIP.
+    installers = report.get('installers', {})
+    if installers and verify_installers:
+        from host.lifecycle.target_publish import MSI_ZIP_NAME, _zip_contains_msi
+        item = installers.get('win-msi')
+        if (set(installers) != {'win-msi'} or not isinstance(item, dict) or
+                item.get('filename') != MSI_ZIP_NAME or
+                not isinstance(item.get('bytes'), int) or item['bytes'] <= 0 or
+                not isinstance(item.get('msi_bytes'), int) or item['msi_bytes'] <= 0 or
+                not isinstance(item.get('msi_sha256'), str)):
+            raise RuntimeError('Invalid Windows MSI ZIP release receipt')
+        package = root / MSI_ZIP_NAME
+        if (not package.is_file() or package.is_symlink() or
+                package.stat().st_size != item['bytes'] or
+                _hash(package) != item.get('sha256') or
+                not _zip_contains_msi(package, sha256=item['msi_sha256'],
+                                      size=item['msi_bytes'])):
+            raise RuntimeError('Windows MSI ZIP changed since Publish: ' + str(package))
+        files[MSI_ZIP_NAME] = package
     return root, report, files
 
 
@@ -1872,6 +1909,15 @@ def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path,
     entries = record.get('artifacts', {})
     if record.get('schema') != FOUR_SCHEMA or record.get('release') != release or set(entries) != set(FOUR_TARGETS):
         raise RuntimeError('Cloudflare four-artifact manifest invalid')
+    installers = record.get('installers', {})
+    if installers:
+        from host.lifecycle.target_publish import MSI_ZIP_NAME
+        item = installers.get('win-msi')
+        if (set(installers) != {'win-msi'} or not isinstance(item, dict) or
+                item.get('filename') != MSI_ZIP_NAME or MSI_ZIP_NAME not in remote or
+                int(remote[MSI_ZIP_NAME]['size']) != item.get('bytes')):
+            raise RuntimeError('Cloudflare Windows MSI ZIP missing/invalid')
+        expected_names.add(MSI_ZIP_NAME)
     for index, target in enumerate(FOUR_TARGETS, 1):
         entry = entries[target]
         name = artifact_filename(target)
@@ -1897,6 +1943,21 @@ def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path,
         else:
             _verify_release_zip(result, target=target, release=release, hash_files=False)
         print(f'[TERMINAL PUBLISH] verified {target} round-trip SHA-256', flush=True)
+    if installers:
+        from host.lifecycle.target_publish import MSI_ZIP_NAME, _zip_contains_msi
+        item = installers['win-msi']
+        if not (reuse_verified and reuse_verified.get(MSI_ZIP_NAME) == item.get('sha256')):
+            result = staged / MSI_ZIP_NAME
+            if (result.is_file() and (result.stat().st_size != item['bytes'] or
+                                      _hash(result) != item['sha256'])):
+                result.unlink()
+            r2._get_file(cfg, f'{prefix}/{MSI_ZIP_NAME}', result,
+                         expected_size=item['bytes'])
+            if (_hash(result) != item['sha256'] or
+                    not _zip_contains_msi(result, sha256=item['msi_sha256'],
+                                          size=item['msi_bytes'])):
+                raise RuntimeError('Cloudflare Windows MSI ZIP round-trip mismatch')
+            print('[TERMINAL PUBLISH] verified Windows MSI ZIP round-trip SHA-256', flush=True)
     if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
         raise RuntimeError('Unsafe Cloudflare download destination: ' + str(destination))
     destination.mkdir(parents=True, exist_ok=True)
@@ -2013,6 +2074,7 @@ def _verify_public_lagomorph_range(url: str, expected_size: int) -> None:
 
 
 def _release_public_urls(release: str, *, include_lagomorph: bool = False,
+                         include_windows_msi: bool = False,
                          prefix: str = CLOUDFLARE_OBJECT_ROOT) -> dict[str, str]:
     """Use the published production origin already defined by the R2 publisher."""
     from host.publishing.release import PUBLIC_URLS
@@ -2020,6 +2082,9 @@ def _release_public_urls(release: str, *, include_lagomorph: bool = False,
     urls = {'manifest': f'{base}/{prefix}/four-artifacts.json'}
     urls.update({target: f'{base}/{prefix}/{artifact_filename(target)}'
                  for target in FOUR_TARGETS})
+    if include_windows_msi:
+        from host.lifecycle.target_publish import MSI_ZIP_NAME
+        urls['win-msi'] = f'{base}/{prefix}/{MSI_ZIP_NAME}'
     if include_lagomorph:
         # Classic-Mac media keeps the existing versioned URL and is not one of the four ZIPs.
         urls['lagomorph'] = f'{base}/{prefix}/{release}/{LAGOMORPH_PUBLIC_NAME}'
@@ -2187,9 +2252,13 @@ def _verify_public_urls(urls: dict[str, str], report: dict, files: dict[str, Pat
             raise RuntimeError('Release public URL does not share verified origin')
     for label, url in urls.items():
         name = ('four-artifacts.json' if label == 'manifest' else
-                LAGOMORPH_PUBLIC_NAME if label == 'lagomorph' else report['artifacts'][label]['filename'])
+                LAGOMORPH_PUBLIC_NAME if label == 'lagomorph' else
+                report['installers']['win-msi']['filename'] if label == 'win-msi' else
+                report['artifacts'][label]['filename'])
+        entry = (report.get('installers', {}).get('win-msi') if label == 'win-msi'
+                 else report.get('artifacts', {}).get(label))
         expected_size = (files[name].stat().st_size if name in files else
-                         int(report['artifacts'][label]['bytes']))
+                         int(entry['bytes']))
         for attempt in range(len(retry_delays) + 1):
             try:
                 _public_http_attempt(label, url, expected_size,
@@ -2281,8 +2350,15 @@ def _remote_manifest_reusable(cfg: dict, prefix: str, remote: dict,
                 set(record.get('artifacts', {})) != set(FOUR_TARGETS)):
             return {}
         reusable = {}
-        for target, item in record['artifacts'].items():
-            name = artifact_filename(target)
+        release_items = {artifact_filename(t): item
+                         for t, item in record['artifacts'].items()}
+        installers = record.get('installers', {})
+        if installers:
+            from host.lifecycle.target_publish import MSI_ZIP_NAME
+            if set(installers) != {'win-msi'}:
+                return {}
+            release_items[MSI_ZIP_NAME] = installers['win-msi']
+        for name, item in release_items.items():
             entry = remote.get(name, {})
             modified = datetime.fromisoformat(entry['last_modified'].replace('Z', '+00:00'))
             if (item.get('filename') == name and
@@ -2363,6 +2439,17 @@ def verify_public_four(builds: Path, *, release: str = HOST_RELEASE,
         if not path.is_file() or path.is_symlink() or path.stat().st_size != item.get('bytes'):
             raise RuntimeError('Local package does not match verified R2 receipt: ' + name)
         files[name] = path
+    installers = report.get('installers', {})
+    if installers:
+        from host.lifecycle.target_publish import MSI_ZIP_NAME, _zip_contains_msi
+        item = installers['win-msi']
+        path = root / MSI_ZIP_NAME
+        if (item.get('filename') != MSI_ZIP_NAME or not path.is_file() or
+                path.is_symlink() or path.stat().st_size != item.get('bytes') or
+                receipt.get('files', {}).get(MSI_ZIP_NAME) != item.get('sha256') or
+                not _zip_contains_msi(path, sha256=item['msi_sha256'], size=item['msi_bytes'])):
+            raise RuntimeError('Windows MSI ZIP does not match verified R2 receipt')
+        files[MSI_ZIP_NAME] = path
     if channel == 'public':
         iso = builds / LAGOMORPH_STAGE / LAGOMORPH_PUBLIC_NAME
         if (not iso.is_file() or iso.is_symlink() or
@@ -2370,7 +2457,8 @@ def verify_public_four(builds: Path, *, release: str = HOST_RELEASE,
             raise RuntimeError('Lagomorph ISO does not match verified R2 receipt')
         files[iso.name] = iso
     receipt['public_urls'] = _release_public_urls(
-        release, include_lagomorph=channel == 'public', prefix=expected_prefix)
+        release, include_lagomorph=channel == 'public',
+        include_windows_msi=bool(installers), prefix=expected_prefix)
     return _finalize_public_receipt(receipt_path, receipt, report, files)
 
 
@@ -2437,7 +2525,7 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
     else:
         legacy_media_prefix = None
         media_remote = {}
-    print(f'[TERMINAL PUBLISH] upload Mac DMG + 3 ZIPs + manifest'
+    print(f'[TERMINAL PUBLISH] upload Mac DMG + 4 ZIPs + manifest'
           f'{" + Lagomorph ISO" if channel in ("public", "release") else ""} -> {cfg["bucket"]}/{prefix}', flush=True)
     total_bytes = sum(x.stat().st_size for x in files.values())
     uploaded = 0
@@ -2455,6 +2543,8 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
     expected_sha = {'four-artifacts.json': _hash(files['four-artifacts.json'])}
     expected_sha.update({item['filename']: item['sha256']
                          for item in report['artifacts'].values()})
+    expected_sha.update({item['filename']: item['sha256']
+                         for item in report.get('installers', {}).values()})
     if LAGOMORPH_PUBLIC_NAME in files:
         expected_sha[LAGOMORPH_PUBLIC_NAME] = _hash(files[LAGOMORPH_PUBLIC_NAME])
     # Authenticate the prior small manifest; even a fresh BUILDER can then
@@ -2534,6 +2624,7 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
         if channel in ('public', 'release'):
             _download_lagomorph_public(cfg, legacy_media_prefix, files[LAGOMORPH_PUBLIC_NAME], downloaded)
     public_urls = (_release_public_urls(release, include_lagomorph=channel in ('public', 'release'),
+                                        include_windows_msi=bool(report.get('installers')),
                                         prefix=prefix) if provider == 'public' else {})
     # Remote ETags allow later runs to reject same-size overwrites without
     # re-downloading unchanged SDK archives.
@@ -2554,7 +2645,7 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
     _write_publish_receipt(previous_receipt, receipt)
     if provider == 'public':
         receipt = _finalize_public_receipt(previous_receipt, receipt, report, files)
-    print(f'[TERMINAL PUBLISH] VERIFIED Mac DMG + 3 ZIPs + manifest'
+    print(f'[TERMINAL PUBLISH] VERIFIED Mac DMG + 4 ZIPs + manifest'
           f'{" + Lagomorph ISO" if channel in ("public", "release") else ""} in {cfg["bucket"]}/{prefix}', flush=True)
     if provider == 'public':
         print('[TERMINAL PUBLISH] PUBLIC TEST URLS (verified unsigned HTTP):', flush=True)

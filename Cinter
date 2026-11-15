@@ -327,19 +327,6 @@ def _reboot_running_terminal(component: str) -> int:
     raise RuntimeError('Native ' + component + ' restart was requested but readiness not confirmed')
 
 
-def _prepare_windows_release_msi(builds: Path) -> dict:
-    """Publish-only MSI compilation before any all-channel upload."""
-    from host.lifecycle.universal_package import HOST_RELEASE
-    from host.lifecycle.unpacked_release import _load
-    from host.windows.msi_installer import publish as package_windows_msi
-    from host.lifecycle.target_publish import package_msi_zip
-    win = _load(builds, HOST_RELEASE)['targets']['win']
-    installer = package_windows_msi(builds, release=HOST_RELEASE, entries=win['files'])
-    # Finish the browser-downloadable MSI ZIP before the four-artifact upload.
-    # An archive failure must never create a half-committed public release.
-    package_msi_zip(builds, installer)
-    return installer
-
 
 def main(argv: list[str]) -> int:
     """Dispatch the supported developer/user commands; returns a process exit code.
@@ -693,15 +680,10 @@ def main(argv: list[str]) -> int:
                                    'Import the matching .p12 into its Keychain before public Mac Release; '
                                    'refusing to publish an unstapled DMG.')
             from host.lifecycle.universal_package import publish_four
-            from host.lifecycle.target_publish import publish_msi_addendum
             channel = {'internal': 'dev', 'release': 'public'}.get(selected, selected)
-            # Complete and verify the MSI BEFORE publishing the four-artifact
-            # manifest. An MSI compiler failure must not leave a half-release
-            # (Mac/ZIPs uploaded, but Windows enterprise installer absent).
-            packaged_msi = _prepare_windows_release_msi(BUILDS)
+            # Publish first prepares all four artifacts (including MSI-only
+            # Windows ZIP) before any Cloudflare upload.
             report = publish_four(BUILDS, channel=channel)
-            # Separate Windows MSI manifest never changes four-artifacts.json.
-            publish_msi_addendum(BUILDS, channel=selected, packaged=packaged_msi)
             if selected == 'release':
                 from host.lifecycle.universal_package import update_readme_public_downloads
                 changed = update_readme_public_downloads(REPO / 'README.md', report)

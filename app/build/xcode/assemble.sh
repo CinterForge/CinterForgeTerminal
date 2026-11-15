@@ -10,37 +10,76 @@ if [[ ! -d "$BUILDS" ]]; then
   echo "error: CinterForgeTerminal Setup is missing: run ./Cinter setup all first" >&2
   exit 1
 fi
-if [[ "${CONFIGURATION:-Debug}" == Debug ]]; then
-  # For Run/LLDB, Xcode itself owns outer app signing. Do not request
-  # publication credentials or submit to the notary service during Debug.
-  unset CINTER_MAC_SIGN_IDENTITY CINTER_MAC_NOTARY_PROFILE
-  export CINTER_XCODE_DEBUG_NATIVE=1
-fi
-# For Archive, reuse the Xcode Release Team/Developer ID selection so the
-# nested VM and Python Mach-O code are signed before Xcode seals the bundle.
-# No network/notarization is triggered by this step.
-if [[ "${CONFIGURATION:-Debug}" == Release ]]; then
+# Xcode does not inherit the interactive shell's PATH. Use the toolchain
+# installed by Setup for the native build and authored-resource refresh.
+export PATH="$BUILDS/CinterForgeTerminal/Toolchains/mac/env/bin:$PATH"
+# An ordinary Xcode Build or Run is ALWAYS the local source-edit loop. Xcode
+# uses ACTION=install for Archive, which is the only Xcode action that needs
+# the signed Release producer. Selecting Release manually for Run must not
+# silently trigger the full release lifecycle.
+XCODE_ARCHIVE=0
+if [[ "${ACTION:-build}" == install && "${CONFIGURATION:-Debug}" == Release ]]; then
+  XCODE_ARCHIVE=1
+  # This resolves signing references from the already-configured Xcode
+  # Release identity. Apple notarization happens only in explicit Publish.
   IDENTITY="$(python3 -B -m host.mac.xcode_signing --field identity)"
   PROFILE="$(python3 -B -m host.mac.xcode_signing --field profile)"
   if [[ -n "$IDENTITY" ]]; then
     export CINTER_MAC_SIGN_IDENTITY="$IDENTITY"
     export CINTER_MAC_NOTARY_PROFILE="$PROFILE"
   fi
+  echo "[Xcode] Archive: preparing signed Release bundle (no notarization)" >&2
+else
+  unset CINTER_MAC_SIGN_IDENTITY CINTER_MAC_NOTARY_PROFILE
+  export CINTER_XCODE_DEBUG_NATIVE=1
+  echo "[Xcode] Build & Run: fast local source build, configuration=${CONFIGURATION:-Debug}, action=${ACTION:-build}" >&2
 fi
-# Use the existing producer. Never add a competing compiler or Python Host.
-./Cinter build mac
-./Cinter host stage
-# App composition is Build-owned, despite its historical internal stage name.
-python3 -B -m host.mac.mac_app stage --builds "$BUILDS"
+# Xcode Build & Run is a source-edit loop. Archive alone uses the release
+# producer; Setup is still responsible for provisioning changed dependencies.
 SOURCE="$BUILDS/CinterForgeTerminal/Applications/mac/arm64/Release/CinterForge Terminal.app"
 DEST="${TARGET_BUILD_DIR:?}/${WRAPPER_NAME:?}"
-if [[ ! -f "$SOURCE/Contents/MacOS/CinterForgeTerminal" ]]; then
-  echo "error: Existing Cinter build did not produce the native macOS app" >&2
-  exit 1
+if [[ "$XCODE_ARCHIVE" == 0 ]]; then
+  # Compile current C/C++ and restage current Python, JS, HTML, and CSS.
+  echo "[Xcode] Compiling native C/C++ with existing Host CMake target" >&2
+  ./Cinter host build --application-shell
+  echo "[Xcode] Refreshing staged Python/JS/HTML/CSS runtime" >&2
+  ./Cinter host stage
+  if [[ ! -f "$SOURCE/Contents/Resources/HostRelease.txt" ]]; then
+    echo 'error: Initial runtime closure missing; run ./Cinter all all once before Xcode Debug.' >&2
+    exit 1
+  fi
+  IFS= read -r HOST_RELEASE < "$SOURCE/Contents/Resources/HostRelease.txt"
+  case "$HOST_RELEASE" in
+    ''|*/*|*\\*) echo 'error: Invalid staged Host release identifier' >&2; exit 1 ;;
+  esac
+  HOST_STAGE="$BUILDS/Python/Host/mac/arm64/$HOST_RELEASE"
+  if [[ ! -f "$HOST_STAGE/bin/CinterForgeTerminal" ]]; then
+    echo 'error: Current native Host executable is missing after Build' >&2
+    exit 1
+  fi
+  # Existing Code-OSS was acquired by Setup. Refresh only our authored
+  # extension, which may also have changed since the last release build.
+  echo "[Xcode] Refreshing authored Code-OSS extension" >&2
+  python3 -B -c 'from pathlib import Path; from webapp.codeoss.producer import _stage_cinterforge_extension; import sys; _stage_cinterforge_extension(Path(sys.argv[1]))' \
+    "$BUILDS/InteractiveFiction/CodeOSS/Web"
+  echo "[Xcode] Updating local app bundle resources" >&2
+  mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
+  /usr/bin/ditto "$SOURCE/Contents/Resources" "$DEST/Contents/Resources"
+  /usr/bin/ditto "$HOST_STAGE" "$DEST/Contents/Resources/Builds/Python/Host/mac/arm64/$HOST_RELEASE"
+  /usr/bin/ditto "$HOST_STAGE/bin/CinterForgeTerminal" "$DEST/Contents/MacOS/CinterForgeTerminal"
+  echo "[Xcode] Debug Build & Run refreshed C/C++/Python/JS/HTML/CSS from repository; Builds=$BUILDS"
+else
+  # Archive alone retains the existing signed Release Build producer.
+  ./Cinter build mac
+  ./Cinter host stage
+  python3 -B -m host.mac.mac_app stage --builds "$BUILDS"
+  if [[ ! -f "$SOURCE/Contents/MacOS/CinterForgeTerminal" ]]; then
+    echo 'error: Cinter build did not produce the native macOS app' >&2
+    exit 1
+  fi
+  mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
+  /usr/bin/ditto "$SOURCE/Contents/MacOS/CinterForgeTerminal" "$DEST/Contents/MacOS/CinterForgeTerminal"
+  /usr/bin/ditto "$SOURCE/Contents/Resources" "$DEST/Contents/Resources"
+  echo "[Xcode] Embedded release runtime: $DEST"
 fi
-mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
-/usr/bin/ditto "$SOURCE/Contents/MacOS/CinterForgeTerminal" "$DEST/Contents/MacOS/CinterForgeTerminal"
-/usr/bin/ditto "$SOURCE/Contents/Resources" "$DEST/Contents/Resources"
-# Xcode's own ProcessInfoPlistFile and CodeSign phases supply the project
-# metadata/certificate and sign this complete Xcode application product.
-echo "[Xcode] Embedded the verified existing Terminal runtime: $DEST"
+# Xcode owns final app Info.plist and signing phases.

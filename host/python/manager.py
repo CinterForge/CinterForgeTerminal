@@ -607,7 +607,10 @@ def build_host(builds: Path, *, zeroconf: bool = True, clean: bool = False,
         webview = provision_webview(builds)
     else:
         webview = None
-    cmake = 'cmake'
+    # Setup owns the macOS toolchain. Resolve CMake from that installation
+    # instead of relying on a login-shell PATH (Xcode launches without one).
+    cmake = (str(builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/cmake')
+             if current_platform() == 'mac' else 'cmake')
     extra = []
     build_env = None
     if current_platform() == 'mac' and application_shell:

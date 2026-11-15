@@ -6163,35 +6163,49 @@ import time
 
 
 def sdk_root() -> Path | None:
-    """Locate a complete, receipt-backed SDK without network access.
+    """Locate provisioned developer tools or a receipt-backed installed SDK.
 
-    The path checks are deliberately lightweight. Each archive and installed
-    member was SHA-256 verified during Stage; `_image_archive` rehashes the
-    selected OCI image before its first Docker load. A stale receipt alone is
-    never proof that Windows/Linux Bash can start.
+    Developer Build & Run uses sibling Builds directly, as Setup and Test do.
+    Installed apps still require the SDK installation receipt. The selected
+    OCI image is verified separately when first loaded into Docker.
     """
-    release = _devtools_release()
-    destination = _devtools_destination(release)
-    receipt = destination / 'stage-receipt.json'
-    legacy = False
-    if not receipt.is_file():
-        # Compatibility with already-installed SDKs: do not force a second
-        # multi-GB download just because the installation layout changed.
-        previous = _legacy_devtools_destination(release)
-        if previous is None or not (previous / 'stage-receipt.json').is_file():
+    if os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'developer':
+        # Xcode Build & Run uses the exact sibling Builds provisioned by Setup.
+        # `./Cinter all all` stages DevTools to Steam, NOT a downloaded-SDK
+        # receipt in Builds/CinterForgeTerminal/DevTools/<release>. Requiring
+        # that receipt (or falling back to a potentially stale Steam SDK)
+        # prevented the native Xcode app from starting the already-working
+        # Linux/Windows VM, Bash and VNC guests.
+        supplied = os.environ.get('CINTER_BUILDS_ROOT', '')
+        builds = Path(supplied).expanduser() if supplied else None
+        if (builds is None or not builds.is_absolute() or builds.name != 'Builds'
+                or builds.is_symlink() or not builds.is_dir()):
             return None
-        destination, receipt, legacy = previous, previous / 'stage-receipt.json', True
-    if receipt.is_symlink() or destination.is_symlink():
-        return None
-    try:
-        record = json.loads(receipt.read_text(encoding='utf-8'))
-    except (OSError, ValueError):
-        return None
-    if (record.get('schema') not in (FOUR_SCHEMA, 'cinterforge.terminal.unpacked-build.v1') or
-            record.get('target') != 'devtools' or record.get('release') != release):
-        return None
-    sdk = (destination / 'DevTools/Builds/CinterForgeTerminal/Toolchains' if legacy
-           else destination.parents[2] / 'CinterForgeTerminal/Toolchains')
+        sdk = builds.resolve(strict=True) / 'CinterForgeTerminal/Toolchains'
+    else:
+        # Downloaded applications must still use a receipt-backed SDK.
+        # Never let a packaged app silently borrow the developer's toolchains.
+        release = _devtools_release()
+        destination = _devtools_destination(release)
+        receipt = destination / 'stage-receipt.json'
+        legacy = False
+        if not receipt.is_file():
+            # Compatibility with already-installed SDKs: no extra download.
+            previous = _legacy_devtools_destination(release)
+            if previous is None or not (previous / 'stage-receipt.json').is_file():
+                return None
+            destination, receipt, legacy = previous, previous / 'stage-receipt.json', True
+        if receipt.is_symlink() or destination.is_symlink():
+            return None
+        try:
+            record = json.loads(receipt.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return None
+        if (record.get('schema') not in (FOUR_SCHEMA, 'cinterforge.terminal.unpacked-build.v1') or
+                record.get('target') != 'devtools' or record.get('release') != release):
+            return None
+        sdk = (destination / 'DevTools/Builds/CinterForgeTerminal/Toolchains' if legacy
+               else destination.parents[2] / 'CinterForgeTerminal/Toolchains')
     needed = ('mac/env/bin/colima', 'mac/env/bin/docker', 'mac/lima/bin/limactl',
               'mac/qemu/bin/qemu-img', 'mac/qemu/bin/qemu-system-x86_64',
               'Windows/MSYS2/usr/bin/bash.exe', 'Windows/MSYS2/usr/bin/msys-2.0.dll')
@@ -6983,7 +6997,8 @@ def _schedule_guest_boot(server: CinterShellServer) -> dict:
         if server.guest_start_state in ('starting', 'ready'):
             return {'state': server.guest_start_state, 'error': server.guest_start_error}
         try:
-            installed = sdk_root() is not None
+            selected_sdk = sdk_root()
+            installed = selected_sdk is not None
         except (OSError, ValueError, RuntimeError) as error:
             server.guest_start_state = 'failed'
             server.guest_start_error = 'Cannot inspect installed DevTools: ' + str(error)
@@ -7012,7 +7027,9 @@ def _schedule_guest_boot(server: CinterShellServer) -> dict:
             server.guest_start_error = 'Cannot start guest supervisor: ' + str(error)
         server.log_event('Managed reusable guests FAILED: ' + str(error))
         return _guest_boot_snapshot(server)
-    server.log_event('Managed reusable guests: starting Linux and Windows at application launch')
+    server.log_event('Managed reusable guests: starting Linux and Windows at application launch; '
+                     'runtime=' + os.environ.get('CINTER_TERMINAL_RUNTIME_MODE', 'unknown') +
+                     '; sdk=' + str(selected_sdk))
     return _guest_boot_snapshot(server)
 
 

@@ -295,7 +295,7 @@
 				A00000000000000000000021 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
+			defaultConfigurationName = Debug;
 		};
 		A00000000000000000000007 /* Build configuration list for PBXNativeTarget "CinterForge Terminal" */ = {
 			isa = XCConfigurationList;
@@ -304,7 +304,7 @@
 				A00000000000000000000023 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
+			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
 	};

@@ -1,7 +1,7 @@
 """One-platform release publisher; never reads or modifies four-artifacts.json.
 
-Windows also publishes a WiX MSI ZIP with a separate content-hash manifest. This
-module is strictly Publish-only: inputs must already be built and Setup-tested.
+Windows publishes the verified WiX MSI inside a second installer-only ZIP.
+The canonical Windows product ZIP remains unchanged. This is Publish-only.
 """
 from __future__ import annotations
 
@@ -182,7 +182,7 @@ def _publish_files(builds: Path, *, channel: str, target: str, files: dict[str, 
 
 def publish(builds: Path, *, target: str, channel: str = 'dryrun',
             release: str | None = None, config: Path | None = None) -> dict:
-    """Prepare/publish one app only; WiX MSI is added for Windows."""
+    """Prepare/publish one app; Windows also publishes its verified MSI ZIP."""
     from host.lifecycle import universal_package as up
     from host.lifecycle.unpacked_release import _load, prepare_publish_packages
     if target not in TARGETS:
@@ -208,35 +208,15 @@ def publish(builds: Path, *, target: str, channel: str = 'dryrun',
     artifacts = {filename: {'sha256': entry['sha256'], 'bytes': entry['bytes'],
                             'build_fingerprint': entry['build_fingerprint']}}
     if target == 'win':
-        from host.windows.msi_installer import publish as make_msi
-        record = _load(builds, release)['targets']['win']
-        installer = make_msi(builds, release=release, entries=record['files'])
-        archive = package_msi_zip(builds, installer)
-        path = builds / 'CinterForgeTerminal/Distribution' / archive['filename']
-        files[path.name] = path
-        artifacts[path.name] = {'sha256': archive['sha256'], 'bytes': archive['bytes'],
-                                'build_fingerprint': record['fingerprint'],
-                                'contains': MSI_NAME, 'msi_sha256': archive['msi_sha256']}
+        # The separately verified MSI ZIP is an additional published artifact.
+        # Never upload the bare .msi; preserve the normal Windows product ZIP.
+        installer = report['installers']['win-msi']
+        installer_name = installer['filename']
+        files[installer_name] = builds / 'CinterForgeTerminal/Distribution' / installer_name
+        artifacts[installer_name] = {
+            'sha256': installer['sha256'], 'bytes': installer['bytes'],
+            'contains': MSI_NAME, 'msi_sha256': installer['msi_sha256']}
     return _publish_files(builds, channel=channel, target=target, files=files,
                           document={'release': release, 'target': target,
                                     'artifacts': artifacts}, config=config)
 
-
-def publish_msi_addendum(builds: Path, *, channel: str, release: str | None = None,
-                         config: Path | None = None, packaged: dict | None = None) -> dict:
-    """Full four-artifact Publish also emits enterprise MSI via the same path."""
-    from host.lifecycle import universal_package as up
-    from host.lifecycle.unpacked_release import _load
-    from host.windows.msi_installer import publish as make_msi
-    release = release or up.HOST_RELEASE
-    record = _load(builds.resolve(), release)['targets']['win']
-    entry = packaged if packaged is not None else make_msi(builds, release=release, entries=record['files'])
-    if entry.get('release') != release or entry.get('filename') != MSI_NAME:
-        raise RuntimeError('Invalid prepared Windows MSI publication receipt')
-    archive = package_msi_zip(builds, entry)
-    path = builds / 'CinterForgeTerminal/Distribution' / archive['filename']
-    return _publish_files(builds, channel=channel, target='win', files={path.name: path},
-                          document={'release': release, 'target': 'win', 'artifacts': {
-                              path.name: {'sha256': archive['sha256'], 'bytes': archive['bytes'],
-                                          'build_fingerprint': record['fingerprint'],
-                                          'contains': MSI_NAME, 'msi_sha256': archive['msi_sha256']}}}, config=config)

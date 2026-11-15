@@ -139,6 +139,20 @@ namespace
     void fillMacAppDefaults(cinterforge::ApplicationShellConfig &cfg)
     {
         const fs::path app = currentExecutable().parent_path().parent_path().parent_path();
+        // Xcode's products are beneath <repo>/../Builds/Xcode/Products.
+        // Build & Run must use that developer Builds tree automatically,
+        // without an argument entered in Scheme or a Steam installation.
+        for (fs::path parent = app.parent_path(); parent != parent.root_path();
+             parent = parent.parent_path())
+        {
+            if (parent.filename() == "Products" &&
+                parent.parent_path().filename() == "Xcode" &&
+                parent.parent_path().parent_path().filename() == "Builds")
+            {
+                cfg.developer = true;
+                break;
+            }
+        }
         const fs::path embedded = app / "Contents/Resources/Builds";
         fs::path builds;
         if (cfg.developer)

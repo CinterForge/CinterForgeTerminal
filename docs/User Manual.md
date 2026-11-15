@@ -10,8 +10,8 @@ CinterForge Terminal is a native application for **macOS, Windows and Linux**. Y
 
 ## 1. Getting started
 
-1. Download the **macOS Apple-silicon**, **Windows x64** or **Linux x64** ZIP using the links at the top of the [README](../README.md).
-2. Extract the archive and open its native application launcher. The Terminal launches into its main Session view.
+1. Download the **macOS Apple-silicon DMG**, **Windows x64 ZIP**, or **Linux x64 ZIP** using the links at the top of the [README](../README.md).
+2. On Windows, extract the ZIP and run `CinterForgeTerminal-win.msi` to install the app. On macOS, open the DMG; on Linux, extract the ZIP and launch its native executable. The Terminal launches into its main Session view.
 3. Type `help` to discover commands, `games` to see the catalog, or `code` to enter the development workspace.
 4. Navigate between Sessions using the application tabs. Games and consoles open in their own tabs rather than replacing your original terminal.
 
