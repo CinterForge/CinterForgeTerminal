@@ -78,7 +78,7 @@ The example illustrates the intended declaration boundary; it is not a promise t
 
 A Steam adapter can implement the same observable HTML-surface/input/bridge contract using the Steam browser surface, while keeping Steamworks SDK types and restricted redistributables out of the Host core. A direct native WebView distribution does not need a Steam account.
 
-Creative Mesh is a permissioned local capability protocol. Applications advertise declared operations and supported input/output types; a caller requests work with identity, deadline, cancellation, and explicit authorization. Discovery is not permission to execute code or access arbitrary files. Large payloads use verified artifacts rather than unrestricted JSON blobs.
+Creative Mesh (WIP) is a permissioned local capability protocol. Applications advertise declared operations and supported input/output types; a caller requests work with identity, deadline, cancellation, and explicit authorization. Discovery is not permission to execute code or access arbitrary files. Large payloads use verified artifacts rather than unrestricted JSON blobs.
 
 ## Ownership and contribution boundaries
 

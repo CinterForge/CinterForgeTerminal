@@ -347,7 +347,7 @@
   // (e.g. "is war just a game?") must answer about war, because escalation is
   // the point of the whole exercise. Order matters — war > intelligent > win >
   // human > game > default. Do not reorder without updating the
-  // characterization test (root test.py smoke suite).
+  // characterization test (root host/lifecycle/test.py smoke suite).
   function answerAsk(cmd){
     const s=cmd.toLowerCase(); let key='default';
     if(/war|guerra|nuclear/.test(s)) key='war';
@@ -653,7 +653,7 @@
     // Error boundary: a bad geographic reference (e.g. a strikes/route id
     // missing from nodes.js) must never leave the simulation stuck on a
     // half-drawn map with audio still running. See
-    // root test.py smoke suite for the automated check that
+    // root host/lifecycle/test.py smoke suite for the automated check that
     // should catch this at test time, long before a player ever hits it.
     try {
     if(!profile) throw new Error('Missing war strategy profile for scenario: ' + s.id);

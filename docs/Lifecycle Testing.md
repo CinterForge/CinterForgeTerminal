@@ -18,9 +18,9 @@ place where release acceptance runs. Setup provisions all toolchains,
 Bedrock/NetherNet inputs and guest images; Build compiles unpacked artifacts;
 Stage copies/verifies those artifacts. None invokes the root smoke suite.
 
-All **12** consolidated smoke checks live in **root `test.py`**. The former
+All **12** consolidated smoke checks live in **`host/lifecycle/test.py`**. The former
 `tests/` directory, hundreds of micro-tests and JavaScript smoke harnesses
-were physically deleted. `test.py` has a permanent rule: keep at most 50 tests;
+were physically deleted. `host/lifecycle/test.py` has a permanent rule: keep at most 50 tests;
 if the count ever reaches 75, consolidate to fewer than 50. Real system tests
 are preferred over fake Docker replies or monkeypatches. The suite performs
 read-only receipt/signature/resource checks and real Bedrock/Linux/Windows
@@ -137,6 +137,26 @@ read-only `Contents/Resources/Builds` directory is merely the historical
 resource closure name, not a runtime output location. The Server Terminal tab
 streams the same authenticated log and displays its exact disk location.
 
+## Open Logs Folder and consolidated diagnostics
+
+The native **Terminal → Open Logs Folder** command opens the active host log
+folder (not a browser download, a VM disk or the signed app Resources):
+
+- Repository lifecycle and Xcode developer runs: `Builds/Logs/CinterForgeTerminal/`
+- Installed native app: `<selected-steamapps>/common/CinterForge/Logs/CinterForgeTerminal/`
+
+The root contains `Lifecycle/`, `Runtime/` (developer Server Log and sessions),
+`VM/c/` (Setup Lima serial/host-agent), `VM/t/` (app Lima serial/host-agent),
+`Guests/VNC/`, `Guests/Launch/`, `Bedrock/`, and `CMake/` as appropriate.
+The runtime writes guest GUI/VNC/launcher logs directly through the existing
+host mount, and mirrors Lima's own files while booting. CMake's internal error
+and configure diagnostics are copied after a lifecycle run; the active CMake
+cache/build tree and Lima sockets/disks remain in their required build/state
+directories. Operating-system-managed crash reports remain owned by the OS;
+Terminal's own crash/error output and lifecycle FAIL records belong in Logs.
+No code path should write new Terminal logs into guest `/tmp`, `Logs/Bedrock`,
+or the Steam Bedrock server installation.
+
 ## Where all results are stored
 
 ```text
@@ -188,7 +208,7 @@ preflight or independent `python`/`node` commands are required of the builder.
 
 - **Observed in a Linux development container for this single-suite source:**
   all six repository-structure and authored-input checks pass; the root
-  `test.py` discovers 12 test cases in total. The six hardware-dependent
+  `host/lifecycle/test.py` discovers 12 test cases in total. The six hardware-dependent
   Mac release checks cannot run in the Linux container.
 - **Observed in the user's prior Mac lifecycle log before this restructuring:**
   Setup, Build and Stage passed, including actual Bedrock, cross-toolchain,

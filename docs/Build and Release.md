@@ -14,12 +14,40 @@ CinterForge Terminal is a reproducibly source-built product for **macOS, Windows
 
 This chapter describes the **repository build driver**. The Game Terminal's game commands and the `code` command are described in the [User Manual](User%20Manual.md). When this repository is loaded in Code-OSS, these same `./Cinter` commands run from real integrated platform terminals.
 
-## Automatic preflight, regression tests and durable lifecycle logs
+## Dirty-checked Setup
+
+`./Cinter setup all` and `./Cinter setup win` reuse a completed Setup when
+their authored Setup inputs and staged dependencies have not changed. Before
+starting either the LinuxKit `c` producer or the shared x86-64 `t` guest, the
+CLI checks a versioned receipt in
+`Builds/Intermediates/CinterForgeTerminal/SetupCache/`. The receipt is written
+**only after** the entire normal Setup succeeds and its owned VMs have shut
+down. The read-only check inventories the already-staged toolchains, runtimes,
+images and app dependencies using file identity/size/mtime/ctime; no Docker
+process or VM is started to check a cache hit. Existing Build and Test phases
+retain their stronger independent integrity and functional acceptance checks.
+
+On an unchanged retry, Setup reports `CURRENT` and skips provisioning and VM
+startup. On any missing or changed required input or output, it reports `DIRTY`,
+invalidates the previous receipt and runs the normal reproducible Setup.
+Individual provisioners may still reuse their own verified artifacts; source
+changes conservatively invalidate the aggregate receipt. Interrupted or failed
+Setup never writes a successful cache receipt. The authenticated **internal**
+Lagomorph snapshot is still checked on every Setup invocation; when its local
+source bytes and Macintosh metadata match the remote index, the large source
+ZIP is not downloaded or unpacked again. This is not a way around Bedrock EULA
+consent or a substitute for real Test acceptance.
+
+All receipts, logs and downloads remain under the sibling `Builds` directory.
+Build, Stage, Test and installed native-app runtime never provision or repair
+Setup-owned dependencies.
+
+## Existing lifecycle tests and durable lifecycle logs
 
 Builders run `./Cinter` lifecycle commands only; there are no separate
-manual preflight or source-test commands. `setup all` verifies the authored
-repository paths, input JSON and Python source syntax and provisions required
-dependencies before Build. `test mac` runs the single root `test.py` real smoke suite
+manual source-layout preflight commands. `setup all` provisions the required
+dependencies and reports failures from the operations that encounter them.
+`test mac` runs the single `host/lifecycle/test.py` real smoke suite
 against the completed staged release, plus a native WebView source syntax check. `all all` performs Setup → Build → Stage
 → Test on the Mac without publishing or claiming Windows/Linux native GUI
 acceptance. The `all all publish` form runs the same phases and, only if Test succeeds,
@@ -76,7 +104,7 @@ remains read-only and does not create logs. See [Lifecycle Testing](Lifecycle%20
 | **Setup** | Download/verify and **extract verified published ZIPs/DMGs only here**, into canonical sibling `Builds` when needed; provision pinned toolchains, **native Debian wixl/msitools toolchain inputs**; no smoke/acceptance tests | Leave Setup VMs running; shift extraction to Build or Stage |
 | **Build** | Compile and sign three unpacked native apps; record the unified DevTools input inventory directly in `Builds` | ZIP/UnZIP, download, Stage or restart |
 | **Stage** | Copy already-built unpacked files straight to `steamapps` and validate receipts; skip unchanged DevTools | ZIP/UnZIP, provision, download or rebuild |
-| **Test** | Run root `test.py` (12 real source/artifact/system smoke checks), Bedrock, guest Bash/VNC, native MSI compiler acceptance; record evidence | ZIP/UnZIP, provision or download |
+| **Test** | Run `host/lifecycle/test.py` (12 real source/artifact/system smoke checks), Bedrock, guest Bash/VNC, native MSI compiler acceptance; record evidence | ZIP/UnZIP, provision or download |
 | **Publish** | Create the **Mac DMG, three ZIPs and Windows enterprise MSI only here**; notarize beta/release Mac DMGs; perform read-only CDN checks on dryrun, otherwise upload and verify | Run during ordinary `all all`, upload without an explicit destination or provision toolchains |
 | **Reboot** | Restart only named running component: `server`, `docker`, `colima` or `app` | Build, Setup, Stage, ZIP/UnZIP or Publish |
 
@@ -418,7 +446,7 @@ For every CinterForge macOS application distributed outside the Mac App Store:
 - No Developer ID private keys, provisioning profile files or notary credentials ship in the image. Apple Keychain and Xcode own credentials; the existing `CINTER_MAC_SIGN_IDENTITY` / `CINTER_MAC_NOTARY_PROFILE` references remain supported.
 - This DMG is a drag-to-Applications **disk image**, not a `.pkg` installer; `Developer ID Application` signs the app, while `Developer ID Installer` is reserved for `.pkg`.
 
-The reusable image helper lives in `host/mac_dmg.py`. It accepts the app path, volume name, README, and target path so the same packaging convention can be applied to other CinterForge Mac applications without introducing another lifecycle phase.
+The reusable image helper lives in `host/mac/mac_dmg.py`. It accepts the app path, volume name, README, and target path so the same packaging convention can be applied to other CinterForge Mac applications without introducing another lifecycle phase.
 
 ### Lagomorph HFS build on the existing Linux guest
 

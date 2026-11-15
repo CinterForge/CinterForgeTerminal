@@ -8,6 +8,8 @@ No ports are published, and every process is cleaned up before this exits.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
+import ctypes
 import os
 from pathlib import Path
 import re
@@ -90,10 +92,28 @@ def main(argv: list[str] | None = None) -> int:
     if command and command[0] == '--':
         command = command[1:]
     processes: list[subprocess.Popen] = []
-    with tempfile.TemporaryDirectory(prefix='cinter-gui-preflight-') as folder:
+    persistent_root = os.environ.get('CINTER_GUI_LOG_DIR', '')
+    if persistent_root:
+        candidate = Path(persistent_root)
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise RuntimeError('Unsafe Setup preflight log destination')
+        root = candidate / ('run-' + time.strftime('%Y%m%d-%H%M%S') + '-' + str(os.getpid()))
+        root.mkdir(mode=0o755)
+        context = nullcontext(str(root))
+    else:
+        context = tempfile.TemporaryDirectory(prefix='cinter-gui-preflight-')
+    with context as folder:
         root = Path(folder)
+        print('[GUI PREFLIGHT] Helper logs: ' + str(root), flush=True)
         streams = []
         try:
+            # Both platform desktops use the same pinned Linux AMD64 image.
+            # VNC passing does not prove Linux CinterForgeTerminal can link.
+            # Test the actual .so runtime in the image; never install on launch.
+            ctypes.CDLL('libwebkit2gtk-4.1.so.0')
+            print('[GUI PREFLIGHT] PASS ' + options.platform +
+                  ' native WebKitGTK 4.1 runtime loader', flush=True)
+
             def start(name: str, args: list[str], *, env=None) -> subprocess.Popen:
                 stream = (root / f'{name}.log').open('w', encoding='utf-8')
                 streams.append(stream)

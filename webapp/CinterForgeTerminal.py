@@ -134,11 +134,10 @@ CODEOSS_OBSERVER = r"""<script nonce="cinterforge">
 STATIC_FILES = {
     '/': ('index.html', 'text/html; charset=utf-8'),
     '/index.html': ('index.html', 'text/html; charset=utf-8'),
-    '/startup.js': ('startup.js', 'text/javascript; charset=utf-8'),
     '/terminal.js': ('terminal.js', 'text/javascript; charset=utf-8'),
     '/terminal.css': ('terminal.css', 'text/css; charset=utf-8'),
-    '/terminal_styles.json': ('terminal_styles.json', 'application/json; charset=utf-8'),
-    '/mac_games.json': ('mac_games.json', 'application/json; charset=utf-8'),
+    '/terminal_styles.json': ('data/terminal_styles.json', 'application/json; charset=utf-8'),
+    '/mac_games.json': ('data/mac_games.json', 'application/json; charset=utf-8'),
     '/vendor/xterm.js': ('vendor/xterm.js', 'text/javascript; charset=utf-8'),
     '/vendor/xterm.css': ('vendor/xterm.css', 'text/css; charset=utf-8'),
     '/vendor/addon-fit.js': ('vendor/addon-fit.js', 'text/javascript; charset=utf-8'),
@@ -237,7 +236,7 @@ def _verified_public_hfs_floppy(url: str) -> bool:
 
 
 def _if_catalog() -> dict:
-    data = json.loads((ASSETS / 'if_titles.json').read_text(encoding='utf-8'))
+    data = json.loads((ASSETS / 'data/if_titles.json').read_text(encoding='utf-8'))
     if data.get('schema') != 'cinterforge.terminal.external-if-titles.v1' or len(data.get('titles', [])) != 16:
         raise RuntimeError('Incomplete Terminal IF title manifest')
     return {Path(item['file']).stem:item for item in data['titles']}
@@ -389,7 +388,7 @@ def _shell_command(system: str, scripts: Path, builds: Path | None = None) -> li
 
 
 def _mac_catalog():
-    data = json.loads((ASSETS / 'mac_games.json').read_text(encoding='utf-8'))
+    data = json.loads((ASSETS / 'data/mac_games.json').read_text(encoding='utf-8'))
     if data.get('schema') != 'cinterforge.terminal.macgames.v1' or len(data.get('games', [])) != 67:
         raise RuntimeError('Incomplete staged Macintosh game catalog')
     result = {}
@@ -414,7 +413,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
         for name in ('help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'discord', 'setpass', 'code', 'htmlmenus'))
     # These exact source filenames are the shell commands. Load the bundled
     # Terminal manifest; no sibling WebApp source or story package is required.
-    catalog = json.loads((ASSETS / 'if_titles.json').read_text(encoding='utf-8'))
+    catalog = json.loads((ASSETS / 'data/if_titles.json').read_text(encoding='utf-8'))
     if len(catalog.get('titles', [])) != 16:
         raise RuntimeError('Incomplete staged external IF catalog')
     story_names = []
@@ -1867,6 +1866,7 @@ class CinterShellServer(ThreadingHTTPServer):
         self.guest_start_state = 'not-installed'
         self.guest_start_error = ''
         self.guest_ready = []  # Per-platform readiness survives a failed Wine probe.
+        self.guest_vnc_ready = []  # Verified VNC endpoint, independent of Bash health.
         self.guest_errors = {}
         # Native app consumes these atomic reboot requests over its existing
         # private JSON-RPC pipe, never through an unauthenticated browser menu.
@@ -2394,8 +2394,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 if path == '/host/code-workspace':
+                    guests = _guest_boot_snapshot(self.server)
                     self._json(200, {**self.server.code_workspace.details(),
-                                     'devtools_installed': _devtools_menu_ready(self.server.system)})
+                                     'devtools_installed': _devtools_menu_ready(self.server.system),
+                                     'devtools_state': guests['state'],
+                                     'devtools_guests': guests['guests'],
+                                     'devtools_vnc': guests['vnc']})
                 else:
                     code_id = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
                     self._json(200, self._code_shell_output(code_id))
@@ -2501,9 +2505,12 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authorized():
                 self._json(403, {'error': 'not authorized'})
                 return
+            guests = _guest_boot_snapshot(self.server)
             self._json(200, {'platform': self.server.system, 'sessions': len(self.server.sessions),
                              'debug': True, 'devtools_installed':
-                             _devtools_menu_ready(self.server.system)})
+                             _devtools_menu_ready(self.server.system),
+                             'devtools_state': guests['state'], 'devtools_guests': guests['guests'],
+                             'devtools_vnc': guests['vnc']})
             return
         if path.startswith('/zmachine/'):
             # Exact scoped staged runtime, no arbitrary Builds path access.
@@ -2738,10 +2745,9 @@ class Handler(BaseHTTPRequestHandler):
             mime=mimetypes.guess_type(str(asset))[0] or 'application/octet-stream'
             self._send(200,asset.read_bytes(),mime,same_origin_frame=asset.name=='index.html')
             return
+        # The native UI is always immediately available. With DevTools the
+        # read-only Server tab shows startup; no splash replaces index.html.
         info = STATIC_FILES.get(path)
-        if _boot_splash_required(self.server, path, urlsplit(self.path).query):
-            # Only the owner boot thread starts the VM; WebView just polls.
-            info = ('startup.html', 'text/html; charset=utf-8')
         if not info:
             self._json(404, {'error': 'not found'})
             return
@@ -2751,7 +2757,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(503, {'error': f'Incomplete shell package: {name}'})
             return
         data = file.read_bytes()
-        if name in ('index.html', 'startup.html'):
+        if name == 'index.html':
             data = data.replace(b'__CPH_TOKEN__', self.server.token.encode('ascii'))
             data = data.replace(b'__CPH_PLATFORM__', self.server.system.encode('ascii'))
         self._send(200, data, ctype)
@@ -2885,24 +2891,49 @@ class Handler(BaseHTTPRequestHandler):
                                 raise RuntimeError('Managed guests are still starting; wait for readiness')
                             self.server.guest_start_state = 'starting'
                             self.server.guest_start_error = ''
+                            self.server.guest_ready = []
+                            self.server.guest_vnc_ready = []
+                            self.server.guest_errors = {}
+                        self.server.log_event('[DEVTOOLS] Rebooting ' + component +
+                                              '; all guest menus disabled until reverified')
                         try:
                             _close_owned_guest_shells(self.server)
                             result = reboot_runtime_guests(component)
                             sdk = sdk_root()
                             if sdk is None:
                                 raise RuntimeError('DevTools disappeared during guest reboot')
-                            for kind in ('linux', 'win'):
-                                connected = _new_owned_guest_shell(self.server, kind, sdk)
-                                with self.server.guest_shells_lock:
-                                    self.server.guest_shells[kind] = connected
+                            with self.server.guest_start_lock:
+                                # reboot_runtime_guests verified both RFB/HTTP
+                                # endpoints independently of interactive PTYs.
+                                self.server.guest_vnc_ready = list(result['guests'])
+                            shell_errors = {}
+                            for kind in result['guests']:
+                                try:
+                                    connected = _new_owned_guest_shell(self.server, kind, sdk)
+                                    with self.server.guest_shells_lock:
+                                        self.server.guest_shells[kind] = connected
+                                    with self.server.guest_start_lock:
+                                        self.server.guest_ready.append(kind)
+                                except Exception as shell_error:
+                                    shell_errors[kind] = str(shell_error)
+                                    self.server.log_event('[DEVTOOLS] ' + kind +
+                                                          ' Bash reconnect FAILED: ' + str(shell_error))
+                            with self.server.guest_start_lock:
+                                self.server.guest_errors = shell_errors
+                                self.server.guest_start_state = 'failed' if shell_errors else 'ready'
+                                self.server.guest_start_error = '; '.join(
+                                    k + ': ' + v for k, v in shell_errors.items())
+                            self.server.log_event('[DEVTOOLS] Reboot completed; VNC verified; ' +
+                                                  str(len(self.server.guest_ready)) + ' Bash connections verified')
                         except Exception as error:
                             with self.server.guest_start_lock:
                                 self.server.guest_start_state = 'failed'
                                 self.server.guest_start_error = str(error)
+                                self.server.guest_ready = []
+                                self.server.guest_vnc_ready = []
+                                self.server.guest_errors = {'linux': str(error), 'win': str(error)}
+                            self.server.log_event('[DEVTOOLS] Reboot FAILED; guest menus remain disabled: ' + str(error))
                             raise
-                        with self.server.guest_start_lock:
-                            self.server.guest_start_state = 'ready'
-                            self.server.guest_start_error = ''
                         self._json(200, result)
             except (OSError, RuntimeError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
                 self.server.log_event('Lifecycle request FAILED: ' + str(error))
@@ -4919,7 +4950,7 @@ For Linux and custom locations, use: bedrock path "/full/path/to/minecraftWorlds
 # No game binaries are staged, mirrored or downloaded by Setup.
 def _cli_if_catalog():
     from pathlib import Path
-    manifest = Path(__file__).with_name('if_titles.json')
+    manifest = ASSETS / 'data/if_titles.json'
     data = json.loads(manifest.read_text(encoding='utf-8'))
     if data.get('schema') != 'cinterforge.terminal.external-if-titles.v1' or len(data.get('titles', [])) != 16:
         raise RuntimeError('Invalid Terminal external story catalog')
@@ -4941,7 +4972,7 @@ def _cli_if_catalog():
 def _cli_mac_catalog():
     """Read the staged, curated Infinite Mac catalog (not a checkout or network call)."""
     from pathlib import Path
-    data = json.loads(Path(__file__).with_name('mac_games.json').read_text(encoding='utf-8'))
+    data = json.loads((ASSETS / 'data/mac_games.json').read_text(encoding='utf-8'))
     if data.get('schema') != 'cinterforge.terminal.macgames.v1' or len(data.get('games', [])) != 67:
         raise RuntimeError('Incomplete Macintosh games catalog')
     result = {}
@@ -6283,6 +6314,43 @@ def _image_archive(sdk: Path, kind: str) -> tuple[Path, str]:
     # The same verified amd64 Debian image supplies both native Linux and
     # Wine/MSYS2 Windows tools. Two UI platforms, ONE running container.
     folder = sdk / 'WindowsCross'
+    selected_file = folder / 'active-image.json'
+    if selected_file.exists():
+        # DevTools Build commits one exact OCI image. Steam Stage can retain
+        # older unowned files, so sorting *.json by name is not deterministic.
+        if selected_file.is_symlink():
+            raise RuntimeError('Active DevTools guest image selection is redirected')
+        try:
+            active = json.loads(selected_file.read_text(encoding='utf-8'))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError('Invalid active DevTools guest image selector') from exc
+        if (active.get('schema') != 'cinterforge.terminal.active-guest-image.v1' or
+                active.get('wine_version') != 'wine-11.15' or
+                not re.fullmatch(r'[0-9a-f]{64}', str(active.get('dockerfile_sha256', '')))):
+            raise RuntimeError('Unsupported active DevTools guest image selector')
+        digest = active['dockerfile_sha256']
+        receipt_file = folder / (digest[:16] + '.json')
+        tar = folder / (digest[:16] + '.tar')
+        if receipt_file.is_symlink() or tar.is_symlink() or not tar.is_file():
+            raise RuntimeError('Selected DevTools guest OCI image is missing or redirected')
+        try:
+            receipt = json.loads(receipt_file.read_text(encoding='utf-8'))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError('Cannot read selected DevTools OCI manifest') from exc
+        if (any(receipt.get(k) != active.get(k) for k in
+                ('dockerfile_sha256', 'image', 'archive_sha256', 'wine_version')) or
+                not isinstance(active.get('image'), str) or
+                not active['image'].startswith('cinterforge-terminal-windows-cross:')):
+            raise RuntimeError('Active OCI image does not match its sealed manifest')
+        checksum = hashlib.sha256()
+        with tar.open('rb') as src:
+            for block in iter(lambda: src.read(4 * 1024 * 1024), b''):
+                checksum.update(block)
+        if checksum.hexdigest() != active['archive_sha256']:
+            raise RuntimeError('Selected DevTools OCI image differs from its sealed SHA-256')
+        return tar, active['image']
+    # Legacy DevTools release (no explicit selection). New releases MUST
+    # include the active selector to prevent a stale-image regression.
     receipts = sorted(folder.glob('*.json'))
     for receipt in receipts:
         if receipt.is_symlink():
@@ -6313,6 +6381,119 @@ def _image_archive(sdk: Path, kind: str) -> tuple[Path, str]:
     raise RuntimeError(f'Unified DevTools has no verified {kind} container image')
 
 
+def _lima_boot_log_directory() -> Path | None:
+    """Store native Colima boot evidence beside the user's other Terminal logs."""
+    app = globals().get('_server')
+    if app is not None:
+        root = _runtime_logs_root(app.mutable_builds)
+        if root.name == 'Runtime':  # Developer run, not installed Steam app.
+            root = root.parent
+    else:
+        configured = os.environ.get('CINTER_BUILDS_ROOT', '')
+        if not configured or Path(configured).name != 'Builds':
+            return None
+        root = Path(configured) / 'Logs/CinterForgeTerminal'
+    directory = root / 'VM' / 't' / (
+        'boot-' + time.strftime('%Y%m%d-%H%M%S') + '-' +
+        str(os.getpid()) + '-' + secrets.token_hex(3))
+    directory.mkdir(parents=True, exist_ok=False)
+    return directory
+
+
+def _follow_lima_boot_diagnostics(env: dict[str, str], stop: threading.Event,
+                                  report: Callable[[str], None],
+                                  archive: Path | None,
+                                  cloud_final_failed: threading.Event) -> None:
+    """Forward *new* Lima host-agent and serial output while Colima waits for SSH.
+
+    These files are where the actual guest/kernel/SSH failure appears; Colima's
+    console may only say "SSH connection" for ten minutes. Never replay old
+    startup logs from a previous native process, and never follow outside our
+    dedicated Lima profile directory.
+    """
+    directory = Path(env['LIMA_HOME']) / ('colima-' + PROFILE)
+    names = ('serial.log', 'serialv.log', 'ha.stderr.log', 'ha.stdout.log')
+    offsets = {}
+    # Skip bytes already present before this startup. New files start at zero.
+    for name in names:
+        path = directory / name
+        try:
+            if path.is_file() and not path.is_symlink():
+                stat = path.stat()
+                offsets[name] = (stat.st_ino, stat.st_size)
+        except OSError:
+            pass
+    pending = {name: b'' for name in names}
+    def drain() -> None:
+        for name in names:
+            path = directory / name
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                stat = path.stat()
+                previous_ino, offset = offsets.get(name, (stat.st_ino, 0))
+                if stat.st_ino != previous_ino or stat.st_size < offset:
+                    offset = 0
+                    pending[name] = b''
+                if stat.st_size <= offset:
+                    offsets[name] = (stat.st_ino, offset)
+                    continue
+                # Bound each read. Serial output is a diagnostic, not a way
+                # to overload the persistent Server Log during repeated boots.
+                with path.open('rb') as stream:
+                    stream.seek(max(offset, stat.st_size - 32768))
+                    chunk = stream.read(32768)
+                offsets[name] = (stat.st_ino, stat.st_size)
+                data = pending[name] + chunk
+                lines = data.split(b'\n')
+                pending[name] = lines.pop()[-2048:]
+                if archive is not None:
+                    # The active Lima files cannot be relocated. Preserve a
+                    # growing copy under Logs while the VM is still starting.
+                    with (archive / name).open('ab') as sink:
+                        sink.write(chunk)
+                for line in lines[-160:]:
+                    clean = line.decode('utf-8', errors='replace').strip()[:1200]
+                    if clean:
+                        if ('cloud-final.service' in clean and
+                                ('Failed to start' in clean or '[FAILED]' in clean)):
+                            cloud_final_failed.set()
+                        report('[DEVTOOLS BOOT ' + name + '] ' + clean)
+            except (OSError, ValueError):
+                continue  # Lima can replace its logs while booting.
+    try:
+        while not stop.wait(1):
+            drain()
+        drain()
+        for name, value in pending.items():
+            if value.strip():
+                report('[DEVTOOLS BOOT ' + name + '] ' +
+                       value.decode('utf-8', errors='replace').strip()[:1200])
+    finally:
+        if archive is not None:
+            # Keep the exact underlying diagnostic files, including output
+            # that predates our follower or arrived during log rotation.
+            for name in names:
+                source = directory / name
+                if source.is_file() and not source.is_symlink():
+                    try:
+                        shutil.copyfile(source, archive / name)
+                    except OSError as error:
+                        report('[DEVTOOLS BOOT] Could not copy ' + name + ': ' + str(error))
+
+
+def _app_devtools_progress(message: str) -> None:
+    """One progress message to native console and persistent in-app Server Log."""
+    line = '[DEVTOOLS] ' + message
+    print(line, flush=True)
+    app = globals().get('_server')
+    if app is not None and not app._stopping:
+        try:
+            app.log_event(line)
+        except (OSError, RuntimeError, ValueError):
+            pass  # Native quit can close the Server Log while guest boot unwinds.
+
+
 def _run_checked(command: list[str], env: dict[str, str], *, title: str,
                  timeout: int = 600, cancel_event: threading.Event | None = None) -> None:
     """Stream real guest process output and retain its error in the Server Log.
@@ -6333,61 +6514,101 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str,
                 # output chunk. Never convert a log race into a VM boot error.
                 pass
     report('[DEVTOOLS] ' + title)
+    diagnostic_stop = threading.Event()
+    cloud_final_failed = threading.Event()
+    ssh_ready = threading.Event()
+    diagnostic_thread = None
+    archive = None
+    if title == 'Starting managed guest VM with host volumes':
+        try:
+            archive = _lima_boot_log_directory()
+        except OSError as error:
+            # A log destination problem must never prevent the native app's
+            # already-provisioned guest from booting.
+            report('[DEVTOOLS] Could not open VM diagnostics folder: ' + str(error))
+        diagnostic_thread = threading.Thread(
+            target=_follow_lima_boot_diagnostics,
+            args=(env, diagnostic_stop, report, archive, cloud_final_failed),
+            daemon=True, name='cinter-lima-boot-log')
+        diagnostic_thread.start()
+        report('[DEVTOOLS] Lima boot diagnostics: ' + str(archive) if archive else
+               '[DEVTOOLS] Following Lima host-agent and serial output')
     tail = bytearray()
     started = time.monotonic()
     last_heartbeat = started
-    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          env=env, bufsize=0) as process:
-        assert process.stdout is not None
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            try:
-                while selector.get_map() or process.poll() is None:
-                    if cancel_event is not None and cancel_event.is_set():
-                        # Stop the CLI promptly; its Lima hostagent may be a
-                        # separate process and is stopped by stop_runtime_vm.
-                        raise RuntimeError(title + ' cancelled: native app is closing')
-                    remaining = timeout - (time.monotonic() - started)
-                    if remaining <= 0:
-                        raise subprocess.TimeoutExpired(command, timeout)
-                    for key, _ in selector.select(timeout=min(1, remaining)):
-                        chunk = os.read(key.fd, 65536)
-                        if not chunk:
-                            selector.unregister(key.fileobj)
-                            continue
-                        tail.extend(chunk)
-                        if len(tail) > 8192:
-                            del tail[:-8192]
-                        message = chunk.decode('utf-8', errors='replace')
-                        print(message, end='', flush=True)
-                        # The native worker's stdout is not the persistent
-                        # Server Log. Mirror Colima errors there so a stuck
-                        # splash is diagnosable from the installed app.
-                        for line in message.splitlines():
-                            report('[DEVTOOLS VM] ' + line[:1200])
-                    if time.monotonic() - last_heartbeat >= 15:
-                        elapsed = int(time.monotonic() - started)
-                        heartbeat = '[DEVTOOLS] WORKING ' + title + ' (' + str(elapsed) + 's)'
-                        print(heartbeat, flush=True)
-                        report(heartbeat)
-                        last_heartbeat = time.monotonic()
-                returncode = process.wait(timeout=max(1, remaining))
-            except subprocess.TimeoutExpired as error:
-                if process.poll() is None:
-                    process.kill()
-                    process.wait()
-                detail = tail.decode('utf-8', errors='replace').strip()[-3200:]
-                raise RuntimeError(title + ' timed out after ' + str(timeout) +
-                                   's; last guest output: ' + (detail or '(none)')) from error
-            except BaseException:
-                if process.poll() is None:
-                    process.kill()
-                    process.wait()
-                raise
-    if returncode:
-        detail = tail.decode('utf-8', errors='replace').strip()[-3200:]
-        raise RuntimeError(title + ' failed (exit ' + str(returncode) + '): ' +
-                           (detail or 'process exited without diagnostics'))
+    try:
+        # Store unfiltered Colima stdout/stderr alongside the original Lima
+        # agent/serial logs. Server Log remains a live, readable summary.
+        with ((archive / 'colima-start.log').open('wb') if archive is not None
+              else open(os.devnull, 'wb')) as raw_log, subprocess.Popen(
+                  command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                  env=env, bufsize=0) as process:
+            assert process.stdout is not None
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                try:
+                    while selector.get_map() or process.poll() is None:
+                        if cancel_event is not None and cancel_event.is_set():
+                            # Stop the CLI promptly; its Lima hostagent may be a
+                            # separate process and is stopped by stop_runtime_vm.
+                            raise RuntimeError(title + ' cancelled: native app is closing')
+                        elapsed = time.monotonic() - started
+                        remaining = timeout - elapsed
+                        if (cloud_final_failed.is_set() and not ssh_ready.is_set() and
+                                elapsed >= 165 and process.poll() is None):
+                            raise RuntimeError(title + ': cloud-final.service failed and '
+                                               'guest SSH did not become ready in 165 seconds; '
+                                               'original VM diagnostics: ' + str(archive))
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(command, timeout)
+                        for key, _ in selector.select(timeout=min(1, remaining)):
+                            chunk = os.read(key.fd, 65536)
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                                continue
+                            tail.extend(chunk)
+                            if len(tail) > 8192:
+                                del tail[:-8192]
+                            raw_log.write(chunk)
+                            raw_log.flush()
+                            message = chunk.decode('utf-8', errors='replace')
+                            if '( 1/5) ✅ SSH connection' in tail[-2048:].decode(
+                                    'utf-8', errors='replace'):
+                                ssh_ready.set()
+                            print(message, end='', flush=True)
+                            # The native worker's stdout is not the persistent
+                            # Server Log. Mirror Colima errors there so a stuck
+                            # splash is diagnosable from the installed app.
+                            for line in message.splitlines():
+                                report('[DEVTOOLS VM] ' + line[:1200])
+                        if time.monotonic() - last_heartbeat >= 15:
+                            elapsed = int(time.monotonic() - started)
+                            heartbeat = '[DEVTOOLS] WORKING ' + title + ' (' + str(elapsed) + 's)'
+                            print(heartbeat, flush=True)
+                            report(heartbeat)
+                            last_heartbeat = time.monotonic()
+                    returncode = process.wait(timeout=max(1, remaining))
+                except subprocess.TimeoutExpired as error:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+                    detail = tail.decode('utf-8', errors='replace').strip()[-3200:]
+                    raise RuntimeError(title + ' timed out after ' + str(timeout) +
+                                       's; last guest output: ' + (detail or '(none)')) from error
+                except BaseException:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+                    raise
+        if returncode:
+            detail = tail.decode('utf-8', errors='replace').strip()[-3200:]
+            raise RuntimeError(title + ' failed (exit ' + str(returncode) + '): ' +
+                               (detail or 'process exited without diagnostics'))
+
+    finally:
+        diagnostic_stop.set()
+        if diagnostic_thread is not None:
+            diagnostic_thread.join(timeout=3)
 
 
 @contextmanager
@@ -6689,7 +6910,7 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
                   if emulation_changed else
                   'outdated overlapping host mount configuration' if mount_changed else
                   'inaccessible host paths: ' + ', '.join(missing))
-        print('[DEVTOOLS] Reconfiguring owned Terminal VM: ' + reason, flush=True)
+        _app_devtools_progress('Reconfiguring owned Terminal VM: ' + reason)
         _run_checked([colima, 'stop', PROFILE], env,
                      title='Stopping idle guest VM for corrected host mounts', timeout=120)
     else:
@@ -6704,7 +6925,7 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
     _configure_colima_host_mounts(env, mounts)
     if not installed or not installed_profile:
         _configure_colima_runtime_emulation(env)
-    print('[DEVTOOLS] Sharing accessible Mac filesystem under /host/mac', flush=True)
+    _app_devtools_progress('Sharing accessible Mac filesystem under /host/mac')
     # Only the terminal-owned runtime profile t changes. Boot the actual
     # QEMU x86_64 Linux guest; Wine/MSYS2 runs natively inside that guest.
     # Do not run amd64 Wine through ARM64 binfmt or Rosetta user translation.
@@ -6725,10 +6946,26 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
              '--mount', '/:/host/mac:w', '--arch', 'x86_64',
              '--cpus', '4', '--memory', '8', '--disk', '32', '--save-config'])
     if installed and not installed_profile:
-        print('[DEVTOOLS] Initializing new x86-64 t profile (no existing VM to replace)',
-              flush=True)
-    _run_checked(args, env, title='Starting managed guest VM with host volumes',
-                 timeout=1200, cancel_event=cancel_event)
+        _app_devtools_progress('Initializing new x86-64 t profile (no existing VM to replace)')
+    try:
+        _run_checked(args, env, title='Starting managed guest VM with host volumes',
+                     timeout=240 if installed and installed_profile else 1200,
+                     cancel_event=cancel_event)
+    except RuntimeError as error:
+        if (not installed or not installed_profile or
+                'cloud-final.service failed' not in str(error) or
+                (cancel_event is not None and cancel_event.is_set())):
+            raise
+        # The installed app's *existing* disposable t VM booted Ubuntu but
+        # cloud-init finalization stalled SSH. Stop/restart that SAME profile
+        # once. Never remove its disk, reset its config or download an image.
+        _app_devtools_progress('Guest cloud-init failed before SSH; stopping and '
+                               'restarting the existing t VM once (no rebuild)')
+        _run_checked([colima, 'stop', PROFILE], env,
+                     title='Stopping failed owned guest boot', timeout=120,
+                     cancel_event=cancel_event)
+        _run_checked(args, env, title='Starting managed guest VM with host volumes',
+                     timeout=240, cancel_event=cancel_event)
     daemon = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=45)
     if daemon.returncode:
         raise RuntimeError('Managed Terminal Docker socket still unavailable after VM start: ' +
@@ -6742,24 +6979,13 @@ def _ensure_docker_locked(sdk: Path, env: dict[str, str], workspace: Path | None
     return docker
 
 
-def _boot_splash_required(server: CinterShellServer, path: str, query: str) -> bool:
-    """Only with installed DevTools warming. Failure NEVER blocks Mac Bash."""
-    if path not in ('/', '/index.html') or server.system != 'mac':
-        return False
-    parameters = parse_qs(query)
-    # Acceptance and explicit splash completion must reach the normal UI.
-    if 'accept-ui' in parameters or 'devtools-boot-complete' in parameters:
-        return False
-    return _guest_boot_snapshot(server)['state'] == 'starting'
-
-
 def _guest_boot_snapshot(server: CinterShellServer) -> dict:
     with server.guest_start_lock:
         state = server.guest_start_state
         return {'state': state, 'error': server.guest_start_error,
-                'guests': list(getattr(server, 'guest_ready',
-                                       ['linux', 'win'] if state == 'ready' else [])),
-                'errors': dict(getattr(server, 'guest_errors', {}))}
+                'guests': list(server.guest_ready),
+                'vnc': list(server.guest_vnc_ready),
+                'errors': dict(server.guest_errors)}
 
 
 def _schedule_guest_boot(server: CinterShellServer) -> dict:
@@ -6788,6 +7014,7 @@ def _schedule_guest_boot(server: CinterShellServer) -> dict:
         server.guest_start_state = 'starting'
         server.guest_start_error = ''
         server.guest_ready = []
+        server.guest_vnc_ready = []
         server.guest_errors = {}
     try:
         # Startup runs off the HTTP/UI thread. The guest boot thread waits
@@ -6857,7 +7084,7 @@ def _verify_persistent_guest_shell(shell: TerminalSession, kind: str, *, timeout
     deadline = started + timeout
     next_progress = started + 15
     label = 'Windows' if kind == 'win' else 'Linux'
-    print('[DEVTOOLS] ' + label + ' persistent Bash PTY START', flush=True)
+    _app_devtools_progress(label + ' persistent Bash PTY START')
     output = bytearray()
     while time.monotonic() < deadline:
         data, closed = shell.poll(500)
@@ -6866,15 +7093,15 @@ def _verify_persistent_guest_shell(shell: TerminalSession, kind: str, *, timeout
             # Keep one real shell prompt buffered for Code-OSS to render after
             # the initial splash; there is no new Bash when the tab attaches.
             shell.write('\n')
-            print('[DEVTOOLS] ' + label + ' persistent Bash PTY PASS (' +
-                  str(round(time.monotonic() - started, 1)) + 's)', flush=True)
+            _app_devtools_progress(label + ' persistent Bash PTY PASS (' +
+                                   str(round(time.monotonic() - started, 1)) + 's)')
             return
         if len(output) > 4096:
             del output[:-4096]
         now = time.monotonic()
         if now >= next_progress:
-            print('[DEVTOOLS] ' + label + ' persistent Bash PTY WORKING (' +
-                  str(int(now - started)) + 's)', flush=True)
+            _app_devtools_progress(label + ' persistent Bash PTY WORKING (' +
+                                   str(int(now - started)) + 's)')
             next_progress = now + 15
         if closed or shell.process.poll() is not None:
             break
@@ -6947,10 +7174,55 @@ def _maintain_owned_guest_shells(server: CinterShellServer, sdk: Path) -> None:
         with server.guest_shells_lock:
             lost = [(kind, session) for kind, session in server.guest_shells.items()
                     if session.closed or session.process.poll() is not None]
+            attached = set(server.guest_shells)
+        with server.guest_start_lock:
+            # A GUI session can be verified even when its interactive PTY
+            # timed out at launch. Retry ONLY that missing PTY in the already
+            # running, owned guest; do not allocate another VM or container.
+            pending = [kind for kind in server.guest_vnc_ready
+                       if kind not in attached and kind not in server.guest_ready
+                       and failures[kind] < 3]
+        for kind in pending:
+            if server._stopping:
+                return
+            failures[kind] += 1
+            server.log_event('[DEVTOOLS] Retrying ' + kind +
+                             ' Bash PTY in existing VNC-ready guest (' +
+                             str(failures[kind]) + '/3)')
+            try:
+                replacement = _new_owned_guest_shell(server, kind, sdk)
+                with server.guest_shells_lock:
+                    if server._stopping or kind in server.guest_shells:
+                        replacement.close()
+                        continue
+                    server.guest_shells[kind] = replacement
+                with server.guest_start_lock:
+                    if kind not in server.guest_ready:
+                        server.guest_ready.append(kind)
+                    server.guest_errors.pop(kind, None)
+                    server.guest_start_state = 'ready' if not server.guest_errors else 'failed'
+                    server.guest_start_error = '; '.join(k + ': ' + v
+                                                        for k, v in server.guest_errors.items())
+                failures[kind] = 0
+                server.log_event('[DEVTOOLS] ' + kind + ' Bash PTY restored; Code-OSS enabled')
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                with server.guest_start_lock:
+                    server.guest_errors[kind] = str(error)
+                    server.guest_start_state = 'failed'
+                    server.guest_start_error = '; '.join(k + ': ' + v
+                                                        for k, v in server.guest_errors.items())
+                server.log_event('[DEVTOOLS] ' + kind + ' Bash PTY retry FAILED: ' + str(error))
         for kind, previous in lost:
             if server._stopping or failures[kind] >= 3:
                 continue
             failures[kind] += 1
+            # Disable ONLY this shell immediately. A disconnected PTY is not
+            # proof that its independent VNC endpoint has gone away.
+            with server.guest_start_lock:
+                server.guest_ready = [v for v in server.guest_ready if v != kind]
+                server.guest_errors[kind] = 'Persistent Bash disconnected; reconnecting'
+                server.guest_start_state = 'failed'
+                server.guest_start_error = '; '.join(k + ': ' + v for k, v in server.guest_errors.items())
             server.log_event(kind + ' persistent Bash exited; reconnecting within its existing guest')
             try:
                 replacement = _new_owned_guest_shell(server, kind, sdk)
@@ -6964,6 +7236,12 @@ def _maintain_owned_guest_shells(server: CinterShellServer, sdk: Path) -> None:
                         if entry is previous:
                             server.code_sessions.pop(code_id, None)
                 previous.close()
+                with server.guest_start_lock:
+                    if kind not in server.guest_ready:
+                        server.guest_ready.append(kind)
+                    server.guest_errors.pop(kind, None)
+                    server.guest_start_state = 'ready' if not server.guest_errors else 'failed'
+                    server.guest_start_error = '; '.join(k + ': ' + v for k, v in server.guest_errors.items())
                 failures[kind] = 0
                 server.log_event(kind + ' persistent Bash reconnected (Code-OSS can reattach)')
             except Exception as error:
@@ -6982,15 +7260,27 @@ def _maintain_owned_guest_shells(server: CinterShellServer, sdk: Path) -> None:
             last_vnc_check = time.monotonic()
             for kind in ('linux', 'win'):
                 with server.guest_start_lock:
-                    ready = kind in server.guest_ready
-                if not ready or server._stopping or vnc_failures[kind] >= 3:
+                    # VNC health is independent of the persistent Bash PTY.
+                    # Continue retrying when the VNC flag was just cleared by
+                    # a failed probe, until the bounded retry limit is hit.
+                    known_guest = (kind in server.guest_vnc_ready or
+                                   kind in server.guest_ready or
+                                   vnc_failures[kind] > 0)
+                if not known_guest or server._stopping or vnc_failures[kind] >= 3:
                     continue
                 try:
                     if _check_owned_guest_vnc(sdk, kind):
                         server.log_event(kind + ' VNC endpoint recovered in existing guest')
+                    with server.guest_start_lock:
+                        # Health is established by _check_owned_guest_vnc itself;
+                        # no persistent Bash PTY is needed for a live desktop.
+                        if kind not in server.guest_vnc_ready:
+                            server.guest_vnc_ready.append(kind)
                     vnc_failures[kind] = 0
                 except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                     vnc_failures[kind] += 1
+                    with server.guest_start_lock:
+                        server.guest_vnc_ready = [v for v in server.guest_vnc_ready if v != kind]
                     server.log_event(kind + ' VNC health/recovery FAILED (' +
                                      str(vnc_failures[kind]) + '/3): ' + str(error))
                     if vnc_failures[kind] >= 3:
@@ -7009,7 +7299,17 @@ def _boot_guests_logged(server: CinterShellServer) -> None:
         watchdog_ready = True
         if server._stopping:
             raise RuntimeError('Native Terminal shut down before guest startup completed')
-        result = boot_runtime_guests(cancel_event=_guest_boot_cancel)
+        server.log_event('[DEVTOOLS] Booting shared t Colima/QEMU Linux host and verifying Docker')
+        def display_connected(kind: str) -> None:
+            # _start_guest_locked verifies RFB and noVNC before this callback.
+            # Do not wait for the OTHER platform's Wine startup or a PTY.
+            with server.guest_start_lock:
+                if kind not in server.guest_vnc_ready:
+                    server.guest_vnc_ready.append(kind)
+            server.log_event('[DEVTOOLS] ' + kind + ' VNC connected; desktop available')
+
+        result = boot_runtime_guests(cancel_event=_guest_boot_cancel,
+                                     on_display_ready=display_connected)
         if not result.get('installed'):
             raise RuntimeError('DevTools disappeared during managed guest startup')
         ready = list(result.get('guests', []))
@@ -7025,7 +7325,14 @@ def _boot_guests_logged(server: CinterShellServer) -> None:
         sdk = sdk_root()
         if sdk is None:
             raise RuntimeError('Verified DevTools disappeared while connecting Bash')
+        # The two already-handshaken VNC displays are usable independently of
+        # long-lived interactive Bash. Do not revoke them if the Wine/MSYS2 PTY
+        # is slow, fails, or is being reconnected.
+        with server.guest_start_lock:
+            server.guest_vnc_ready = list(ready)
+            server.guest_errors = dict(errors)
         for kind in list(ready):
+            server.log_event('[DEVTOOLS] Connecting persistent ' + kind + ' Bash PTY')
             if server._stopping:
                 raise RuntimeError('Native Terminal quit during guest startup')
             try:
@@ -7035,6 +7342,11 @@ def _boot_guests_logged(server: CinterShellServer) -> None:
                         connected.close()
                         raise RuntimeError('Native Terminal quit during guest startup')
                     server.guest_shells[kind] = connected
+                # Publish this *verified* Bash as soon as its PTY answers;
+                # Windows' slower Wine startup cannot withhold Linux readiness.
+                with server.guest_start_lock:
+                    if kind not in server.guest_ready:
+                        server.guest_ready.append(kind)
                 server.log_event(kind + ' persistent Bash connected (Code-OSS reusable PTY)')
             except Exception as error:
                 ready.remove(kind)
@@ -7042,10 +7354,12 @@ def _boot_guests_logged(server: CinterShellServer) -> None:
                 server.log_event(kind + ' persistent Bash FAILED: ' + str(error))
         with server.guest_start_lock:
             server.guest_ready = ready
+            # Do NOT derive VNC readiness from persistent Bash readiness.
+            # Each successful _start_guest_locked independently tested RFB/HTTP.
             server.guest_errors = errors
             server.guest_start_state = 'ready' if not errors else 'failed'
             server.guest_start_error = '; '.join(k + ': ' + v for k, v in errors.items())
-        if ready and not server._stopping:
+        if (ready or server.guest_vnc_ready) and not server._stopping:
             threading.Thread(target=_maintain_owned_guest_shells, args=(server, sdk),
                              daemon=True, name='cinter-guest-shell-supervisor').start()
         if errors:
@@ -7069,6 +7383,7 @@ def _boot_guests_logged(server: CinterShellServer) -> None:
             server.guest_start_state = 'failed'
             server.guest_start_error = str(error)
             server.guest_ready = []
+            server.guest_vnc_ready = []
             server.guest_errors = {'linux': str(error), 'win': str(error)}
         server.log_event('Managed reusable guests FAILED: ' + str(error))
 
@@ -7434,12 +7749,12 @@ def _guest_verification_probe(docker: str, env: dict[str, str], name: str,
     """
     started = time.monotonic()
     completed = threading.Event()
-    print('[DEVTOOLS] Windows Bash probe START ' + stage, flush=True)
+    _app_devtools_progress('Windows Bash probe START ' + stage)
 
     def heartbeat() -> None:
         while not completed.wait(15):
-            print('[DEVTOOLS] Windows Bash probe WORKING ' + stage +
-                  ' (' + str(int(time.monotonic() - started)) + 's)', flush=True)
+            _app_devtools_progress('Windows Bash probe WORKING ' + stage +
+                                   ' (' + str(int(time.monotonic() - started)) + 's)')
 
     ticker = threading.Thread(target=heartbeat, daemon=True)
     ticker.start()
@@ -7462,14 +7777,14 @@ def _guest_verification_probe(docker: str, env: dict[str, str], name: str,
     if expected and expected.lower() not in output.lower():
         raise RuntimeError('win guest Bash verification did not confirm ' + stage +
                            ': ' + (output[-700:] if output else 'no guest output'))
-    print('[DEVTOOLS] Windows Bash probe PASS ' + stage +
-          ' (' + str(round(time.monotonic() - started, 1)) + 's)', flush=True)
+    _app_devtools_progress('Windows Bash probe PASS ' + stage +
+                           ' (' + str(round(time.monotonic() - started, 1)) + 's)')
     return result
 
 
 def _verify_guest_bash(docker: str, env: dict[str, str], kind: str, name: str) -> None:
     if kind == 'linux':
-        print('[DEVTOOLS] Verifying reusable linux guest', flush=True)
+        _app_devtools_progress('Verifying reusable Linux guest Bash')
         result = _docker_call(docker, env, 'exec', name, '/bin/bash', '--version', timeout=150)
         if result.returncode:
             diagnostic = (result.stderr or result.stdout or '').strip()[-1200:]
@@ -7509,7 +7824,8 @@ def _stop_owned_guests_locked_one(docker: str, env: dict[str, str], name: str) -
     _docker_call(docker, env, 'rm', '-f', name)
 
 
-def boot_runtime_guests(*, cancel_event: threading.Event | None = None) -> dict:
+def boot_runtime_guests(*, cancel_event: threading.Event | None = None,
+                        on_display_ready: Callable[[str], None] | None = None) -> dict:
     """On app startup: one VM, one persistent Debian guest, two desktops."""
     if platform.system() != 'Darwin':
         return {'platform': platform.system(), 'guests': 'native'}
@@ -7523,15 +7839,20 @@ def boot_runtime_guests(*, cancel_event: threading.Event | None = None) -> dict:
             raise RuntimeError('Guest boot cancelled: native app exited')
         docker = _ensure_docker_locked(sdk, env, workspace, cancel_event=cancel_event)
         ready, failures = [], {}
+        _app_devtools_progress('Shared Colima t guest booted; Docker daemon and host mounts verified')
         for kind in ('linux', 'win'):
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError('Guest boot cancelled: native app exited')
+            _app_devtools_progress('Connecting ' + kind + ' Docker guest, Bash and VNC')
             try:
                 _start_guest_locked(sdk, env, docker, kind, workspace)
                 ready.append(kind)
+                if on_display_ready is not None:
+                    on_display_ready(kind)
+                _app_devtools_progress(kind + ' guest Bash and VNC handshake PASS')
             except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
                 failures[kind] = str(error)
-                print('[DEVTOOLS] ' + kind + ' guest FAILED: ' + str(error), flush=True)
+                _app_devtools_progress(kind + ' guest FAILED: ' + str(error))
         if not ready:
             # No verified capability depends on this container. Capture of
             # each startup failure has already happened before this cleanup.
@@ -7749,7 +8070,8 @@ def _launcher_guest_env(kind: str) -> list[str]:
     if kind == 'win':
         # Match the guest's existing MSYS2 Bash environment and prefix, not
         # the separate builder-only Wine PREFIX or a second Windows image.
-        result += ['-e', 'HOME=/tmp', '-e', 'WINEPREFIX=/tmp/.wine']
+        result += ['-e', 'HOME=/tmp', '-e', 'WINEPREFIX=/tmp/.wine',
+                   '-e', 'CINTER_WINE_GUEST=1']
     return result
 
 
@@ -7762,21 +8084,15 @@ def _launcher_container(kind: str, server=None) -> tuple[str, dict[str, str], st
     if server is None:
         _wait_for_app_guests(kind)  # CLI children carry a trusted shell token.
     else:
-        # Browser requests are already authenticated by Handler. Check that
-        # native application's guest startup finished without a recursive HTTP
-        # request requiring shell-only credentials.
-        deadline = time.monotonic() + 120
-        while True:
-            with server.guest_start_lock:
-                state, error = server.guest_start_state, server.guest_start_error
-            if kind in getattr(server, 'guest_ready', ['linux', 'win'] if state == 'ready' else []):
-                break
-            if state != 'starting':
-                detail = getattr(server, 'guest_errors', {}).get(kind, error or state)
-                raise RuntimeError('Managed guest unavailable: ' + detail)
-            if server._stopping or time.monotonic() >= deadline:
-                raise RuntimeError('Managed guest startup timed out; check the Server log')
-            time.sleep(0.5)
+        # Never allocate a browser VNC view for an unverified endpoint.
+        # Guest startup happens ONLY in the app-owned supervisor; requests do
+        # not wait for or start VM/container work.
+        with server.guest_start_lock:
+            ready = kind in server.guest_vnc_ready
+            detail = server.guest_errors.get(kind, server.guest_start_error or server.guest_start_state)
+        if not ready:
+            raise RuntimeError('Managed ' + kind + ' VNC is not connected: ' + detail +
+                               '; see Server Log')
     env = _env(sdk)
     return str(sdk / 'mac/env/bin/docker'), env, _guest_name(kind)
 
@@ -7968,7 +8284,7 @@ def _launcher_x11_window(docker: str, env: dict[str, str], kind: str,
     """Read the REAL mapped X11 window tree, not Docker's exec acknowledgment.
 
     The guest image already includes x11-utils (xwininfo). One window per
-    platform is identified by the title set in CinterApplicationShell.cpp;
+    platform is identified by the title set in app/src/CinterForgeTerminal.cpp;
     Linux and Wine use independent DISPLAYs in the same Docker container.
     """
     script = r"""set -u
@@ -8061,6 +8377,21 @@ def _launcher_launch(kind: str, app: str, server=None) -> dict:
         if present.returncode:
             raise RuntimeError('Staged ' + kind + ' build is not visible through the managed guest mount: ' +
                                str(staged))
+        if kind == 'linux':
+            # Read-only ELF dependency check in the already-provisioned image.
+            # Build/Stage cannot fix missing system libraries and app runtime
+            # must never call apt, download or mutate the guest toolchain.
+            binary = '/host/mac' + str(staged.parent / 'CinterForge Terminal')
+            probe = _docker_call(docker, env, 'exec', name, '/bin/sh', '-c',
+                                 'ldd "$1" 2>&1', 'linux-library-check', binary,
+                                 timeout=25)
+            dependency_output = (probe.stdout or '') + (probe.stderr or '')
+            missing = [line.strip() for line in dependency_output.splitlines()
+                       if 'not found' in line]
+            if probe.returncode or missing:
+                raise RuntimeError('Staged Linux executable cannot load its native libraries: ' +
+                                   ('; '.join(missing) or dependency_output.strip()[-500:]) +
+                                   '. This is a missing Setup image dependency, not a VNC failure.')
 
         # Separate logs and completion receipts for Linux and Windows, even
         # when both are started in the one shared container.  The wrapper
@@ -8104,7 +8435,7 @@ exit "$rc"
                                (launched.stderr or launched.stdout or '').strip()[-400:])
         # Linux WebKitGTK and Wine WebView2 can take different times to map.
         # Check the live X server; a successful Docker exec is NOT success.
-        deadline = time.monotonic() + (85 if kind == 'win' else 45)
+        deadline = time.monotonic() + (180 if kind == 'win' else 45)
         last_error = ''
         last_heartbeat = time.monotonic()
         while time.monotonic() < deadline:

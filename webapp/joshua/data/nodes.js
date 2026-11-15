@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Named launch/target/city sites for the GLOBAL THERMONUCLEAR WAR map.
 // Referenced by id from warRoutes.js and warStrategyProfiles.js's
-// strikes arrays (see root test.py smoke suite for the
+// strikes arrays (see root host/lifecycle/test.py smoke suite for the
 // automated check that every such reference resolves to an id below).
 //
 // Each entry: {id, label, lon, lat, type}

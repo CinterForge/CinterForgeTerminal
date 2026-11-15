@@ -140,7 +140,7 @@ The native shell uses the pinned [`webview/webview`](https://github.com/webview/
 | Windows | Win32 / WebView2 | Windows ConPTY and staged MSYS2 Bash |
 | Linux | GTK / WebKitGTK | POSIX PTY and Linux process services |
 
-`src/CinterApplicationShell.cpp` owns the native shell and menu adaptation. The Host retains its **`CinterForgePythonHost`** C++ library, **`cph_*`** C ABI and **`./Cinter host ...`** lifecycle interface. It supplies native WebViews, PTY/ConPTY session management, HTTP/client transport (`cinter-curl`), supervised Python services, authenticated JS/native bridge, readiness, events, timeouts, cancellation, process lifetime, optional discovery and an optional Steam HTML-surface adapter. The core does not require Steam and does not grant arbitrary LAN access or filesystem execution.
+`app/src/CinterForgeTerminal.cpp` owns the native shell and menu adaptation. The Host retains its **`CinterForgePythonHost`** C++ library, **`cph_*`** C ABI and **`./Cinter host ...`** lifecycle interface. It supplies native WebViews, PTY/ConPTY session management, HTTP/client transport (`cinter-curl`), supervised Python services, authenticated JS/native bridge, readiness, events, timeouts, cancellation, process lifetime, optional discovery and an optional Steam HTML-surface adapter. The core does not require Steam and does not grant arbitrary LAN access or filesystem execution.
 
 Native WebView inspectors use the real browser-engine debugging support, with native menu access and the `debugger` developer command in Code-OSS. Merely evaluating a JS `debugger;` statement is not equivalent to opening an inspector.
 

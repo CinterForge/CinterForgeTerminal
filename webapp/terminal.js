@@ -381,7 +381,18 @@
 
   let session = null, generation = 0, platform = 'linux', selected = '', profiles = [], waiting = false;
   let devtoolsInstalled = false;
+  // The DevTools receipt never proves a running VM, a Bash PTY, or a VNC
+  // handshake. Only the app-owned supervisor may publish live capabilities.
+  let guestState = 'not-installed';
+  let guestReady = new Set();
+  let guestVncReady = new Set();
+  let startupGuestRestore = null;
+  let retainingPriorLayout = false;
+  let guestRestoreRunning = false;
+  let guestRestoreComplete = false;
+  const restoredGuestTabs = new Map(); // Saved index -> opened tab, across readiness changes.
   const queuedSessionOpens = [];
+
   let macCatalog = new Map();
   /**
    * Read a machine profile’s kind, defaulting to a standard terminal.
@@ -491,6 +502,7 @@
     const message = event.data || {};
     if (message.type === 'open-launcher') {
       if (['mac', 'win', 'linux'].includes(message.platform) &&
+          terminalActionEnabled('launcher:' + message.platform) &&
           codeFrame.dataset.loaded === 'true')
         void openLauncherTab(message.platform);
       return;
@@ -1974,6 +1986,17 @@ method: 'POST', headers: {
    * Create a new independent tab and open its selected shell, emulator, or Bedrock backend.
    */
   async function openSession(profileId, backend = 'native') {
+    // The museum, typed `code`, restored layouts and native menus all go
+    // through this single readiness gate. A saved Code-OSS tab must never
+    // load guest PTYs while the VM is still connecting.
+    if (profileId === 'codeoss' && !terminalActionEnabled('code')) {
+      notice('Code-OSS disabled until installed DevTools guests connect; see Server Log');
+      return;
+    }
+    if ((backend === 'linux' || backend === 'win') && !terminalActionEnabled(backend)) {
+      notice(backend + ' Bash is not connected; see Server Log');
+      return;
+    }
     // CodeOSS owns a single workbench and guest terminal set. A second
     // click or restored layout MUST focus, not allocate a second worker.
     if (profileId === 'codeoss') {
@@ -2470,11 +2493,14 @@ method: 'POST', headers: {
   // Windows/Linux native apps offer their own native integrated shell only.
   function terminalActionEnabled(kind) {
     if (kind === 'mac') return platform === 'mac';
-    if (kind === 'win') return platform === 'win' || (platform === 'mac' && devtoolsInstalled);
-    if (kind === 'linux') return platform === 'linux' || (platform === 'mac' && devtoolsInstalled);
+    if (kind === 'code') return platform !== 'mac' || (devtoolsInstalled && guestReady.size > 0);
+    if (kind === 'win') return platform === 'win' ||
+      (platform === 'mac' && devtoolsInstalled && guestReady.has('win'));
+    if (kind === 'linux') return platform === 'linux' ||
+      (platform === 'mac' && devtoolsInstalled && guestReady.has('linux'));
     if (kind === 'launcher:mac') return platform === 'mac';
     if (kind === 'launcher:win' || kind === 'launcher:linux')
-      return platform === 'mac' && devtoolsInstalled;
+      return platform === 'mac' && devtoolsInstalled && guestVncReady.has(kind.slice(9));
     if (kind === 'minecraft') return Boolean(minecraftMenuState);
     return true; // Existing working non-platform actions retain their behavior.
   }
@@ -2715,12 +2741,15 @@ method: 'POST', headers: {
   // ---------------------------------------------------------------------------
   const layoutKey = 'cinterterminal.window-layout.v1';
   function saveTerminalLayout() {
-    if (acceptUI || !activeTab) return;
+    // While DevTools is connecting, preserve the *previous* layout rather
+    // than overwriting it with the temporary Server Log startup screen.
+    if (acceptUI || !activeTab || retainingPriorLayout) return;
     try {
       const restorable = tabs.filter(tab => !tab.closed &&
         (tab.profileId === 'codeoss' || (tab.kind === 'terminal' &&
         !tab.profileId?.startsWith('macgame-')) || tab.kind === 'server' ||
-        tab.kind === 'emulator' && !tab.profileId?.startsWith('quadra-650')));
+        tab.kind === 'emulator' && !tab.profileId?.startsWith('quadra-650') ||
+        tab.kind === 'launcher'));
       localStorage.setItem(layoutKey, JSON.stringify({
         active: restorable.indexOf(activeTab),
         tabs: restorable.map(tab => ({profileId: tab.profileId, backend: tab.backend, kind: tab.kind}))
@@ -3023,6 +3052,119 @@ method: 'POST', headers: {
     }
   });
 
+  // ==========================================================================
+  // VERIFIED GUEST READINESS AND DEFERRED WINDOW RESTORATION
+  // ==========================================================================
+
+  function updateGuestCapabilities(status) {
+    if (!status || typeof status !== 'object') return;
+    const installed = status.devtools_installed === undefined
+      ? devtoolsInstalled : status.devtools_installed === true;
+    const state = String(status.devtools_state || status.state || guestState);
+    const guests = new Set((status.devtools_guests || status.guests || [])
+      .filter(kind => kind === 'linux' || kind === 'win'));
+    const vnc = new Set((status.devtools_vnc || status.vnc || [])
+      .filter(kind => kind === 'linux' || kind === 'win'));
+    const changed = devtoolsInstalled !== installed || guestState !== state ||
+      [...guests].some(kind => !guestReady.has(kind)) ||
+      [...guestReady].some(kind => !guests.has(kind)) ||
+      [...vnc].some(kind => !guestVncReady.has(kind)) ||
+      [...guestVncReady].some(kind => !vnc.has(kind));
+    devtoolsInstalled = installed;
+    guestState = state;
+    guestReady = guests;
+    guestVncReady = vnc;
+    if (changed) {
+      updateCodeMenuMode();
+      codeCommands?.postMessage({type: 'devtools-capabilities', installed,
+        guests: [...guestReady], vnc: [...guestVncReady], state});
+      // A VM disconnect must not leave a foreground Code-OSS or noVNC window
+      // appearing usable. Keep tabs for later reconnection, but move to Log.
+      const foreground = activeTab;
+      const needed = foreground?.kind === 'launcher'
+        ? 'launcher:' + foreground.backend
+        : foreground?.profileId === 'codeoss' ? 'code'
+        : (foreground?.backend === 'win' || foreground?.backend === 'linux')
+          ? foreground.backend : null;
+      if (needed && !terminalActionEnabled(needed)) {
+        const log = tabs.find(tab => !tab.closed && tab.kind === 'server');
+        if (log) void activateTab(log);
+        else void openServerTab();
+      }
+      if (state === 'failed' && guestReady.size === 0)
+        notice('DevTools guest startup failed. See Server Log; Mac Bash remains available.');
+    }
+    if (retainingPriorLayout && !guestRestoreComplete && !guestRestoreRunning &&
+        (guestReady.size > 0 || guestVncReady.size > 0))
+      void restoreConnectedGuestTabs();
+  }
+
+  async function restoreConnectedGuestTabs() {
+    if (guestRestoreRunning || guestRestoreComplete || !retainingPriorLayout) return;
+    guestRestoreRunning = true;
+    let allConnected = true;
+    try {
+      const saved = startupGuestRestore;
+      const previous = Array.isArray(saved?.tabs) ? saved.tabs.slice(0, 12) : [];
+      const restored = restoredGuestTabs;
+      const serverTab = tabs.find(tab => !tab.closed && tab.kind === 'server');
+      for (const [index, tab] of previous.entries()) {
+        if (tab.kind === 'server') {
+          if (serverTab) restored.set(index, serverTab);
+          continue;
+        }
+        if (restored.has(index) && !restored.get(index).closed) continue;
+        const needed = tab.kind === 'launcher' ? 'launcher:' + tab.backend :
+          tab.profileId === 'codeoss' ? 'code' :
+          ['linux', 'win'].includes(tab.backend) ? tab.backend : null;
+        if (needed && !terminalActionEnabled(needed)) {
+          allConnected = false; // Preserve the unavailable tab for a later launch.
+          continue;
+        }
+        const before = tabs.length;
+        if (tab.kind === 'launcher') await openLauncherTab(tab.backend);
+        else if (tab.kind === 'terminal' && ['linux', 'win'].includes(tab.backend)) {
+          // Guest Bash is *inside Code-OSS only*. Old layouts never open a
+          // standalone simulated Session to reconnect a Windows/Linux PTY.
+          await openSession('codeoss');
+        } else await openSession(tab.profileId, tab.backend || 'native');
+        const opened = tabs[before] || tabs.find(item => !item.closed &&
+          (tab.kind === 'terminal' && ['linux', 'win'].includes(tab.backend)
+            ? item.profileId === 'codeoss'
+            : item.kind === tab.kind && item.profileId === tab.profileId &&
+              item.backend === tab.backend));
+        if (opened) restored.set(index, opened);
+        else allConnected = false;
+      }
+      if (Number.isInteger(saved?.active) && restored.has(saved.active))
+        await activateTab(restored.get(saved.active));
+      else if (serverTab) await activateTab(serverTab);
+      if (!allConnected)
+        notice('Some previous guest tabs remain disconnected; see Server Log');
+      else {
+        guestRestoreComplete = true;
+        retainingPriorLayout = false;
+        saveTerminalLayout();
+      }
+    } catch (error) {
+      notice('Session restore delayed: ' + error.message);
+    } finally {
+      guestRestoreRunning = false;
+    }
+  }
+
+  // Status is read-only. A slow guest never blocks the WebView or local Mac PTY.
+  let guestStatusPolling = false;
+  setInterval(async () => {
+    if (platform !== 'mac' || !devtoolsInstalled || guestStatusPolling) return;
+    guestStatusPolling = true;
+    try { updateGuestCapabilities(await api('/api/lifecycle/guest-status')); }
+    catch (error) {
+      // A lost service cannot be evidence that old VNC/PTY connections are live.
+      updateGuestCapabilities({state: 'unavailable', guests: [], vnc: []});
+    } finally { guestStatusPolling = false; }
+  }, 1500);
+
   // ===========================================================================
   // COMMAND EVENT POLLING AND APPLICATION STARTUP
   // ===========================================================================
@@ -3108,18 +3250,6 @@ method: 'POST', headers: {
       } else await openSession('codeoss');
     } catch (_) { /* Service may be closing. */ }
   }, 850);
-  setInterval(async () => {
-    if (platform !== 'mac' || document.visibilityState === 'hidden') return;
-    try {
-      const status = await api('/api/status');
-      const installed = status.devtools_installed === true;
-      if (installed !== devtoolsInstalled) {
-        devtoolsInstalled = installed;
-        updateCodeMenuMode();
-        codeCommands.postMessage({type: 'devtools-capabilities', installed});
-      }
-    } catch (_) { /* Installed service can be closed while a tab is open. */ }
-  }, 10000);
   // Development-only HTML menu inspection on macOS. The native menu remains
   // authoritative; the command only controls visibility of the existing row.
   setInterval(async () => {
@@ -3144,8 +3274,7 @@ method: 'POST', headers: {
     try {
       const status = await api('/api/status');
       platform = status.platform;
-      devtoolsInstalled = status.devtools_installed === true;
-      updateCodeMenuMode();
+      updateGuestCapabilities(status);
       document.documentElement?.setAttribute?.('data-cinter-platform', platform);
       setWindowsApplicationMenus();
 
@@ -3167,24 +3296,30 @@ method: 'POST', headers: {
       // Apple II connection previously made its VT100 probe a false failure.
       const initialId = byId.has(initial) ? initial : data.defaults[platform];
       if (!acceptUI) {
-        let restored = null;
-        try { restored = JSON.parse(localStorage.getItem(layoutKey) || 'null'); }
-        catch (_) { /* Corrupt optional layout is not a startup failure. */ }
-        const previous = Array.isArray(restored?.tabs) ? restored.tabs.filter(tab =>
-          (tab.kind === 'server' || byId.has(tab.profileId) &&
-           !byId.get(tab.profileId)?.lagomorph && !byId.get(tab.profileId)?.macGame) &&
-          ['native', 'mac', 'win', 'linux', 'server'].includes(tab.backend) ||
-          tab.profileId === 'codeoss').slice(0, 12) : [];
-        if (previous.length) {
-          void (async () => {
-            for (const tab of previous) {
-              if (tab.kind === 'server') await openServerTab();
-              else await openSession(tab.profileId, tab.backend || 'native');
-            }
-            if (Number.isInteger(restored.active) && tabs[restored.active])
-              await activateTab(tabs[restored.active]);
-          })().catch(error => notice('Session restore: ' + error.message));
-        } else void openSession(initialId);
+        if (platform === 'mac' && devtoolsInstalled) {
+          // Show the real live Server Log IMMEDIATELY while the one app-owned
+          // VM connects. Saved Code/guest/VNC tabs cannot display dead views.
+          try { startupGuestRestore = JSON.parse(localStorage.getItem(layoutKey) || 'null'); }
+          catch (_) { startupGuestRestore = null; }
+          const previous = Array.isArray(startupGuestRestore?.tabs)
+            ? startupGuestRestore.tabs : [];
+          startupGuestRestore = {...startupGuestRestore, tabs: previous.filter(tab =>
+            tab && (tab.kind === 'server' || tab.kind === 'launcher' &&
+              ['mac', 'win', 'linux'].includes(tab.backend) ||
+              tab.profileId === 'codeoss' || byId.has(tab.profileId) &&
+              !byId.get(tab.profileId)?.lagomorph && !byId.get(tab.profileId)?.macGame))};
+          retainingPriorLayout = true;
+          await openServerTab();
+          // Boot may have completed while the UI loaded. Do not wait for the
+          // next poll merely because there was never a splash screen.
+          if (guestReady.size > 0 || guestVncReady.size > 0)
+            void restoreConnectedGuestTabs();
+        } else if (platform === 'mac') {
+          // No DevTools receipt: open the real Mac Bash without even probing a VM.
+          void openSession('modern', 'native');
+        } else {
+          void openSession(initialId);
+        }
       }
       // Historical categories are four independent menus; don't flatten
       // Macintosh, BeOS and NeXTSTEP into the existing Terminals list.

@@ -780,12 +780,24 @@ async function activateCoordinator(context) {
         return assetTaskTerminal;
     };
 
-    let devtoolsInstalled = terminalHost?.platform === 'mac' && terminalHost.devtools_installed === true;
+    // The receipt is not a live shell. The native supervisor publishes one
+    // verified Bash and VNC capability per guest, after actual handshakes.
+    let guestReady = new Set((terminalHost?.devtools_guests || [])
+        .filter(kind => kind === 'linux' || kind === 'win'));
+    let guestVncReady = new Set((terminalHost?.devtools_vnc || [])
+        .filter(kind => kind === 'linux' || kind === 'win'));
+    let devtoolsInstalled = terminalHost?.platform === 'mac' && guestReady.size > 0;
+
 
     const hostPlatformName = terminalHost?.platform === 'mac' ? 'Mac' :
         terminalHost?.platform === 'win' ? 'Windows' : 'Linux';
 
     const openNativeTerminal = (backend = 'native', label = null) => {
+        if ((backend === 'linux' || backend === 'win') &&
+            terminalHost?.platform === 'mac' && !guestReady.has(backend)) {
+            vscode.window.showErrorMessage(backend + ' Bash is not connected; see Server Log');
+            return null;
+        }
         // The menu, command channel and startup all use this one creation path.
         // Reopening a guest shell focuses it instead of allocating another PTY.
         if (backend === 'linux' || backend === 'win') {
@@ -853,6 +865,10 @@ async function activateCoordinator(context) {
         await vscode.commands.executeCommand('setContext', 'cinterforge.hostTerminal', true);
         await vscode.commands.executeCommand('setContext', 'cinterforge.devtoolsInstalled',
             devtoolsInstalled);
+        await vscode.commands.executeCommand('setContext', 'cinterforge.linuxReady',
+            guestReady.has('linux'));
+        await vscode.commands.executeCommand('setContext', 'cinterforge.windowsReady',
+            guestReady.has('win'));
     }
     for (const [id, platform, label] of [
         ['cinterforge.newMacTerminal', 'mac', 'Mac'],
@@ -864,7 +880,7 @@ async function activateCoordinator(context) {
             if (!terminalHost) return;
             const host = terminalHost.platform;
             if (platform !== 'server' && platform !== host &&
-                !(host === 'mac' && devtoolsInstalled)) {
+                !(host === 'mac' && guestReady.has(platform))) {
                 return vscode.window.showErrorMessage(label + ' requires supported host DevTools');
             }
             const backend = platform === host ? 'native' :
@@ -890,16 +906,24 @@ async function activateCoordinator(context) {
             context.subscriptions.push(vscode.commands.registerCommand(
                 command, () => {
                     if (terminalHost.platform !== 'mac' ||
-                        (system !== 'mac' && !devtoolsInstalled)) return;
+                        (system !== 'mac' && !guestVncReady.has(system))) return;
                     codeCommandChannel.postMessage({type: 'open-launcher', platform: system});
                 }));
         }
         codeCommandChannel.onmessage = (event) => {
             const request = event.data || {};
             if (request.type === 'devtools-capabilities') {
-                devtoolsInstalled = terminalHost.platform === 'mac' && request.installed === true;
+                guestReady = new Set((request.guests || []).filter(kind =>
+                    kind === 'linux' || kind === 'win'));
+                guestVncReady = new Set((request.vnc || []).filter(kind =>
+                    kind === 'linux' || kind === 'win'));
+                devtoolsInstalled = terminalHost.platform === 'mac' && guestReady.size > 0;
                 void vscode.commands.executeCommand('setContext',
                     'cinterforge.devtoolsInstalled', devtoolsInstalled);
+                void vscode.commands.executeCommand('setContext',
+                    'cinterforge.linuxReady', guestReady.has('linux'));
+                void vscode.commands.executeCommand('setContext',
+                    'cinterforge.windowsReady', guestReady.has('win'));
                 return;
             }
             if (request.type === 'new-terminal') {
@@ -912,6 +936,8 @@ async function activateCoordinator(context) {
                     openNativeTerminal('minecraft', 'Minecraft');
                 } else {
                     const target = backend === 'mac' ? 'native' : backend;
+                    if ((target === 'win' || target === 'linux') &&
+                        terminalHost.platform === 'mac' && !guestReady.has(target)) return;
                     const label = target === 'server' ? 'Server Log' :
                         target === 'linux' ? 'Linux' :
                         target === 'win' ? 'Windows' : hostPlatformName;
@@ -1875,7 +1901,8 @@ async function activateCoordinator(context) {
             const startup = [['native', current]];
             if (terminalHost.platform === 'mac') {
                 startup.push(['server', 'Server Log']);
-                if (devtoolsInstalled) startup.push(['linux', 'Linux'], ['win', 'Windows']);
+                if (guestReady.has('linux')) startup.push(['linux', 'Linux']);
+                if (guestReady.has('win')) startup.push(['win', 'Windows']);
             }
             try {
                 for (const [backend, label] of startup) {

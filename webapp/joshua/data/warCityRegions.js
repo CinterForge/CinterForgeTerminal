@@ -10,7 +10,7 @@
 // because globalBlanket() concatenates [...world, ...south] without
 // deduplicating — a city listed in both would be impacted and counted twice
 // within a single pass. strikeStorm('south', ...) is unaffected. See
-// root test.py smoke suite for the regression guard.
+// root host/lifecycle/test.py smoke suite for the regression guard.
 window.JOSHUA_CITY_REGIONS = {
   usa: [
     {label:'SEATTLE',lon:-122.33,lat:47.60},{label:'SAN FRANCISCO',lon:-122.42,lat:37.77},{label:'LOS ANGELES',lon:-118.24,lat:34.05},

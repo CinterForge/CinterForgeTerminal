@@ -31,7 +31,7 @@ exercises real Linux Bash, Windows MSYS2 Bash, two VNC/noVNC endpoints and
 both owned shutdown paths. Results go to sibling
 `Builds/Logs/CinterForgeTerminal/guest-connections-test.{json,log}` and the
 LinuxKit Bedrock acceptance JSON. Test fails if inputs are missing, never
-provisions them. All 12 release smoke tests are physically in root `test.py`.
+provisions them. All 12 release smoke tests are physically in `host/lifecycle/test.py`.
 
 When a **receipt-verified unified DevTools** package is installed, the **native app** acquires one exclusive lifetime watchdog, then starts the single `t` QEMU x86-64 VM with one Debian AMD64 container serving both platforms. It creates exactly **one persistent interactive Bash PTY per platform** and keeps these alive independently of the Code-OSS tab. Opening/reopening Code-OSS attaches to these existing PTYs without `docker run`, without a fresh Bash process and without a second VM; closing Code-OSS detaches but does not terminate them. Unexpected PTY exit is repaired only inside the same owned guest, with bounded attempts and a visible Server Log error if reconnect fails. A periodic VNC health check restarts only missing helpers inside that same shared guest, recording persistent failures in the Server Log. Linux and Windows graphical Launcher Sessions attach **only to the already-running VNC endpoints**, never to Bash; the VNC helpers run on separate X displays inside the one owned Debian container and are idempotent. Native Mac Bash is independent and remains available on partial guest startup failures.
 
@@ -101,7 +101,7 @@ The **single Code-OSS Session** remains mounted while changing Session tabs. Its
 
 Mac Bootstrap installs an exact prebuilt macOS ARM64 QEMU package
 (`qemu-portable-darwin-arm64` 0.2.1, SHA-512 pinned in
-`host/mac_bootstrap.py`) into sibling
+`host/mac/mac_bootstrap.py`) into sibling
 `Builds/CinterForgeTerminal/Toolchains/mac/qemu`. It executes both
 `qemu-img --version` and `qemu-system-x86_64 --version` and checks the
 QEMU machine list before allowing Setup to proceed. The provider's bundled

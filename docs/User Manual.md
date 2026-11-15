@@ -6,7 +6,7 @@ CinterForge Terminal is a native application for **macOS, Windows and Linux**. Y
 
 [Download CinterForge Terminal](../README.md#download-cinterforgeterminal) · [See the games](Game%20Catalog.md) · [Developer Tooling](Developer%20Tooling.md)
 
-![Overview of CinterForge Terminal and its features](../CinterForgeterminal.png)
+![Overview of CinterForge Terminal and its features](CinterForgeTerminal.png)
 
 ## 1. Getting started
 
@@ -193,6 +193,8 @@ This also applies to the plus button. The native menu can create supported termi
 Server log or Minecraft console sessions. **Server** is a read-only Terminal tab showing the live local Python/HTTP backend log, not a new shell or a second server process. Choose **Machines → Server · Live log** or **Terminal → New Server Log Terminal**. Its footer displays the complete log path so you can retrieve it after a failure. It must not silently launch a second Bedrock server. To open the **Code-OSS** workbench, type `code`; platform developer terminals are integrated there as well. Ordinary commands such as `pwd`, `ls`, `cd`, Git or a compiler belong in a real shell, not in a game/emulator text field.
 
 ### Runtime files and diagnostic logs
+
+Use **Terminal → Open Logs Folder** to reveal the active app or development log directory directly in Finder, Explorer, or your Linux file manager. In repository lifecycle/development mode it opens `<repo>/../Builds/Logs/CinterForgeTerminal/`; in the installed app it opens the selected Steam library’s `steamapps/common/CinterForge/Logs/CinterForgeTerminal/`. This tree includes lifecycle (Setup, Build, Stage, Test), native launch and shutdown output, the Server and session logs, Bedrock, CMake diagnostic copies, and preserved guest/VM startup, Docker, Bash, X11 and VNC logs. Some external utilities must keep their **active** files in their own state directories (for example Lima serial/host-agent logs in the VM cache and CMake diagnostics in its build tree); Terminal also copies their readable diagnostics into the central log tree. macOS system-generated crash reports remain in Apple’s `~/Library/Logs/DiagnosticReports/` and are not relocated by the app.
 
 A downloaded/installed application stores **installed applications, persistent player/session data and runtime logs** in the actual selected Steam library, including `steamapps/common/CinterForge/Logs/CinterForgeTerminal/`. **Temporary files do not belong in `steamapps`.** On macOS, the app-owned Colima/Lima VM disk, Docker caches and other transient guest state live in the user OS cache (`~/Library/Caches/CFTVM/`); resumable DevTools download ZIPs and disposable shell scratch use the user OS cache under `~/Library/Caches/CinterForgeTerminal/`. Setup/build/test use sibling `<repo>/../Builds` for VM, intermediates, temporary files and lifecycle logs. The read-only app bundle can contain a folder named `Builds` as a packaged resource layout; that is **not** a writable developer Builds directory. An installed app must not create `Builds` on ordinary launch. After explicit consent to `devtools install`, it shows and creates the selected workspace `Builds` folder, installs the unified SDK at `Builds/CinterForgeTerminal/Toolchains/`, and remembers the destination. Guest VM caches remain in OS cache and runtime logs remain in Steam.
 

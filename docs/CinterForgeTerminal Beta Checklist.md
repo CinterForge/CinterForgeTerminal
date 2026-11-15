@@ -11,7 +11,7 @@
 
 ## 0. CRITICAL BLOCKERS
 
-- [-] MAC-BUILDER missing tools - setup is not installing all needed tools
+- [X] MAC-BUILDER missing tools - setup is not installing all needed tools
 - [-] Installed Mac build does not launch.  No idea how to debug this.
 - [-] Installed Windows build does not register in Add/Remove Programs
 - [-] Installed Windows build does not add to start menu
@@ -30,7 +30,7 @@
 - [-] Confirm tab close/reopen/reconnect behavior using native WebView2/ConPTY.
 
 ## 2. Critical CodeOSS issues
-- [ ] Cut is Broken - The whole Edit menu is messed up.  We are damaging the CodeOSS Edit menu
+- [X] Cut is Broken - The whole Edit menu is messed up.  We are damaging the CodeOSS Edit menu
 - [ ] CodeOSS MD/HTML/Image/etc Preview is broken - as many media types to preview as is easy
 - [ ] Cinter button not working
 

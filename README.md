@@ -1,6 +1,6 @@
 # CinterForge Terminal
 
-![CinterForge Terminal — games, classic computers, real terminals, Code-OSS, Minecraft Bedrock and development tools](CinterForgeTerminal.png)
+![CinterForge Terminal — games, classic computers, real terminals, Code-OSS, Minecraft Bedrock and development tools](docs/CinterForgeTerminal.png)
 
 <!-- CINTERFORGE:DOWNLOADS:START -->
 ## Download CinterForge Terminal
@@ -96,15 +96,6 @@ On the supported macOS producer, with Xcode installed:
 ```
 
 This runs **Setup → Build → Stage → Test**. It does **not** publish. Setup owns preflight and dependency provisioning; Test owns automated regressions and the applicable native acceptance checks. Full logs and PASS/FAIL summaries are saved beneath sibling `Builds/Logs/CinterForgeTerminal/Lifecycle/` instead of disappearing from the console. Target-native Windows and Linux GUI acceptance require the actual target environments.
-
-To publish a verified release explicitly:
-
-```sh
-./Cinter publish public
-./Cinter verify public
-```
-
-After public verification, the publisher updates the **managed download section at the top of this README** with the new macOS, Windows and Linux links. It does not automatically commit or push the README to Git.
 
 ## Documentation
 

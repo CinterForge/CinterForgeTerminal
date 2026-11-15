@@ -3,7 +3,7 @@
 // Launch/target node-id pairs (see nodes.js for the id -> {lon,lat,type}
 // definitions) animated during globalBlanket()'s opening wave, in game.js.
 // Each pair is [fromNodeId, toNodeId]; every id here must exist in
-// nodes.js — see root test.py smoke suite for the automated
+// nodes.js — see root host/lifecycle/test.py smoke suite for the automated
 // check.
 window.JOSHUA_GLOBAL_WORLD_PAIRS = [
   ['russia-west','na-east'],['siberian-corridor','na-west'],['na-east','central-europe'],['na-west','western-pacific'],

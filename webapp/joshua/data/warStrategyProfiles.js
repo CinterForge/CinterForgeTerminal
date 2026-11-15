@@ -5,7 +5,7 @@
 // four phases (local, first, second, global); each of the first three has
 // {title, log[], strikes[]} where every strikes entry is
 // [fromNodeId, toNodeId, colorOrFaction] — every id must exist in
-// nodes.js (see root test.py smoke suite). The "global" phase
+// nodes.js (see root host/lifecycle/test.py smoke suite). The "global" phase
 // only has {title, log[]} — its arcs come from GLOBAL_WORLD_PAIRS instead
 // (see warRoutes.js), applied uniformly across every scenario.
 window.JOSHUA_STRATEGY_PROFILES = {

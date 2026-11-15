@@ -16,7 +16,7 @@ RUN set -eu; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         bash ca-certificates cmake ninja-build pkg-config python3 nodejs \
-        gcc g++ libgtk-3-dev libwebkit2gtk-4.1-dev dbus-x11 \
+        gcc g++ libgtk-3-dev libwebkit2gtk-4.1-dev libwebkit2gtk-4.1-0 dbus-x11 \
         gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix \
         binutils-mingw-w64-x86-64 \
         xvfb xauth openbox x11vnc websockify novnc feh x11-utils \
@@ -37,8 +37,11 @@ RUN set -eu; \
     test "$(dpkg-query -W -f='${Version}' wixl)" = '0.106+repack-1'; \
     command -v wixl; command -v msiinfo; command -v msiextract; \
     pkg-config --exists gtk+-3.0 webkit2gtk-4.1; \
+    python3 -c 'import ctypes; ctypes.CDLL("libwebkit2gtk-4.1.so.0")'; \
     command -v g++; command -v node; \
     echo '[MSYS2 WINE] PASS pinned patched Wine 11.15, native guest GUI tools'
+# Runtime ABI linking is asserted above as well as by GUI preflight.
+# A header/pkg-config check alone cannot certify the native ELF launcher.
 COPY gui_preflight.py /usr/local/lib/cinterforge/gui_preflight.py
 ENV TZ=UTC
 ENV WINEDLLOVERRIDES="mshtml=d;mscoree=d"
