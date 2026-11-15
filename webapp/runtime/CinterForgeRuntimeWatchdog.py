@@ -72,9 +72,13 @@ def _runtime_watchdog_main(argv: list[str]) -> int:
     native_pid = int(argv[0])
     ready_fd = int(argv[1]) if len(argv) == 2 else None
     import fcntl as local_fcntl
-    if _CinterForgeRuntimeBootstrap.sdk_root() is None or platform.system() != 'Darwin':
+    sdk = _CinterForgeRuntimeBootstrap.sdk_root()
+    if sdk is None or platform.system() != 'Darwin':
         return 1 if ready_fd is not None else 0
-    env = _env(_CinterForgeRuntimeBootstrap.sdk_root())
+    # Use the same application-owned t-profile environment as guest startup.
+    # The old monolithic _env() function no longer exists after the split.
+    vm = _CinterForgeRuntimeBootstrap._CINTERFORGE_VM
+    env = vm.environment(sdk, state_root=vm.state_root)
     lock_path = Path(env['COLIMA_HOME']) / 'CinterForgeTerminalLifetime.lock'
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     try:
