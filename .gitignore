@@ -5,6 +5,9 @@
 DerivedData/*
 .derived*
 *.xcuserstate
+*xcuserdata
+*xcscheme
+*xcworkspace
 
 # Generated Python bytecode and test caches belong in Builds, not source.
 __pycache__/
