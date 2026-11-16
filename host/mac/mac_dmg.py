@@ -177,11 +177,18 @@ def _style_editable_dmg(editable: Path, root: Path, *,
         raise RuntimeError('DMG Publish requires checked-in installer/mac_dmg.applescript')
     attached = False
     try:
-        _run(['/usr/bin/hdiutil', 'attach', '-nobrowse', '-noautoopen',
+        # Unlike verification mounts, Publish's writable layout mount must be
+        # visible in Finder: the user can watch the authored layout being applied.
+        # Keep the mount in Builds and avoid an implicit extra Finder window;
+        # the checked-in AppleScript opens the exact mounted path explicitly.
+        print(f'[MAC DMG] Attaching writable Finder-visible volume: {mount}', flush=True)
+        _run(['/usr/bin/hdiutil', 'attach', '-noautoopen',
               '-mountpoint', str(mount), str(editable)])
         attached = True
-        print('[MAC DMG] Applying 768x768 Finder artwork and icon layout', flush=True)
-        _run(['/usr/bin/osascript', str(script), volume_name, app_name])
+        if not (mount / app_name).is_dir() or not (mount / 'Applications').is_symlink():
+            raise RuntimeError('Writable DMG was not mounted with the expected app and Applications shortcut')
+        print('[MAC DMG] Finder will display and arrange the app, Applications, and README', flush=True)
+        _run(['/usr/bin/osascript', str(script), volume_name, app_name, str(mount)])
         # A successful AppleScript exit alone does not prove that Finder saved
         # the presentation. Do not silently publish an unstyled image.
         metadata = mount / '.DS_Store'
