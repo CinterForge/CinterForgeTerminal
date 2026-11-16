@@ -182,7 +182,7 @@ def _input_identity(assets: dict[str, Path | bytes], target: str) -> dict:
     if target == 'mac':
         identity['@signing'] = [os.environ.get('CINTER_MAC_SIGN_IDENTITY', '') or 'ad-hoc',
                                 os.environ.get('CINTER_MAC_NOTARY_PROFILE', ''),
-                                os.environ.get('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS', '')]
+                                'unified-public-signing-v1']
     return identity
 
 
@@ -581,13 +581,9 @@ def prepare_publish_packages(builds: Path, *, release: str | None = None,
     artifacts = {}
     for target in selected:
         info = record['targets'][target]
-        # Standalone `publish ... beta` can reuse a normal Build but still
-        # must NOT reuse the normal Mac DMG. Publish-only copy is re-signed
-        # with diagnostic entitlements before notarization below.
-        diagnostic_beta = (target == 'mac' and
-                           os.environ.get('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS') == '1')
-        package_fingerprint = (hashlib.sha256((info['fingerprint'] + '|diagnostic-beta-v1').encode()).hexdigest()
-                               if diagnostic_beta else info['fingerprint'])
+        # Beta and release use the same already-signed Build app. Their
+        # manifests and destinations remain separate, not their signatures.
+        package_fingerprint = info['fingerprint']
         if target == 'win':
             # Invalidate any earlier MSI-only archive, while retaining the
             # canonical ZIP of the staged Windows product folder.
@@ -647,9 +643,6 @@ def prepare_publish_packages(builds: Path, *, release: str | None = None,
                     shutil.rmtree(publish_app)
                 publish_app.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(signed, publish_app, symlinks=True)
-                if diagnostic_beta:
-                    from host.mac.mac_app import _sign_and_verify
-                    _sign_and_verify(publish_app)
                 up._notarize_mac_app(publish_app, temporary)
             from host.mac.mac_dmg import create_dmg
             artifact = create_dmg(publish_app, path, builds,

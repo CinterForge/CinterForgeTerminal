@@ -1249,7 +1249,6 @@ def build_four(builds: Path, *, release: str = HOST_RELEASE) -> dict:
             notary_profile = os.environ.get('CINTER_MAC_NOTARY_PROFILE', '').strip()
             fingerprint = hashlib.sha256((MAC_ZIP_SEAL + signing_id + '\n' +
                                           notary_profile + '\n' +
-                                          os.environ.get('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS', '') + '\n' +
                                           fingerprint).encode()).hexdigest()
         input_fingerprints[target] = fingerprint
         old = previous.get('artifacts', {}).get(target, {})
