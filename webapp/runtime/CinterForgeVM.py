@@ -70,12 +70,8 @@ class CinterForgeVM:
         """
         installed = os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'installed'
         if installed:
-            value = os.environ.get('CINTER_STEAMAPPS', '')
-            if not value:
-                raise RuntimeError('Installed DevTools require the real Steam library')
-            steam = Path(value).expanduser()
-            if steam.name.lower() != 'steamapps' or steam.is_symlink() or not steam.is_dir():
-                raise RuntimeError('Installed DevTools require an existing real steamapps directory')
+            # An optional SDK can be installed from a standalone DMG without
+            # Steam. The managed VM is transient and belongs in the OS cache.
             if platform.system() != 'Darwin':
                 raise RuntimeError('Managed macOS guest VM requires a macOS runtime')
             # A short Lima socket path is mandatory on macOS. Cache contains only

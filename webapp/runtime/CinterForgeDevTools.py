@@ -81,7 +81,9 @@ def _devtools_builds_pin() -> Path | None:
     from runtime import CinterForgeSettings as _CinterForgeSettings
     steam = _CinterForgeSessions._steam_library_for_installed_root(_CinterForgeSettings.ASSETS.parent)
     if steam is None:
-        return None
+        # Persist the selected Builds path for standalone installs as well;
+        # the receipt is user configuration, not an SDK or VM disk.
+        return _CinterForgeSessions._standalone_state_root(create=False) / 'devtools-builds.json'
     return steam / 'common/CinterForge/Applications/TerminalState/devtools-builds.json'
 
 

@@ -162,10 +162,12 @@ def handle(method: str, params: dict) -> dict:
                 if steam is not None:
                     os.environ['CINTER_STEAMAPPS'] = str(steam)
             else:
+                # A downloaded signed app is installed-mode even on machines
+                # with no Steam client or library. DevTools remain optional.
+                os.environ['CINTER_TERMINAL_RUNTIME_MODE'] = 'installed'
                 steam = _CinterForgeSessions._steam_library_for_installed_root(builds)
                 if steam is not None:
                     os.environ['CINTER_STEAMAPPS'] = str(steam)
-                    os.environ['CINTER_TERMINAL_RUNTIME_MODE'] = 'installed'
             os.environ['CINTER_CODE_WORKSPACE'] = str(Path(_server.code_workspace.details()['cwd']))
             if not guest_http:
                 from runtime.CinterForgeWebSockets import CinterForgeSidecarPorts

@@ -178,7 +178,14 @@ namespace
                 fs::is_directory(steam / "common/CinterForge"))
                 return steam / "common/CinterForge/Logs/CinterForgeTerminal";
         }
-        return {}; // Python's Steam resolver handles multi-library ambiguity.
+        // A direct-download DMG is fully usable without the Steam client.
+        // Match the Python installed runtime's standard macOS Logs location.
+        if (const char *home = std::getenv("HOME")) {
+            const fs::path user(home);
+            if (user.is_absolute())
+                return user / "Library/Logs/CinterForgeTerminal";
+        }
+        return {};
     }
 
     void beginNativeLogging(const cinterforge::ApplicationShellConfig &cfg)

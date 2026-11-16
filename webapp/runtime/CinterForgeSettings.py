@@ -77,9 +77,10 @@ AUTHORING/LIFECYCLE CONTRACT
     The browser UI is ``webapp/CinterForgeTerminal.js``. The native C++ host owns the
     process lifetime, and ``Cinter`` owns all build/setup/publish commands.
     Runtime files must work *without* the original source checkout installed.
-    Installed apps keep normal runtime data in their selected Steam library;
-    an explicitly consented DevTools install also creates/uses the selected
-    developer Builds tree. Repository lifecycle runs use sibling Builds. Do not repurpose
+    Steam installs keep runtime state in their selected Steam library; direct
+    downloads use standard OS user-support directories without requiring Steam.
+    An explicitly consented DevTools install creates/uses the selected developer
+    Builds tree. Repository lifecycle runs use sibling Builds. Do not repurpose
     or terminate another process's managed VM.
     Do not change the Infinite Mac guest-input automation in this backend.
 

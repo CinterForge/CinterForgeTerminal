@@ -218,11 +218,40 @@ def _installed_cache_root(home: Path) -> Path:
     return path
 
 
+def _standalone_state_root(*, create: bool = True) -> Path:
+    """Writable user state for a downloaded Terminal without Steam.
+
+    This is NOT the signed app's embedded Builds directory and never starts a
+    developer tool installation. Steam-installed apps retain their Steam state.
+    """
+    home = _real_login_home()
+    if platform.system() == 'Darwin':
+        path = home / 'Library/Application Support/CinterForgeTerminal'
+    elif platform.system() == 'Windows':
+        path = home / 'AppData/Local/CinterForgeTerminal/State'
+    else:
+        path = home / '.local/share/CinterForgeTerminal'
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise RuntimeError('Unsafe standalone Terminal state directory: ' + str(path))
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path.resolve(strict=create)
+
+
+def _standalone_logs_root() -> Path:
+    """Use normal OS user logs when there is no installed Steam library."""
+    home = _real_login_home()
+    if platform.system() == 'Darwin':
+        return home / 'Library/Logs/CinterForgeTerminal'
+    if platform.system() == 'Windows':
+        return home / 'AppData/Local/CinterForgeTerminal/Logs'
+    return home / '.local/state/CinterForgeTerminal/Logs'
+
+
 def _session_environment(builds: Path, system: str) -> dict[str, str]:
-    """Keep persistent user data in Steam, transient runtime data out of it."""
+    """Keep installed state in Steam or user support, transient files in cache."""
     from runtime import CinterForgeSettings as _CinterForgeSettings
-    installed = (builds.name != 'Builds' and
-                 _steam_library_for_installed_root(builds) is not None)
+    installed = builds.name != 'Builds'
     user_home = _real_login_home()
     root = builds / 'Run' / 'CinterForgeTerminal' / system
     scratch = ((_installed_cache_root(user_home) / 'Sessions' / system)
@@ -251,18 +280,11 @@ def _session_environment(builds: Path, system: str) -> dict[str, str]:
     if installed_steam is not None:
         env['CINTER_STEAMAPPS'] = str(installed_steam)
     elif not env.get('CINTER_STEAMAPPS'):
-        if platform.system() in ('Darwin', 'Linux'):
-            try:
-                import pwd
-                login_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
-            except (ImportError, KeyError, OSError):
-                login_home = Path.home()
-            steam = (login_home / 'Library/Application Support/Steam/steamapps'
-                     if platform.system() == 'Darwin'
-                     else login_home / '.local/share/Steam/steamapps')
-        else:
-            steam = Path(env.get('PROGRAMFILES(X86)', 'C:/Program Files (x86)')) / 'Steam/steamapps'
-        env['CINTER_STEAMAPPS'] = str(steam)
+        # A standalone DMG is not an implicit Steam installation. Never pass
+        # an invented steamapps path to commands launched from a PTY.
+        steam = _steam_library_for_installed_root(builds)
+        if steam is not None:
+            env['CINTER_STEAMAPPS'] = str(steam)
     # In the installed Host tree this directory is named <release>.
     # The checkout path uses the same canonical pinned release as the builder.
     release = _CinterForgeSettings.ASSETS.parent.name
@@ -280,8 +302,9 @@ def _session_environment(builds: Path, system: str) -> dict[str, str]:
     logs = _runtime_logs_root(builds)
     logs.mkdir(parents=True, exist_ok=True)
     env['CINTER_TERMINAL_DIRECTORY_LOG'] = str(logs / ('native-terminal-' + system + '.log'))
-    if _steam_library_for_installed_root(builds) is not None and builds.name != 'Builds':
-        # The optional guest VM and downloaded DevTools must never use ~/Builds.
+    if installed:
+        # Installed apps use user cache and optional consented DevTools; merely
+        # launching them never creates a development Builds directory.
         env.pop('CINTER_BUILDS_ROOT', None)
         env['CINTER_TERMINAL_RUNTIME_MODE'] = 'installed'
     if system == 'win':
@@ -659,8 +682,7 @@ def _terminal_mutable_root(builds: Path) -> Path:
             and os.environ.get('CINTER_BUILDS_ROOT') != str(physical)):
         steam = installed_steam or _steam_library_for_installed_root(physical)
         if steam is None:
-            raise RuntimeError('Installed Windows Terminal requires a real Steam library; '
-                               'set CINTER_STEAMAPPS to select an existing library')
+            return _standalone_state_root()
         candidate = steam / 'common/CinterForge/Applications/TerminalState'
         if candidate.is_symlink() or (candidate.exists() and not candidate.is_dir()):
             raise RuntimeError('Unsafe installed Terminal state root: ' + str(candidate))
@@ -691,8 +713,8 @@ def _terminal_mutable_root(builds: Path) -> Path:
             for parent in physical.parents:
                 if parent.name == 'Builds' and not any(p.endswith('.app') for p in parent.parts):
                     return parent
-        raise RuntimeError('Packaged Terminal needs an actual Steam library for runtime state; set CINTER_STEAMAPPS')
-    raise RuntimeError('Runtime state needs a repository Builds or an installed Steam library')
+        return _standalone_state_root()
+    raise RuntimeError('Runtime state needs repository Builds, a Steam installation, or a packaged application')
 
 
 def _runtime_logs_root(writable_root: Path) -> Path:
@@ -703,7 +725,9 @@ def _runtime_logs_root(writable_root: Path) -> Path:
             return parent / 'common/CinterForge/Logs/CinterForgeTerminal'
     if root.name == 'Builds':
         return root / 'Logs/CinterForgeTerminal/Runtime'
-    raise RuntimeError('Runtime logs cannot escape developer Builds or the Steam installation')
+    if root == _standalone_state_root(create=False):
+        return _standalone_logs_root()
+    raise RuntimeError('Runtime logs cannot escape the developer, Steam, or standalone user directories')
 
 
 def _devtools_menu_ready(system: str) -> bool:
