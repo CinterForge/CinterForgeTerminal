@@ -257,12 +257,17 @@ def build_four(builds: Path, *, release: str | None = None,
 
 
 def _installed_state(root: Path, files: dict) -> str | None:
+    # Receipt compares permissions as well as file metadata. Execute-bit drift
+    # must force the existing Stage repair path even when a filesystem reports
+    # no useful timestamp change.
     state = {}
     for name in files:
         path = root / name
         if path.is_symlink() or not path.is_file():
             return None
-        state[name] = _stat(path)
+        info = path.stat()
+        state[name] = [info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+                       stat.S_IMODE(info.st_mode)]
     return _fingerprint(state)
 
 
@@ -415,6 +420,13 @@ def stage_four(builds: Path, *, release: str | None = None,
                 if dest.is_symlink():
                     raise RuntimeError('Unsafe Steam Stage file symlink: ' + str(dest))
                 if dest.is_file() and dest.stat().st_size == detail['bytes'] and _sha(dest) == detail['sha256']:
+                    # The existing bytes are already correct, but Finder,
+                    # unpackers, or an earlier Stage can change POSIX execute
+                    # bits. Repair *owned* Stage metadata without copying the
+                    # file again, and never weaken Test's mode verification.
+                    if (dest.stat().st_mode & 0o777) != detail['mode']:
+                        dest.chmod(detail['mode'])
+                        changed += 1
                     continue
                 if dest.is_dir():
                     raise RuntimeError('Directory blocks Stage file: ' + str(dest))

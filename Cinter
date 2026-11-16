@@ -544,9 +544,10 @@ def main(argv: list[str]) -> int:
         selected = argv[1]
         publish_mode = (argv[3] if len(argv) == 4 else
                         'dryrun' if len(argv) == 3 else None)
-        if publish_mode == 'beta' and selected in ('mac', 'all') and platform.system() == 'Darwin':
-            os.environ['CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS'] = '1'
-        elif publish_mode == 'release':
+        if publish_mode in ('beta', 'release'):
+            # Public betas and releases use the SAME hardened app entitlement
+            # contract. Do not silently switch the customer's beta into the
+            # experimental debugger-signed configuration.
             os.environ.pop('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS', None)
         if (selected in ('mac', 'all') and publish_mode in ('beta', 'release') and
                 platform.system() == 'Darwin'):
@@ -682,11 +683,9 @@ def main(argv: list[str]) -> int:
         selected = {'public': 'release'}.get(options[0], options[0]) if options else 'dryrun'
         if selected not in ('dryrun', 'internal', 'beta', 'release'):
             raise ValueError('Usage: ./Cinter publish cfterminal [mac|win|linux|all] [dryrun|internal|beta|release]')
-        if selected == 'beta' and target in ('all', 'mac') and platform.system() == 'Darwin':
-            # One broad, explicitly diagnostic customer launch experiment.
-            # Normal Release has no exceptions; no Xcode global setting is changed.
-            os.environ['CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS'] = '1'
-        elif selected == 'release':
+        if selected in ('beta', 'release'):
+            # Distribution uses the normal signed/notarized product. Keep any
+            # diagnostic debugger entitlement an explicit development opt-in.
             os.environ.pop('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS', None)
         if selected in ('release', 'beta') and target in ('all', 'mac') and platform.system() == 'Darwin':
             from host.mac.xcode_signing import release_signing_environment

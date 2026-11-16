@@ -42,6 +42,8 @@
 #endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <syslog.h>
 #include <unistd.h>
 #include <cstdlib>
 #endif
@@ -515,6 +517,25 @@ int main(int argc, char **argv)
     catch (const std::exception &e)
     {
         std::cerr << "[CinterForgeTerminal] FAIL: " << e.what() << '\n';
+#ifdef __APPLE__
+        // Finder/LaunchServices launches have no visible stderr. If runtime
+        // discovery fails before beginNativeLogging(), the error otherwise
+        // disappears entirely on a consumer Mac (without any Steam logs).
+        // Do not create a second installed-app log directory outside Steam.
+        syslog(LOG_ERR, "CinterForgeTerminal startup failed: %s", e.what());
+        if (!cfg.accept_ui) {
+            CFStringRef details = CFStringCreateWithCString(
+                kCFAllocatorDefault, e.what(), kCFStringEncodingUTF8);
+            if (details) {
+                CFUserNotificationDisplayAlert(
+                    0, kCFUserNotificationStopAlertLevel,
+                    nullptr, nullptr, nullptr,
+                    CFSTR("CinterForge Terminal could not start"), details,
+                    CFSTR("OK"), nullptr, nullptr, nullptr);
+                CFRelease(details);
+            }
+        }
+#endif
         return 1;
     }
 }

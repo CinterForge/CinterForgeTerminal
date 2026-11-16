@@ -340,23 +340,19 @@ def _sign_and_verify_with_login_keychain(app: Path) -> None:
         sign_launcher(vm)
     sign_flags = (['--options', 'runtime', '--timestamp'] if identity
                   else ['--timestamp=none'])
-    # Diagnostic beta only: test all SIX Hardened Runtime exceptions at once.
-    # Debugging Tool means cs.debugger, NOT get-task-allow (notarization rejects
-    # get-task-allow on distributed software). Normal Release is unchanged.
+    # Sign the main WKWebView application with its own Hardened Runtime
+    # entitlements. The Xcode Release setting requests allow-jit, but manual
+    # `codesign --deep` previously never passed that entitlement to the final
+    # built app. Apply the beta debugger exception only to the APP executable;
+    # the Python runtime and CinterBDSVM have independent signing requirements.
     diagnostic = os.environ.get('CINTER_MAC_DIAGNOSTIC_ALL_EXCEPTIONS') == '1'
-    diagnostic_entitlements = Path(__file__).resolve().parents[2] / 'app/build/xcode/DiagnosticBeta.entitlements'
-    exception_flags = ['--entitlements', str(diagnostic_entitlements)] if diagnostic else []
-    # if diagnostic:
-    #     import plistlib
-    #     claims = plistlib.loads(diagnostic_entitlements.read_bytes())
-    #     required = ('allow-jit', 'allow-unsigned-executable-memory',
-    #                 'allow-dyld-environment-variables', 'disable-library-validation',
-    #                 'disable-executable-page-protection', 'debugger')
-    #     if any(claims.get('com.apple.security.cs.' + key) is not True for key in required):
-    #         raise RuntimeError('Incomplete diagnostic Beta Hardened Runtime entitlements')
-    #     if claims.get('com.apple.security.get-task-allow'):
-    #         raise RuntimeError('Diagnostic Beta must not include get-task-allow (notarization)')
-    #     print('[MAC SIGN] DIAGNOSTIC BETA: all six Hardened Runtime exceptions enabled', flush=True)
+    authored = Path(__file__).resolve().parents[2] / 'app/build/xcode'
+    entitlement_file = authored / ('DiagnosticBeta.entitlements' if diagnostic else 'Release.entitlements')
+    claims = plistlib.loads(entitlement_file.read_bytes())
+    if (claims.get('com.apple.security.cs.allow-jit') is not True or
+            claims.get('com.apple.security.get-task-allow') or
+            any(not isinstance(value, bool) or not value for value in claims.values())):
+        raise RuntimeError('Invalid main-app Hardened Runtime entitlements: ' + str(entitlement_file))
     if identity:
         # Apple notarization inspects *all* nested Mach-O code, including the
         # private Python/Host runtime below Resources (which --deep alone does
@@ -373,12 +369,23 @@ def _sign_and_verify_with_login_keychain(app: Path) -> None:
                 if executable.read(4) not in macho_magic:
                     continue
             subprocess.run(['/usr/bin/codesign', '--force', '--sign', identity,
-                            '--preserve-metadata=entitlements', *exception_flags, *sign_flags,
+                            '--preserve-metadata=entitlements', *sign_flags,
                             str(nested)], check=True, capture_output=True, text=True)
-    subprocess.run(['/usr/bin/codesign', '--force', '--deep',
-                    '--preserve-metadata=entitlements', '--sign', identity or '-',
-                    *exception_flags, *sign_flags, str(app)], check=True, capture_output=True, text=True)
+    # Apple requires inside-out signing. --deep on SIGN (not verify) can re-sign
+    # nested Python/VM binaries with the top-level options and erase their
+    # distinct entitlements, even when signature verification initially passes.
+    subprocess.run(['/usr/bin/codesign', '--force', '--sign', identity or '-',
+                    '--entitlements', str(entitlement_file), *sign_flags, str(app)],
+                   check=True, capture_output=True, text=True)
     _verify_signature(app)
+    signed = subprocess.run(['/usr/bin/codesign', '--display', '--entitlements', ':-', str(app)],
+                            capture_output=True, check=False)
+    try:
+        effective = plistlib.loads(signed.stdout)
+    except (ValueError, TypeError, plistlib.InvalidFileException) as error:
+        raise RuntimeError('Signed Mac app has no inspectable Hardened Runtime entitlements') from error
+    if signed.returncode or effective.get('com.apple.security.cs.allow-jit') is not True:
+        raise RuntimeError('Signed Mac app lost its WKWebView JIT entitlement')
     if not has_virtualization_entitlement(vm):
         raise RuntimeError('VM entitlements missing after packaging; refusing broken release')
 
