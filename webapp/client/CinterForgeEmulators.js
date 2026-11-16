@@ -12,16 +12,16 @@
   const CinterForgeState = window.CinterForgeClientState || (window.CinterForgeClientState = Object.create(null));
 
   // Original source lines 441–441
-CinterForgeState.lagBootSequence = 0;
+  CinterForgeState.lagBootSequence = 0;
 
   // Original source lines 442–442
-CinterForgeState.lagWelcomeTimer = null;
+  CinterForgeState.lagWelcomeTimer = null;
 
   // Original source lines 447–447
-CinterForgeState.lagPause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  CinterForgeState.lagPause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
   // Original source lines 452–607
-CinterForgeState.lagomorphBootControls = async (stamp, target) => {
+  CinterForgeState.lagomorphBootControls = async (stamp, target) => {
     /**
      * Confirm that the current Lagomorph startup still owns the selected iframe and launch
      * generation.
@@ -110,6 +110,13 @@ CinterForgeState.lagomorphBootControls = async (stamp, target) => {
       // quitSticky() focuses the guest iframe without another mouse click.
       await CinterForgeState.lagPause(CinterForgeState.LAGOMORPH_DELAYS_MS.beforeStickyNotesQuit);
       if (!valid()) return;
+
+      if (!valid()) return;
+      if (!await doubleClick(
+        CinterForgeState.LAGOMORPH_GUEST_POSITIONS.lagomorphDisk.x,
+        CinterForgeState.LAGOMORPH_GUEST_POSITIONS.lagomorphDisk.y
+      )) return;
+
       /**
        * Send a physical guest Command-Q chord with balanced key-down and key-up events.
        */
@@ -179,7 +186,7 @@ CinterForgeState.lagomorphBootControls = async (stamp, target) => {
   };
 
   // Original source lines 608–624
-window.addEventListener('message', event => {
+  window.addEventListener('message', event => {
     if (event.origin !== 'https://infinitemac.org' || event.source !== CinterForgeState.frame.contentWindow ||
       CinterForgeState.computerView.hidden || event.data?.type !== 'emulator_loaded' ||
       CinterForgeState.selected !== 'quadra-650') return;
@@ -198,7 +205,7 @@ window.addEventListener('message', event => {
   });
 
   // Original source lines 630–649
-CinterForgeState.showTerminal = () => {
+  CinterForgeState.showTerminal = () => {
     if (CinterForgeState.terminalOverlay.dataset.codeWrapperHidden === 'true')
       CinterForgeState.setCodeWrapperHidden(false);
     CinterForgeState.lagBootSequence++;
@@ -220,7 +227,7 @@ CinterForgeState.showTerminal = () => {
   };
 
   // Original source lines 653–730
-CinterForgeState.showComputer = async (profile) => {
+  CinterForgeState.showComputer = async (profile) => {
     CinterForgeState.lagBootSequence++;
     if (CinterForgeState.lagWelcomeTimer) {
       clearTimeout(CinterForgeState.lagWelcomeTimer);
