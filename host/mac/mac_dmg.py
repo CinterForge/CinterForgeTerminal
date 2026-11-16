@@ -37,16 +37,14 @@ import sys
 import tempfile
 
 
-INSTALL_README = """# Install CinterForge Terminal
+# The authored installer README is shared by the Mac DMG and Windows MSI.
+# Do not regenerate or embed a stale alternate copy in the Python producer.
+INSTALLER_ASSETS = Path(__file__).resolve().parents[2] / 'app/build/resources/installer'
+INSTALL_README_PATH = INSTALLER_ASSETS / 'README.md'
+DMG_BACKGROUND_PATH = INSTALLER_ASSETS / 'DMGBackground.png'
+DMG_LAYOUT_SCRIPT_PATH = INSTALLER_ASSETS / 'mac_dmg.applescript'
+INSTALL_README = INSTALL_README_PATH.read_text(encoding='utf-8')
 
-1. Drag **CinterForge Terminal.app** onto the **Applications** shortcut.
-2. Open CinterForge Terminal from Applications.
-3. macOS may ask for permission to open a downloaded application or access files.
-   Review these requests in the normal macOS interface.
-
-CinterForge DevTools are optional and are installed separately from the app.
-For information and support, visit https://www.cinterforge.com/.
-"""
 
 
 def _require_mac() -> None:
@@ -113,7 +111,9 @@ def mounted_dmg(dmg: Path, builds: Path):
                 _run(['/usr/bin/hdiutil', 'detach', str(mount)])
 
 
-def verify_dmg(dmg: Path, builds: Path, *, app_name: str, public: bool = False) -> None:
+def verify_dmg(dmg: Path, builds: Path, *, app_name: str, public: bool = False,
+               expected_readme: bytes | None = None,
+               expected_background: bytes | None = None) -> None:
     """Verify actual mounted contents; for public DMGs also verify Apple ticket."""
     _require_mac()
     _run(['/usr/bin/hdiutil', 'verify', str(dmg)])
@@ -129,6 +129,15 @@ def verify_dmg(dmg: Path, builds: Path, *, app_name: str, public: bool = False) 
         visible = {p.name for p in volume.iterdir() if not p.name.startswith('.')}
         if visible != {app_name, 'Applications', 'README.md'}:
             raise RuntimeError('DMG contains unexpected visible top-level payloads')
+        if expected_readme is not None and readme.read_bytes() != expected_readme:
+            raise RuntimeError('Compressed DMG contains a stale or altered installer README')
+        if expected_background is not None:
+            background = volume / '.background/DMGBackground.png'
+            if not background.is_file() or background.read_bytes() != expected_background:
+                raise RuntimeError('Compressed DMG missing the authored background')
+            finder_layout = volume / '.DS_Store'
+            if not finder_layout.is_file() or finder_layout.stat().st_size == 0:
+                raise RuntimeError('Compressed DMG is missing its Finder icon layout')
         if public:
             _run(['xcrun', 'stapler', 'validate', str(app)])
             _run(['/usr/sbin/spctl', '--assess', '--type', 'execute', '--verbose=4', str(app)])
@@ -155,14 +164,60 @@ def _notarize_dmg(dmg: Path, profile: str) -> None:
     _run(['xcrun', 'stapler', 'staple', str(dmg)])
 
 
+def _style_editable_dmg(editable: Path, root: Path, *,
+                        volume_name: str, app_name: str,
+                        expected_readme: bytes, expected_background: bytes) -> None:
+    """Use Finder's own .DS_Store format; no new build dependency or VM."""
+    mount = root / 'EditableMount'
+    mount.mkdir()
+    # The Finder layout is authored and reviewed as an installer resource.
+    # Publish executes that file directly; it must not generate AppleScript.
+    script = DMG_LAYOUT_SCRIPT_PATH
+    if not script.is_file() or script.is_symlink():
+        raise RuntimeError('DMG Publish requires checked-in installer/mac_dmg.applescript')
+    attached = False
+    try:
+        _run(['/usr/bin/hdiutil', 'attach', '-nobrowse', '-noautoopen',
+              '-mountpoint', str(mount), str(editable)])
+        attached = True
+        print('[MAC DMG] Applying 768x768 Finder artwork and icon layout', flush=True)
+        _run(['/usr/bin/osascript', str(script), volume_name, app_name])
+        # A successful AppleScript exit alone does not prove that Finder saved
+        # the presentation. Do not silently publish an unstyled image.
+        metadata = mount / '.DS_Store'
+        if not metadata.is_file() or metadata.stat().st_size == 0:
+            raise RuntimeError('Finder did not write the DMG icon-view .DS_Store')
+        background = mount / '.background/DMGBackground.png'
+        readme = mount / 'README.md'
+        if not background.is_file() or background.read_bytes() != expected_background:
+            raise RuntimeError('DMG background differs from authored installer artwork')
+        if not readme.is_file() or readme.read_bytes() != expected_readme:
+            raise RuntimeError('DMG README differs from authored installer README.md')
+    finally:
+        if attached:
+            _run(['/usr/bin/hdiutil', 'detach', str(mount)])
+
+
 def create_dmg(app: Path, output: Path, builds: Path, *,
-               volume_name: str, readme: str = INSTALL_README,
+               volume_name: str, readme: str | None = None,
                public: bool = False, notary_profile: str = '') -> dict:
-    """Create app + Applications shortcut + README, optionally notarize DMG."""
+    """Publish-only: build a styled, verified, optionally notarized DMG."""
     _require_mac()
     _validate_app(app)
     if not output.is_relative_to(builds) or output.suffix.lower() != '.dmg':
         raise RuntimeError('Publish DMG must be generated under canonical Builds')
+    if (not INSTALL_README_PATH.is_file() or INSTALL_README_PATH.is_symlink()
+            or not DMG_BACKGROUND_PATH.is_file() or DMG_BACKGROUND_PATH.is_symlink()
+            or not DMG_LAYOUT_SCRIPT_PATH.is_file() or DMG_LAYOUT_SCRIPT_PATH.is_symlink()):
+        raise RuntimeError('DMG Publish requires installer/README.md, '
+                           'installer/DMGBackground.png and installer/mac_dmg.applescript')
+    # Use the real README from disk, not an inline generated template. Keep the
+    # existing explicit readme override for callers that use it.
+    readme_bytes = (INSTALL_README_PATH.read_bytes() if readme is None else
+                    readme.encode('utf-8'))
+    background_bytes = DMG_BACKGROUND_PATH.read_bytes()
+    if not background_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+        raise RuntimeError('Installer DMGBackground.png is not a PNG image')
     output.parent.mkdir(parents=True, exist_ok=True)
     scratch = builds / 'Intermediates/CinterForgeTerminal/DMG'
     scratch.mkdir(parents=True, exist_ok=True)
@@ -172,13 +227,26 @@ def create_dmg(app: Path, output: Path, builds: Path, *,
         content.mkdir()
         shutil.copytree(app, content / app.name, symlinks=True)
         (content / 'Applications').symlink_to('/Applications', target_is_directory=True)
-        (content / 'README.md').write_text(readme, encoding='utf-8')
+        (content / 'README.md').write_bytes(readme_bytes)
+        background_dir = content / '.background'
+        background_dir.mkdir()
+        (background_dir / 'DMGBackground.png').write_bytes(background_bytes)
+
+        editable = root / 'Editable.dmg'
         candidate = root / 'Package.dmg'
-        _run(['/usr/bin/hdiutil', 'create', '-ov', '-format', 'UDZO', '-fs', 'HFS+',
-              '-volname', volume_name, '-srcfolder', str(content), str(candidate)])
+        print('[MAC DMG] Creating writable HFS+ layout source', flush=True)
+        _run(['/usr/bin/hdiutil', 'create', '-ov', '-format', 'UDRW', '-fs', 'HFS+',
+              '-volname', volume_name, '-srcfolder', str(content), str(editable)])
+        _style_editable_dmg(editable, root, volume_name=volume_name,
+                            app_name=app.name, expected_readme=readme_bytes,
+                            expected_background=background_bytes)
+        print('[MAC DMG] Compressing Finder-customized image', flush=True)
+        _run(['/usr/bin/hdiutil', 'convert', str(editable), '-format', 'UDZO',
+              '-o', str(candidate)])
         if public:
             _notarize_dmg(candidate, notary_profile)
-        verify_dmg(candidate, builds, app_name=app.name, public=public)
+        verify_dmg(candidate, builds, app_name=app.name, public=public,
+                   expected_readme=readme_bytes, expected_background=background_bytes)
         # Only promote an independently verified complete image.
         candidate.replace(output)
     return {'filename': output.name, 'sha256': _sha(output),

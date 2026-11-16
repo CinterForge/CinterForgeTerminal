@@ -48,9 +48,9 @@ WIXL_PACKAGE_VERSION = '0.106+repack-1'  # Debian Trixie package provided by msi
 UPGRADE_CODE = '506BDCC3-BB2B-5035-BC0D-FD99F49F3CB3'
 GUID_NAMESPACE = uuid.UUID('e67096da-e7c1-4c25-9a96-68b6eea50ff1')
 NS = 'http://schemas.microsoft.com/wix/2006/wi'
-SCHEMA = 'cinterforge.terminal.windows-msi-preflight.v5'
+SCHEMA = 'cinterforge.terminal.windows-msi-preflight.v6'
 # Increment when authored MSI structure or compiler invocation changes.
-PUBLISH_RECIPE = 'cinterforge.terminal.windows-msi-publish.v2'
+PUBLISH_RECIPE = 'cinterforge.terminal.windows-msi-publish.v5-notepad-type50'
 
 
 def _builds(builds: Path) -> Path:
@@ -214,8 +214,11 @@ def _test_mac_native(builds: Path) -> dict | None:
         exe = template_work / 'CinterForge Terminal.exe'
         cmd.write_text('@echo off\r\necho CinterForge MSI template preflight\r\n', encoding='utf-8')
         exe.write_bytes(b'CinterForge MSI template fixture (not executable)')
+        template_readme = template_work / 'README.md'
+        shutil.copyfile(_authored_readme(), template_readme)
         template = _compile(builds, tools, work=template_work,
-                            sources={'Terminal.cmd': cmd, 'CinterForge Terminal.exe': exe},
+                            sources={'Terminal.cmd': cmd, 'CinterForge Terminal.exe': exe,
+                                     'README.md': template_readme},
                             release='2026.11.0', smoke=False)
         template_checks = _verify_msi(tools, template, cwd=template_work)
         report.update(status='passed', smoke_sha256=smoke_checks['sha256'],
@@ -238,7 +241,10 @@ def _run(cross, name: str, command: list[str], *, cwd: Path, timeout: int = 600)
     with progress_step(name, prefix='[WINDOWS MSI]'):
         result = cross.execute(command, cwd=cwd, timeout=timeout)
         if result.returncode:
-            raise RuntimeError(f'Windows MSI {name} failed ({result.returncode}): {(result.stdout or "")[-4000:]}')
+            diagnostics = '\n'.join(part for part in
+                                    (getattr(result, 'stdout', '') or '',
+                                     getattr(result, 'stderr', '') or '') if part)
+            raise RuntimeError(f'Windows MSI {name} failed ({result.returncode}): {diagnostics[-4000:]}')
     return result.stdout or ''
 
 
@@ -286,8 +292,49 @@ def _product_code(release: str, *, smoke: bool = False) -> str:
     return str(uuid.uuid5(GUID_NAMESPACE, namespace_key)).upper()
 
 
-def _document(source_files: dict[str, Path], *, release: str, smoke: bool = False) -> bytes:
-    """Build a minimal wixl-compatible MSI with stable component/upgrade IDs."""
+def _installer_artwork() -> dict[str, Path]:
+    """Use existing authored branding; Publish never downloads/generates it."""
+    folder = Path(__file__).resolve().parents[2] / 'app/build/resources/installer'
+    files = {'icon': folder / 'WindowsInstaller.ico',
+             'banner': folder / 'WindowsBanner.bmp',
+             'dialog': folder / 'WindowsDialog.bmp'}
+    for kind, path in files.items():
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError('Missing authored Windows MSI ' + kind + ' artwork: ' + str(path))
+    return files
+
+
+def _authored_ui() -> Path:
+    """Checked-in WiX 3 UI source; never synthesize dialog XML at runtime."""
+    source = (Path(__file__).resolve().parents[2] / 'app/build/resources/installer/WindowsInstallerUI.wxs')
+    if not source.is_file() or source.is_symlink():
+        raise RuntimeError('Missing authored Windows installer UI: ' + str(source))
+    return source
+
+
+def _authored_license() -> Path:
+    """Use the checked-in installer license; never generate it during Build."""
+    source = _authored_ui().parent / 'License.rtf'
+    if not source.is_file() or source.is_symlink():
+        raise RuntimeError('Missing authored Windows installer license: ' + str(source))
+    return source
+
+
+def _authored_readme() -> Path:
+    """The installer README is owned by the repository, not generated in code."""
+    source = Path(__file__).resolve().parents[2] / 'app/build/resources/installer/README.md'
+    if not source.is_file() or source.is_symlink():
+        raise RuntimeError('Missing authored installer README: ' + str(source))
+    return source
+
+
+def _windows_readme() -> str:
+    return _authored_readme().read_text(encoding='utf-8')
+
+
+def _document(source_files: dict[str, Path], *, release: str, smoke: bool = False,
+              artwork: dict[str, Path] | None = None) -> bytes:
+    """Build a wixl-compatible MSI with stable component/upgrade IDs."""
     ET.register_namespace('', NS)
     root = _wix('Wix')
     product = _child(root, 'Product', Id=_product_code(release, smoke=smoke),
@@ -305,8 +352,33 @@ def _document(source_files: dict[str, Path], *, release: str, smoke: bool = Fals
     if not smoke:
         # Let Windows Installer create its own Add/Remove Programs registration.
         # ARPNOREMOVE and ARPSYSTEMCOMPONENT must never be authored.
-        _child(product, 'Property', Id='ARPNOMODIFY', Value='1')
+        # WixUI_Minimal already authors ARPNOMODIFY=1. Duplicating that
+        # Property creates a duplicate MSI primary key (libmsi_query_execute).
         _child(product, 'Property', Id='ARPURLINFOABOUT', Value='https://www.cinterforge.com/')
+        if artwork is None:
+            raise RuntimeError('Windows MSI requires authored installer artwork')
+        _child(product, 'Icon', Id='CinterForgeTerminal.ico', SourceFile=str(artwork['icon']))
+        _child(product, 'Property', Id='ARPPRODUCTICON', Value='CinterForgeTerminal.ico')
+        # Use stock wizard for existing install flow and one authored branded
+        # introduction from WindowsInstallerUI.wxs. No WixVariable support needed.
+        _child(product, 'UIRef', Id='WixUI_Minimal')
+        _child(product, 'UIRef', Id='CinterForgeInstallerUI')
+        # The Finish-page checkbox launches the installed README only when the
+        # user completes an interactive installation, never on silent install
+        # or uninstall. Notepad is part of Windows; no bundled tool needed.
+        _child(product, 'Property', Id='WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT',
+               Value='View installation README')
+        _child(product, 'Property', Id='WIXUI_EXITDIALOGOPTIONALCHECKBOX', Value='1')
+        readme_id = 'F' + hashlib.sha1(b'readme.md').hexdigest()[:28]
+        # wixl 0.106 supports MSI EXE_PROPERTY (type 50), not the newer
+        # Directory/ExeCommand (type 34) WiX syntax. Set the *full* Notepad
+        # path as a type 51 action on the Finish button in checked-in UI.
+        _child(product, 'CustomAction', Id='CinterForgeSetNotepadPath',
+               Property='CINTERFORGE_NOTEPAD', Value='[SystemFolder]notepad.exe')
+        _child(product, 'CustomAction', Id='CinterForgeOpenReadme',
+               Property='CINTERFORGE_NOTEPAD',
+               ExeCommand='"[#{0}]"'.format(readme_id),
+               Execute='immediate', Impersonate='yes', Return='asyncNoWait')
         # wixl 0.106 supports the underlying MSI Type 51 CustomAction. Its
         # <SetProperty> WiX sugar is not consistently implemented by wixl.
         # Resolve INSTALLDIR only after CostFinalize, never at authoring time.
@@ -316,6 +388,8 @@ def _document(source_files: dict[str, Path], *, release: str, smoke: bool = Fals
         _child(sequence, 'Custom', Action='SetARPINSTALLLOCATION',
                After='CostFinalize')
     target = _child(product, 'Directory', Id='TARGETDIR', Name='SourceDir')
+    if not smoke:
+        _child(target, 'Directory', Id='SystemFolder')  # Notepad Finish action
     program = _child(target, 'Directory', Id='ProgramFiles64Folder')
     if not smoke:
         # Standard per-machine Start-menu folder; Wixl generates both create
@@ -348,6 +422,7 @@ def _document(source_files: dict[str, Path], *, release: str, smoke: bool = Fals
             _child(file_node, 'Shortcut', Id='CinterForgeTerminalStartMenu',
                    Directory='ProgramMenuFolder', Name='CinterForge Terminal',
                    Description='CinterForge Terminal', Advertise='yes',
+                   Icon='CinterForgeTerminal.ico', IconIndex='0',
                    WorkingDirectory='INSTALLDIR')
         _child(feature, 'ComponentRef', Id=identifier)
     return ET.tostring(root, encoding='utf-8', xml_declaration=True)
@@ -359,10 +434,21 @@ def _compile(builds: Path, cross, *, work: Path, sources: dict[str, Path],
     # wixl is a native Linux executable: SourceFile attributes use guest POSIX
     # paths. Wine Z: paths and 32-bit Windows utilities are never involved.
     guest_sources = {name: Path(cross.path(source)) for name, source in sources.items()}
-    xml = _document(guest_sources, release=release, smoke=smoke)
+    artwork = None if smoke else {kind: Path(cross.path(path))
+                                     for kind, path in _installer_artwork().items()}
+    xml = _document(guest_sources, release=release, smoke=smoke, artwork=artwork)
     wxs = work / 'Installer.wxs'
     output = work / ('InstallerSmoke.msi' if smoke else 'CinterForgeTerminal-win.msi')
     wxs.write_bytes(xml)
+    # Variable file inventory lives under Builds as before; the installer UI,
+    # dialog controls, and image sources are authored in the repository.
+    authored_ui = None if smoke else _authored_ui()
+    # wixl 0.106 only loads WixUI_Minimal and its stock dialogs when the
+    # pre-provisioned UI extension is enabled. No downloads or tool setup.
+    ui_args = ([] if smoke else ['--ext', 'ui', '--includedir',
+               cross.path(_authored_license().parent), '--define',
+               'CinterArtwork=' + cross.path(_authored_ui().parent),
+               cross.path(authored_ui)])
     output.unlink(missing_ok=True)
     if native_scratch and cross.provider != 'host':
         # wixl writes an OLE/MSI database. Intermittent libgsf corruption was
@@ -374,19 +460,20 @@ def _compile(builds: Path, cross, *, work: Path, sources: dict[str, Path],
             'set -eu\n'
             'scratch=$(mktemp -d /tmp/cinterforge-msi.XXXXXXXX)\n'
             "trap 'rm -rf \"$scratch\"' EXIT\n"
-            'wixl --arch x64 --output "$scratch/installer.msi" "$1"\n'
+            'input=$1; output=$2; shift 2\n'
+            'wixl --arch x64 --output "$scratch/installer.msi" "$input" "$@"\n'
             'msiinfo tables "$scratch/installer.msi" >/dev/null\n'
-            'cp "$scratch/installer.msi" "$2"\n'
-            'sync "$2"\n'
-            'cmp "$scratch/installer.msi" "$2"\n'
+            'cp "$scratch/installer.msi" "$output"\n'
+            'sync "$output"\n'
+            'cmp "$scratch/installer.msi" "$output"\n'
         )
         _run(cross, 'wixl native x64 MSI compiler',
-             ['sh', '-c', script, 'cinterforge-msi', cross.path(wxs), cross.path(output)],
+             ['sh', '-c', script, 'cinterforge-msi', cross.path(wxs), cross.path(output), *ui_args],
              cwd=work, timeout=1200)
     else:
         # Test's tiny smoke files retain their existing compiler path.
         _run(cross, 'wixl native x64 MSI compiler',
-             ['wixl', '--arch', 'x64', '--output', cross.path(output), cross.path(wxs)],
+             ['wixl', '--arch', 'x64', '--output', cross.path(output), cross.path(wxs), *ui_args],
              cwd=work, timeout=1200)
     if not output.is_file() or output.is_symlink() or output.stat().st_size < 1024:
         raise RuntimeError('wixl completed without writing a nonempty MSI: ' + str(output))
@@ -448,6 +535,17 @@ def _verify_registration(cross, msi: Path, *, cwd: Path, smoke: bool) -> dict:
             raise RuntimeError('MSI missing Add/Remove Programs publisher or display name')
         if props.get('ARPNOMODIFY') != '1' or not props.get('ARPURLINFOABOUT'):
             raise RuntimeError('MSI missing explicit Add/Remove Programs metadata')
+        if props.get('ARPPRODUCTICON') != 'CinterForgeTerminal.ico':
+            raise RuntimeError('MSI missing CinterForge installed-program icon')
+        # The MSI File table column is FileName (not Name).  wixl may
+        # encode it as SHORTNAM.MD|README.md; verify both the authored File
+        # identifier and the installed long filename, not the source path.
+        readme_id = 'F' + hashlib.sha1(b'readme.md').hexdigest()[:28]
+        readme_files = [row for row in _msi_table(cross, msi, cwd=cwd, name='File')
+                        if row.get('File') == readme_id and
+                        row.get('FileName', '').split('|')[-1] == 'README.md']
+        if len(readme_files) != 1:
+            raise RuntimeError('MSI missing the shared Mac/Windows README')
         custom_actions = _msi_table(cross, msi, cwd=cwd, name='CustomAction')
         location_actions = [row for row in custom_actions
                             if row.get('Action') == 'SetARPINSTALLLOCATION']
@@ -479,6 +577,44 @@ def _verify_registration(cross, msi: Path, *, cwd: Path, smoke: bool) -> dict:
             raise RuntimeError('MSI Start-menu shortcut is not MSI-owned')
         if {'CreateShortcuts', 'RemoveShortcuts'} - actions:
             raise RuntimeError('MSI has no Start-menu shortcut removal action')
+        # README launch is two MSI-supported actions: first assign the full
+        # SystemFolder Notepad path (type 51), then run it (type 50). No
+        # unsupported wixl Directory custom-action attribute or missing Source.
+        set_notepad = [row for row in custom_actions
+                       if row.get('Action') == 'CinterForgeSetNotepadPath']
+        run_readme = [row for row in custom_actions
+                      if row.get('Action') == 'CinterForgeOpenReadme']
+        if (len(set_notepad) != 1 or
+                set_notepad[0].get('Type') != '51' or
+                set_notepad[0].get('Source') != 'CINTERFORGE_NOTEPAD' or
+                set_notepad[0].get('Target') != '[SystemFolder]notepad.exe'):
+            raise RuntimeError('MSI Finish-page Notepad path is not a valid type 51 action')
+        if (len(run_readme) != 1 or
+                (int(run_readme[0].get('Type', '-1')) & 0x3f) != 50 or
+                run_readme[0].get('Source') != 'CINTERFORGE_NOTEPAD' or
+                run_readme[0].get('Target') != '"[#{0}]"'.format(readme_id)):
+            raise RuntimeError('MSI Finish-page README launch is not a valid type 50 action')
+        ui_events = _msi_table(cross, msi, cwd=cwd, name='ControlEvent')
+        if not any(row.get('Dialog') == 'CinterForgeWelcome'
+                   for row in _msi_table(cross, msi, cwd=cwd, name='Dialog')):
+            raise RuntimeError('MSI missing repository-authored welcome dialog')
+        # Both events must be on Finish and in this order. Their conditions
+        # prevent README launch on uninstall, repair and silent install.
+        finish_events = [row for row in ui_events
+                         if row.get('Dialog_') == 'ExitDialog' and
+                         row.get('Control_') == 'Finish' and
+                         row.get('Event') == 'DoAction' and
+                         row.get('Argument') in ('CinterForgeSetNotepadPath',
+                                                'CinterForgeOpenReadme')]
+        if (len(finish_events) != 2 or
+                {row['Argument'] for row in finish_events} !=
+                    {'CinterForgeSetNotepadPath', 'CinterForgeOpenReadme'} or
+                not all('NOT Installed' in row.get('Condition', '') for row in finish_events) or
+                (int(next(row['Ordering'] for row in finish_events
+                          if row['Argument'] == 'CinterForgeSetNotepadPath')) >=
+                 int(next(row['Ordering'] for row in finish_events
+                          if row['Argument'] == 'CinterForgeOpenReadme')))):
+            raise RuntimeError('MSI Finish must resolve Notepad before opening README')
     return {'product_code': props['ProductCode'], 'allusers': props['ALLUSERS'],
             'default_directory': 'ProgramFiles64Folder/CinterForge/CinterForge Terminal',
             'registration_actions': sorted(mandatory),
@@ -497,7 +633,7 @@ def _verify_msi(cross, msi: Path, *, cwd: Path, smoke_file: str | None = None,
     required = {'Property', 'File', 'Component', 'Feature', 'Upgrade', 'Media', 'Directory',
                 'InstallExecuteSequence'}
     if not smoke:
-        required.update({'Shortcut', 'CustomAction'})
+        required.update({'Shortcut', 'CustomAction', 'Icon', 'Dialog', 'Control', 'ControlEvent'})
     missing = required - set(tables.split())
     if missing:
         raise RuntimeError('MSI missing Windows Installer tables: ' + str(sorted(missing)))
@@ -576,9 +712,12 @@ def test(builds: Path) -> dict:
         sample_cmd.write_text('@echo off\r\necho CinterForge MSI template preflight\r\n',
                               encoding='utf-8')
         sample_exe.write_bytes(b'CinterForge MSI template fixture (not executable)')
+        template_readme = template_work / 'README.md'
+        shutil.copyfile(_authored_readme(), template_readme)
         template = _compile(builds, cross, work=template_work,
                             sources={'Terminal.cmd': sample_cmd,
-                                     'CinterForge Terminal.exe': sample_exe},
+                                     'CinterForge Terminal.exe': sample_exe,
+                                     'README.md': template_readme},
                             release='2026.11.0', smoke=False)
         template_checks = _verify_msi(cross, template, cwd=template_work)
         # Native Windows ARP visibility/uninstall cannot be inferred from Wine.
@@ -652,6 +791,13 @@ def _input_fingerprint(release: str, entries: dict[str, dict]) -> str:
         if not name.startswith(prefix):
             raise RuntimeError('Unexpected Windows Build member: ' + name)
         payload[name] = detail['sha256']
+    # Source branding and installer README are Publish inputs too: changing
+    # artwork or instructions must invalidate the cached distribution MSI.
+    payload['(install-readme)'] = hashlib.sha256(_windows_readme().encode('utf-8')).hexdigest()
+    payload['(installer-ui.wxs)'] = _sha(_authored_ui())
+    payload['(installer-license.rtf)'] = _sha(_authored_license())
+    for kind, path in sorted(_installer_artwork().items()):
+        payload['(msi-' + kind + ')'] = _sha(path)
     record = {'recipe': PUBLISH_RECIPE, 'release': release,
               'wixl': '0.106', 'files': payload}
     return hashlib.sha256(json.dumps(record, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
@@ -713,6 +859,9 @@ def publish(builds: Path, *, release: str, entries: dict[str, dict]) -> dict:
             raise RuntimeError('Windows Build receipt lacks launchers required for MSI')
         if any(name.startswith('DevTools/') for name in sources):
             raise RuntimeError('Windows MSI accidentally includes the optional DevTools bundle')
+        readme = work / 'README.md'
+        shutil.copyfile(_authored_readme(), readme)
+        sources['README.md'] = readme
         fingerprint = _input_fingerprint(release, entries)
         cached = _reuse_installer(builds, release=release, fingerprint=fingerprint)
         if cached is not None:

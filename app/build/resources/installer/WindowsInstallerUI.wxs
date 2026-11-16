@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+CinterForge Terminal Windows installer UI.
+Owned by app/build/resources/installer. Edit this file to change dialog layout,
+text, and branding. Setup/Build/Stage do not generate this source file.
+The existing MSI producer only supplies variable Windows file components.
+Artwork is already authored in this directory; CinterArtwork is passed as a
+wixl define-variable option so both native and Docker toolchains locate the same files.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <UI Id="CinterForgeInstallerUI">
+      <Binary Id="CinterForgeBanner" SourceFile="$(var.CinterArtwork)/WindowsBanner.bmp" />
+      <Binary Id="CinterForgeDialog" SourceFile="$(var.CinterArtwork)/WindowsDialog.bmp" />
+
+      <!-- First, branded introduction; then the existing WixUI_Minimal wizard.
+           This does not replace the stock EULA/progress/finish screens. -->
+      <Dialog Id="CinterForgeWelcome" Width="370" Height="270"
+              Title="[ProductName] Setup">
+        <Control Id="Artwork" Type="Bitmap" X="0" Y="0" Width="370"
+                 Height="234" Text="CinterForgeDialog" />
+        <Control Id="Banner" Type="Bitmap" X="0" Y="0" Width="370"
+                 Height="44" Text="CinterForgeBanner" />
+        <Control Id="Heading" Type="Text" X="142" Y="78" Width="212"
+                 Height="26" Transparent="yes"
+                 Text="CinterForge Terminal" />
+        <Control Id="Message" Type="Text" X="142" Y="116" Width="210"
+                 Height="65" Transparent="yes"
+                 Text="Install CinterForge Terminal. Click Next to continue." />
+        <Control Id="Next" Type="PushButton" X="236" Y="243"
+                 Width="56" Height="17" Default="yes" Text="Next" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243"
+                 Width="56" Height="17" Cancel="yes" Text="Cancel" />
+      </Dialog>
+      <Publish Dialog="CinterForgeWelcome" Control="Next"
+               Event="NewDialog" Value="WelcomeEulaDlg">1</Publish>
+      <Publish Dialog="CinterForgeWelcome" Control="Cancel"
+               Event="SpawnDialog" Value="CancelDlg">1</Publish>
+      <!-- The Finish action is authored here, not as a <UI> inside <Product>:
+           wixl 0.106 does not permit Product/UI. Only interactive, checked,
+           first-time installation launches the installed README. -->
+      <!-- wixl supports Type 51 property-setting and Type 50 executable
+           actions. Set Notepad's full path first; do not use Directory=. -->
+      <Publish Dialog="ExitDialog" Control="Finish"
+               Event="DoAction" Value="CinterForgeSetNotepadPath" Order="1"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = &quot;1&quot; AND NOT Installed" />
+      <Publish Dialog="ExitDialog" Control="Finish"
+               Event="DoAction" Value="CinterForgeOpenReadme" Order="2"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = &quot;1&quot; AND NOT Installed" />
+      <InstallUISequence>
+        <Show Dialog="CinterForgeWelcome" Before="WelcomeEulaDlg">NOT Installed</Show>
+      </InstallUISequence>
+    </UI>
+  </Fragment>
+</Wix>
