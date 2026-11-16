@@ -9,20 +9,7 @@
 [ ] = Known issue or not started 
 ```
 
-## 0. CRITICAL BLOCKERS
-
-- [X] MAC-BUILDER missing tools - setup is not installing all needed tools
-- [ ] Installed Mac build does not launch.  No idea how to debug this.
-- [X] Installed Windows build does not register in Add/Remove Programs
-- [X] Installed Windows build does not add to start menu
-- [X] Installed Windows build installer defaults to the Downloads folder
-
-## 1. CodeOSS issues
-- [X] Cut is Broken - The whole Edit menu is messed up.  We are damaging the CodeOSS Edit menu
-- [X] CodeOSS MD/HTML/Image/etc Preview is broken - as many media types to preview as is easy
-- [X] Cinter button not working
-
-## 2. Infinite-Mac — current timing and first-launch bug
+## 1. Infinite-Mac — current timing and first-launch bug
 - [x] Current delay values were identified and reported.
 - [x] Move configuration values into a documented section near the top of `terminal.js` 
 - [ ] Add diagnostic visibility to the first-launch bug
@@ -30,14 +17,14 @@
 - [ ] Repair the cold-start problem without introducing arbitrary long waits.
 - [ ] Test clean first launch separately from subsequent warm launches.
 
-## 3. Windows Installer UI/UX
+## 2. Windows Installer UI/UX
 - [ ] Icon
 - [ ] Start Menu Icon
 - [ ] Installer Icon
 - [ ] Installer Dialog Image
 - [ ] Readme
 
-## 4. Testing
+## 3. Testing
 - [ ] Verify the packaged shell styles connect in the installed macOS application.
 - [ ] Verify the Server tab reports the exact runtime log and captures native startup failures.
 - [ ] Validate Mac Bash with a real native PTY.
