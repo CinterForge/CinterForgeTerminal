@@ -28,6 +28,7 @@
 #include <string>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <streambuf>
 #include <chrono>
@@ -217,6 +218,10 @@ namespace
         std::cerr << "[CinterForgeTerminal] Native launch log: " << logfile << '\n';
         const fs::path workerLog = runtimeFolder / ("python-worker-" + stamp + "-" +
                                        std::to_string(static_cast<long long>(getpid())) + ".log");
+        // Create before fork/exec, so even exec/permission failures have a
+        // real log file and the installed-app acceptance cannot print a ghost.
+        { std::ofstream create(workerLog, std::ios::app);
+          if (!create) throw std::runtime_error("Cannot create Python worker diagnostic log: " + workerLog.string()); }
         if (setenv("CINTER_PYTHON_WORKER_STDERR_LOG", workerLog.string().c_str(), 1))
             throw std::runtime_error("Cannot configure Python worker diagnostics");
         std::cerr << "[CinterForgeTerminal] Python worker stderr log: " << workerLog << '\n';
@@ -525,6 +530,19 @@ int main(int argc, char **argv)
     {
         std::cerr << "[CinterForgeTerminal] FAIL: " << e.what() << '\n';
 #ifdef __APPLE__
+        // Include the child's actual traceback/exec error in the native Test
+        // transcript; a consumer must not have to locate a second log file.
+        if (const char* path = std::getenv("CINTER_PYTHON_WORKER_STDERR_LOG")) {
+            std::ifstream workerLog(path, std::ios::binary | std::ios::ate);
+            if (workerLog) {
+                const auto size = workerLog.tellg();
+                if (size > 0) {
+                    workerLog.seekg(size > std::streampos(4096) ? size - std::streamoff(4096) : std::streampos(0));
+                    std::string tail((std::istreambuf_iterator<char>(workerLog)), std::istreambuf_iterator<char>());
+                    std::cerr << "[CinterForgeTerminal] Python worker stderr (last 4096 bytes):\n" << tail << '\n';
+                }
+            }
+        }
         // Finder/LaunchServices launches have no visible stderr. If runtime
         // discovery fails before beginNativeLogging(), the error otherwise
         // disappears entirely on a consumer Mac (without any Steam logs).

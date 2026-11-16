@@ -47,8 +47,10 @@ def main(argv=None) -> int:
         service_dir = str(Path(location).resolve().parent)
         if service_dir not in sys.path:
             sys.path.insert(0, service_dir)
+        send({'event': 'startup', 'phase': 'import-service'})
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        send({'event': 'startup', 'phase': 'service-imported'})
         handler = getattr(module, 'handle', None)
         if not callable(handler):
             raise ValueError(f'Service {location} must implement handle(method, params)')

@@ -175,9 +175,10 @@ def validate_codeoss_web(web: Path) -> None:
             missing_refs.append(value)
     if missing_refs:
         raise RuntimeError("Code - OSS static workbench references missing local resources: " + ", ".join(missing_refs[:20]))
-    # A cached Web product can pass the HTML audit while its built-in browser
-    # extension was pruned. Validate the on-disk entrypoints even on Setup's
-    # reuse path, not only when rebuilding Web in _stage_web().
+    # This validator is also Setup's cached-Web reuse gate. Require the same
+    # dynamically loaded browser libraries that a fresh producer stages; a
+    # successful HTML/extension audit alone does not mean CodeOSS can run.
+    _validate_required_browser_runtime(web)
     _validate_required_browser_extensions(web)
 
 
@@ -1801,6 +1802,26 @@ def _refresh_static_workbench(source: Path, web: Path) -> None:
         raise RuntimeError(f"Code - OSS staged workbench directory is missing: {staged_workbench.parent}")
     shutil.copy2(source_workbench, staged_workbench)
     _render_static_workbench(web)
+
+
+def _validate_required_browser_runtime(web: Path) -> None:
+    """Check producer-pinned runtime files even when Setup reuses cached Web.
+
+    The compiled workbench constructs these FileAccess URLs dynamically, so
+    neither the HTML references audit nor the built-in extension audit sees
+    missing files. The producer enforces the same files on a fresh Web stage.
+    """
+    required = (
+        'node_modules/vscode-textmate/release/main.js',
+        'node_modules/vscode-oniguruma/release/main.js',
+        'node_modules/vscode-oniguruma/release/onig.wasm',
+        'node_modules/@vscode/vscode-languagedetection/dist/lib/index.js',
+    )
+    missing = [name for name in required
+               if not (web / name).is_file() or (web / name).is_symlink()]
+    if missing:
+        raise RuntimeError('Code-OSS browser runtime dependency missing: ' +
+                           ', '.join(missing) + '; Setup must refresh CodeOSS Web')
 
 
 def _validate_required_browser_extensions(web: Path) -> None:

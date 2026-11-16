@@ -222,8 +222,11 @@ def _stage_complete_resources(builds: Path, app: Path) -> None:
     # Build uses the already-provisioned Code-OSS Web tree but must package
     # CURRENT authored extension source. Setup's verified upstream build cache
     # is not evidence that Terminal's own extension.js is unchanged.
-    from host.codeoss.producer import _stage_cinterforge_extension
+    from host.codeoss.producer import _stage_cinterforge_extension, validate_codeoss_web
     _stage_cinterforge_extension(payload / 'CodeOSS')
+    # A Build consumer must never repair Setup outputs. Reject absent browser
+    # tokenizer/extension files in the final app before codesign and Steam Stage.
+    validate_codeoss_web(payload / 'CodeOSS')
     embedded_host = payload / 'Python/Host/mac/arm64' / HOST_RELEASE
     embedded = embedded_host / 'webapp'
     receipt_path = embedded_host / 'manifest.json'

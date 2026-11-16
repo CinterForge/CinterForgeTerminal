@@ -150,17 +150,39 @@ namespace cinterforge {
                 const char *wineFlag = std::getenv("CINTER_WINE_GUEST");
                 wineGuest = wineFlag != nullptr && std::string(wineFlag) == "1";
 #endif
+                const auto workerBudget = std::chrono::seconds(wineGuest ? 90 : 45);
+                const auto httpBudget = std::chrono::seconds(wineGuest ? 60 : 45);
+                std::cerr << "[TERMINAL STARTUP] START Python worker/service import (budget="
+                          << workerBudget.count() << "s)\n";
+                // Only fixed startup phases are logged. General Python events
+                // can include session data and must never be dumped here.
+                host->onEvent([](const std::string& event) {
+                    if (event.find("\"event\": \"startup\"") != std::string::npos) {
+                        if (event.find("\"import-service\"") != std::string::npos)
+                            std::cerr << "[TERMINAL STARTUP] Python worker reached service import\n";
+                        if (event.find("\"service-imported\"") != std::string::npos)
+                            std::cerr << "[TERMINAL STARTUP] Python service import completed\n";
+                    }
+                });
                 try {
-                    host->start(config.python, config.worker, config.service,
-                                std::chrono::seconds(wineGuest ? 90 : 10));
+                    host->start(config.python, config.worker, config.service, workerBudget);
                 } catch (const std::exception &e) {
-                    if (wineGuest)
-                        throw std::runtime_error(std::string("Wine guest Python worker startup failed after a 90s budget: ") + e.what());
-                    throw;
+                    throw std::runtime_error("Python worker/service readiness failed (budget=" +
+                        std::to_string(workerBudget.count()) + "s): " + e.what());
                 }
+                std::cerr << "[TERMINAL STARTUP] PASS Python worker ready\n";
                 hostRunning = true;
-                const std::string reply = host->call("start", "{\"builds\":\"" + CinterForgeApplicationPaths::jsonEscape(config.builds) + "\"}",
-                                                    std::chrono::seconds(wineGuest ? 60 : 15));
+                std::cerr << "[TERMINAL STARTUP] START Python HTTP service (budget="
+                          << httpBudget.count() << "s)\n";
+                std::string reply;
+                try {
+                    reply = host->call("start", "{\"builds\":\"" +
+                        CinterForgeApplicationPaths::jsonEscape(config.builds) + "\"}", httpBudget);
+                } catch (const std::exception &e) {
+                    throw std::runtime_error("Python HTTP service readiness failed (budget=" +
+                        std::to_string(httpBudget.count()) + "s): " + e.what());
+                }
+                std::cerr << "[TERMINAL STARTUP] PASS Python HTTP service replied\n";
                 url = CinterForgePythonServiceHandshake::readyUrl(reply);
                 navigationUrl = CinterForgePythonServiceHandshake::nativeBootstrapUrl(reply, url);
                 runtimeOwner = reply.find("\"attached\": true") == std::string::npos &&
