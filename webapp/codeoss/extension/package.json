@@ -41,7 +41,8 @@
     "onCommand:cinterforge.newServerLogTerminal",
     "onCommand:cinterforge.openMacLauncher",
     "onCommand:cinterforge.openWindowsLauncher",
-    "onCommand:cinterforge.openLinuxLauncher"
+    "onCommand:cinterforge.openLinuxLauncher",
+    "onCommand:cinterforge.previewHtml"
   ],
   "contributes": {
     "commands": [
@@ -120,6 +121,10 @@
       {
         "command": "cinterforge.openLinuxLauncher",
         "title": "Linux Launcher"
+      },
+      {
+        "command": "cinterforge.previewHtml",
+        "title": "CinterForge: Preview HTML to Side"
       }
     ],
     "configuration": {
@@ -216,6 +221,11 @@
           "command": "cinterforge.revealInHostOS",
           "when": "resourceScheme == cinterforge || resourceScheme == cinterforge-host",
           "group": "navigation@30"
+        },
+        {
+          "command": "cinterforge.previewHtml",
+          "when": "resourceLangId == html",
+          "group": "navigation@35"
         }
       ],
       "openEditors/context": [
@@ -223,6 +233,13 @@
           "command": "cinterforge.revealInHostOS",
           "when": "resourceScheme == cinterforge || resourceScheme == cinterforge-host",
           "group": "navigation@30"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "cinterforge.previewHtml",
+          "when": "resourceLangId == html",
+          "group": "navigation@35"
         }
       ]
     }

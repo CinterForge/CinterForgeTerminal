@@ -322,6 +322,48 @@ def _mac_install(builds: Path, root: Path, files: dict, *, target: str) -> int:
         shutil.rmtree(candidate, ignore_errors=True)
 
 
+def _verify_staged_devtools_for_native_app(steam: Path, release: str) -> None:
+    """Stage-time cross-product verification; no VM boot or provisioning.
+
+    A signed installed app must resolve the *same* DevTools directory that
+    Stage just installed. Checking independent target receipts alone missed a
+    different hierarchy and let `all all` pass while the app used stale tools.
+    """
+    up = _up()
+    sdk_release = up._steam_release_path(steam, 'devtools', release)
+    sdk = sdk_release / 'DevTools/Builds/CinterForgeTerminal/Toolchains'
+    required = (
+        'mac/env/bin/colima', 'mac/env/bin/docker',
+        'mac/lima/bin/limactl', 'mac/qemu/bin/qemu-system-x86_64',
+        'mac/qemu/cinter-qemu-receipt.json',
+        'Windows/MSYS2/usr/bin/bash.exe',
+        'Windows/MSYS2/usr/bin/msys-2.0.dll',
+        'WindowsCross/active-image.json',
+    )
+    for name in required:
+        path = sdk / name
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError('Stage installed DevTools unusable by Mac app: missing ' + str(path))
+    selection = json.loads((sdk / 'WindowsCross/active-image.json').read_text(encoding='utf-8'))
+    if (selection.get('schema') != 'cinterforge.terminal.active-guest-image.v1' or
+            selection.get('wine_version') != 'wine-11.15' or
+            not re.fullmatch(r'[a-f0-9]{64}', str(selection.get('dockerfile_sha256', ''))) or
+            not re.fullmatch(r'[a-f0-9]{64}', str(selection.get('archive_sha256', '')))):
+        raise RuntimeError('Staged DevTools active guest image receipt is invalid')
+    prefix = selection['dockerfile_sha256'][:16]
+    manifest = sdk / 'WindowsCross' / (prefix + '.json')
+    archive = sdk / 'WindowsCross' / (prefix + '.tar')
+    if (manifest.is_symlink() or archive.is_symlink() or
+            not manifest.is_file() or not archive.is_file()):
+        raise RuntimeError('Staged DevTools selected Windows/Linux OCI image is missing')
+    pinned = json.loads(manifest.read_text(encoding='utf-8'))
+    if any(selection.get(key) != pinned.get(key) for key in
+           ('dockerfile_sha256', 'image', 'archive_sha256', 'wine_version')):
+        raise RuntimeError('Staged DevTools active image does not match its pinned receipt')
+    print('[TERMINAL STAGE] PASS: release Mac app can discover its staged '
+          f'DevTools closure and selected Linux/Windows OCI image at {sdk_release}', flush=True)
+
+
 def stage_four(builds: Path, *, release: str | None = None,
                steamapps: Path | None = None, targets: tuple[str, ...] | None = None) -> Path:
     """Install directly from Build inventory. Absolutely no ZIP reads/writes."""
@@ -385,6 +427,11 @@ def stage_four(builds: Path, *, release: str | None = None,
                                      'target': target, 'build_fingerprint': info['fingerprint'],
                                      'installed_state': state})
         print(f'[TERMINAL STAGE] {target}: {changed} refreshed files directly from Builds', flush=True)
+    # Check the cross-target contract after the SDK target is installed. Keep
+    # Stage responsible only for placement/integrity; real guest boot belongs
+    # to Test, and no SDK files are copied to a second Builds location.
+    if 'mac' in selected and 'devtools' in selected:
+        _verify_staged_devtools_for_native_app(steam, release)
     return steam / 'common/CinterForge/Applications'
 
 

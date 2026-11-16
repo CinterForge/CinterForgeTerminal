@@ -80,29 +80,60 @@ def sdk_root() -> Path | None:
             return None
         sdk = builds.resolve(strict=True) / 'CinterForgeTerminal/Toolchains'
     else:
-        # Downloaded applications must still use a receipt-backed SDK.
-        # Never let a packaged app silently borrow the developer's toolchains.
+        # Prefer the SDK installed by the same Stage as this native application.
+        # Previously this was only a legacy fallback behind a user-selected
+        # Builds receipt. Prefer the exact Stage product for a staged release;
+        # Test also verifies the selected SDK rather than inferring it.
         release = _CinterForgeDevTools._devtools_release()
-        destination = _CinterForgeDevTools._devtools_destination(release)
-        receipt = destination / 'stage-receipt.json'
-        legacy = False
-        if not receipt.is_file():
-            # Compatibility with already-installed SDKs: no extra download.
-            previous = _CinterForgeDevTools._legacy_devtools_destination(release)
-            if previous is None or not (previous / 'stage-receipt.json').is_file():
-                return None
-            destination, receipt, legacy = previous, previous / 'stage-receipt.json', True
-        if receipt.is_symlink() or destination.is_symlink():
-            return None
+        staged = _CinterForgeDevTools._staged_devtools_destination(release)
+        candidates: list[tuple[Path, bool, bool]] = []
+        if staged is not None:
+            candidates.append((staged, True, True))
+        # A separately downloaded application can still use the explicitly
+        # installed, receipt-backed Builds SDK. Never create Builds on launch.
         try:
-            record = json.loads(receipt.read_text(encoding='utf-8'))
-        except (OSError, ValueError):
+            candidates.append((_CinterForgeDevTools._devtools_destination(release), False, False))
+        except (RuntimeError, OSError, ValueError):
+            # A malformed user Builds preference must not hide the correctly
+            # staged SDK that this installed release owns.
+            pass
+        legacy = _CinterForgeDevTools._legacy_devtools_destination(release)
+        if legacy is not None and legacy != staged:
+            candidates.append((legacy, True, False))
+        sdk = None
+        for destination, steam_layout, stage_managed in candidates:
+            receipt = destination / 'stage-receipt.json'
+            if (destination.is_symlink() or not destination.is_dir() or
+                    receipt.is_symlink() or not receipt.is_file()):
+                continue
+            try:
+                record = json.loads(receipt.read_text(encoding='utf-8'))
+            except (OSError, ValueError, TypeError):
+                continue
+            if (record.get('schema') not in (
+                    _CinterForgeSettings.FOUR_SCHEMA, 'cinterforge.terminal.unpacked-build.v1') or
+                    record.get('target') != 'devtools' or record.get('release') != release):
+                continue
+            # Stage-managed SDKs require the complete Build fingerprint and
+            # installed-file inventory; consented public downloads use an
+            # artifact receipt sealed by their own manifest instead.
+            if stage_managed and (
+                    not isinstance(record.get('build_fingerprint'), str) or
+                    not isinstance(record.get('installed_state'), str)):
+                continue
+            if not stage_managed and not (
+                    record.get('source') == 'public' and
+                    isinstance(record.get('artifact'), dict) or
+                    isinstance(record.get('build_fingerprint'), str)):
+                continue
+            candidate = (destination / 'DevTools/Builds/CinterForgeTerminal/Toolchains'
+                         if steam_layout else
+                         destination.parents[2] / 'CinterForgeTerminal/Toolchains')
+            if candidate.is_dir() and not candidate.is_symlink():
+                sdk = candidate
+                break
+        if sdk is None:
             return None
-        if (record.get('schema') not in (_CinterForgeSettings.FOUR_SCHEMA, 'cinterforge.terminal.unpacked-build.v1') or
-                record.get('target') != 'devtools' or record.get('release') != release):
-            return None
-        sdk = (destination / 'DevTools/Builds/CinterForgeTerminal/Toolchains' if legacy
-               else destination.parents[2] / 'CinterForgeTerminal/Toolchains')
     needed = ('mac/env/bin/colima', 'mac/env/bin/docker', 'mac/lima/bin/limactl',
               'mac/qemu/bin/qemu-img', 'mac/qemu/bin/qemu-system-x86_64',
               'Windows/MSYS2/usr/bin/bash.exe', 'Windows/MSYS2/usr/bin/msys-2.0.dll')

@@ -129,6 +129,71 @@ async function activateCoordinator(context) {
         buildOutput
     );
 
+    // Code-OSS has built-in Markdown preview, but HTML language services are
+    // not an HTML preview. Keep a small, built-in webview-based HTML preview
+    // instead of installing another browser extension or external service.
+    // Webviews isolate authored HTML from the workbench; scripts are disabled.
+    const htmlPreviewPanels = new Map();
+    const htmlPreviewTimers = new Map();
+    const htmlPreviewName = (uri) => uri.path.split('/').pop() || 'HTML';
+    const htmlPreviewSource = (document) => document.getText();
+
+    const openHtmlPreview = async (resource) => {
+        const uri = resource && typeof resource.scheme === 'string'
+            ? resource : vscode.window.activeTextEditor?.document.uri;
+        if (!uri) {
+            vscode.window.showWarningMessage('Open an HTML document to preview it.');
+            return;
+        }
+        const document = await vscode.workspace.openTextDocument(uri);
+        if (document.languageId !== 'html' && !/\.html?$/i.test(document.uri.path)) {
+            vscode.window.showWarningMessage('HTML Preview supports .html and .htm files.');
+            return;
+        }
+        const key = document.uri.toString();
+        let panel = htmlPreviewPanels.get(key);
+        if (!panel) {
+            panel = vscode.window.createWebviewPanel(
+                'cinterforge.htmlPreview',
+                'HTML Preview: ' + htmlPreviewName(document.uri),
+                vscode.ViewColumn.Beside,
+                {
+                    enableScripts: false,
+                    localResourceRoots: [],
+                    retainContextWhenHidden: true
+                }
+            );
+            htmlPreviewPanels.set(key, panel);
+            context.subscriptions.push(panel.onDidDispose(() => {
+                htmlPreviewPanels.delete(key);
+                if (htmlPreviewTimers.has(key)) {
+                    clearTimeout(htmlPreviewTimers.get(key));
+                    htmlPreviewTimers.delete(key);
+                }
+            }));
+        }
+        panel.webview.html = htmlPreviewSource(document);
+        panel.reveal(vscode.ViewColumn.Beside, true);
+    };
+    context.subscriptions.push(vscode.commands.registerCommand(
+        'cinterforge.previewHtml', openHtmlPreview
+    ));
+    context.subscriptions.push(vscode.workspace.onDidChangeTextDocument(event => {
+        const key = event.document.uri.toString();
+        if (!htmlPreviewPanels.has(key)) return;
+        if (htmlPreviewTimers.has(key)) clearTimeout(htmlPreviewTimers.get(key));
+        htmlPreviewTimers.set(key, setTimeout(() => {
+            htmlPreviewTimers.delete(key);
+            const panel = htmlPreviewPanels.get(key);
+            if (panel) panel.webview.html = htmlPreviewSource(event.document);
+        }, 250));
+    }));
+    context.subscriptions.push({dispose() {
+        for (const timer of htmlPreviewTimers.values()) clearTimeout(timer);
+        htmlPreviewTimers.clear();
+    }});
+
+
     // The same extension is used by IFPlayer and Terminal. Only Terminal has
     // a host filesystem and native/guest development sessions. Probe the
     // existing Terminal HTTP service; leave IFPlayer's game/editor path alone.

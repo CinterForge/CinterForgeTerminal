@@ -149,6 +149,21 @@ def _devtools_destination(release: str) -> Path:
     return _devtools_builds_root() / 'CinterForgeTerminal/DevTools' / release
 
 
+def _staged_devtools_destination(release: str) -> Path | None:
+    """Resolve the exact unified SDK installed by ``./Cinter stage all``.
+
+    Stage places its complete, hashed DevTools payload alongside the platform
+    apps, under the *same* Steam library. This is a read-only lookup; normal
+    application launch must not download tools, create Builds, or copy an SDK.
+    """
+    from runtime import CinterForgeSessions as _CinterForgeSessions
+    from runtime import CinterForgeSettings as _CinterForgeSettings
+    steam = _CinterForgeSessions._steam_library_for_installed_root(_CinterForgeSettings.ASSETS.parent)
+    if steam is None:
+        return None
+    return steam / 'common/CinterForge/Applications/DevTools/CinterForge Terminal' / release
+
+
 def _legacy_devtools_destination(release: str) -> Path | None:
     """Read only: previously installed Steam SDKs remain usable until moved."""
     from runtime import CinterForgeSessions as _CinterForgeSessions

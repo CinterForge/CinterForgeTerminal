@@ -12,39 +12,32 @@
 ## 0. CRITICAL BLOCKERS
 
 - [X] MAC-BUILDER missing tools - setup is not installing all needed tools
-- [-] Installed Mac build does not launch.  No idea how to debug this.
+- [ ] Installed Mac build does not launch.  No idea how to debug this.
 - [X] Installed Windows build does not register in Add/Remove Programs
 - [X] Installed Windows build does not add to start menu
 - [X] Installed Windows build installer defaults to the Downloads folder
 
-## 1. Windows/Linux — MSYS2 Bash startup — BUG
-
-- [X] Native app launches.
-- [X] Verify the MSYS2 package closure copied into the Windows release.
-- [X] Make package contents relocatable.
-- [X] Confirm Windows GUI application launch without an extra console window.
-- [X] Add a real Bash startup smoke test to the Linux and Windows release checks.
-- [X] Real Linux/Win Bash prompt appears inside Terminal.
-- [X] Provide writable temporary runtime state.
-- [X] Check Bash executable paths and argument construction.
-- [X] Confirm tab close/reopen/reconnect behavior using native WebView2/ConPTY.
-- [X] Real Linux App Launch In App.
-- [X] Real Win App Launch In App.
-
-## 2. Critical CodeOSS issues
+## 1. CodeOSS issues
 - [X] Cut is Broken - The whole Edit menu is messed up.  We are damaging the CodeOSS Edit menu
-- [ ] CodeOSS MD/HTML/Image/etc Preview is broken - as many media types to preview as is easy
-- [ ] Cinter button not working
+- [X] CodeOSS MD/HTML/Image/etc Preview is broken - as many media types to preview as is easy
+- [X] Cinter button not working
 
 ## 2. Infinite-Mac — current timing and first-launch bug
 - [x] Current delay values were identified and reported.
 - [x] Move configuration values into a documented section near the top of `terminal.js` 
+- [ ] Add diagnostic visibility to the first-launch bug
 - [ ] Determine why leaving the page and returning allows it to work.
-- [ ] Add diagnostic visibility to the first-launch path.
-- [ ] Repair the actual cold-start problem without introducing arbitrary long waits.
+- [ ] Repair the cold-start problem without introducing arbitrary long waits.
 - [ ] Test clean first launch separately from subsequent warm launches.
 
-## 3. Testing
+## 3. Windows Installer UI/UX
+- [ ] Icon
+- [ ] Start Menu Icon
+- [ ] Installer Icon
+- [ ] Installer Dialog Image
+- [ ] Readme
+
+## 4. Testing
 - [ ] Verify the packaged shell styles connect in the installed macOS application.
 - [ ] Verify the Server tab reports the exact runtime log and captures native startup failures.
 - [ ] Validate Mac Bash with a real native PTY.

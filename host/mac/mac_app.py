@@ -36,7 +36,9 @@ import plistlib
 import re
 import urllib.request
 import shutil
+import socket
 import subprocess
+import threading
 import time
 import struct
 import zlib
@@ -492,24 +494,76 @@ def launch(builds: Path, *, verify: bool = False) -> Path:
     return app
 
 
-def accept_native_ui(builds: Path) -> None:
-    """Execute actual staged Release app and require JS -> native menu + PTY callbacks."""
-    launcher = application(builds) / 'Contents/MacOS/CinterForgeTerminal'
-    _verify_signature(application(builds))
+def accept_native_ui(builds: Path, *, launcher: Path | None = None,
+                     steamapps: Path | None = None) -> None:
+    """Run real JS/native acceptance using the installed signed app, when supplied.
+
+    Do not use the Build-tree executable as a substitute for the one actually
+    installed in Steam. Test never repairs or stages dependencies.
+    """
+    launcher = launcher or application(builds) / 'Contents/MacOS/CinterForgeTerminal'
+    launcher = launcher.resolve(strict=True)
+    app = launcher.parent.parent.parent
+    _verify_signature(app)
     logs = builds / 'Logs/CinterForgeTerminal'
     logs.mkdir(parents=True, exist_ok=True)
-    (builds / 'Run/CinterForgeTerminal/mac').mkdir(parents=True, exist_ok=True)
-    result = subprocess.run([str(launcher), '--accept-ui'],
-                            cwd=builds / 'Run/CinterForgeTerminal/mac',
-                            capture_output=True, text=True, timeout=45, check=False)
-    (logs / 'mac-ui-acceptance.log').write_text(result.stdout + result.stderr)
-    if result.returncode or 'TERMINAL_UI_PASS ready=1 museum=mac-plus terminal=vt100-terminal callback=native' not in result.stdout:
-        # Preserve the full log and show its diagnostic tail in lifecycle output.
-        # Native UI evidence is still mandatory; never mask a missing callback.
-        tail = (result.stdout + result.stderr).strip().splitlines()[-12:]
-        raise RuntimeError('Real macOS Terminal native UI callback failed (exit '
-                           + str(result.returncode) + '):\n'
-                           + '\n'.join(tail) + '\nSee ' + str(logs / 'mac-ui-acceptance.log'))
+    working = builds / 'Run/CinterForgeTerminal/mac'
+    working.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    if steamapps is not None:
+        # Never accidentally execute the signed staged app in Xcode developer
+        # mode when Test was invoked from a developer shell.
+        env.pop('CINTER_BUILDS_ROOT', None)
+        env['CINTER_TERMINAL_RUNTIME_MODE'] = 'installed'
+        env['CINTER_STEAMAPPS'] = str(steamapps.resolve(strict=True))
+    evidence = logs / ('mac-installed-ui-acceptance.log' if steamapps else 'mac-ui-acceptance.log')
+    if steamapps is not None:
+        # Never attach to a developer/foreign HTTP service and accidentally
+        # report its working WebView as evidence for this staged installation.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            if probe.connect_ex(('127.0.0.1', 20300)) == 0:
+                raise RuntimeError('Real staged app Test requires free port 20300; '
+                                   'quit the existing Terminal first (no process killed)')
+    # The normal lifecycle streams subprocess output in real time. Native UI
+    # acceptance does the same instead of hiding minutes of startup/cleanup
+    # inside capture_output; the full transcript also remains in Builds/Logs.
+    with evidence.open('w', encoding='utf-8') as transcript:
+        process = subprocess.Popen([str(launcher), '--accept-ui'], cwd=working,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, bufsize=1, env=env)
+        messages: list[str] = []
+        def follow_native() -> None:
+            assert process.stdout is not None
+            for line in process.stdout:
+                messages.append(line)
+                transcript.write(line)
+                transcript.flush()
+                print(line, end='', flush=True)
+        follower = threading.Thread(target=follow_native, name='cinter-installed-ui-log', daemon=True)
+        follower.start()
+        try:
+            code = process.wait(timeout=240)
+        except subprocess.TimeoutExpired as error:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+            follower.join(timeout=10)
+            raise RuntimeError('Installed native Mac UI timed out; see ' + str(evidence)) from error
+        follower.join(timeout=10)
+    output = ''.join(messages)
+    if (code or
+            'TERMINAL_UI_PASS ready=1 museum=mac-plus terminal=vt100-terminal callback=native' not in output or
+            'Native shutdown completed' not in output):
+        tail = output.strip().splitlines()[-15:]
+        raise RuntimeError('Installed Mac app UI/shutdown acceptance failed (exit ' +
+                           str(code) + '):\n' + '\n'.join(tail) +
+                           '\nSee ' + str(evidence))
+    print('[MAC APP] PASS actual signed staged UI callback and owned shutdown; '
+          'evidence=' + str(evidence), flush=True)
 
 
 def test(builds: Path) -> None:

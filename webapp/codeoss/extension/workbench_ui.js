@@ -193,7 +193,7 @@
     function isTerminalWrapperHost() {
         try {
             return window.parent !== window &&
-                window.parent.document.getElementById('computer-frame')?.contentWindow === window;
+                window.parent.document.getElementById('codeoss-frame')?.contentWindow === window;
         } catch (_) { return false; } // IFPlayer or cross-origin workbench host.
     }
     function installCinterForgeMenu() {
@@ -203,7 +203,7 @@
         var button = document.createElement('button');
         button.id = 'cinterforge-activity-menu';
         button.type = 'button';
-        button.title = isTerminalWrapperHost() ? 'Toggle CinterForge Terminal wrapper' : 'CinterForge';
+        button.title = isTerminalWrapperHost() ? 'Show or hide Terminal menus, tabs and status' : 'CinterForge';
         button.setAttribute('aria-label',button.title);
         button.setAttribute('aria-pressed','false');
         button.setAttribute('aria-haspopup',String(!isTerminalWrapperHost()));

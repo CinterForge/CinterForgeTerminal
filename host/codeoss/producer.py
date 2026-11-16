@@ -54,7 +54,7 @@ CODEOSS_REPOSITORY = "https://github.com/microsoft/vscode.git"
 # commit rather than tracking main so every maintainer produces the same tree.
 CODEOSS_REF = "645f29cc3176500b4b5762ba887cf2a7f0ffdf2c"
 CODEOSS_VERSION = "1.137.0"
-CODEOSS_SCHEMA = "cinterforge.codeoss-web.v43"
+CODEOSS_SCHEMA = "cinterforge.codeoss-web.v45"
 CODEOSS_BUILD_CACHE_SCHEMA = "cinterforge.codeoss-build-cache.v10"
 CODEOSS_TEST_WEB_VERSION = "0.0.81"
 
@@ -949,7 +949,11 @@ CODEOSS_NONPRODUCTION_EXTENSIONS = frozenset({"vscode-test-resolver", "copilot"}
 # categories do not all match our programming-language pruning heuristic. Never
 # discard their staged browser scripts: the worker would otherwise 404 at runtime.
 CODEOSS_REQUIRED_BROWSER_EXTENSIONS = (
-    "github-authentication", "emmet", "merge-conflict", "mermaid-markdown-features",
+    "github-authentication", "emmet", "merge-conflict",
+    # The pinned built-ins own the Markdown preview, HTML language support,
+    # and Mermaid preview renderer. Their manifests and browser entrypoints
+    # must survive pruning and be present in the final consumer artifact.
+    "markdown-language-features", "html-language-features", "mermaid-markdown-features",
 )
 
 
@@ -1391,7 +1395,15 @@ def _stage_referenced_node_modules(source: Path, staging: Path) -> None:
     # necessarily occur as literal /node_modules/... strings in emitted JS.
     # They are first-class browser runtime resources in upstream Code - OSS
     # (main.js plus Oniguruma's WASM), not optional extension dependencies.
-    browser_runtime_packages = {"vscode-textmate", "vscode-oniguruma"}
+    # Code-OSS resolves these runtime URLs via FileAccess; they do not appear
+    # as literal paths in emitted scripts. Stage only packages declared in the
+    # pinned upstream npm dependency tree. In particular, the older
+    # vscode-regexp-languagedetection distribution is NOT a package in this
+    # checkout and requiring it made a clean Setup fail after compilation.
+    # Setup provisions dependencies; Build/Stage/Test never install them.
+    browser_runtime_packages = {
+        "vscode-textmate", "vscode-oniguruma", "@vscode/vscode-languagedetection",
+    }
     candidates.update(browser_runtime_packages)
 
     # The integrated terminal loads xterm packages through FileAccess-generated
@@ -1433,6 +1445,7 @@ def _stage_referenced_node_modules(source: Path, staging: Path) -> None:
         staging / "node_modules" / "vscode-textmate" / "release" / "main.js",
         staging / "node_modules" / "vscode-oniguruma" / "release" / "main.js",
         staging / "node_modules" / "vscode-oniguruma" / "release" / "onig.wasm",
+        staging / "node_modules" / "@vscode" / "vscode-languagedetection" / "dist" / "lib" / "index.js",
     ]
     if xterm_scope.is_dir():
         required_runtime_files.append(

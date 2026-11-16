@@ -596,11 +596,9 @@ a {
 #lan-menu-list .lan-manual { display: flex; gap: .35rem; padding: .5rem; }
 #lan-menu-list .lan-manual input { min-width: 0; flex: 1; }
 
-/* Single HTML menubar on Linux/Windows; on macOS the native system menu
-   owns these actions. The tab strip occupies the top of the web content. */
-html[data-cinter-platform="mac"]:not([data-html-menus="show"]) .terminal-titlebar {
-   display: none;
-}
+/* The Terminal HTML menu row is available on macOS, Windows and Linux.
+   Only the explicit Cinter button's data-code-wrapper-hidden state hides
+   it alongside the Session tabs and bottom status bar. */
 .terminal-titlebar {
    display: flex;
    flex-wrap: nowrap;

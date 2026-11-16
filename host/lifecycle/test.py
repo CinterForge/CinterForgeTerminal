@@ -478,8 +478,62 @@ class RealStagedSystemSmoke(unittest.TestCase):
 
     def test_08_real_signed_mac_app_and_codeoss_lagomorph(self):
         """Verify the exact signed staged native app and real bundled assets."""
-        from host.mac.mac_app import test as inspect_staged_app
+        from host.mac.mac_app import test as inspect_staged_app, accept_native_ui
+        from host.lifecycle.unpacked_release import status_four
+        from host.lifecycle.universal_package import APP_ROOTS
         inspect_staged_app(self.builds)
+        stage = status_four(self.builds)
+        location = stage['targets']['mac']
+        self.assertTrue(location['steam_receipt_matches'],
+                        'Cannot launch an unverified Steam Stage Mac application')
+        steam = Path(stage['steam_destination']).parents[2]
+        release_dir = Path(location['steam_root'])
+        app = release_dir / APP_ROOTS['mac']
+        embedded = app / 'Contents/Resources/Builds'
+        # These assets are needed by the actual installed HTTP/Code-OSS server,
+        # not merely by a producer workbench in sibling Builds.
+        code = embedded / 'CodeOSS/extensions'
+        for rel in ('markdown-language-features/package.json',
+                    'html-language-features/package.json',
+                    'mermaid-markdown-features/dist/browser/extension.js'):
+            with self.subTest(staged_preview=rel):
+                self.assertTrue((code / rel).is_file() and not (code / rel).is_symlink(),
+                                f'Installed Code-OSS preview missing: {code / rel}')
+        for rel in ('vscode-textmate/release/main.js',
+                    'vscode-oniguruma/release/onig.wasm',
+                    '@vscode/vscode-languagedetection/dist/lib/index.js'):
+            path = embedded / 'CodeOSS/node_modules' / rel
+            with self.subTest(staged_code_runtime=rel):
+                self.assertTrue(path.is_file() and not path.is_symlink(),
+                                f'Installed Code-OSS editor dependency missing: {path}')
+        # Use the staged Python interpreter and staged HTTP source to resolve
+        # DevTools in INSTALLED mode, exactly as the signed app does. No mocks,
+        # no source-tree import path, no SDK installation or VM changes.
+        if 'devtools' in self.receipt['targets']:
+            python = embedded / 'Python/Environments/mac/arm64/cinterterminalenv/bin/python'
+            webapp = embedded / f'Python/Host/mac/arm64/{self.release}/webapp'
+            expected = (Path(stage['targets']['devtools']['steam_root']) /
+                        'DevTools/Builds/CinterForgeTerminal/Toolchains').resolve()
+            env = dict(os.environ)
+            env.pop('CINTER_BUILDS_ROOT', None)
+            env['CINTER_TERMINAL_RUNTIME_MODE'] = 'installed'
+            env['CINTER_STEAMAPPS'] = str(steam)
+            code_check = ('from runtime.CinterForgeRuntimeBootstrap import sdk_root; '
+                          'p=sdk_root(); print(str(p) if p else "MISSING")')
+            probe = subprocess.run([str(python), '-B', '-c', code_check], cwd=webapp,
+                                   env=env, capture_output=True, text=True,
+                                   timeout=40, check=False)
+            self.assertEqual(probe.returncode, 0,
+                             'Installed signed app SDK resolver failed: ' + probe.stderr[-1000:])
+            self.assertEqual(probe.stdout.strip(), str(expected),
+                             'Installed app did not resolve the SDK from its own Steam Stage; '
+                             'actual=' + probe.stdout.strip())
+            print('[TEST STAGE] PASS installed app resolves exact Stage DevTools: ' +
+                  str(expected), flush=True)
+        # A passing receipt or developer VM is not enough: exercise the real
+        # signed binary installed in Steam and its own Python HTTP service.
+        accept_native_ui(self.builds, launcher=app / 'Contents/MacOS/CinterForgeTerminal',
+                         steamapps=steam)
 
     def test_09_real_bedrock_rosetta_network_console_and_shutdown(self):
         """Execute the actual official Bedrock server; never a player's world."""

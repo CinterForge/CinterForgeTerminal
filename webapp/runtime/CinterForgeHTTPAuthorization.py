@@ -253,7 +253,7 @@ class CinterForgeHTTPAuthorization:
         if is_code:
             # VS Code's Web worker needs a broader CSP than the control shell.
             self.send_header('X-Frame-Options', 'SAMEORIGIN')
-            self.send_header('Content-Security-Policy', "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' https:; img-src 'self' data: blob:; font-src 'self' data:; frame-src 'self' blob:; frame-ancestors 'self'")
+            self.send_header('Content-Security-Policy', "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' https:; img-src 'self' data: blob:; font-src 'self' data:; frame-src 'self' blob: https://*.vscode-cdn.net; frame-ancestors 'self'")
         else:
             self.send_header('Accept-Ranges', 'bytes')
             self.send_header('Access-Control-Allow-Origin', 'https://infinitemac.org')
