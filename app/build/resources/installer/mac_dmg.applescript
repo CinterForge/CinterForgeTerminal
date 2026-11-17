@@ -15,16 +15,16 @@ on run argv
 		set current view of layoutWindow to icon view
 		set toolbar visible of layoutWindow to false
 		set statusbar visible of layoutWindow to false
-		set bounds of layoutWindow to {200, 100, 968, 920}
+		set bounds of layoutWindow to {23, 16, 943, 480}
 		set theViewOptions to the icon view options of layoutWindow
 		set arrangement of theViewOptions to not arranged
-		set icon size of theViewOptions to 96
+		set icon size of theViewOptions to 80
 		set text size of theViewOptions to 12
 		set label position of theViewOptions to bottom
 		set background picture of theViewOptions to backgroundFile
-		set position of item applicationName of layoutWindow to {135, 550}
-		set position of item "Applications" of layoutWindow to {630, 550}
-		set position of item "README.md" of layoutWindow to {385, 690}
+		set position of item applicationName of layoutWindow to {135, 132}
+		set position of item "Applications" of layoutWindow to {630, 132}
+		set position of item "README.md" of layoutWindow to {385, 272}
 		close layoutWindow
 		open mountedFolder
 		set layoutWindow to front Finder window
