@@ -38,7 +38,7 @@ import time
 import traceback
 import uuid
 from typing import Callable
-from urllib.parse import unquote, urlsplit, parse_qs, urlparse
+from urllib.parse import unquote, urlsplit, parse_qs, urlparse, quote
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
 import zipfile
@@ -87,14 +87,16 @@ def _checked_url(url: str) -> str:
     return url
 
 
-def _safe_extract(archive: Path, target: Path) -> None:
+def _safe_extract(archive: Path, target: Path, *, max_uncompressed_bytes: int | None = None) -> None:
     from runtime import CinterForgeSettings as _CinterForgeSettings
     with zipfile.ZipFile(archive) as source:
         names = source.infolist()
         if len(names) > 25000:
             raise ValueError('Bedrock archive has too many entries')
         total = sum(item.file_size for item in names)
-        if total > 4 * _CinterForgeSettings.MAX_DOWNLOAD_BYTES:
+        limit = (4 * _CinterForgeSettings.MAX_DOWNLOAD_BYTES
+                 if max_uncompressed_bytes is None else max_uncompressed_bytes)
+        if total > limit:
             raise ValueError('Bedrock archive uncompressed size exceeds limit')
         for item in names:
             name = item.filename.replace('\\', '/')
@@ -281,6 +283,8 @@ class CinterForgeBedrockManager:
         self.steamapps = _user_steamapps(self.builds) if user_install else None
         self.root = (self.steamapps / 'common/CinterForge/Servers/Bedrock'
                      if user_install else self.builds / 'Servers/Bedrock')
+        # Curated worlds are user-requested content, not developer Builds or a second Bedrock server.
+        self.curated_worlds = self.root / 'CuratedWorlds'
         self.package_dir = self.root / 'Packages' / self.target
         self.package = self.package_dir / 'current'
         self.run_root = (self.root / 'Run' / self.app if user_install
@@ -306,6 +310,8 @@ class CinterForgeBedrockManager:
         self._session_file = self.run_root / '.cinter/console-session.json'
         self._console_fifo = self.run_root / '.cinter/console-input.fifo'
         self._lock = threading.RLock()
+        self._craftmaster_process: subprocess.Popen | None = None
+        self._craftmaster_conversion_lock = threading.Lock()
 
     def _watch_vm(self, pid: int) -> None:
         """Guard VM lifetime if the HTTP/Terminal owner is force-quit.
@@ -592,8 +598,14 @@ class CinterForgeBedrockManager:
         custom = settings.get('root')
         if custom:
             root = Path(custom)
-            return [root.resolve()] if root.is_dir() and not root.is_symlink() else []
-        return list(dict.fromkeys(self._default_world_roots()))
+            roots = [root.resolve()] if root.is_dir() and not root.is_symlink() else []
+            if self.curated_worlds.is_dir() and not self.curated_worlds.is_symlink():
+                roots.append(self.curated_worlds.resolve())
+            return roots
+        roots = list(dict.fromkeys(self._default_world_roots()))
+        if self.curated_worlds.is_dir() and not self.curated_worlds.is_symlink():
+            roots.append(self.curated_worlds.resolve())
+        return roots
 
     def set_world_path(self, raw: str) -> dict:
         with self._lock:
@@ -607,6 +619,267 @@ class CinterForgeBedrockManager:
             path = path.resolve(strict=True)
             self._save_world_settings({'root': str(path)})
             return self.list_worlds()
+
+    def _java_world_roots(self) -> list[Path]:
+        """Use each OS's real Java saves root; never scan arbitrary directories."""
+        home = self._login_home()
+        if self.platform == 'mac':
+            paths = [home / 'Library/Application Support/minecraft/saves']
+        elif self.platform == 'win':
+            roaming = Path(os.environ.get('APPDATA', str(home / 'AppData/Roaming')))
+            paths = [roaming / '.minecraft/saves']
+        else:
+            paths = [home / '.minecraft/saves']
+        return [p.resolve() for p in paths if p.is_dir() and not p.is_symlink()]
+
+    def _craftmaster_cli(self) -> tuple[Path, Path]:
+        """Use exactly the verified native executable shipped with this app."""
+        from runtime.CinterForgeCommands import _packaged_craftmaster
+        binary = _packaged_craftmaster()
+        package = binary.parent.parent
+        manifest = json.loads((package / 'manifest.json').read_text('utf-8'))
+        for name in ('Resources.json', 'Contours.json', 'MCTemplate.mcworld',
+                     'world-template.htm', 'zoomify-viewer.min.js', 'preview.py'):
+            asset = package / 'data' / name
+            expected = manifest.get('files', {}).get('data/' + name)
+            if (not asset.is_file() or asset.is_symlink() or
+                    not isinstance(expected, str) or _sha256(asset) != expected):
+                raise RuntimeError('Packaged CraftMaster data failed verification: ' + name)
+        return binary, package / 'data'
+
+    def list_java_worlds(self) -> list[dict]:
+        """Native CraftMaster is authoritative for Java world inventory."""
+        roots = self._java_world_roots()
+        if not roots:
+            return []
+        binary, _ = self._craftmaster_cli()
+        worlds = []
+        for root in roots:
+            scan = subprocess.run([str(binary), 'worlds', '--json', '--root', str(root)],
+                                  capture_output=True, text=True, timeout=90, check=False)
+            if scan.returncode:
+                raise RuntimeError('CraftMaster Java world scan failed: ' + scan.stderr[-1000:])
+            data = json.loads(scan.stdout)
+            if data.get('schema') != 'cinterforge.craftmaster.worlds.v1':
+                raise RuntimeError('CraftMaster returned unexpected worlds inventory schema')
+            for item in data.get('worlds', []):
+                path = Path(item.get('path', ''))
+                if (not path.is_dir() or path.is_symlink() or
+                        not path.resolve().parent == root or
+                        not (path / 'level.dat').is_file() or (path / 'db').is_dir()):
+                    continue
+                worlds.append({'name': item['name'], 'folder': path.name,
+                               'path': str(path.resolve()), 'root': str(root),
+                               'edition': 'java', 'dimensions': item.get('dimensions', {})})
+        return worlds
+
+    def _convert_java_world(self, world: dict,
+                            progress: Callable[[str], None] | None = None) -> Path:
+        """Stream the actual native converter, then import only validated output."""
+        binary, data = self._craftmaster_cli()
+        source = Path(world['path'])
+        if source.is_symlink() or not (source / 'level.dat').is_file():
+            raise RuntimeError('Java world disappeared or became unsafe: ' + str(source))
+        name_run = subprocess.run([str(binary), 'export-name', '--world-folder', source.name],
+                                  capture_output=True, text=True, timeout=20, check=True)
+        name = name_run.stdout.strip()
+        # CraftMaster owns portable export naming (including legitimate Unicode).
+        # Defense in depth against path traversal if the binary is corrupted.
+        if (not name or len(name.encode('utf-8')) > 240 or name != name.strip()
+                or name in ('.', '..') or Path(name).name != name
+                or any(ch in name for ch in '\\/:*?"<>|')
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in name)):
+            raise RuntimeError('CraftMaster returned unsafe converted world name: ' + repr(name))
+        target = self.curated_worlds / name
+        if target.is_symlink() or self.curated_worlds.is_symlink():
+            raise RuntimeError('Refusing linked CraftMaster world destination')
+        # Prefer any already validated Bedrock world, including a copy installed
+        # by the independent CraftMaster producer/publisher. Never replace an
+        # existing user world just because a Java folder has a matching name.
+        if target.is_dir() and not any(item.is_symlink() for item in target.rglob('*')):
+            if ((target / 'level.dat').is_file() and (target / 'db/CURRENT').is_file()
+                    and any((target / 'db').glob('MANIFEST-*'))):
+                if progress:
+                    progress(name + ': reusing existing validated Bedrock world')
+                return target
+        if target.exists():
+            raise RuntimeError('Refusing to overwrite an existing Bedrock world: ' + str(target))
+        # The installed app must not create a development Builds directory.
+        # Cache/Zoomify intermediate tiles remain under this managed runtime root.
+        output = self.root / 'Conversions/CraftMaster'
+        output.mkdir(parents=True, exist_ok=True)
+        command = [str(binary), 'convert', '--world', str(source.resolve()),
+                   '--data-dir', str(data), '--output-root', str(output),
+                   '--dimensions', 'all', '--no-open']
+        say = progress or self._append_log
+        with self._craftmaster_conversion_lock:
+            say(name + ': converting Java save using bundled CraftMaster')
+            process = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT, text=True, bufsize=1)
+            with self._lock:
+                self._craftmaster_process = process
+            try:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    if line.strip():
+                        say('[CraftMaster] ' + line.rstrip()[:2000])
+                code = process.wait()
+                if code:
+                    raise RuntimeError('CraftMaster conversion failed (exit ' + str(code) +
+                                       '); see persistent Bedrock log')
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=8)
+                    except subprocess.TimeoutExpired:
+                        process.kill(); process.wait()
+                with self._lock:
+                    if self._craftmaster_process is process:
+                        self._craftmaster_process = None
+                if process.stdout:
+                    process.stdout.close()
+        archive = output / 'Worlds' / name / (name + '.mcworld')
+        if not archive.is_file() or archive.is_symlink() or archive.stat().st_size < 1024:
+            raise RuntimeError('CraftMaster did not create a complete .mcworld: ' + str(archive))
+        self.curated_worlds.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='craftmaster-import-', dir=self.curated_worlds) as scratch:
+            payload = Path(scratch) / 'world'
+            payload.mkdir()
+            _safe_extract(archive, payload, max_uncompressed_bytes=64 * 1024**3)
+            if not all((payload / item).is_file() for item in
+                       ('level.dat', 'levelname.txt', 'db/CURRENT')):
+                raise RuntimeError('CraftMaster archive missing Bedrock level or LevelDB')
+            if not list((payload / 'db').glob('MANIFEST-*')):
+                raise RuntimeError('CraftMaster world LevelDB missing MANIFEST')
+            (payload / 'levelname.txt').write_text(name + '\n', encoding='utf-8')
+            (payload / 'cinter-craftmaster-world.json').write_text(json.dumps({
+                'schema': 'cinterforge.terminal.craftmaster-world.v1',
+                'source': str(source.resolve()), 'world': name,
+                'archive_sha256': _sha256(archive)}, indent=2) + '\n', encoding='utf-8')
+            if target.exists():
+                raise RuntimeError('CraftMaster destination changed during conversion: ' + str(target))
+            os.replace(payload, target)
+        say(name + ': converted world installed and ready for Bedrock')
+        return target
+
+    def install_published_world(self, name: str, progress: Callable[[str], None] | None = None) -> Path:
+        """Install a publisher-validated .mcworld by its selected name, on request.
+
+        CraftMaster owns the world and R2 publication manifest. Terminal verifies
+        its SHA-256 and extracts a managed immutable source copy. The writable
+        Bedrock server copy is created separately by run_world(). No file is
+        taken from another local source checkout or unverified CDN guess.
+        """
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 _().-]{0,120}', name) or name.endswith((' ', '.')):
+            raise ValueError('Invalid curated world name')
+        target = self.curated_worlds / name
+        receipt_path = target / 'cinter-published-world.json'
+        if target.is_symlink() or self.curated_worlds.is_symlink():
+            raise RuntimeError('Refusing linked published-world destination')
+        if receipt_path.is_file() and not receipt_path.is_symlink():
+            receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
+            if (receipt.get('schema') == 'cinterforge.terminal.curated-world.v1' and
+                    receipt.get('world') == name and
+                    re.fullmatch(r'[0-9a-f]{64}', str(receipt.get('sha256', ''))) and
+                    (target / 'level.dat').is_file() and
+                    (target / 'db/CURRENT').is_file() and
+                    (target / 'levelname.txt').is_file() and
+                    not any(item.is_symlink() for item in target.rglob('*'))):
+                if progress:
+                    progress(name + ': already installed from verified published world (' + str(target) + ')')
+                return target
+        if target.exists():
+            raise RuntimeError('Existing Candlewood content is incomplete or unverified: ' + str(target))
+        public = 'https://cinterforge.ucreg.io/'
+        prefix = 'CinterForgeCraftMaster/Worlds/' + quote(name, safe='')
+        manifest_url = public + prefix + '/manifest.json' 
+        if progress:
+            progress(name + ': checking published CraftMaster world manifest')
+        with urlopen(Request(manifest_url, headers={'Cache-Control': 'no-cache'}), timeout=30) as response:
+            if response.geturl() != manifest_url or response.status != 200:
+                raise RuntimeError('Unexpected CraftMaster manifest response')
+            raw = response.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise RuntimeError('CraftMaster publication manifest exceeds size limit')
+        manifest = json.loads(raw)
+        if (manifest.get('schema') != 'cinterforge.craftmaster.world.v1' or
+                manifest.get('channel') != 'release' or manifest.get('world') != name):
+            raise RuntimeError('No verified public CraftMaster release for ' + name)
+        details = manifest.get('files', {}).get(name + '.mcworld')
+        if not isinstance(details, dict):
+            raise RuntimeError(name + ' has not yet been published as a complete Bedrock world')
+        expected_bytes = details.get('bytes')
+        expected_hash = details.get('sha256')
+        if (type(expected_bytes) is not int or expected_bytes < 1024 or
+                expected_bytes > 32 * 1024 * 1024 * 1024 or
+                not isinstance(expected_hash, str) or
+                not re.fullmatch(r'[a-f0-9]{64}', expected_hash)):
+            raise RuntimeError('Invalid published world size or SHA-256 in publication')
+        url = public + prefix + '/' + quote(name + '.mcworld', safe='')
+        self.curated_worlds.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='published-world-download-', dir=self.curated_worlds) as temporary:
+            temp = Path(temporary)
+            archive = temp / (name + '.mcworld')
+            digest = hashlib.sha256()
+            size = 0
+            if progress:
+                progress(name + ': downloading published world (' + str(expected_bytes) + ' bytes)')
+            with urlopen(Request(url, headers={'Cache-Control': 'no-cache'}), timeout=60) as response:
+                if response.geturl() != url or response.status != 200:
+                    raise RuntimeError('Unexpected published world download response')
+                with archive.open('wb') as output:
+                    for block in iter(lambda: response.read(1024 * 1024), b''):
+                        size += len(block)
+                        if size > expected_bytes:
+                            raise RuntimeError('World download exceeds publication manifest size')
+                        output.write(block)
+                        digest.update(block)
+                        if progress and size % (16 * 1024 * 1024) < len(block):
+                            progress(f'{name}: downloaded {size}/{expected_bytes} bytes')
+            if size != expected_bytes or digest.hexdigest() != expected_hash:
+                raise RuntimeError('Published world failed SHA-256 verification')
+            payload = temp / name
+            payload.mkdir()
+            # A full converted Java world can exceed the 2-GiB server-package
+            # cap. This larger bound applies only to SHA-256-verified published
+            # worlds; official Bedrock binary downloads keep their old cap.
+            _safe_extract(archive, payload, max_uncompressed_bytes=64 * 1024**3)
+            if not all((payload / f).is_file() for f in ('level.dat', 'levelname.txt', 'db/CURRENT')):
+                raise RuntimeError('Published world archive missing Bedrock files')
+            if not list((payload / 'db').glob('MANIFEST-*')):
+                raise RuntimeError('Published world LevelDB is missing MANIFEST')
+            # Restrict the curated artifact to a known display name. Source
+            # content is never allowed to control its installation path.
+            (payload / 'levelname.txt').write_text(name + '\n', encoding='utf-8')
+            (payload / 'cinter-published-world.json').write_text(json.dumps({
+                'schema': 'cinterforge.terminal.curated-world.v1', 'world': name,
+                'sha256': expected_hash, 'bytes': size,
+                'publication_version': manifest.get('version'), 'source': url,
+            }, indent=2) + '\n', encoding='utf-8')
+            os.replace(payload, target)
+        if progress:
+            progress(name + ': verified and installed at ' + str(target))
+        return target
+
+    def prepare_world(self, name: str, progress: Callable[[str], None] | None = None) -> str:
+        """Resolve to a Bedrock folder, preserving CraftMaster's export-name mapping."""
+        if not name.strip():
+            return name
+        existing = self.list_worlds()['worlds']
+        local = [entry for entry in existing if
+                 name.casefold() in (entry['name'].casefold(), entry['folder'].casefold())]
+        if len(local) > 1:
+            raise RuntimeError('Ambiguous Bedrock world: use its unique folder name')
+        if local:
+            return local[0]['folder']
+        java = [world for world in self.list_java_worlds()
+                if name.casefold() in (world['name'].casefold(), world['folder'].casefold())]
+        if len(java) > 1:
+            raise RuntimeError('Ambiguous Java world; select a unique folder name')
+        if java:
+            return self._convert_java_world(java[0], progress=progress).name
+        return self.install_published_world(name, progress=progress).name
 
     def list_worlds(self) -> dict:
         entries: list[dict] = []
@@ -624,10 +897,18 @@ class CinterForgeBedrockManager:
                 except OSError:
                     name = folder.name
                 entries.append({'name': name or folder.name, 'folder': folder.name,
-                                'path': str(folder.resolve()), 'root': str(root)})
+                                'path': str(folder.resolve()), 'root': str(root),
+                                'edition': 'bedrock'})
         settings = self._world_settings()
+        java_error = None
+        try:
+            java = self.list_java_worlds()
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+            java = []
+            java_error = str(error)
         return {'roots': [str(r) for r in self.world_roots()], 'configured_root': settings.get('root'),
-                'selected': settings.get('selected'), 'worlds': entries}
+                'selected': settings.get('selected'), 'worlds': entries,
+                'java_worlds': java, 'java_error': java_error}
 
     @staticmethod
     def _safe_world_copy(source: Path, destination: Path) -> None:
@@ -1297,6 +1578,11 @@ class CinterForgeBedrockManager:
             raise RuntimeError('Bedrock VM still running after explicit stop; refusing to start another VM')
 
     def stop(self) -> dict:
+        # The native conversion is also owned by this Terminal instance.
+        # App shutdown must not leave a Java-world converter writing in steamapps.
+        running_conversion = self._craftmaster_process
+        if running_conversion is not None and running_conversion.poll() is None:
+            running_conversion.terminate()
         with self._lock:
             pid, owned, attachable = self._live_session_locked()
             if pid is not None:

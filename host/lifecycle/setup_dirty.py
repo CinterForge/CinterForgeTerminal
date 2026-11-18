@@ -64,6 +64,7 @@ ALL_OUTPUTS = (
     'InteractiveFiction/CodeOSS/Web',
     'Applications/CinterForgeCode/Emulators/Quadra650/Lagomorph',
     'Lagomorph',
+    'CinterForgeCraftMaster/Setup',
     'Run/CinterForgeTerminal/WindowsCross/WineVolume.json',
 )
 WIN_OUTPUTS = (
@@ -74,6 +75,7 @@ WIN_OUTPUTS = (
     'Toolchains/WebView2',
     'Intermediates/CinterForgeTerminal/WebView2',
     'Run/CinterForgeTerminal/WindowsCross/WineVolume.json',
+    'CinterForgeCraftMaster/Setup',
 )
 # Runtime/test activity is allowed to write ephemeral caches; those bytes are
 # not part of the Setup closure.  Everything else remains a dirty input.

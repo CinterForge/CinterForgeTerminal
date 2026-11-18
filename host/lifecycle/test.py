@@ -475,6 +475,20 @@ class RealStagedSystemSmoke(unittest.TestCase):
                     self.assertTrue(source.is_file() and not source.is_symlink())
                     self.assertTrue(source.resolve().is_relative_to(self.builds.resolve()))
                     self.assertEqual(_sha256(source), item['sha256'])
+                if target in ('mac', 'linux', 'win'):
+                    # Real platform-matched CraftMaster bytes are mandatory in
+                    # every installed Terminal, independent of its DevTools.
+                    from host.lifecycle.universal_package import APP_ROOTS
+                    from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
+                    app = Path(stage['steam_root']) / APP_ROOTS[target]
+                    binary = verify_embedded_craftmaster(app, target)
+                    self.assertGreater(binary.stat().st_size, 1024)
+                    if target == 'mac':
+                        # Executable functionality, not just a magic header or
+                        # a copied receipt, is required on the native host.
+                        subprocess.run([str(binary), 'self-test', '--data-dir',
+                                        str(binary.parent.parent / 'data')],
+                                       timeout=45, check=True)
 
     def test_08_real_signed_mac_app_and_codeoss_lagomorph(self):
         """Verify the exact signed staged native app and real bundled assets."""

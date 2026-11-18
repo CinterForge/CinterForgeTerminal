@@ -1,0 +1,53 @@
+{
+  "schema": "cinterforge.terminal.game-cartridge.v1",
+  "id": "if-Elephants",
+  "title": "When I Was Shot By Elephants III",
+  "command": "Elephants",
+  "kind": "interactive-fiction",
+  "card": {
+    "title": "When I Was Shot By Elephants III",
+    "subtitle": "Z-machine interactive fiction",
+    "artwork": null
+  },
+  "runtime": {
+    "engine": "CinterForge Terminal bundled JavaScript Z-machine interpreter",
+    "format": "zcode",
+    "extension": ".z5",
+    "zcode_version": 5,
+    "application_download_required": false,
+    "guest_machine": null,
+    "screen_resolution": null,
+    "bit_depth": null
+  },
+  "download": {
+    "method": "direct-https-on-request",
+    "url": "https://ifarchive.org/if-archive/games/zcode/Elephants.z5",
+    "filename": "Elephants.z5",
+    "install_command": "Elephants install",
+    "destination": "<resolved-steamapps>/common/CinterForge/InteractiveFiction/Titles/Elephants/Elephants.z5",
+    "max_bytes": 33554432,
+    "require_https_after_redirect": true,
+    "validation": "Z-code version 3, 5, or 8 header",
+    "checksum_sha256": null,
+    "url_checked_live": false,
+    "redistribute_binary": false
+  },
+  "launch": {
+    "command": "Elephants",
+    "explicit_start_command": "Elephants start",
+    "status_command": "Elephants status",
+    "stop_command": "Elephants stop",
+    "requires_installed_story": true,
+    "start_api": "/api/if/start",
+    "opens": "separate Z-machine Session tab"
+  },
+  "saves": {
+    "format": "CONV/Quetzal",
+    "autosave": "<resolved-steamapps>/common/CinterForge/InteractiveFiction/Saves/Elephants/autosave.conv.json",
+    "story_fingerprint": "computed SHA-256 on installed executable"
+  },
+  "source": {
+    "project_file": "webapp/data/if_titles.json",
+    "download_url_origin": "existing Terminal title catalog"
+  }
+}

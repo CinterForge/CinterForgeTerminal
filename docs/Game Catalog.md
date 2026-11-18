@@ -113,7 +113,7 @@ Use `<command> install`, `<command> status`, `<command>` (or `<command> start`),
 
 ## Minecraft Bedrock
 
-Minecraft is a managed game/server experience, not a generic developer terminal. `bedrock install` obtains the official server after EULA acceptance. `bedrock start` discovers worlds; `bedrock run <world>` launches the chosen managed copy; `minecraft` opens a new console attached to that same running server. The console can be closed without stopping the server. `bedrock stop` and application shutdown end the managed server and guests.
+Minecraft is a managed game/server experience, not a generic developer terminal. `bedrock` lists installed **Bedrock** worlds and the user's local **Java** saves. Selecting a Java world runs the bundled native CraftMaster CLI, reuses validated conversions when present, and imports its Bedrock copy before starting the server. `bedrock <world>` installs the official server after EULA acceptance when needed, retrieves a published world by name if absent, and launches it in an interactive tab. `minecraft` opens another console attached to that same running server; closing a client console merely detaches, while closing the server-owning Bedrock tab stops its managed server and guests.
 
 Bedrock uses the LinuxKit/Rosetta guest and host LAN relay on macOS. Client connectivity and discovery must be verified on the host LAN; the guest does not receive its own LAN IP. Details are in the [User Manual](User%20Manual.md).
 

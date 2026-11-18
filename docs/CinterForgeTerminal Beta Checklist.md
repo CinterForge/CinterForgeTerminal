@@ -10,10 +10,10 @@
 ```
 
 ## 1. Windows Installer UI/UX
-- [ ] Icon
-- [ ] Start Menu Icon
-- [ ] Installer Icon
-- [ ] Installer Dialog Image
-- [ ] Readme
+- [-] Icon
+- [-] Start Menu Icon
+- [-] Installer Icon
+- [-] Installer Dialog Image
+- [-] Readme
 
-BETA ACIEVED!
+BETA ACHIEVED!

@@ -291,8 +291,11 @@ class CinterForgeLifecycleVM:
 
 
     def ensure_docker_locked(self, sdk: Path, env: dict[str, str], workspace: Path | None,
-                             cancel_event: threading.Event | None = None) -> str:
-        """Boot/reuse developer t only; all helpers belong to lifecycle."""
+                             cancel_event: threading.Event | None = None,
+                             min_disk_gib: int | None = None) -> str:
+        """Boot/reuse t; disk growth is authorized by Setup, never Build/runtime."""
+        if min_disk_gib is not None and (min_disk_gib < 32 or min_disk_gib > 1024):
+            raise ValueError('Invalid managed t disk capacity requested')
         configure_host_mounts = self.configure_colima_host_mounts
         configure_runtime_emulation = self.configure_colima_runtime_emulation
         run_checked = self.run_checked
@@ -310,6 +313,29 @@ class CinterForgeLifecycleVM:
         def guest_directory(directory: str) -> bool:
             probe = call([colima, 'ssh', '--profile', self.profile, '--', 'test', '-d', directory])
             return probe.returncode == 0
+
+        def verify_setup_disk_space() -> None:
+            if min_disk_gib is None:
+                return
+            # Catch an unexpanded/full t filesystem before a long Docker image
+            # build or Wine preflight.  Build/runtime never repair storage.
+            space = call([colima, 'ssh', '--profile', self.profile, '--',
+                          'df', '-Pk', '/var/lib/docker'], timeout=35)
+            rows = space.stdout.strip().splitlines() if space.returncode == 0 else []
+            try:
+                fields = rows[-1].split()
+                capacity_kib, available_kib = int(fields[1]), int(fields[3])
+            except (IndexError, ValueError) as exc:
+                raise RuntimeError('Cannot measure managed t Docker filesystem: '
+                                   + (space.stderr or space.stdout)[-600:]) from exc
+            progress(f'Owned t Docker storage: {capacity_kib // 1048576} GiB capacity, '
+                     f'{available_kib // 1048576} GiB free')
+            if capacity_kib < min_disk_gib * 1048576 * 3 // 4:
+                raise RuntimeError('Managed t Docker disk did not grow to the Setup '
+                                   f'capacity of {min_disk_gib} GiB; preserving VM state')
+            if available_kib < 4 * 1048576:
+                raise RuntimeError('Managed t Docker disk has under 4 GiB free after '
+                                   'Setup disk provisioning; preserving VM state')
 
         def active_containers(via_guest: bool) -> bool:
             argv = ([colima, 'ssh', '--profile', self.profile, '--', 'docker', 'ps', '--quiet']
@@ -372,25 +398,37 @@ class CinterForgeLifecycleVM:
         required = ['/host/mac', '/host/mac' + str(sdk)]
         if workspace is not None:
             required.append('/host/mac' + str(workspace))
-        installed_profile = bool(env.get('COLIMA_HOME')) and (
-            Path(env['COLIMA_HOME']) / self.profile / 'colima.yaml').is_file()
+        profile_file = Path(env['COLIMA_HOME']) / self.profile / 'colima.yaml'
+        installed_profile = bool(env.get('COLIMA_HOME')) and profile_file.is_file()
+        disk_growth_needed = False
+        if min_disk_gib is not None and installed_profile:
+            # Colima can increase an existing disk on start; do not delete the
+            # VM or its Docker volumes.  Never shrink a larger existing disk.
+            match = re.search(r'(?m)^disk:\s*(\d+)\s*(?:#.*)?$',
+                              profile_file.read_text(encoding='utf-8'))
+            if match is None:
+                raise RuntimeError('Cannot verify managed t disk size in ' + str(profile_file))
+            disk_growth_needed = int(match.group(1)) < min_disk_gib
         mount_changed = configure_host_mounts(env, mounts, dry_run=True)
         # Installed profiles have immutable VM type/architecture. Updating their
         # YAML cannot convert an already-created ARM/VZ disk to AMD64/QEMU.
         # Inspect the *running* engine rather than rewriting these settings.
         emulation_changed = (False if installed and installed_profile else
                              configure_runtime_emulation(env, dry_run=True))
-        config_changed = mount_changed or emulation_changed
+        config_changed = mount_changed or emulation_changed or disk_growth_needed
         ping = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=20)
         if ping.returncode == 0 and installed:
             require_native_installed_architecture()
         if ping.returncode == 0:
             missing = [path for path in required if not guest_directory(path)]
             if not missing and not config_changed:
+                verify_setup_disk_space()
                 return docker  # One already-ready VM; every tab uses docker exec.
             if active_containers(via_guest=False):
                 recover_stale_owned_guests()  # Verifies labels before stopping.
-            reason = ('Rosetta translator disabled for real Wine/MSYS2 Bash'
+            reason = ('expanding Setup-owned t disk to ' + str(min_disk_gib) + ' GiB'
+                      if disk_growth_needed else
+                      'Rosetta translator disabled for real Wine/MSYS2 Bash'
                       if emulation_changed else
                       'outdated overlapping host mount configuration' if mount_changed else
                       'inaccessible host paths: ' + ', '.join(missing))
@@ -423,12 +461,19 @@ class CinterForgeLifecycleVM:
         # Only initial profile creation needs immutable QEMU/architecture flags.
         # Reusing a saved installed profile with those flags causes warnings and
         # cannot change its VM. Do not rebuild an existing profile at app launch.
-        args = ([colima, 'start', self.profile, '--runtime', 'docker']
-                if installed and installed_profile else
-                [colima, 'start', self.profile, '--runtime', 'docker',
-                 '--vm-type', 'qemu', '--mount-type', '9p',
-                 '--mount', '/:/host/mac:w', '--arch', 'x86_64',
-                 '--cpus', '4', '--memory', '8', '--disk', '32', '--save-config'])
+        if installed_profile:
+            args = [colima, 'start', self.profile, '--runtime', 'docker']
+            if disk_growth_needed:
+                # Existing x86-64 QEMU profile: grow in place, retaining its
+                # images, volumes, guest identity, and all owned resources.
+                args += ['--disk', str(min_disk_gib), '--save-config']
+        else:
+            args = [colima, 'start', self.profile, '--runtime', 'docker',
+                    '--vm-type', 'qemu', '--mount-type', '9p',
+                    '--mount', '/:/host/mac:w', '--arch', 'x86_64',
+                    '--cpus', '4', '--memory', '8',
+                    '--disk', str(min_disk_gib if min_disk_gib is not None else 32),
+                    '--save-config']
         if installed and not installed_profile:
             progress('Initializing new x86-64 t profile (no existing VM to replace)')
         # The saved installed t profile may require several minutes to bring SSH
@@ -447,6 +492,7 @@ class CinterForgeLifecycleVM:
         if missing:
             raise RuntimeError('Managed Terminal VM cannot access shared Mac paths ' +
                                ', '.join(missing) + '; refusing a broken Docker bind mount')
+        verify_setup_disk_space()
         return docker
 
     @staticmethod

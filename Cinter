@@ -383,8 +383,11 @@ def main(argv: list[str]) -> int:
         if platform.system() not in ('Darwin', 'Linux'):
             raise RuntimeError('Windows producer Setup currently requires macOS or Linux cross-build host')
         BUILDS.mkdir(parents=True, exist_ok=True)
+        from host.lifecycle.craftmaster_dependency import ensure_craftmaster_sources, setup_craftmaster
+        ensure_craftmaster_sources(BUILDS)
         from host.lifecycle.setup_dirty import is_current, invalidate, commit
-        if is_current(REPO, BUILDS, 'win'):
+        from host.lifecycle.craftmaster_dependency import setup_receipts_present
+        if is_current(REPO, BUILDS, 'win') and setup_receipts_present(BUILDS, ('win',)):
             return 0
         invalidate(BUILDS, 'win')
         if platform.system() == 'Darwin':
@@ -395,13 +398,17 @@ def main(argv: list[str]) -> int:
         from host.lifecycle.amd64_backend import managed_amd64_backend
         with managed_amd64_backend(BUILDS):
             invoke(sys.executable, '-B', '-m', 'host.windows.windows_dependencies', '--builds', str(BUILDS))
+            from host.lifecycle.webview import provision
+            provision(BUILDS)
+            setup_craftmaster(BUILDS, targets=('win',), guest=True)
             invoke(sys.executable, '-B', '-m', 'host.windows.msi_installer', '--builds', str(BUILDS))
         commit(REPO, BUILDS, 'win')
         print('[CinterForgeTerminal] Windows Setup complete: cross-runtime and WiX tools provisioned', flush=True)
         return 0
     if argv in (['setup', 'mac'], ['setup', 'linux']):
-        # These targets currently share the broader platform toolchain
-        # closure, but Build/Stage/Test/Publish still select only their app.
+        # These targets share platform toolchains, but only the selected app's
+        # native CraftMaster package is required for a scoped release.
+        os.environ['CINTER_CRAFTMASTER_SETUP_TARGETS'] = argv[1]
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'setup', 'all')
         return 0
     if argv in (['setup', 'all'], ['setup', 'cfterminal', 'all']):
@@ -412,8 +419,19 @@ def main(argv: list[str]) -> int:
         # the local Setup cache is current; remote updates must invalidate HFS.
         invoke(sys.executable, '-B', str(REPO / 'Cinter'),
                'pull', 'lagomorph', 'source')
+        # Acquire the standalone maintained CraftMaster + Bedrock LevelDB Git
+        # sources during Setup. Do not require published or staged binaries;
+        # Terminal Build will compile all three native CLIs from these sources.
+        from host.lifecycle.craftmaster_dependency import ensure_craftmaster_sources, setup_craftmaster
+        requested = os.environ.get('CINTER_CRAFTMASTER_SETUP_TARGETS', 'all')
+        if requested not in ('mac', 'linux', 'win', 'all'):
+            raise RuntimeError('Invalid CraftMaster Setup target selection')
+        craft_targets = ('mac', 'linux', 'win') if requested == 'all' else (requested,)
+        ensure_craftmaster_sources(BUILDS)
         from host.lifecycle.setup_dirty import is_current, invalidate, commit
-        if is_current(REPO, BUILDS, 'all'):
+        from host.lifecycle.craftmaster_dependency import setup_receipts_present
+        if (is_current(REPO, BUILDS, 'all') and
+                setup_receipts_present(BUILDS, craft_targets)):
             from host.linux.bedrock_consent import require_bedrock_eula
             require_bedrock_eula(BUILDS, 'mac')
             return 0
@@ -433,6 +451,8 @@ def main(argv: list[str]) -> int:
             from host.mac.mac_bootstrap import managed_environment
             os.environ.pop('DOCKER_CONTEXT', None)
             os.environ.update(managed_environment(BUILDS))
+            if 'mac' in craft_targets:
+                setup_craftmaster(BUILDS, targets=('mac',))
         # LinuxKit Setup starts the canonical c Docker producer directly,
         # builds its ARM64 kernel and guest closure, then releases c before
         # actual Bedrock acceptance. No w cross-builder is started.
@@ -457,6 +477,11 @@ def main(argv: list[str]) -> int:
             if platform.system() in ('Darwin', 'Linux'):
                 invoke(sys.executable, '-B', '-m', 'host.windows.windows_dependencies',
                        '--builds', str(BUILDS))
+                from host.lifecycle.webview import provision
+                provision(BUILDS)
+                guests = tuple(t for t in craft_targets if t in ('linux', 'win'))
+                if guests:
+                    setup_craftmaster(BUILDS, targets=guests, guest=True)
                 # Setup provisions WiX tools; tiny-MSI execution is Test-only.
             # For this Setup phase, verify the full developer tool inventory first.
             # The resulting Markdown inventory includes failed tool checks as well as
@@ -509,6 +534,10 @@ def main(argv: list[str]) -> int:
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'build', '--application-shell')
         invoke(sys.executable, '-B', str(REPO / 'host/linux/lifecycle.py'), 'verify')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'stage')
+        from host.lifecycle.craftmaster_dependency import build_craftmaster
+        # Build owns dependency integration: embed the verified native CraftMaster
+        # Stage *before* Mac app assembly and the final code-signing pass.
+        build_craftmaster(BUILDS, targets=('mac',))
         invoke(sys.executable, '-B', '-m', 'host.mac.mac_app', 'stage', '--builds', str(BUILDS))
         # Build only uses Setup-provisioned t; no ARM64 c, image creation, or packages.
         with managed_amd64_backend(BUILDS, setup=False) as docker:
@@ -516,6 +545,7 @@ def main(argv: list[str]) -> int:
             from host.linux.linux_runner import build_terminal
             build_terminal(BUILDS, docker=docker,
                            logfile=BUILDS / 'Logs/CinterForgeTerminal/linux-native-build.log')
+            build_craftmaster(BUILDS, targets=('linux', 'win'), docker=docker)
         from host.lifecycle.universal_package import build_four
         report = build_four(BUILDS)
         if set(report['artifacts']) != {'mac', 'linux', 'win', 'devtools'}:
@@ -582,6 +612,11 @@ def main(argv: list[str]) -> int:
                 # Only Test exercises staged real Bedrock, Linux/Windows guests,
                 # native MSI compiler and root smoke suite. No provisioning.
                 _run_automated_regression_tests()
+                from host.lifecycle.universal_package import _steam_release_path, steamapps_root, APP_ROOTS, HOST_RELEASE
+                from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
+                verify_embedded_craftmaster(
+                    _steam_release_path(steamapps_root(), 'mac', HOST_RELEASE)
+                    / APP_ROOTS['mac'], 'mac')
             else:
                 invoke(sys.executable, '-B', '-m', 'host.mac.mac_app', action,
                        '--builds', str(BUILDS))
@@ -596,17 +631,23 @@ def main(argv: list[str]) -> int:
             invoke(sys.executable, '-B', '-m', 'host.devtools.toolchain', '--builds', str(BUILDS))
             invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'build', '--application-shell')
             invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'stage')
+            from host.lifecycle.craftmaster_dependency import build_craftmaster
+            build_craftmaster(BUILDS, targets=('mac',))
             invoke(sys.executable, '-B', '-m', 'host.mac.mac_app', 'stage', '--builds', str(BUILDS))
         elif target == 'win' and native in ('mac', 'linux'):
             from host.lifecycle.amd64_backend import managed_amd64_backend
-            with managed_amd64_backend(BUILDS, setup=False):
+            with managed_amd64_backend(BUILDS, setup=False) as docker:
                 invoke(sys.executable, '-B', '-m', 'host.lifecycle.cross_build', '--builds', str(BUILDS))
+                from host.lifecycle.craftmaster_dependency import build_craftmaster
+                build_craftmaster(BUILDS, targets=('win',), docker=docker)
         elif target == 'linux' and native == 'mac':
             from host.lifecycle.amd64_backend import managed_amd64_backend
             from host.linux.linux_runner import build_terminal
             with managed_amd64_backend(BUILDS, setup=False) as docker:
                 build_terminal(BUILDS, docker=docker,
                                logfile=BUILDS / 'Logs/CinterForgeTerminal/linux-native-build.log')
+                from host.lifecycle.craftmaster_dependency import build_craftmaster
+                build_craftmaster(BUILDS, targets=('linux',), docker=docker)
         elif target == native:
             invoke(sys.executable, '-B', '-m', 'host.devtools.toolchain', '--builds', str(BUILDS))
             invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'build', '--application-shell')
@@ -741,6 +782,10 @@ def main(argv: list[str]) -> int:
         with executable.open('rb') as stream:
             if stream.read(len(magic)) != magic:
                 raise RuntimeError(f'{target} staged native launcher has invalid executable magic')
+        # A release must carry its platform-matched native CraftMaster CLI
+        # and exact data closure; Setup's downloaded receipt alone is not proof.
+        from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
+        verify_embedded_craftmaster(root / APP_ROOTS[target], target)
         if target == 'win':
             from host.windows.msi_installer import _check_tools, test as test_msi
             try:
@@ -765,7 +810,14 @@ def main(argv: list[str]) -> int:
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'mac')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'linux')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'win')
-        from host.lifecycle.universal_package import status_four
+        from host.lifecycle.universal_package import status_four, _steam_release_path, steamapps_root, APP_ROOTS
+        from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
+        steam = steamapps_root()
+        for target in ('mac', 'linux', 'win'):
+            verify_embedded_craftmaster(
+                _steam_release_path(steam, target,
+                    __import__('host.lifecycle.universal_package', fromlist=['HOST_RELEASE']).HOST_RELEASE)
+                / APP_ROOTS[target], target)
         result = status_four(BUILDS)
         if not result['complete_build_receipt'] or not result['complete_stage_receipt']:
             raise RuntimeError('Automated Test requires four built and staged verified releases; '

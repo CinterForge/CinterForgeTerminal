@@ -135,7 +135,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     python = str(Path(sys.executable).resolve())
     functions = '\n'.join(
         f'{name}() {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in ('help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'discord', 'setpass', 'code', 'htmlmenus'))
+        for name in ('help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'discord', 'setpass', 'code', 'htmlmenus', 'craftmaster'))
     # These exact source filenames are the shell commands. Load the bundled
     # Terminal manifest; no sibling WebApp source or story package is required.
     catalog = json.loads((_CinterForgeSettings.ASSETS / 'data/if_titles.json').read_text(encoding='utf-8'))
@@ -153,7 +153,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
         for name in ['games', 'stories'] + story_names)
     mac_names = list(_mac_catalog())
-    if set(mac_names) & set(['help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories', 'install'] + story_names):
+    if set(mac_names) & set(['help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories', 'install', 'craftmaster'] + story_names):
         raise RuntimeError('Mac game command collides with existing Terminal command')
     functions += '\n' + '\n'.join(
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
@@ -755,6 +755,9 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
     from runtime import CinterForgeSettings as _CinterForgeSettings
     if server.bedrock is None:
         raise RuntimeError('Bedrock is unavailable: ' + server.bedrock_error)
+    # Download only selected published worlds absent from local saves. Keep
+    # network I/O outside the Bedrock/Session locks so status and console stay live.
+    name = server.bedrock.prepare_world(name, progress=server.bedrock._append_log)
     with server.bedrock_terminal_lock:
         with server.sessions_lock:
             live = [item for item in server.sessions.values()

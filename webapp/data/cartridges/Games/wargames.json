@@ -1,0 +1,42 @@
+{
+  "schema": "cinterforge.terminal.game-cartridge.v1",
+  "id": "wargames",
+  "title": "WarGames (JOSHUA)",
+  "command": "wargames",
+  "kind": "web-application",
+  "card": {
+    "title": "WarGames (JOSHUA)",
+    "subtitle": "Interactive simulation",
+    "artwork": null
+  },
+  "emulator": null,
+  "display": {
+    "width": null,
+    "height": null,
+    "depth_bits": null,
+    "note": "Responsive web application, not a classic Mac emulator."
+  },
+  "media": {
+    "method": "bundled-with-terminal",
+    "local_entrypoint": "/joshua/index.html",
+    "download_url": null
+  },
+  "application": {
+    "launch_method": "open-bundled-joshua",
+    "web_path": "/joshua/index.html",
+    "auto_launch_verified": true
+  },
+  "launch": {
+    "terminal_command": "wargames",
+    "existing_route": "/api/wargames/open",
+    "opens": "new JOSHUA Session"
+  },
+  "requirements": {
+    "browser_webview": true,
+    "network_required": false
+  },
+  "source": {
+    "project_file": "docs/Game Catalog.md",
+    "implementation": "webapp/runtime/CinterForgeCommands.py"
+  }
+}

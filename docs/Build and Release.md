@@ -42,6 +42,33 @@ All receipts, logs and downloads remain under the sibling `Builds` directory.
 Build, Stage, Test and installed native-app runtime never provision or repair
 Setup-owned dependencies.
 
+## CraftMaster source-build dependency (all three native targets)
+
+`cinterforge-craftmaster` remains its own Git repository and maintains its native
+`Cinter` lifecycle, converter source, Java world scanner and Zoomify map pipeline.
+Terminal Setup clones missing `cinterforge-craftmaster` and its real
+`cinterforge-leveldb` sibling into the workspace; existing checkouts are
+**never reset, pulled, or overwritten**. No published CraftMaster ZIP or previous
+CraftMaster Stage output is required for Terminal Setup.
+
+Terminal Setup provisions the macOS compiler and the existing managed x86-64
+Debian/MinGW toolchain, then runs CraftMaster's native `setup` prerequisites.
+Terminal Build invokes CraftMaster's standalone `build` and its internal
+asset-copy `stage` for macOS, Linux x86-64 and Windows x86-64, validating all
+three native executable signatures and resource manifests. Terminal's own
+Stage still only installs completed unpacked Terminal build products; Publish
+alone packages and uploads release archives.
+
+Every native Terminal release embeds the matching CraftMaster CLI and its
+checked source-produced resource closure under
+`Builds/CinterForgeCraftMaster/<platform>/`. The installed Terminal never
+requires the Git checkout and does not run another CraftMaster HTTP server.
+At runtime `bedrock` inventories local Java and Bedrock saves, and
+`bedrock <world>` invokes the bundled converter only when needed before using
+the established Bedrock server tab. Conversion tiles and intermediate maps
+remain in the existing managed runtime tree, not inside the final `Worlds/`
+output. The conversion never assembles a giant full-world PNG.
+
 ## Existing lifecycle tests and durable lifecycle logs
 
 Builders run `./Cinter` lifecycle commands only; there are no separate

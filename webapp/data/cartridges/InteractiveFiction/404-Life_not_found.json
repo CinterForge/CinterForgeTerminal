@@ -1,0 +1,53 @@
+{
+  "schema": "cinterforge.terminal.game-cartridge.v1",
+  "id": "if-404-Life_not_found",
+  "title": "404- Life not Found (Beta)",
+  "command": "404-Life_not_found",
+  "kind": "interactive-fiction",
+  "card": {
+    "title": "404- Life not Found (Beta)",
+    "subtitle": "Z-machine interactive fiction",
+    "artwork": null
+  },
+  "runtime": {
+    "engine": "CinterForge Terminal bundled JavaScript Z-machine interpreter",
+    "format": "zblorb",
+    "extension": ".zblorb",
+    "zcode_version": null,
+    "application_download_required": false,
+    "guest_machine": null,
+    "screen_resolution": null,
+    "bit_depth": null
+  },
+  "download": {
+    "method": "direct-https-on-request",
+    "url": "https://ifarchive.org/if-archive/games/zcode/404-Life_not_found.zblorb",
+    "filename": "404-Life_not_found.zblorb",
+    "install_command": "404-Life_not_found install",
+    "destination": "<resolved-steamapps>/common/CinterForge/InteractiveFiction/Titles/404-Life_not_found/404-Life_not_found.zblorb",
+    "max_bytes": 33554432,
+    "require_https_after_redirect": true,
+    "validation": "FORM/IFRS with embedded ZCOD",
+    "checksum_sha256": null,
+    "url_checked_live": false,
+    "redistribute_binary": false
+  },
+  "launch": {
+    "command": "404-Life_not_found",
+    "explicit_start_command": "404-Life_not_found start",
+    "status_command": "404-Life_not_found status",
+    "stop_command": "404-Life_not_found stop",
+    "requires_installed_story": true,
+    "start_api": "/api/if/start",
+    "opens": "separate Z-machine Session tab"
+  },
+  "saves": {
+    "format": "CONV/Quetzal",
+    "autosave": "<resolved-steamapps>/common/CinterForge/InteractiveFiction/Saves/404-Life_not_found/autosave.conv.json",
+    "story_fingerprint": "computed SHA-256 on installed executable"
+  },
+  "source": {
+    "project_file": "webapp/data/if_titles.json",
+    "download_url_origin": "existing Terminal title catalog"
+  }
+}

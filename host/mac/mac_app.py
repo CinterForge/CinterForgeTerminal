@@ -219,6 +219,22 @@ def _stage_complete_resources(builds: Path, app: Path) -> None:
         raise RuntimeError('Repository requires complete 67-game catalog')
     for source, destination in sources:
         _copy_runtime_tree(source, destination)
+    # CraftMaster is built/staged first by the Terminal Build orchestrator.
+    # Copy its verified, *unsigned* native Mac closure into the actual app
+    # before codesign. Never leave a previous signed CraftMaster executable
+    # or obsolete data member behind when reconciling a reused .app directory.
+    from host.lifecycle.craftmaster_dependency import (staged_craftmaster,
+                                                        verify_embedded_craftmaster)
+    craftmaster_stage = staged_craftmaster(builds, 'mac')
+    embedded_craftmaster = payload / 'CinterForgeCraftMaster/mac'
+    if embedded_craftmaster.is_symlink():
+        raise RuntimeError('Unsafe embedded CraftMaster directory')
+    if embedded_craftmaster.exists():
+        if not embedded_craftmaster.is_dir():
+            raise RuntimeError('Embedded CraftMaster path is not a directory')
+        shutil.rmtree(embedded_craftmaster)
+    _copy_runtime_tree(craftmaster_stage, embedded_craftmaster)
+    verify_embedded_craftmaster(app, 'mac')
     # Build uses the already-provisioned Code-OSS Web tree but must package
     # CURRENT authored extension source. Setup's verified upstream build cache
     # is not evidence that Terminal's own extension.js is unchanged.
@@ -311,6 +327,62 @@ def _sign_and_verify(app: Path) -> None:
             os.environ['HOME'] = managed_home
 
 
+def _embedded_craftmaster_receipt(app: Path) -> Path | None:
+    """Locate the platform-specific receipt inside a completed Mac app.
+
+    CraftMaster Stage bytes have their own content-verified receipt. The Mac
+    release signer may subsequently alter the Mach-O to add its code signature.
+    That finalized, signed executable requires a corresponding *embedded*
+    receipt; CraftMaster's original Stage manifest remains untouched.
+    """
+    folder = (app / 'Contents/Resources/Builds/CinterForgeCraftMaster/mac')
+    manifest = folder / 'manifest.json'
+    if not folder.exists():
+        return None
+    if folder.is_symlink() or manifest.is_symlink() or not manifest.is_file():
+        raise RuntimeError('Mac CraftMaster payload has no regular manifest')
+    return manifest
+
+
+def _refresh_signed_craftmaster_receipt(manifest: Path) -> bool:
+    """Update only the executable digest after the native Mac signing pass.
+
+    Reject any changed data or other unexpected member rather than rewriting
+    all hashes to match potentially corrupted content. The receipt is sealed
+    by re-signing the *outer* app after this update.
+    """
+    from host.lifecycle.craftmaster_dependency import _digest
+    doc = json.loads(manifest.read_text(encoding='utf-8'))
+    binary_name = 'bin/CinterForgeCraftMaster'
+    files = doc.get('files')
+    if (doc.get('schema') != 'cinterforge.craftmaster.stage.v1'
+            or doc.get('platform') != 'mac' or not isinstance(files, dict)
+            or binary_name not in files):
+        raise RuntimeError('Invalid signed Mac CraftMaster receipt')
+    binary_digest = None
+    for name, expected in files.items():
+        relative = Path(name)
+        if (not isinstance(name, str) or not name or relative.is_absolute()
+                or '..' in relative.parts or '\\' in name
+                or not isinstance(expected, str) or len(expected) != 64):
+            raise RuntimeError('Unsafe signed Mac CraftMaster receipt member')
+        file = manifest.parent / relative
+        if file.is_symlink() or not file.is_file():
+            raise RuntimeError('Signed Mac CraftMaster payload member missing: ' + name)
+        actual = _digest(file)
+        if name == binary_name:
+            binary_digest = actual
+        elif actual != expected:
+            raise RuntimeError('Mac signing unexpectedly changed CraftMaster data: ' + name)
+    if files[binary_name] == binary_digest:
+        return False
+    doc['files'][binary_name] = binary_digest
+    manifest.write_text(json.dumps(doc, indent=2, sort_keys=True) + '\n',
+                        encoding='utf-8')
+    print('[MAC SIGN] Updated embedded CraftMaster SHA-256 for signed Mach-O', flush=True)
+    return True
+
+
 def _sign_and_verify_with_login_keychain(app: Path) -> None:
     """Seal the *finished* app, after the executable, icon and plist are written.
 
@@ -321,6 +393,12 @@ def _sign_and_verify_with_login_keychain(app: Path) -> None:
     """
     if os.uname().sysname != 'Darwin':
         raise RuntimeError('macOS application signing requires the macOS host')
+    # The original CraftMaster Stage receipt must match *before* codesign.
+    # Never use signing to conceal an already-corrupt packaged executable.
+    craftmaster_receipt = _embedded_craftmaster_receipt(app)
+    if craftmaster_receipt is not None:
+        from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
+        verify_embedded_craftmaster(app, 'mac')
     # Seal the real VM launcher with only the unrestricted virtualization
     # entitlement *before* sealing the outer app. --deep re-signs nested Mach-O
     # files and previously stripped the VM's own entitlements. Preserve
@@ -367,6 +445,18 @@ def _sign_and_verify_with_login_keychain(app: Path) -> None:
                     '--preserve-metadata=entitlements', '--sign', identity or '-',
                     *sign_flags, str(app)], check=True, capture_output=True, text=True)
     _verify_signature(app)
+    if craftmaster_receipt is not None and _refresh_signed_craftmaster_receipt(craftmaster_receipt):
+        # --deep already signed the embedded Mach-O. Re-seal only the outer
+        # bundle's resource inventory: another --deep pass could change the
+        # executable again and invalidate the freshly recorded SHA-256.
+        subprocess.run(['/usr/bin/codesign', '--force',
+                        '--preserve-metadata=entitlements', '--sign', identity or '-',
+                        *sign_flags, str(app)],
+                       check=True, capture_output=True, text=True)
+        _verify_signature(app)
+    if craftmaster_receipt is not None:
+        from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
+        verify_embedded_craftmaster(app, 'mac')
     if not has_virtualization_entitlement(vm):
         raise RuntimeError('VM entitlements missing after packaging; refusing broken release')
 

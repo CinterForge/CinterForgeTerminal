@@ -1,0 +1,53 @@
+{
+  "schema": "cinterforge.terminal.game-cartridge.v1",
+  "id": "if-QuestForTheMagicMuffin3",
+  "title": "The Quest for The Magic Bagel...Err Muffin 3",
+  "command": "QuestForTheMagicMuffin3",
+  "kind": "interactive-fiction",
+  "card": {
+    "title": "The Quest for The Magic Bagel...Err Muffin 3",
+    "subtitle": "Z-machine interactive fiction",
+    "artwork": null
+  },
+  "runtime": {
+    "engine": "CinterForge Terminal bundled JavaScript Z-machine interpreter",
+    "format": "zblorb",
+    "extension": ".zblorb",
+    "zcode_version": null,
+    "application_download_required": false,
+    "guest_machine": null,
+    "screen_resolution": null,
+    "bit_depth": null
+  },
+  "download": {
+    "method": "direct-https-on-request",
+    "url": "https://ifarchive.org/if-archive/games/zcode/QuestForTheMagicMuffin3.zblorb",
+    "filename": "QuestForTheMagicMuffin3.zblorb",
+    "install_command": "QuestForTheMagicMuffin3 install",
+    "destination": "<resolved-steamapps>/common/CinterForge/InteractiveFiction/Titles/QuestForTheMagicMuffin3/QuestForTheMagicMuffin3.zblorb",
+    "max_bytes": 33554432,
+    "require_https_after_redirect": true,
+    "validation": "FORM/IFRS with embedded ZCOD",
+    "checksum_sha256": null,
+    "url_checked_live": false,
+    "redistribute_binary": false
+  },
+  "launch": {
+    "command": "QuestForTheMagicMuffin3",
+    "explicit_start_command": "QuestForTheMagicMuffin3 start",
+    "status_command": "QuestForTheMagicMuffin3 status",
+    "stop_command": "QuestForTheMagicMuffin3 stop",
+    "requires_installed_story": true,
+    "start_api": "/api/if/start",
+    "opens": "separate Z-machine Session tab"
+  },
+  "saves": {
+    "format": "CONV/Quetzal",
+    "autosave": "<resolved-steamapps>/common/CinterForge/InteractiveFiction/Saves/QuestForTheMagicMuffin3/autosave.conv.json",
+    "story_fingerprint": "computed SHA-256 on installed executable"
+  },
+  "source": {
+    "project_file": "webapp/data/if_titles.json",
+    "download_url_origin": "existing Terminal title catalog"
+  }
+}

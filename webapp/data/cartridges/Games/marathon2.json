@@ -1,0 +1,64 @@
+{
+  "schema": "cinterforge.terminal.game-cartridge.v1",
+  "id": "mac-marathon2",
+  "title": "Marathon 2",
+  "command": "marathon2",
+  "kind": "classic-macintosh",
+  "card": {
+    "title": "Marathon 2",
+    "subtitle": "Classic Macintosh",
+    "artwork": null
+  },
+  "emulator": {
+    "provider": "Infinite Mac",
+    "embed_url": "https://infinitemac.org/embed",
+    "machine": "Quadra 650",
+    "system_disk": "Mac OS 7.6",
+    "infinite_hd": true,
+    "saved_hd": false,
+    "configuration_origin": "current CinterForgeTerminal.js / CinterForgeCommands.js",
+    "compatibility_verified": false
+  },
+  "display": {
+    "width": null,
+    "height": null,
+    "depth_bits": null,
+    "suggested_width": 640,
+    "suggested_height": 480,
+    "suggested_values_verified": false,
+    "note": "Resolution and bit depth are not specified for this title in the source catalog. Do not force 16 colors without a tested title-specific requirement."
+  },
+  "media": {
+    "method": "Infinite HD library",
+    "source_repository": "https://github.com/CinterForge/cinterforge-infinite-mac/tree/main/Library/Games",
+    "library_path": "Library/Games/Bungie/Marathon 2.json",
+    "library_entry_format": "json",
+    "direct_download_url": null,
+    "note": "This is the upstream library entry, not an HFS application path or a verified downloadable disk image."
+  },
+  "application": {
+    "volume": null,
+    "hfs_path": null,
+    "launch_method": "guest-applescript-when-available",
+    "applescript": null,
+    "fallback": "manual Finder launch from Infinite HD",
+    "auto_launch_verified": false
+  },
+  "launch": {
+    "terminal_command": "marathon2",
+    "existing_route": "/api/macgames/open",
+    "opens": "Infinite Mac emulator Session",
+    "current_behavior": "boots selected machine with Infinite HD; direct application open not verified",
+    "requires_guest_hfs_path_for_auto_launch": true
+  },
+  "requirements": {
+    "needs_system_7": true,
+    "needs_mac_os_x": false,
+    "compatibility_warning": null
+  },
+  "source": {
+    "project_file": "webapp/data/mac_games.json",
+    "library_catalog": "https://github.com/CinterForge/cinterforge-infinite-mac/tree/main/Library/Games",
+    "snapshot": "Library.zip provided 2026-11-09"
+  }
+}

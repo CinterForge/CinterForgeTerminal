@@ -67,11 +67,11 @@ games            List the 68 game commands
 wargames         Open JOSHUA
 stories          Explore interactive fiction
 infinite-mac     List classic Macintosh game commands
-bedrock help     See Minecraft Bedrock management commands
+bedrock          List Bedrock and Java Minecraft worlds
 code             Open Code-OSS
 ```
 
-To start a Minecraft world, follow `bedrock eula`, `bedrock install`, and `bedrock run "<world name>"` when prompted and authorized. `minecraft` **attaches to the running server**; it does not start one.
+Type `bedrock "<world name>"` to start a verified Bedrock world or convert a local Java world using the bundled CraftMaster CLI and start the server. The official server requires one-time EULA consent. `minecraft` **attaches to the running server**; it does not start one.
 
 See the **[User Manual](docs/User%20Manual.md)** for installing, finding games, using the museum, working in Code-OSS, managing worlds and understanding optional development tooling.
 

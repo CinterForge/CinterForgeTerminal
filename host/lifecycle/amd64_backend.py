@@ -131,7 +131,11 @@ def managed_amd64_backend(builds: Path, *, setup: bool = True):
             # Set ownership before start: even a partially booted VM is ours
             # to stop if an exception or timeout interrupts the start.
             owns_vm = True
-            docker = vm.ensure_docker_locked(sdk, env, builds.parent)
+            # Setup owns capacity provisioning.  The original 32-GiB t disk is
+            # too small for the pinned Windows cross SDK plus BuildKit/Wine.
+            # Build/Test may start t but must never resize or repair it.
+            docker = vm.ensure_docker_locked(
+                sdk, env, builds.parent, min_disk_gib=96 if setup else None)
             arch = subprocess.run([docker, 'info', '--format', '{{.Architecture}}'],
                                   env=env, capture_output=True, text=True,
                                   timeout=45, check=False)

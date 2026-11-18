@@ -1,0 +1,53 @@
+{
+  "schema": "cinterforge.terminal.game-cartridge.v1",
+  "id": "if-zork1",
+  "title": "Zork I: The Great Underground Empire",
+  "command": "zork1",
+  "kind": "interactive-fiction",
+  "card": {
+    "title": "Zork I: The Great Underground Empire",
+    "subtitle": "Z-machine interactive fiction",
+    "artwork": null
+  },
+  "runtime": {
+    "engine": "CinterForge Terminal bundled JavaScript Z-machine interpreter",
+    "format": "zcode",
+    "extension": ".z3",
+    "zcode_version": 3,
+    "application_download_required": false,
+    "guest_machine": null,
+    "screen_resolution": null,
+    "bit_depth": null
+  },
+  "download": {
+    "method": "direct-https-on-request",
+    "url": "https://raw.githubusercontent.com/historicalsource/zork1/master/COMPILED/zork1.z3",
+    "filename": "zork1.z3",
+    "install_command": "zork1 install",
+    "destination": "<resolved-steamapps>/common/CinterForge/InteractiveFiction/Titles/zork1/zork1.z3",
+    "max_bytes": 33554432,
+    "require_https_after_redirect": true,
+    "validation": "Z-code version 3, 5, or 8 header",
+    "checksum_sha256": null,
+    "url_checked_live": false,
+    "redistribute_binary": false
+  },
+  "launch": {
+    "command": "zork1",
+    "explicit_start_command": "zork1 start",
+    "status_command": "zork1 status",
+    "stop_command": "zork1 stop",
+    "requires_installed_story": true,
+    "start_api": "/api/if/start",
+    "opens": "separate Z-machine Session tab"
+  },
+  "saves": {
+    "format": "CONV/Quetzal",
+    "autosave": "<resolved-steamapps>/common/CinterForge/InteractiveFiction/Saves/zork1/autosave.conv.json",
+    "story_fingerprint": "computed SHA-256 on installed executable"
+  },
+  "source": {
+    "project_file": "webapp/data/if_titles.json",
+    "download_url_origin": "existing Terminal title catalog"
+  }
+}

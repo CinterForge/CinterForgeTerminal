@@ -59,8 +59,9 @@ HELP = '''CinterForgeTerminal custom commands
 
   help [infinite-mac|debugger|bedrock|devtools] Display this help or one command's options
   debugger [open|status|help]   Inspect the current WebView (default: open)
-  bedrock <operation>           Manage this app's Minecraft Bedrock server
+  bedrock [world name]          List Bedrock and Java worlds; convert Java when launched
   minecraft                     Enter running Bedrock server console (exit to return)
+  craftmaster [args]            Run the bundled native CraftMaster CLI
   install devtools              Download optional unified SDK after confirmation
   <story-file-stem> install|start|stop|status   On-demand Z-machine games
   games                         List all 68 games (WarGames first, then 67 classic Macs)
@@ -94,24 +95,11 @@ supported fallback if direct opening is unavailable.
 '''
 
 
-BEDROCK_HELP = '''bedrock [start|run <save name>|restart|command <Minecraft command>|path [directory]|stop|status|log|eula|install|help]
-  bedrock start          List local saves and probe nearby Bedrock servers; do not launch
-  bedrock run <save name> Open a dedicated Bedrock Session, leaving this terminal intact
-  bedrock command <cmd> Send one Minecraft server-console command
-  bedrock path           Show selected discovery root(s)
-  bedrock path <folder>  Set an existing minecraftWorlds directory (server must be stopped)
-  bedrock stop           Stop the active server (also handles old unattached VMs)
-  bedrock restart        Stop this world and open a fresh dedicated Bedrock Session
-  bedrock status         Display selected world, actual path and configured UDP port
-  bedrock log            Show server installation diagnostics
-  bedrock eula           Present official EULA in the application WebView
-  bedrock install        Install official server after consent
-  bedrock help           Show these commands
-
-Original world saves are not modified. Each selected world is copied into the
-server's writable Run/worlds tree. A later run reuses that managed copy.
-For Linux and custom locations, use: bedrock path "/full/path/to/minecraftWorlds"
-'''
+BEDROCK_HELP = """bedrock [world name]
+  bedrock             List Bedrock saves and local Java Minecraft worlds
+  bedrock <world>     Convert Java if needed; open the interactive Bedrock server tab
+  Close the Bedrock tab to stop its server; accept the EULA once when prompted.
+"""
 
 
 def _cli_if_catalog():
@@ -296,7 +284,7 @@ def _api(path: str, *, body: dict | None = None) -> dict:
                       data=json.dumps(body).encode('utf-8') if body is not None else None,
                       headers=headers, method='POST' if body is not None else 'GET')
     try:
-        with urlopen(request, timeout=120 if path in ('/api/bedrock/install', '/api/bedrock/run') else 90 if path in ('/api/bedrock/stop', '/api/bedrock/restart') else 10) as response:
+        with urlopen(request, timeout=1800 if path == '/api/bedrock/run' else 120 if path == '/api/bedrock/install' else 90 if path in ('/api/bedrock/stop', '/api/bedrock/restart') else 10) as response:
             return json.loads(response.read(65536).decode('utf-8'))
     except HTTPError as error:
         try:
@@ -432,7 +420,7 @@ def minecraft_console(input_fn=None) -> int:
     import threading
     state = _api('/api/bedrock/status')
     if not (state.get('running') or state.get('starting')):
-        print('Minecraft server is not running. Start it with bedrock run <save name>.', file=sys.stderr)
+        print('Minecraft server is not running. Start it with bedrock <world name>.', file=sys.stderr)
         return 1
     read = input if input_fn is None else input_fn
     finished = threading.Event()
@@ -488,6 +476,40 @@ def minecraft_console(input_fn=None) -> int:
     return 0
 
 
+def _packaged_craftmaster() -> Path:
+    """Find the current platform's packaged CraftMaster, never a sibling repo."""
+    from runtime import CinterForgeSettings as settings
+    system = {'Darwin': 'mac', 'Linux': 'linux', 'Windows': 'win'}[platform.system()]
+    filename = 'CinterForgeCraftMaster.exe' if system == 'win' else 'CinterForgeCraftMaster'
+    # Runtime's ASSETS lives under the staged Python/Host/webapp subtree.
+    # A native app's Build root can be named differently from repo Builds.
+    roots = []
+    configured = os.environ.get('CINTER_BUILDS_ROOT', '').strip()
+    if configured:
+        roots.append(Path(configured))
+    roots.extend(settings.ASSETS.resolve().parents)
+    for root in roots:
+        candidate = root / 'CinterForgeCraftMaster' / system
+        receipt = candidate / 'manifest.json'
+        binary = candidate / 'bin' / filename
+        if (not candidate.is_symlink() and receipt.is_file() and
+                not receipt.is_symlink() and binary.is_file() and not binary.is_symlink()):
+            doc = json.loads(receipt.read_text('utf-8'))
+            expected = doc.get('files', {}).get('bin/' + filename)
+            if (doc.get('schema') != 'cinterforge.craftmaster.stage.v1' or
+                    doc.get('platform') != system or
+                    not isinstance(expected, str) or len(expected) != 64):
+                raise RuntimeError('Packaged CraftMaster receipt is invalid')
+            digest = hashlib.sha256()
+            with binary.open('rb') as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b''):
+                    digest.update(block)
+            if digest.hexdigest() != expected:
+                raise RuntimeError('Packaged CraftMaster binary SHA-256 mismatch')
+            return binary
+    raise RuntimeError('This Terminal release lacks a verified native CraftMaster package')
+
+
 def execute(args: list[str]) -> int:
     from runtime import CinterForgeDevTools as _CinterForgeDevTools
     if not args or args[0] in ('help', '--help', '-h'):
@@ -504,6 +526,9 @@ def execute(args: list[str]) -> int:
             print('Usage: help [infinite-mac|debugger|bedrock|devtools]', file=sys.stderr)
             return 2
         return 0
+    if args[0] == 'craftmaster':
+        binary = _packaged_craftmaster()
+        return subprocess.call([str(binary), *args[1:]])
     if args[0] == 'setpass':
         if len(args) != 3:
             print('Usage: setpass <username> <password>', file=sys.stderr)
@@ -652,153 +677,63 @@ def execute(args: list[str]) -> int:
                 print('If no Inspector appears, open Safari > Develop > CinterForge Terminal.')
         return 0
     if command == 'bedrock':
-        option = options or ['prompt']
-        if not option or option[0] not in ('prompt', 'status', 'log', 'eula', 'install', 'start', 'stop', 'restart', 'help', 'run', 'path', 'command') or (option[0] not in ('run', 'path', 'command') and len(option) != 1) or (option[0] in ('run', 'command') and len(option) < 2):
-            print(BEDROCK_HELP, file=sys.stderr)
-            return 2
-        op = option[0]
-        if op == 'help':
-            print(BEDROCK_HELP)
-        elif op == 'eula':
-            _api('/api/bedrock/eula', body={})
-            print('Review the Bedrock EULA in the CinterForgeTerminal WebView.')
-        elif op == 'log':
-            data = _api('/api/bedrock/log')
-            print('[bedrock] Installer log:', data.get('path', ''))
-            for line in data.get('lines', []):
-                print(line)
-        elif op == 'path':
-            if len(option) == 1:
-                state = _api('/api/bedrock/worlds')
-            else:
-                state = _api('/api/bedrock/path', body={'path': ' '.join(option[1:])})
-            print('World search roots:')
-            for root in state.get('roots', []):
-                print('  ' + root)
-            print(f"Discovered {len(state.get('worlds', []))} saves. Type bedrock start to list them.")
-        elif op == 'command':
-            result = _api('/api/bedrock/command', body={'command': ' '.join(option[1:])})
-            if not result.get('sent'):
-                raise RuntimeError('Minecraft command was not delivered to the server console')
-            print('[bedrock] Submitted to server console:', result.get('command', ''))
-        elif op == 'restart':
-            state = _api('/api/bedrock/restart', body={})
-            print('[bedrock] Restarting the same managed world in a fresh Bedrock Terminal.')
-            print('Console available:', 'yes' if state.get('console_available') else 'no')
-            print('The new Bedrock Session owns the live console; this shell remains available.')
-        elif op == 'run':
-            state = _api('/api/bedrock/run', body={'name': ' '.join(option[1:])})
-            config = state.get('server_configuration') or {}
-            if state.get('terminal_session'):
-                print('[bedrock] Dedicated Bedrock Terminal opening; this session remains available.')
-                print('[bedrock] Server stdin and stdout belong to the new Session tab.')
-            else:
-                print('[bedrock] Server state:', 'running' if state.get('running') else 'not running')
-            print('Save:', state.get('world_name', ''))
-            print('Source world:', state.get('source_world', ''))
-            print('Active server world:', state.get('active_world', ''))
-            print('Configured UDP IPv4:', config.get('server-port', '19132'),
-                  '| IPv6:', config.get('server-portv6', '19133'))
-        elif op == 'status':
-            state = _api('/api/bedrock/status')
-            print(f"Bedrock ({state.get('host', 'unknown')} / {state.get('platform', 'unknown')}): "
-                  f"EULA {'accepted' if state.get('eula_accepted') else 'not accepted'}, "
-                  f"{'installed' if state.get('installed') else 'not installed'}, "
-                  f"{'running' if state.get('running') else ('starting' if state.get('starting') else 'stopped')}")
-            if state.get('installing'):
-                print('Installing: ' + str(state.get('install_progress') or 'starting...'))
-            if state.get('install_error'):
-                print('Last installation error: ' + str(state['install_error']))
-                print('Type bedrock log to read download diagnostics.')
-            if state.get('pid') is not None:
-                print('Launcher PID:', state['pid'])
-            if state.get('startup_error'):
-                print('Startup error:',state['startup_error'])
-            config = state.get('server_configuration') or {}
-            if config:
-                print('World:', config.get('level-name', '(not specified)'),
-                      '| Server:', config.get('server-name', '(not specified)'),
-                      '| Bedrock UDP IPv4:', config.get('server-port', '19132'),
-                      '| IPv6:', config.get('server-portv6', '19133'))
-            selected = (state.get('world_selection') or {}).get('selected') or {}
-            if selected:
-                print('Source world:', selected.get('path', ''))
-                level = config.get('level-name', '')
-                if level:
-                    print('Active server world:', str(__import__('pathlib').Path(state.get('run_root', '')) / 'worlds' / level))
-
-            if state.get('running') and not state.get('network_verified'):
-                print('Bedrock VM is alive; LAN connections are not independently verified by this status check.')
-                if state.get('guest_nat'):
-                    print('macOS LinuxKit uses NAT: LAN discovery/UDP forwarding is not guaranteed.')
-                if state.get('console_available') is False:
-                    print('Existing launch has no console input; type bedrock restart to recover it explicitly.')
-                else:
-                    print('Enter minecraft to use the live server console.')
-        elif op == 'start':
+        if not options:
             state = _api('/api/bedrock/worlds')
-            print('Available Bedrock saves:')
+            print('Available Bedrock worlds:')
             for world in state.get('worlds', []):
                 print('  ' + world['name'] + '  [' + world['folder'] + ']')
-                print('    ' + world['path'])
             if not state.get('worlds'):
-                print('  No saves discovered. Use bedrock path <minecraftWorlds directory>.')
-            else:
-                print('Run one with: bedrock run <save name>')
-            print('Checking for other Minecraft servers on the LAN...')
-            scan = _api('/api/bedrock/lan')
-            peers = scan.get('servers') or []
-            print('Other Minecraft servers visible to this host:')
-            if not peers:
-                print('  None answered the bounded RakNet UDP discovery probe.')
-            for peer in peers:
-                print('  ' + peer.get('name', '(unnamed)') + '  ' + peer.get('address', '') + ':' + str(peer.get('port', '')))
-            events = scan.get('relay_events') or []
-            if events:
-                print('Recent LinuxKit relay observations:')
-                for event in events[-6:]:
-                    print('  ' + event)
-            else:
-                print('LAN scan is host-side; bridged guest listens directly on its own LAN IP.')
-        elif op == 'prompt':
+                print('  (none installed)')
+            print('Available Java worlds:')
+            for world in state.get('java_worlds', []):
+                print('  ' + world['name'] + '  [' + world['folder'] + ']')
+            if not state.get('java_worlds'):
+                print('  (none discovered)')
+            if state.get('java_error'):
+                print('  CraftMaster inventory unavailable: ' + state['java_error'])
+            print('Launch with: bedrock <world name>')
+            return 0
+        selected = ' '.join(options).strip()
+        if not selected or selected in ('help', '--help', '-h'):
+            print(BEDROCK_HELP)
+            return 0
+        # No separate install/start/run/stop/status public commands. Retain
+        # internal HTTP actions for the owning Bedrock tab and EULA UI only.
+        if selected.casefold() in ('install', 'run', 'stop', 'start', 'status', 'restart', 'eula', 'log', 'command', 'path'):
+            print('Usage: bedrock <world name> (or bedrock to list worlds)', file=sys.stderr)
+            return 2
+        state = _api('/api/bedrock/status')
+        if not state.get('eula_accepted'):
+            _api('/api/bedrock/eula', body={})
+            print('[bedrock] Review and accept the official Minecraft EULA in Terminal.', flush=True)
+        elif not state.get('installed') and not state.get('installing'):
+            _api('/api/bedrock/install', body={})
+        # The accepted EULA starts the existing background Bedrock installer.
+        # Poll only while the user-requested command remains open. Cancellation
+        # of the EULA returns without downloading any server or world content.
+        last_progress = None
+        start_wait = time.monotonic()
+        while not state.get('installed'):
+            if time.monotonic() - start_wait > 1800:
+                raise RuntimeError('Bedrock installation did not complete; view the persistent Bedrock log')
+            time.sleep(0.75)
             state = _api('/api/bedrock/status')
-            if state.get('installed'):
-                print('Bedrock server installed. Type bedrock start, stop or status.')
-            else:
-                print('Bedrock server not installed.')
-                if state.get('installing'):
-                    print('Installation in progress:', state.get('install_progress', ''))
-                elif state.get('install_error'):
-                    print('Installation failed:', state['install_error'])
-                    print('Type bedrock install to retry without accepting the EULA again.')
-                elif not state.get('eula_accepted'):
-                    _api('/api/bedrock/eula', body={})
-                    print('Review the Bedrock EULA in the Terminal. Acceptance starts installation.')
-                else:
-                    print('Type bedrock install to retry the server download.')
-        elif op == 'install':
-            state = _api('/api/bedrock/status')
-            if not state.get('eula_accepted'):
-                _api('/api/bedrock/eula', body={})
-                print('Review the Minecraft EULA: https://www.minecraft.net/en-us/eula')
-                print('Accept the EULA in the WebView to start download and installation.')
-            else:
-                state = _api('/api/bedrock/install', body={})
-                if state.get('installed'):
-                    print('[bedrock] Already installed. Type bedrock start.')
-                elif state.get('install_error'):
-                    print('[bedrock] ' + str(state['install_error']), file=sys.stderr)
-                    return 1
-                else:
-                    print('[bedrock] EULA previously accepted. Installation started. Monitoring live progress (Ctrl-C stops watching only)...', flush=True)
-                    return _monitor_bedrock_install()
-        else:
-            state = _api('/api/bedrock/' + op, body={})
-            verb = 'started' if op == 'start' else 'stopped'
-            if state.get('running') is (op == 'start'):
-                print('[bedrock] ' + ('Launcher started; Minecraft readiness not yet verified.' if op == 'start' else 'Server stopped.'))
-            else:
-                print('[bedrock] ' + json.dumps(state, sort_keys=True))
+            if state.get('install_error'):
+                raise RuntimeError('Bedrock installation failed: ' + state['install_error'])
+            if state.get('eula_accepted') and not state.get('installing') and not state.get('installed'):
+                _api('/api/bedrock/install', body={})
+            if not state.get('eula_accepted') and not state.get('eula_requested'):
+                print('[bedrock] EULA dialog dismissed; no installation was started.')
+                return 1
+            progress = state.get('install_progress')
+            if progress and progress != last_progress:
+                print('[bedrock] ' + str(progress), flush=True)
+                last_progress = progress
+        print('[bedrock] Starting ' + selected + ' in a new interactive terminal tab…', flush=True)
+        result = _api('/api/bedrock/run', body={'name': selected})
+        if not result.get('terminal_session'):
+            raise RuntimeError('Bedrock did not create its interactive terminal tab')
+        print('[bedrock] Opened ' + selected + '; close its tab to stop the server.', flush=True)
         return 0
     print('Unknown custom command. Type help.', file=sys.stderr)
     return 2

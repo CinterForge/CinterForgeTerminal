@@ -1,0 +1,61 @@
+{
+  "schema": "cinterforge.terminal.game-cartridge.v1",
+  "id": "lagomorph",
+  "title": "Lagomorph",
+  "command": "lagomorph",
+  "kind": "classic-macintosh-special",
+  "card": {
+    "title": "Lagomorph",
+    "subtitle": "Hidden classic Macintosh game",
+    "artwork": null,
+    "hidden": true
+  },
+  "emulator": {
+    "provider": "Infinite Mac",
+    "embed_url": "https://infinitemac.org/embed",
+    "machine": "Quadra 650",
+    "system_disk": "Mac OS 7.6",
+    "saved_hd": true,
+    "infinite_hd": false
+  },
+  "display": {
+    "width": 640,
+    "height": 480,
+    "depth_bits": 4,
+    "colors": 16,
+    "current_method": "existing Control Strip guest input sequence",
+    "planned_method": "guest-side AppleScript with a compatible installed monitor-depth scripting addition",
+    "applescript_method_verified": false
+  },
+  "media": {
+    "method": "existing staged Lagomorph media",
+    "media_api": "/api/lagomorph/media",
+    "use_returned_disk_urls": true,
+    "separate_writable_save_disk": true,
+    "manual_api": "/api/lagomorph/manual",
+    "note": "Do not embed a fixed ISO URL. Existing runtime resolves published HTTPS media and may supply two floppy URLs."
+  },
+  "application": {
+    "candidate_volume": "Lagomorph 1",
+    "candidate_file": "Lagomorph 1",
+    "hfs_path": null,
+    "launch_method": "guest-applescript-when-verified",
+    "candidate_applescript": "tell application \"Finder\" to open file \"Lagomorph 1\" of disk \"Lagomorph 1\"",
+    "candidate_applescript_verified": false,
+    "fallback": "preserve existing guest Control Strip / Finder input sequence",
+    "fallback_verified_in_existing_product": true
+  },
+  "launch": {
+    "terminal_command": "lagomorph",
+    "opens": "Quadra 650 Infinite Mac Session",
+    "existing_route": "/api/lagomorph/next",
+    "additional_behavior": "preserve hidden command, manual, Battles, original assets, save disk, and existing working guest startup sequence"
+  },
+  "source": {
+    "project_files": [
+      "webapp/data/terminal_styles.json",
+      "webapp/client/CinterForgeEmulators.js",
+      "webapp/runtime/CinterForgeIF.py"
+    ]
+  }
+}

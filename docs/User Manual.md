@@ -154,27 +154,31 @@ A **terminal style** changes the visual presentation, for example color, charact
 
 CinterForge Terminal manages the official **Minecraft Bedrock Dedicated Server**. It provides world selection, a dedicated server Session with real output, console commands, and a second reconnectable console without launching a duplicate server.
 
-### First-time setup
+### List, convert and launch Minecraft worlds
 
 ```text
-bedrock status          Check server installation and status
-bedrock eula            Review/accept the official EULA
-bedrock install         Download and verify the official server after consent
-bedrock start           Discover/select worlds; does NOT start a world
-bedrock run "My World"  Start a named world in its own server Session
+bedrock                            List Bedrock and local Java Minecraft saves
+bedrock "Candlewood (Candlewood)"  Convert Java if needed; start the Bedrock server
+bedrock "My World"                 Launch an existing Bedrock save
 ```
 
-After the server reaches the ready state, use its **live Bedrock tab** to type real server-console commands such as `list`. From another Terminal Session, type `minecraft` to attach an additional console to that same running server. You can also use:
+`bedrock` scans the standard Java saves directory as well as the installed
+Bedrock world directories. A Java-world selection invokes the native
+CraftMaster executable bundled with Terminal, preserves the Java source,
+converts all present dimensions, validates its `.mcworld`, and imports the
+Bedrock copy. A previously validated Bedrock world is reused instead of being
+converted again. Other names can still use the existing verified public
+published-world fallback; an in-progress beta upload is not a complete release.
+The official Bedrock Dedicated Server is installed only after the one-time
+EULA acceptance.
 
-```text
-bedrock command list    Send a server command
-bedrock log             Open runtime/install diagnostics
-bedrock restart         Restart the managed server session
-bedrock stop            Stop the server gracefully
-bedrock help            Show available Bedrock commands
-```
-
-**Important distinction:** `bedrock run "<world>"` starts a world; `minecraft` only **attaches** after the server is already running. The application should stop its owned Bedrock runtime and helpers on exit, without deleting player worlds or stopping unrelated virtual machines. On macOS the server uses the managed LinuxKit/Rosetta environment and LAN relay. Other platforms use their appropriate supported execution environments, and actual LAN connectivity depends on the host/network configuration. Minecraft itself and the official server binaries are third-party software with their own requirements and terms.
+Type Minecraft server commands such as `list` directly into the live Bedrock
+tab. Closing that tab stops its owned server and helper processes, without
+deleting the world. From another Terminal Session, `minecraft` attaches an
+additional console to the running server. Closing that client console only
+detaches it. On macOS the managed server uses the supported LinuxKit/Rosetta
+runtime and host LAN relay; reachability depends on the host network and the
+official Bedrock server terms apply.
 
 ## 7. Real terminals on three platforms
 
@@ -282,7 +286,7 @@ Use the [Architecture](Architecture.md), [Integrating the Host](Integrating%20th
 
 **A game isn't starting:** Check the exact command in `games` or `infinite-mac`, verify that its permitted media is available, and look for in-app error messages. A style preview is not equivalent to an installed emulator.
 
-**`minecraft` reports no server:** Start a world first with `bedrock run "<world>"`. A second console cannot attach to a server that is stopped.
+**`minecraft` reports no server:** Start a world first with `bedrock "<world>"`. A second console cannot attach to a server that is stopped.
 
 **A Windows/Linux shell is unavailable on macOS:** The real guest environment or optional DevTools may be missing. Follow the in-app install flow if offered; Terminal will not fake the platform shell.
 

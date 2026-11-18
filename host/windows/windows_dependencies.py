@@ -303,18 +303,18 @@ def _verify_wine_runtime(cross: WindowsCrossEnvironment, *, cwd: Path) -> dict[s
                        'WINEDEBUG=warn+all,err+all', 'wineboot', '--init']
             boot = cross.execute(command, cwd=cwd, timeout=180, graphical=True,
                                  diagnostic_log=log_path)
-        if boot.returncode:
-            raise RuntimeError('Windows cross Wine prefix initialization failed: '
-                               + (boot.stdout or '')[-1000:])
+            if boot.returncode:
+                raise RuntimeError('Windows cross Wine prefix initialization failed: '
+                                   + (boot.stdout or '')[-1000:])
     else:
         print('[WINDOWS SETUP] REUSE previously verified Wine prefix', flush=True)
     with progress_step('verify Wine executable loader (winepath)'):
         result = cross.execute(['winepath', '-w', '/builds'], cwd=cwd, timeout=90,
                                graphical=True)
-    if (result.returncode or not (result.stdout or '').strip() or
-            not (result.stdout or '').strip().lower().endswith('\\builds')):
-        raise RuntimeError('Windows cross Wine runtime failed executable preflight (winepath): '
-                           + (result.stdout or '')[-1000:])
+        if (result.returncode or not (result.stdout or '').strip() or
+                not (result.stdout or '').strip().lower().endswith('\\builds')):
+            raise RuntimeError('Windows cross Wine runtime failed executable preflight (winepath): '
+                               + (result.stdout or '')[-1000:])
     if hasattr(cross, 'mark_wine_prefix_initialized'):
         cross.mark_wine_prefix_initialized()
     return {'wineboot': 'prefix-initialized', 'winepath': 'executable-verified'}

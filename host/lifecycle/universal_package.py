@@ -616,6 +616,10 @@ def _app_assets(builds: Path, target: str, release: str) -> dict[str, Path | byt
         # add files inside Contents after the bundle has been sealed.
         from host.mac.mac_app import _verify_signature
         _verify_signature(app)
+        # CraftMaster is already inside this signed bundle. Do not later
+        # replace its signed Mach-O with the unsigned standalone Stage bytes.
+        from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
+        verify_embedded_craftmaster(app, 'mac')
     else:
         prefix = 'CinterForge Terminal'
         builds_prefix = prefix + '/Builds'
@@ -723,6 +727,14 @@ exec "$HERE/CinterForge Terminal" --builds "$BUILDS" --python "$BUILDS/Python/En
         assets[host_root + '/python/worker.py'] = repo / 'host/worker.py'
         for name in _authored_webapp_assets(repo):
             assets[host_root + '/webapp/' + name] = repo / 'webapp' / name
+    # CraftMaster owns its converter. Linux/Windows releases consume their
+    # verified Stage bytes here; the Mac executable was embedded and signed
+    # earlier, so its already-sealed contents must not be overwritten.
+    if target != 'mac':
+        # Linux/Windows have no signed .app: take their validated Stage bytes.
+        from host.lifecycle.craftmaster_dependency import packaged_craftmaster_assets
+        assets.update(packaged_craftmaster_assets(builds, target,
+                      builds_prefix + '/CinterForgeCraftMaster/' + target))
     if any('/Servers/Bedrock/' in k or k.endswith('/bedrock_server') or k.endswith('/bedrock_server.exe')
            for k in assets):
         raise RuntimeError('Bedrock server must never ship in Setup/Build/Stage')
