@@ -65,26 +65,14 @@ def _bounded_size(cols: int, rows: int) -> tuple[int, int]:
 
 
 def _windows_msys2_root(writable_root: Path) -> Path:
-    """Read Bash from immutable packaged resources, not the Steam state tree.
-
-    The downloaded Windows application bundles its MSYS2 runtime under its
-    read-only Builds/ resources directory; native session state must instead
-    be written under the selected steamapps/TerminalState directory. A source
-    lifecycle run may use its provisioned developer MSYS2 closure directly.
-    """
-    from runtime import CinterForgeSettings as _CinterForgeSettings
-    for ancestor in _CinterForgeSettings.ASSETS.resolve().parents:
-        if ancestor.name == 'Builds':
-            candidate = ancestor / 'CinterForgeTerminal/Runtime/MSYS2'
-            if (candidate / 'usr/bin/bash.exe').is_file():
-                return candidate
-    for relative in ('CinterForgeTerminal/Runtime/MSYS2',
-                     'CinterForgeTerminal/Toolchains/Windows/MSYS2'):
-        candidate = writable_root / relative
-        if (candidate / 'usr/bin/bash.exe').is_file():
-            return candidate
-    raise RuntimeError('Packaged Windows MSYS2 UCRT64 Bash is missing; '
-                       'rebuild the Windows application with the complete runtime')
+    """Read exactly the selected shared Builds/Toolchains/Windows/MSYS2."""
+    from runtime import CinterForgeDevTools as devtools
+    builds = devtools._devtools_builds_root()
+    root = builds / 'Toolchains/Windows/MSYS2'
+    if root.is_symlink() or not (root / 'usr/bin/bash.exe').is_file():
+        raise RuntimeError('Windows MSYS2 missing at ' + str(root) +
+                           '; install DevTools in the selected Builds workspace')
+    return root
 
 
 def _shell_command(system: str, scripts: Path, builds: Path | None = None) -> list[str]:
@@ -135,7 +123,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     python = str(Path(sys.executable).resolve())
     functions = '\n'.join(
         f'{name}() {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in ('help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'discord', 'setpass', 'code', 'htmlmenus', 'craftmaster'))
+        for name in ('help', 'debugger', 'bedrock', 'play', 'lagomorph', 'infinite-mac', 'discord', 'setpass', 'code', 'htmlmenus', 'craftmaster'))
     # These exact source filenames are the shell commands. Load the bundled
     # Terminal manifest; no sibling WebApp source or story package is required.
     catalog = json.loads((_CinterForgeSettings.ASSETS / 'data/if_titles.json').read_text(encoding='utf-8'))
@@ -151,17 +139,16 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
         raise RuntimeError('Duplicate IF commands')
     functions += '\n' + '\n'.join(
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in ['games', 'stories'] + story_names)
-    mac_names = list(_mac_catalog())
-    if set(mac_names) & set(['help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories', 'install', 'craftmaster'] + story_names):
-        raise RuntimeError('Mac game command collides with existing Terminal command')
-    functions += '\n' + '\n'.join(
-        f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in mac_names)
-    # only the explicitly requested `install devtools` native-app command.
-    functions += ('\ninstall() { if [ "$1" = devtools ]; then '
-                  + shlex.quote(python) + ' ' + shlex.quote(str(cli))
-                  + ' --terminal-cli install "$@"; else command install "$@"; fi; }')
+        for name in ['games', 'stories'])
+    # All games and stories are selected using the single play command.
+    reserved = {'help', 'debugger', 'bedrock', 'lagomorph', 'play', 'games',
+                'stories', 'discord', 'setpass', 'code', 'htmlmenus',
+                'craftmaster', 'devtools'}
+    if set(story_names) & reserved or set(_mac_catalog()) & reserved:
+        raise RuntimeError('Game or story title collides with a Terminal command')
+    # Explicit shared workspace selection; never copy SDK into Steam.
+    functions += ('\ndevtools() { ' + shlex.quote(python) + ' '
+                  + shlex.quote(str(cli)) + ' --terminal-cli devtools "$@"; }')
     # The package controls MSYSTEM, UCRT64 PATH and HOME. Sourcing the global
     # /etc/profile on every interactive Session reruns MSYS2 first-start hooks
     # (pacman-key, /dev/shm and /dev/mqueue setup), even for read-only bundles.
@@ -755,9 +742,51 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
     from runtime import CinterForgeSettings as _CinterForgeSettings
     if server.bedrock is None:
         raise RuntimeError('Bedrock is unavailable: ' + server.bedrock_error)
-    # Download only selected published worlds absent from local saves. Keep
-    # network I/O outside the Bedrock/Session locks so status and console stay live.
-    name = server.bedrock.prepare_world(name, progress=server.bedrock._append_log)
+    # Create the preview tab BEFORE conversion. Its HTML displays progress until
+    # the first Zoomify tile arrives; the browser polls independently of this
+    # potentially long-running request. The later Bedrock PTY is a separate tab.
+    from runtime import CinterForgeCraftMasterMap as _CinterForgeCraftMasterMap
+    java_world = server.bedrock.find_java_world(name) if name.strip() else None
+    map_request = (_CinterForgeCraftMasterMap.open_map_tab(server, java_world)
+                   if java_world is not None else None)
+
+    def report_progress(message: str) -> None:
+        if map_request is None:
+            server.bedrock._append_log(message)
+        else:
+            _CinterForgeCraftMasterMap.report_progress(server, map_request['id'], message)
+
+    # Keep the existing world preparation outside Session locks. Do not hold a
+    # browser/VM lock while converting Java chunks or downloading a public ZIP.
+    try:
+        server.bedrock.prepare_world(name, progress=report_progress)
+    except Exception as error:
+        if map_request is not None:
+            _CinterForgeCraftMasterMap.mark_finished(server, map_request['id'], error)
+        raise
+    if map_request is not None:
+        map_file = (server.bedrock.craftmaster_output_root() / 'Maps' /
+                    map_request['world'] / 'Overworld' / 'Live Map.htm')
+        if map_file.is_file():
+            _CinterForgeCraftMasterMap.mark_finished(server, map_request['id'])
+        else:
+            # The Bedrock import may have reused a validated save that predates
+            # Zoomify output. Produce its live map without delaying Bedrock.
+            def build_missing_map() -> None:
+                try:
+                    server.bedrock.run_native_craftmaster(
+                        java_world, progress=report_progress,
+                    )
+                except Exception as error:
+                    _CinterForgeCraftMasterMap.mark_finished(
+                        server, map_request['id'], error,
+                    )
+                else:
+                    _CinterForgeCraftMasterMap.mark_finished(server, map_request['id'])
+            threading.Thread(
+                target=build_missing_map, daemon=True,
+                name='bedrock-craftmaster-map',
+            ).start()
     with server.bedrock_terminal_lock:
         with server.sessions_lock:
             live = [item for item in server.sessions.values()

@@ -35,6 +35,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import secrets
 import stat
 import tempfile
 import time
@@ -48,10 +49,10 @@ SOURCE_FILES = ('Cinter', 'Cinter.cmd', 'webapp/CinterForgeTerminal.py')
 # These are Setup-produced, BUILD-READ-ONLY closures.  No Builds/Logs,
 # Intermediates compiler trees, application builds, or Steam stages are here.
 ALL_OUTPUTS = (
-    'CinterForgeTerminal/Toolchains/mac',
-    'CinterForgeTerminal/Toolchains/WindowsCross',
-    'CinterForgeTerminal/Toolchains/Windows',
-    'CinterForgeTerminal/Toolchains/Linux',
+    'Toolchains/mac',
+    'Toolchains/WindowsCross',
+    'Toolchains/Windows',
+    'Toolchains/Linux',
     'Toolchains/WebView',
     'Toolchains/WebView2',
     'CinterForgeTerminal/Dependencies/LinuxKit/mac/arm64',
@@ -68,9 +69,9 @@ ALL_OUTPUTS = (
     'Run/CinterForgeTerminal/WindowsCross/WineVolume.json',
 )
 WIN_OUTPUTS = (
-    'CinterForgeTerminal/Toolchains/mac',
-    'CinterForgeTerminal/Toolchains/WindowsCross',
-    'CinterForgeTerminal/Toolchains/Windows',
+    'Toolchains/mac',
+    'Toolchains/WindowsCross',
+    'Toolchains/Windows',
     'Toolchains/WebView',
     'Toolchains/WebView2',
     'Intermediates/CinterForgeTerminal/WebView2',
@@ -81,9 +82,9 @@ WIN_OUTPUTS = (
 # not part of the Setup closure.  Everything else remains a dirty input.
 IGNORED_PARTS = frozenset({'__pycache__', '.DS_Store', '.git', '.pytest_cache', '.mypy_cache'})
 IGNORED_PREFIXES = (
-    'CinterForgeTerminal/Toolchains/mac/mamba-cache/',
-    'CinterForgeTerminal/Toolchains/Windows/MSYS2/tmp/',
-    'CinterForgeTerminal/Toolchains/Windows/MSYS2/var/log/',
+    'Toolchains/mac/mamba-cache/',
+    'Toolchains/Windows/MSYS2/tmp/',
+    'Toolchains/Windows/MSYS2/var/log/',
 )
 
 
@@ -131,7 +132,7 @@ def _output_state(builds: Path, scope: str) -> dict[str, dict]:
     """
     roots = ALL_OUTPUTS if scope == 'all' else WIN_OUTPUTS
     if scope == 'win' and platform.system() != 'Darwin':
-        roots = tuple(name for name in roots if name != 'CinterForgeTerminal/Toolchains/mac')
+        roots = tuple(name for name in roots if name != 'Toolchains/mac')
     result = {}
     started = time.monotonic()
     last_heartbeat = started
@@ -198,6 +199,102 @@ def _receipt(builds: Path, scope: str) -> Path:
     return builds / 'Intermediates/CinterForgeTerminal/SetupCache' / f'{scope}.json'
 
 
+
+# VM state is intentionally not recursively included in ALL_OUTPUTS: every
+# normal boot mutates its disk. Record the identity of the *verified* t profile
+# instead, so a deleted/replaced guest cannot inherit an unrelated Setup PASS.
+T_GUEST_SCHEMA = 'cinterforge.terminal.setup-t-guest-rsync.v1'
+
+
+def _t_guest_state(builds: Path) -> dict[str, str | int]:
+    """Read identity of the managed developer VM, without starting it."""
+    vm_root = builds / 'CFTVM/T'
+    colima_profile = vm_root / 'c/t'
+    lima_instance = vm_root / 'l/colima-t'
+    config = colima_profile / 'colima.yaml'
+    guest_identity = lima_instance / 'CinterForgeSetupGuest.id'
+    if (vm_root.is_symlink() or colima_profile.is_symlink() or
+            lima_instance.is_symlink() or config.is_symlink() or
+            guest_identity.is_symlink() or not guest_identity.is_file() or
+            not colima_profile.is_dir() or not lima_instance.is_dir() or
+            not config.is_file()):
+        raise RuntimeError('Setup-provisioned t VM profile is missing or unsafe')
+    # Inodes change when an instance is deleted and recreated, but not when
+    # normal VM boot writes to its virtual disk or Docker volumes.
+    identity = guest_identity.read_text(encoding='ascii').strip()
+    if len(identity) != 32 or any(ch not in '0123456789abcdef' for ch in identity):
+        raise RuntimeError('Managed t Lima instance lacks a valid Setup identity')
+    colima_metadata = colima_profile.stat()
+    lima_metadata = lima_instance.stat()
+    return {
+        'vm_root': str(vm_root.resolve(strict=True)),
+        'lima_instance_identity': identity,
+        'colima_directory_device': colima_metadata.st_dev,
+        'colima_directory_inode': colima_metadata.st_ino,
+        'lima_directory_device': lima_metadata.st_dev,
+        'lima_directory_inode': lima_metadata.st_ino,
+    }
+
+
+def _t_guest_receipt(builds: Path) -> Path:
+    return builds / 'CFTVM/T/config/DevToolsGuestSetup.json'
+
+
+def record_verified_t_guest(builds: Path) -> None:
+    """Seal a Setup-only rsync probe against the precise developer VM."""
+    vm_root = builds / 'CFTVM/T'
+    identity = vm_root / 'l/colima-t/CinterForgeSetupGuest.id'
+    if identity.is_symlink():
+        raise RuntimeError('Refusing linked Lima instance Setup identity')
+    if not identity.exists():
+        if not identity.parent.is_dir() or identity.parent.is_symlink():
+            raise RuntimeError('Cannot identify missing managed Lima t instance')
+        identity.write_text(secrets.token_hex(16) + '\n', encoding='ascii')
+    state = _t_guest_state(builds)
+    receipt = _t_guest_receipt(builds)
+    if receipt.is_symlink():
+        raise RuntimeError('Refusing linked DevTools guest receipt: ' + str(receipt))
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    payload = {'schema': T_GUEST_SCHEMA, 'profile': 't',
+               'required_guest_executable': 'rsync', 'state': state}
+    with tempfile.NamedTemporaryFile(
+            mode='w', encoding='utf-8', dir=receipt.parent,
+            prefix='DevToolsGuestSetup-', suffix='.tmp', delete=False) as stream:
+        temporary = Path(stream.name)
+        json.dump(payload, stream, indent=2, sort_keys=True)
+        stream.write('\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        os.replace(temporary, receipt)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _require_verified_t_guest(builds: Path, scope: str) -> None:
+    """A cached Mac Setup may reuse only its own rsync-verified t instance."""
+    if scope != 'all' or platform.system() != 'Darwin':
+        return
+    receipt = _t_guest_receipt(builds)
+    if receipt.is_symlink() or not receipt.is_file():
+        raise RuntimeError('DevTools t guest has no verified rsync Setup receipt')
+    data = json.loads(receipt.read_text(encoding='utf-8'))
+    if (data.get('schema') != T_GUEST_SCHEMA or
+            data.get('profile') != 't' or
+            data.get('required_guest_executable') != 'rsync' or
+            data.get('state') != _t_guest_state(builds)):
+        raise RuntimeError('DevTools t guest changed since rsync provisioning')
+    # VM disks are mutable and deliberately excluded from the cache inventory,
+    # but Colima's saved topology is a Setup-owned *configuration*. A cached
+    # Setup cannot claim CURRENT if the next Build would reject that topology.
+    from host.lifecycle.CinterForgeLifecycleVM import CinterForgeLifecycleVM
+    vm = CinterForgeLifecycleVM(builds)
+    differences = vm.colima_configuration_differences(
+        {'COLIMA_HOME': str(builds / 'CFTVM/T/c')}, vm.mac_host_mounts())
+    if differences:
+        raise RuntimeError('DevTools t guest saved configuration changed: ' +
+                           '; '.join(differences))
+
 def is_current(repo: Path, builds: Path, scope: str = 'all') -> bool:
     """Return True only for a prior fully accepted and unchanged Setup."""
     path = _receipt(builds, scope)
@@ -211,6 +308,7 @@ def is_current(repo: Path, builds: Path, scope: str = 'all') -> bool:
             raise ValueError('Setup receipt schema/scope/builds differs')
         if data.get('source_sha256') != _sources(repo, scope):
             raise ValueError('Setup authored inputs changed')
+        _require_verified_t_guest(builds, scope)
         observed = _output_state(builds, scope)
         if data.get('outputs') != observed:
             changed = next((key for key in observed if
@@ -239,6 +337,7 @@ def commit(repo: Path, builds: Path, scope: str = 'all') -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink():
         raise RuntimeError(f'Unsafe Setup receipt path: {path}')
+    _require_verified_t_guest(builds, scope)
     data = {'schema': SCHEMA, 'scope': scope,
             'builds': str(builds.resolve()),
             'source_sha256': _sources(repo, scope),

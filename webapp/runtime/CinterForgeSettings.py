@@ -189,38 +189,3 @@ CODEOSS_OBSERVER = r"""<script nonce="cinterforge">
 })();
 </script>
 """.encode('utf-8')
-
-
-CLIENT_SCRIPTS = ('client/CinterForgeAPI.js', 'client/CinterForgeTerminals.js', 'client/CinterForgeCapabilities.js', 'client/CinterForgeClientState.js', 'client/CinterForgeCodeOSS.js', 'client/CinterForgeEmulators.js', 'client/CinterForgeSessions.js', 'client/CinterForgeLaunchers.js', 'client/CinterForgeDiscord.js', 'client/CinterForgeLAN.js', 'client/CinterForgeIF.js', 'client/CinterForgeSessionIO.js', 'client/CinterForgeInput.js', 'client/CinterForgeMenus.js', 'client/CinterForgeLayout.js', 'client/CinterForgeKeyboard.js', 'client/CinterForgeBedrock.js', 'client/CinterForgeGuestStatus.js', 'client/CinterForgeCommands.js', 'CinterForgeTerminal.js')
-
-STATIC_FILES = {
-    '/': ('index.html', 'text/html; charset=utf-8'),
-    '/index.html': ('index.html', 'text/html; charset=utf-8'),
-    '/CinterForgeTerminal.js': ('CinterForgeTerminal.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeAPI.js': ('client/CinterForgeAPI.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeTerminals.js': ('client/CinterForgeTerminals.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeCapabilities.js': ('client/CinterForgeCapabilities.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeClientState.js': ('client/CinterForgeClientState.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeCodeOSS.js': ('client/CinterForgeCodeOSS.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeEmulators.js': ('client/CinterForgeEmulators.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeSessions.js': ('client/CinterForgeSessions.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeLaunchers.js': ('client/CinterForgeLaunchers.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeDiscord.js': ('client/CinterForgeDiscord.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeLAN.js': ('client/CinterForgeLAN.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeIF.js': ('client/CinterForgeIF.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeSessionIO.js': ('client/CinterForgeSessionIO.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeInput.js': ('client/CinterForgeInput.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeMenus.js': ('client/CinterForgeMenus.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeLayout.js': ('client/CinterForgeLayout.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeKeyboard.js': ('client/CinterForgeKeyboard.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeBedrock.js': ('client/CinterForgeBedrock.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeGuestStatus.js': ('client/CinterForgeGuestStatus.js', 'text/javascript; charset=utf-8'),
-    '/client/CinterForgeCommands.js': ('client/CinterForgeCommands.js', 'text/javascript; charset=utf-8'),
-    '/terminal.css': ('terminal.css', 'text/css; charset=utf-8'),
-    '/terminal_styles.json': ('data/terminal_styles.json', 'application/json; charset=utf-8'),
-    '/mac_games.json': ('data/mac_games.json', 'application/json; charset=utf-8'),
-    '/vendor/xterm.js': ('vendor/xterm.js', 'text/javascript; charset=utf-8'),
-    '/vendor/xterm.css': ('vendor/xterm.css', 'text/css; charset=utf-8'),
-    '/vendor/addon-fit.js': ('vendor/addon-fit.js', 'text/javascript; charset=utf-8'),
-}
-

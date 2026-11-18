@@ -83,7 +83,7 @@ def _download_msys2(builds: Path) -> Path:
     recovering provenance.  A receipt without its payload is likewise
     recovered only when the new download matches its recorded SHA-256.
     """
-    stage = builds / 'CinterForgeTerminal/Toolchains/Windows/Downloads'
+    stage = builds / 'Toolchains/Windows/Downloads'
     stage.mkdir(parents=True, exist_ok=True)
     installer = stage / f'msys2-x86_64-{MSYS2_VERSION}.exe'
     receipt = stage / f'msys2-x86_64-{MSYS2_VERSION}.json'
@@ -254,7 +254,7 @@ def _mac_transfer_entries(builds: Path) -> dict[str, Path]:
     verified its image and Wine/MSYS2 work in the x86-64 t backend; neither
     c's VM state nor t's live disk is a transferable build dependency.
     """
-    mac = builds / 'CinterForgeTerminal/Toolchains/mac'
+    mac = builds / 'Toolchains/mac'
     entries: dict[str, Path] = {}
     for name, rel in (
         ('MacHostEnvironment', 'env'),
@@ -326,7 +326,7 @@ def ensure(builds: Path) -> dict:
         raise RuntimeError(f'Windows dependency staging requires sibling Builds directory: {builds}')
     if platform.system() not in ('Darwin', 'Linux'):
         raise RuntimeError('Windows cross-dependency staging requires a macOS or Linux host')
-    stage = builds / 'CinterForgeTerminal/Toolchains/WindowsCross'
+    stage = builds / 'Toolchains/WindowsCross'
     stage.mkdir(parents=True, exist_ok=True)
     log = builds / 'Logs/CinterForgeTerminal/windows-dependencies.json'
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -381,10 +381,10 @@ def ensure(builds: Path) -> dict:
         print('[WINDOWS DEPENDENCIES] OCI MinGW/Wine/Xvfb image staged: ' + str(image_archive), flush=True)
 
         with progress_step('provision WebView source'):
-            webview = provision_webview(builds)
+            webview = provision_webview(builds, repair=True)
         report['stages']['WebViewSource'] = str(webview)
         with progress_step('provision Windows WebView2 SDK'):
-            sdk = provision_webview2(builds)
+            sdk = provision_webview2(builds, repair=True)
         report['stages']['WebView2SDK'] = str(sdk)
         with progress_step('provision offline WebView2 runtime'):
             installer, _ = provision_offline_webview2(builds)

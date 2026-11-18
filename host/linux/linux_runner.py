@@ -49,7 +49,7 @@ def stage(builds: Path, *, docker: str, logfile: Path) -> Path:
     cache = builds / 'Intermediates/CinterForgeTerminal/PythonPackages' / filename
     _download_verified(cache, filename, expected)
     image = _docker_image(builds, docker, logfile)
-    root = builds / 'CinterForgeTerminal/Toolchains/TargetRunners/linux'
+    root = builds / 'Toolchains/TargetRunners/linux'
     root.mkdir(parents=True, exist_ok=True)
     executable = root / 'run'
     recipe_hash = linux_recipe_sha256()

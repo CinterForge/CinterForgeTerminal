@@ -93,7 +93,11 @@ class CinterForgeGuestSupervisor:
             if not installed:
                 server.guest_start_state = 'not-installed'
                 server.guest_start_error = ''
-                server.log_event('Managed reusable guests: DevTools not installed; no VM started')
+                from runtime import CinterForgeDevTools as devtools
+                selection = devtools._devtools_builds_pin()
+                server.log_event('Managed reusable guests: DevTools Source not selected; '
+                                 'run devtools install <path/to/source>; selection=' + str(selection) +
+                                 '; no VM started')
                 return {'state': 'not-installed', 'error': ''}
             server.guest_start_state = 'starting'
             server.guest_start_error = ''

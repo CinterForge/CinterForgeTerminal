@@ -65,7 +65,9 @@ setInterval(async () => {
         disk,
         kind: 'emulator',
         year: 1993,
-        macGame: true
+        macGame: true,
+        gameAttemptUrl: result.url || null,
+        gameUnverified: !result.verified
       });
       await CinterForgeState.openSession('macgame-' + result.game);
     } catch (error) {

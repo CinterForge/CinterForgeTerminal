@@ -194,7 +194,7 @@ def _staged_kernel_image(destination: Path) -> str | None:
 
 def _clone_kernel_source(builds: Path) -> Path:
     """Provision the original v1.8.2 LinuxKit kernel sources solely in Builds."""
-    root = builds / "CinterForgeTerminal/Toolchains/mac/linuxkit/kernel-source"
+    root = builds / "Toolchains/mac/linuxkit/kernel-source"
     git = root / ".git"
     if git.is_dir():
         result = subprocess.run(["git", "-C", str(root), "rev-parse", "--short=7", "HEAD"],
@@ -225,7 +225,7 @@ def _linuxkit_build_environment(repo_root: Path) -> dict[str, str]:
                              capture_output=True, text=True).stdout.strip()
     if not context:
         raise RuntimeError("Managed Docker context is empty; cannot select ARM64 builder")
-    cache = cfos_builds_root(repo_root) / "CinterForgeTerminal/Toolchains/mac/linuxkit/cache"
+    cache = cfos_builds_root(repo_root) / "Toolchains/mac/linuxkit/cache"
     cache.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["LINUXKIT_BUILDERS"] = "linux/arm64=" + context

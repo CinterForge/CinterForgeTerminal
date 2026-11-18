@@ -337,21 +337,12 @@ namespace
             std::cerr << "[CinterForgeTerminal] Xcode/developer runtime: " << cfg.builds
                       << "; Server logs: " << (builds / "Logs/CinterForgeTerminal/Runtime").string() << '\n';
         }
-        if (cfg.developer)
-        {
-            // Explicit developer launcher: lifecycle and VM state belong to Builds.
-            // A downloaded app must not inherit runtime VM paths inside the signed
-            // Contents/Resources/Builds payload; Python chooses its Steam root.
-            const fs::path state = builds / "CFTVM";
-            useIfUnset("COLIMA_HOME", (state / "colima").string());
-            useIfUnset("LIMA_HOME", (state / "lima").string());
-            useIfUnset("COLIMA_CACHE_HOME", (state / "cache/colima").string());
-            useIfUnset("DOCKER_CONFIG", (state / "docker").string());
-            useIfUnset("DOCKER_CONTEXT", "colima-cinterforge-windows");
-        }
+        // No Colima/Docker selectors are set by the native launcher.
+        // The Python VM owner supplies the exact Setup-owned
+        // Builds/CFTVM/T environment when DevTools are explicitly available.
         // On HOPE-DEV, developer tools may exist in sibling Builds. The lightweight
         // released app does not require them for its normal WebView startup.
-        const fs::path tools = builds / "CinterForgeTerminal/Toolchains/mac";
+        const fs::path tools = builds / "Toolchains/mac";
         if (fs::is_directory(tools))
         {
             const std::string prior = std::getenv("PATH") ? std::getenv("PATH") : "";

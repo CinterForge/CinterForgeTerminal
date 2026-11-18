@@ -276,6 +276,13 @@
       url.searchParams.set('disk', profile.disk);
       if (profile.macGame) {
         url.searchParams.set('infinite_hd', 'true');
+        // Import only the exact authored URL selected by the live server.
+        // A library catalog filename is never converted into a guessed URL.
+        if (profile.gameAttemptUrl) {
+          const media = new URL(profile.gameAttemptUrl);
+          if (media.protocol === 'https:' && !media.username && !media.password)
+            url.searchParams.set('library_url', media.toString());
+        }
       }
       if (profile.lagomorph) {
         url.searchParams.set('screenSize', '640x480');

@@ -207,13 +207,11 @@ def _stage_complete_resources(builds: Path, app: Path) -> None:
     # Construct the final, signed app from current repository source, and keep
     # the embedded Host manifest consistent with the exact bytes shipped.
     authored = Path(__file__).resolve().parents[2] / 'webapp'
-    required = ('CinterForgeTerminal.py', 'data/if_titles.json', 'data/mac_games.json',
-                'index.html', 'CinterForgeTerminal.js', 'terminal.css', 'data/terminal_styles.json', 'views/startup.html', 'startup.js', 'views/discord.html')
-    required += tuple('client/' + name.name for name in sorted((authored / 'client').glob('CinterForge*.js')))
-    required += tuple('runtime/' + name.name for name in sorted((authored / 'runtime').glob('CinterForge*.py')))
-    for name in required:
-        if not (authored / name).is_file():
-            raise RuntimeError('Missing authored Terminal shell asset in repository: ' + name)
+    # Copy *all* authored webapp files from the current checkout. Never guess
+    # which JavaScript, view, image, or runtime module a new feature needs.
+    # The same dynamic inventory is used for Linux/Windows application builds.
+    from host.lifecycle.universal_package import _authored_webapp_assets
+    required = _authored_webapp_assets(authored.parent)
     catalog = json.loads((authored / 'data/mac_games.json').read_text(encoding='utf-8'))
     if catalog.get('schema') != 'cinterforge.terminal.macgames.v1' or len(catalog.get('games', [])) != 67:
         raise RuntimeError('Repository requires complete 67-game catalog')
@@ -261,33 +259,13 @@ def _stage_complete_resources(builds: Path, app: Path) -> None:
         receipt['files']['webapp/' + name] = digest
         if hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
             raise RuntimeError('Mac app embedded Terminal asset differs from repository: ' + name)
-    joshua_source=authored / 'joshua'
-    if not (joshua_source / 'index.html').is_file() or not (joshua_source / 'LICENSE').is_file():
-        raise RuntimeError('Missing authored JOSHUA standalone source and license')
-    joshua_dest=embedded / 'joshua'
-    if joshua_dest.is_dir():
-        shutil.rmtree(joshua_dest)
-    shutil.copytree(joshua_source,joshua_dest)
-    for source in sorted(joshua_source.rglob('*')):
-        if source.is_file():
-            rel=source.relative_to(authored)
-            digest=hashlib.sha256(source.read_bytes()).hexdigest()
-            receipt['files']['webapp/' + rel.as_posix()]=digest
-    # Keep all launcher HTML/icons/three independent wallpapers synchronized
-    # with authored repository source before sealing the Mac application.
-    launcher_source = authored / 'launcher'
-    if not all((launcher_source / ('assets/backgrounds/' + name + '.png')).is_file()
+    # Required launcher/game payloads must be present in the same authored
+    # inventory; there are no separate hardcoded copy passes or script lists.
+    if not (embedded / 'joshua/index.html').is_file() or not (embedded / 'joshua/LICENSE').is_file():
+        raise RuntimeError('Missing staged JOSHUA source and license')
+    if not all((embedded / ('launcher/assets/backgrounds/' + name + '.png')).is_file()
                for name in ('mac', 'windows', 'linux')):
-        raise RuntimeError('Missing separate Mac/Windows/Linux Launcher backgrounds')
-    launcher_dest = embedded / 'launcher'
-    if launcher_dest.is_dir():
-        shutil.rmtree(launcher_dest)
-    shutil.copytree(launcher_source, launcher_dest,
-                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store'))
-    for source in sorted(launcher_source.rglob('*')):
-        if source.is_file() and not source.is_symlink():
-            rel = source.relative_to(authored)
-            receipt['files']['webapp/' + rel.as_posix()] = hashlib.sha256(source.read_bytes()).hexdigest()
+        raise RuntimeError('Missing staged Mac/Windows/Linux Launcher backgrounds')
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n', encoding='utf-8')
     # The guest probe and loader are required by Bedrock when users install
     # it later. Neither LinuxKit Setup nor the app includes a BDS executable.
@@ -383,6 +361,78 @@ def _refresh_signed_craftmaster_receipt(manifest: Path) -> bool:
     return True
 
 
+
+def _bundle_craftmaster_native_libraries(app: Path) -> list[Path]:
+    """Make CraftMaster relocatable; never load Homebrew libraries at runtime.
+
+    The standalone converter is built with macOS LibArchive found by CMake.
+    Its Mach-O may reference a Homebrew dylib signed by a different Team ID.
+    Hardened Runtime rejects that dependency when the signed app is launched.
+    Bundle the *complete* non-system Mach-O dependency closure, rewrite each
+    load command to @loader_path, and sign the copies with the app identity.
+    """
+    binary = (app / 'Contents/Resources/Builds/CinterForgeCraftMaster/mac/'
+              'bin/CinterForgeCraftMaster')
+    if not binary.is_file() or binary.is_symlink():
+        raise RuntimeError('Mac CraftMaster executable is missing or linked')
+    # Keep @loader_path references short enough for the existing Mach-O headers.
+    destination = binary.parent.parent / 'lib'
+    if destination.is_symlink():
+        raise RuntimeError('Refusing linked CraftMaster native library directory')
+    if destination.exists():
+        if not destination.is_dir():
+            raise RuntimeError('CraftMaster native library path is not a directory')
+        shutil.rmtree(destination)  # The app is a generated Build output.
+
+    def dependencies(file: Path) -> list[str]:
+        result = subprocess.run(['/usr/bin/otool', '-L', str(file)],
+                                check=True, capture_output=True, text=True)
+        lines = result.stdout.splitlines()
+        if not lines or not lines[0].rstrip().endswith(':'):
+            raise RuntimeError('Cannot inspect Mach-O dependencies: ' + str(file))
+        libraries = [line.strip().split(' (', 1)[0] for line in lines[1:] if line.strip()]
+        # otool lists a dylib's own LC_ID_DYLIB first; it is not a dependency.
+        return libraries[1:] if file != binary else libraries
+
+    pending = [binary]
+    copied: dict[str, Path] = {}
+    while pending:
+        file = pending.pop()
+        for dependency in dependencies(file):
+            if dependency.startswith(('/usr/lib/', '/System/Library/')):
+                continue  # Apple platform libraries pass hardened validation.
+            if dependency.startswith('@loader_path/'):
+                local = (file.parent / dependency[len('@loader_path/'):]).resolve()
+                if local.is_file() and local.is_relative_to(app.resolve()):
+                    continue
+                raise RuntimeError('Unresolved CraftMaster @loader_path: ' + dependency)
+            if not dependency.startswith('/'):
+                raise RuntimeError('Unresolved CraftMaster dynamic library: ' + dependency)
+            upstream = Path(dependency)
+            if upstream.is_relative_to(app):
+                continue
+            if not upstream.is_file():
+                raise RuntimeError('Required CraftMaster dynamic library missing: ' + dependency)
+            name = upstream.name
+            real = upstream.resolve(strict=True)
+            if name in copied and copied[name] != real:
+                raise RuntimeError('Conflicting CraftMaster library names: ' + name)
+            if name not in copied:
+                destination.mkdir(parents=True, exist_ok=True)
+                target = destination / name
+                shutil.copy2(real, target)
+                copied[name] = real
+                pending.append(target)
+            target = destination / name
+            relative = os.path.relpath(target, file.parent).replace(os.sep, '/')
+            subprocess.run(['/usr/bin/install_name_tool', '-change', dependency,
+                            '@loader_path/' + relative, str(file)], check=True,
+                           capture_output=True, text=True)
+    print(f'[MAC SIGN] Bundled {len(copied)} CraftMaster native libraries inside app',
+          flush=True)
+    return sorted((destination / name for name in copied), key=str)
+
+
 def _sign_and_verify_with_login_keychain(app: Path) -> None:
     """Seal the *finished* app, after the executable, icon and plist are written.
 
@@ -399,6 +449,9 @@ def _sign_and_verify_with_login_keychain(app: Path) -> None:
     if craftmaster_receipt is not None:
         from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
         verify_embedded_craftmaster(app, 'mac')
+        craftmaster_libraries = _bundle_craftmaster_native_libraries(app)
+    else:
+        craftmaster_libraries = []
     # Seal the real VM launcher with only the unrestricted virtualization
     # entitlement *before* sealing the outer app. --deep re-signs nested Mach-O
     # files and previously stripped the VM's own entitlements. Preserve
@@ -421,6 +474,12 @@ def _sign_and_verify_with_login_keychain(app: Path) -> None:
         sign_launcher(vm)
     sign_flags = (['--options', 'runtime', '--timestamp'] if identity
                   else ['--timestamp=none'])
+    # --deep alone does not reliably sign loose dylibs under Resources.
+    # Sign each copy with the SAME identity as the app.
+    for library in craftmaster_libraries:
+        subprocess.run(['/usr/bin/codesign', '--force', '--sign', identity or '-',
+                        *sign_flags, str(library)], check=True,
+                       capture_output=True, text=True)
     # Public beta and release are signed identically. Preserve the existing
     # nested-code and VM entitlements; do not require a channel-specific file.
     if identity:

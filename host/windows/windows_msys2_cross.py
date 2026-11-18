@@ -263,7 +263,7 @@ def _unpack_ucrt(cross, builds: Path, root: Path, archives: list[Path]) -> None:
 
 
 def ensure(builds: Path, cross, base: Path) -> Path:
-    root = builds / 'CinterForgeTerminal/Toolchains/Windows/MSYS2'
+    root = builds / 'Toolchains/Windows/MSYS2'
     manifest = root / 'closure.json'
     required = [root / name for name in (
         *REQUIRED, 'usr/bin/winpty.exe',

@@ -48,24 +48,14 @@ def target() -> tuple[str, str]:
 
 
 def msys2_root(builds: Path) -> Path:
-    """Find a complete UCRT64 installation, preferring an already staged copy.
-
-    A system installation is reused for initial provisioning, but does not
-    silently satisfy the offline-bundle contract. Stage it into Builds before
-    producing a distributable bundle.
-    """
-    candidates = [builds / 'CinterForgeTerminal/Toolchains/Windows/MSYS2',
-                  builds / 'Toolchains/MSYS2',
-                  Path(os.environ.get('CINTER_MSYS2_ROOT', 'C:/msys64'))]
-    if os.name == 'nt':
-        candidates.extend([Path('C:/msys64'), Path('C:/tools/msys64')])
-    for root in candidates:
-        if all((root / p).is_file() for p in ('usr/bin/bash.exe', 'ucrt64/bin/gcc.exe',
-                                              'ucrt64/bin/g++.exe', 'ucrt64/bin/cmake.exe',
-                                              'ucrt64/bin/ninja.exe')):
-            return root.resolve()
-    raise RuntimeError('MSYS2 UCRT64 toolchain missing: expected Bash + GCC/G++ + CMake + Ninja; '
-                       'install/reuse MSYS2 and stage it under Builds/CinterForgeTerminal/Toolchains/Windows/MSYS2')
+    """The only managed MSYS2 installation is Builds/Toolchains/Windows/MSYS2."""
+    root = builds / 'Toolchains/Windows/MSYS2'
+    required = ('usr/bin/bash.exe', 'ucrt64/bin/gcc.exe',
+                'ucrt64/bin/g++.exe', 'ucrt64/bin/cmake.exe',
+                'ucrt64/bin/ninja.exe')
+    if root.is_symlink() or not all((root / name).is_file() for name in required):
+        raise RuntimeError('Missing Setup-owned MSYS2 UCRT64 under ' + str(root))
+    return root.resolve(strict=True)
 
 
 def stage_windows_msys2(builds: Path) -> Path:
@@ -74,7 +64,7 @@ def stage_windows_msys2(builds: Path) -> Path:
     A full, conventional installation is easier and safer than manually
     picking DLLs out of the UCRT64 toolchain. Never download at build time.
     """
-    output = builds / 'CinterForgeTerminal/Toolchains/Windows/MSYS2'
+    output = builds / 'Toolchains/Windows/MSYS2'
     try:
         existing = msys2_root(builds)
     except RuntimeError:
@@ -171,7 +161,7 @@ def probe_local(builds: Path, *, require_cross: bool = False) -> dict:
         # The Mac toolchain is provisioned exclusively by Setup in sibling
         # Builds. Resolve it directly so a new Build process does not require
         # Homebrew/system installs or an inherited Setup-only PATH.
-        managed_mac_bin = builds / 'CinterForgeTerminal/Toolchains/mac/env/bin'
+        managed_mac_bin = builds / 'Toolchains/mac/env/bin'
         bash = shutil.which('bash') or '/bin/bash'
         cc = shutil.which('clang' if system == 'mac' else 'gcc') or ('clang' if system == 'mac' else 'gcc')
         cxx = shutil.which('clang++' if system == 'mac' else 'g++') or ('clang++' if system == 'mac' else 'g++')

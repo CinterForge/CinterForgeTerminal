@@ -57,28 +57,22 @@ from runtime.CinterForgeGuest import CinterForgeGuestSupervisor
 
 HELP = '''CinterForgeTerminal custom commands
 
-  help [infinite-mac|debugger|bedrock|devtools] Display this help or one command's options
-  debugger [open|status|help]   Inspect the current WebView (default: open)
-  bedrock [world name]          List Bedrock and Java worlds; convert Java when launched
-  minecraft                     Enter running Bedrock server console (exit to return)
-  craftmaster [args]            Run the bundled native CraftMaster CLI
-  install devtools              Download optional unified SDK after confirmation
-  <story-file-stem> install|start|stop|status   On-demand Z-machine games
-  games                         List all 68 games (WarGames first, then 67 classic Macs)
-  wargames                      Launch original JOSHUA as its own Session tab
-  stories                       List 16 IF titles (interactive fiction)
-  discord <user> <server> <channel>  Open a Discord bot-connected Session tab
-  setpass <username> <password>      Set this host's LAN login credentials
-  code [run]                        Open Code-OSS in a tab
-  code mode light|dark              Set and remember the Code-OSS theme
-  code open <absolute-path>         Select host folder or .code-workspace
-  htmlmenus show|hide|toggle        Inspect HTML menus on macOS (native menu remains)
-  infinite-mac                  List 67 classic Macintosh games (help infinite-mac)
-  <game-name>                   Launch the named game in its existing player
-  Infinite Mac: https://infinitemac.org/
+  <command> help               Display this help or one command's options
 
-Your other commands run in the real OS shell (zsh, bash, or PowerShell).
-Minecraft Bedrock downloads require an explicit EULA decision in the WebView.
+  games                         List Playable Infinite-Mac macOS Games
+  stories                       List Interactive Fiction Stories
+  play <title>                  Launch a game or story in a Session Window
+  bedrock <world>               List and load and serve a Minecraft Bedrock world
+  craftmaster <world>           Convert a Minecraft Java world to Bedrock
+
+  debugger                      Debug the current WebView (default: open). See debugger help
+  devtools                      Manage Developer Tools. See devtools help
+  code                          Open CinterForge Code. See code help
+
+  discord                       Open a Discord bot-connected Session tab. See discord help
+  setpass                       Set this host's LAN login credentials. See setpass help
+
+  Other commands                Run in the real OS shell (zsh, bash, or PowerShell).
 '''
 
 
@@ -87,6 +81,29 @@ DEBUGGER_HELP = '''debugger [open|status|help]
   debugger open        Same as debugger
   debugger status      Show whether developer inspection is enabled
   debugger help        Show this help
+'''
+
+CODE_HELP = '''code [open|status|help]
+  code                      Open the CinterForge Code editor
+  code open                 Same as code
+  code status               Show whether the code editor is enabled
+  code help                 Show this help
+  code open <workspace>     Open the specified workspace in the CinterForge Code editor
+'''
+
+BEDROCK_HELP = '''bedrock [world name]
+  bedrock             List installed Bedrock worlds (including CraftMaster conversions)
+  bedrock <world>     Install as needed and open its interactive server tab
+  Close the Bedrock tab to stop its server; accept the EULA once when prompted.
+'''
+
+DEVTOOLS_HELP = '''devtools [install|update|uninstall|version|report|help]
+    devtools install <path/to/source>  Install a local Developer Tools source tree
+    devtools update                    Update the installed Developer Tools to the latest staged version
+    devtools uninstall                 Remove the installed Developer Tools
+    devtools version                   Show the installed Developer Tools version
+    devtools report                    Show the installed Developer Tools version and staged version
+    devtools help                      Show this help
 
 The Terminal enables native WebView inspection itself. Windows opens WebView2
 DevTools and Linux opens WebKitGTK Inspector. On macOS, Terminal requests the
@@ -94,12 +111,25 @@ WKWebView Inspector and enables inspection through Safari > Develop as the
 supported fallback if direct opening is unavailable.
 '''
 
+DISCORD_HELP = '''discord <user> <server> <channel>
+  discord "<user>" "<server>" "<channel>"   Open a bot-connected Discord Session tab
+  discord help                            Show this help
 
-BEDROCK_HELP = """bedrock [world name]
-  bedrock             List Bedrock saves and local Java Minecraft worlds
-  bedrock <world>     Convert Java if needed; open the interactive Bedrock server tab
-  Close the Bedrock tab to stop its server; accept the EULA once when prompted.
-"""
+Quote names containing spaces; commas between quoted arguments are optional.
+The first argument is a user/context label, not an account to impersonate.
+The configured Discord bot must belong to the named server and have access to
+the named text channel. Close the Discord tab to disconnect its Session.
+'''
+
+SETPASS_HELP = '''setpass <username> <password>
+  setpass <username> <password>    Enable or change this host's LAN login
+  setpass help                     Show this help
+
+No default username or password exists. The command invalidates existing
+remote LAN logins. It runs in a real OS shell: entered credentials may remain
+visible in the terminal transcript; avoid exposing them or sharing the log.
+The Terminal HTTP interface is not encrypted. Use a trusted LAN or secure tunnel.
+'''
 
 
 def _cli_if_catalog():
@@ -197,9 +227,6 @@ def _if_command(name, operation, entry):
     import subprocess
     import tempfile
     path = _if_path(name, entry)
-    if operation == 'status':
-        print(f'{name}: ' + ('installed' if path.is_file() else 'not installed') + ' at ' + str(path))
-        return 0
     if operation == 'install':
         if path.is_symlink() or path.parent.is_symlink():
             raise RuntimeError('Refusing linked story installation path')
@@ -247,27 +274,19 @@ def _if_command(name, operation, entry):
             return 0
         finally:
             if temp is not None: temp.unlink(missing_ok=True)
-    if operation == 'start':
+    if operation == 'play':
         if not path.is_file():
-            print(f'{name} is not installed. Type {name} install.', file=sys.stderr)
-            return 1
+            result = _if_command(name, 'install', entry)
+            if result:
+                return result
         body = {'command': name}
         source = os.environ.get('CINTER_TERMINAL_SESSION_ID', '')
-        if __import__('re').fullmatch(r'[0-9a-f]{32}', source):
+        if re.fullmatch(r'[0-9a-f]{32}', source):
             body['session_id'] = source
         result = _api('/api/if/start', body=body)
-        print(f'{name}: opening a separate Z-machine Session tab in Terminal WebView')
+        print(f'{name}: opening interactive fiction tab; close the tab to stop')
         return 0 if result.get('requested') else 1
-    if operation == 'stop':
-        body = {'command':name}
-        source = os.environ.get('CINTER_TERMINAL_SESSION_ID', '')
-        if __import__('re').fullmatch(r'[0-9a-f]{32}', source):
-            body['session_id'] = source
-        result = _api('/api/if/stop', body=body)
-        print(f'{name}: browser interpreter stopped' if result.get('stopped') else f'{name}: not running')
-        return 0
-    print(f'Usage: {name} [install|start|stop|status]', file=sys.stderr)
-    return 2
+    raise ValueError('Unknown internal story operation')
 
 
 def _api(path: str, *, body: dict | None = None) -> dict:
@@ -284,7 +303,7 @@ def _api(path: str, *, body: dict | None = None) -> dict:
                       data=json.dumps(body).encode('utf-8') if body is not None else None,
                       headers=headers, method='POST' if body is not None else 'GET')
     try:
-        with urlopen(request, timeout=1800 if path == '/api/bedrock/run' else 120 if path == '/api/bedrock/install' else 90 if path in ('/api/bedrock/stop', '/api/bedrock/restart') else 10) as response:
+        with urlopen(request, timeout=1800 if path == '/api/bedrock/run' else 120 if path in ('/api/bedrock/install', '/api/craftmaster/map/run') else 90 if path in ('/api/bedrock/stop', '/api/bedrock/restart') else 10) as response:
             return json.loads(response.read(65536).decode('utf-8'))
     except HTTPError as error:
         try:
@@ -415,99 +434,135 @@ def _monitor_bedrock_install() -> int:
         return 130
 
 
-def minecraft_console(input_fn=None) -> int:
-    """Interactive Bedrock console in the current PTY (other tabs stay live)."""
-    import threading
-    state = _api('/api/bedrock/status')
-    if not (state.get('running') or state.get('starting')):
-        print('Minecraft server is not running. Start it with bedrock <world name>.', file=sys.stderr)
-        return 1
-    read = input if input_fn is None else input_fn
-    finished = threading.Event()
-    def follow_output():
-        offset = -1
-        while not finished.wait(0.35):
-            try:
-                result = _api('/api/bedrock/console/output?offset=' + str(offset))
-                offset = result['offset']
-                text = result.get('output', '')
-                if text:
-                    # The server's output belongs in this console tab, not in
-                    # the separate shell session or the VM management process.
-                    sys.stdout.write('\r\n' + text)
-                    sys.stdout.flush()
-                if not (result.get('running') or result.get('starting')):
-                    finished.set()
-            except (OSError, ValueError, RuntimeError):
-                pass
-    watcher = threading.Thread(target=follow_output, name='bedrock-console-view', daemon=True)
-    watcher.start()
-    if state.get('starting'):
-        print('Minecraft VM is alive; server readiness has not been independently verified.', flush=True)
-    if state.get('console_available') is False:
-        print('This older VM has no console input. Run bedrock restart to replace it', file=sys.stderr, flush=True)
-        print('with the reconnectable console, then enter minecraft again.', file=sys.stderr, flush=True)
-        return 1
-    print('Minecraft server console. Enter commands without /; exit to return.', flush=True)
-    try:
-        while not finished.is_set():
-            try:
-                line = read('minecraft> ')
-            except (EOFError, KeyboardInterrupt):
-                break
-            command = line.strip()
-            if not command: continue
-            if command.lower() in ('exit','quit'): break
-            if '\r' in command or '\n' in command or len(command.encode('utf-8')) > 2048:
-                print('Expected one Minecraft command up to 2048 bytes.', file=sys.stderr)
-                continue
-            try:
-                result = _api('/api/bedrock/command', body={'command': command.lstrip('/')})
-                if not result.get('sent'):
-                    print('Minecraft command not delivered.', file=sys.stderr)
-            except (RuntimeError, ValueError) as error:
-                print('Minecraft:', error, file=sys.stderr)
-                if not _api('/api/bedrock/status').get('running'):
-                    break
-    finally:
-        finished.set()
-        watcher.join(timeout=1)
-    print('Leaving Minecraft console; server continues running.', flush=True)
-    return 0
-
 
 def _packaged_craftmaster() -> Path:
-    """Find the current platform's packaged CraftMaster, never a sibling repo."""
+    """Verify the single native CraftMaster packaged beside this staged webapp.
+
+    The selected developer Builds/Toolchains tree is not an application binary
+    search path.  The staged app owns exactly one platform-matched package.
+    """
     from runtime import CinterForgeSettings as settings
+
     system = {'Darwin': 'mac', 'Linux': 'linux', 'Windows': 'win'}[platform.system()]
     filename = 'CinterForgeCraftMaster.exe' if system == 'win' else 'CinterForgeCraftMaster'
-    # Runtime's ASSETS lives under the staged Python/Host/webapp subtree.
-    # A native app's Build root can be named differently from repo Builds.
-    roots = []
-    configured = os.environ.get('CINTER_BUILDS_ROOT', '').strip()
-    if configured:
-        roots.append(Path(configured))
-    roots.extend(settings.ASSETS.resolve().parents)
-    for root in roots:
-        candidate = root / 'CinterForgeCraftMaster' / system
-        receipt = candidate / 'manifest.json'
-        binary = candidate / 'bin' / filename
-        if (not candidate.is_symlink() and receipt.is_file() and
-                not receipt.is_symlink() and binary.is_file() and not binary.is_symlink()):
-            doc = json.loads(receipt.read_text('utf-8'))
-            expected = doc.get('files', {}).get('bin/' + filename)
-            if (doc.get('schema') != 'cinterforge.craftmaster.stage.v1' or
-                    doc.get('platform') != system or
-                    not isinstance(expected, str) or len(expected) != 64):
-                raise RuntimeError('Packaged CraftMaster receipt is invalid')
-            digest = hashlib.sha256()
-            with binary.open('rb') as handle:
-                for block in iter(lambda: handle.read(1024 * 1024), b''):
-                    digest.update(block)
-            if digest.hexdigest() != expected:
-                raise RuntimeError('Packaged CraftMaster binary SHA-256 mismatch')
-            return binary
-    raise RuntimeError('This Terminal release lacks a verified native CraftMaster package')
+    assets = settings.ASSETS.resolve(strict=True)
+    # .../Builds/Python/Host/<platform>/<architecture>/<version>/webapp
+    if (assets.name != 'webapp' or assets.parents[2].name != system
+            or assets.parents[3].name != 'Host'
+            or assets.parents[4].name != 'Python'
+            or assets.parents[5].name != 'Builds'):
+        raise RuntimeError('Invalid staged CraftMaster application layout: ' + str(assets))
+    package = assets.parents[5] / 'CinterForgeCraftMaster' / system
+    manifest_path = package / 'manifest.json'
+    binary = package / 'bin' / filename
+    if (package.is_symlink() or manifest_path.is_symlink() or binary.is_symlink()
+            or not manifest_path.is_file() or not binary.is_file()):
+        raise RuntimeError('Missing packaged CraftMaster at ' + str(package))
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    digest = manifest.get('files', {}).get('bin/' + filename)
+    if (manifest.get('schema') != 'cinterforge.craftmaster.stage.v1'
+            or manifest.get('platform') != system
+            or not isinstance(digest, str)
+            or not re.fullmatch(r'[0-9a-f]{64}', digest)):
+        raise RuntimeError('Invalid packaged CraftMaster receipt at ' + str(manifest_path))
+    actual = hashlib.sha256()
+    with binary.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            actual.update(chunk)
+    if actual.hexdigest() != digest:
+        raise RuntimeError('Packaged CraftMaster binary SHA-256 mismatch: ' + str(binary))
+    return binary
+
+
+def _open_bedrock_with_progress(world_name: str) -> dict:
+    """Stream conversion/download status while the host creates the Bedrock tab.
+
+    The HTTP run call may take minutes for a large Java world. Keep the calling
+    terminal responsive with real progress and a 15-second heartbeat; the
+    separate Zoomify browser tab opens as soon as its map request is queued.
+    """
+    completion = threading.Event()
+    result = {}
+    failures = []
+    try:
+        initial_cursor = _api('/api/bedrock/events?cursor=0').get('cursor', 0)
+    except RuntimeError:
+        initial_cursor = 0
+
+    def request_server() -> None:
+        try:
+            result.update(_api('/api/bedrock/run', body={'name': world_name}))
+        except Exception as error:
+            failures.append(error)
+        finally:
+            completion.set()
+
+    worker = threading.Thread(
+        target=request_server, name='bedrock-visible-run', daemon=True,
+    )
+    worker.start()
+    cursor = initial_cursor
+    last_output = time.monotonic()
+    started = last_output
+    while not completion.wait(1.5):
+        try:
+            events = _api('/api/bedrock/events?cursor=' + str(cursor))
+            cursor = events.get('cursor', cursor)
+            for event in events.get('events', []):
+                message = str(event.get('message', ''))
+                # Per-chunk diagnostics remain in the Server log. Display the
+                # meaningful dimensions, regions, tiles, download and phases.
+                if any(word in message.lower() for word in (
+                    'convert dimension', 'stream ', 'map ', 'download',
+                    'install', 'reuse', 'reus', 'ready', 'packag', 'converting',
+                    'craftmaster conversion', 'failed',
+                )):
+                    print('[bedrock] ' + message, flush=True)
+                    last_output = time.monotonic()
+        except (RuntimeError, OSError, TimeoutError):
+            pass  # A transient polling issue must not abort the actual run.
+        if time.monotonic() - last_output >= 15:
+            elapsed = int(time.monotonic() - started)
+            print(f'[bedrock] WORKING {world_name}: elapsed={elapsed}s; see live Map / Server tabs', flush=True)
+            last_output = time.monotonic()
+    worker.join()
+    if failures:
+        raise failures[0]
+    return result
+
+
+def _games_download() -> int:
+    """Undocumented export of current in-memory game URL verification state."""
+    from runtime import CinterForgeSessions as sessions
+    response = _api('/api/games/verification')
+    if not isinstance(response.get('verification'), dict):
+        raise RuntimeError('Game verification state unavailable')
+    catalog = _game_catalog()
+    games = []
+    for command, entry in catalog.items():
+        state = response['verification'].get(command, {})
+        games.append({'command': command, 'title': entry['title'],
+                      'kind': entry.get('kind', 'classic-macintosh'),
+                      'library_path': entry.get('library_path'),
+                      'verification': state})
+    downloads = sessions._real_login_home() / 'Downloads'
+    if downloads.is_symlink() or not downloads.is_dir():
+        raise RuntimeError('Host Downloads directory unavailable: ' + str(downloads))
+    target = downloads / 'Games.json'
+    if target.is_symlink():
+        raise RuntimeError('Unsafe Games.json destination')
+    payload = {'schema': 'cinterforge.games.verification.v1',
+               'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+               'games': games}
+    import tempfile
+    with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=downloads,
+                                     prefix='games-export-', delete=False) as handle:
+        temp = Path(handle.name)
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write('\n')
+    temp.replace(target)
+    print('Exported game verification state: ' + str(target), flush=True)
+    return 0
 
 
 def execute(args: list[str]) -> int:
@@ -520,18 +575,53 @@ def execute(args: list[str]) -> int:
             print('67 Macintosh games — https://infinitemac.org/ (experimental guest auto-open):')
             for slug, game in _cli_mac_catalog().items():
                 print(f"{slug:30} {game['title']}")
-        elif len(option) == 1 and option[0] in ('debugger', 'bedrock', 'devtools'):
-            print(DEBUGGER_HELP if option[0] == 'debugger' else BEDROCK_HELP if option[0] == 'bedrock' else 'install devtools\n  Check the installed SDK, or offer verified public download with size/path confirmation.')
+        elif len(option) == 1 and option[0] in ('debugger', 'bedrock', 'devtools', 'code', 'discord', 'setpass'):
+            print({'debugger': DEBUGGER_HELP, 'bedrock': BEDROCK_HELP,
+                   'devtools': DEVTOOLS_HELP, 'code': CODE_HELP,
+                   'discord': DISCORD_HELP, 'setpass': SETPASS_HELP}[option[0]])
         else:
-            print('Usage: help [infinite-mac|debugger|bedrock|devtools]', file=sys.stderr)
+            print('Usage: help [debugger|bedrock|devtools|code|discord|setpass]', file=sys.stderr)
             return 2
         return 0
+    if args[0] == 'devtools':
+        operation = args[1] if len(args) >= 2 else 'help'
+        if operation == 'install' and len(args) == 3:
+            return _CinterForgeDevTools.install_devtools(args[2])
+        if operation == 'update' and len(args) == 2:
+            return _CinterForgeDevTools.install_devtools(update=True)
+        if operation == 'uninstall' and len(args) == 2:
+            return _CinterForgeDevTools.uninstall_devtools()
+        if operation == 'version' and len(args) == 2:
+            return _CinterForgeDevTools.version_devtools()
+        if operation == 'report' and len(args) == 2:
+            return _CinterForgeDevTools.report_devtools()
+        if operation == 'help' and len(args) in (1, 2):
+            return _CinterForgeDevTools.devtools_help()
+        print('Usage: devtools install <path/to/source> | update | uninstall | version | help | report', file=sys.stderr)
+        return 2
     if args[0] == 'craftmaster':
+        # A world name opens the native incremental conversion and its live
+        # Zoomify map in a separate tab. Retain the original CLI passthrough
+        # for flags and subcommands such as worlds, players and convert.
+        native_commands = {
+            'worlds', 'players', 'convert', 'export-name', 'self-test',
+            'capabilities', '--version', '--help', '-h', 'help',
+        }
+        if args[1:] and args[1] not in native_commands and not args[1].startswith('-'):
+            selected_world = ' '.join(args[1:]).strip()
+            response = _api('/api/craftmaster/map/run', body={'name': selected_world})
+            if not response.get('started'):
+                raise RuntimeError('CraftMaster map conversion did not start')
+            print('[CraftMaster] Opening live Zoomify map for ' + selected_world + ' in a new tab', flush=True)
+            return 0
         binary = _packaged_craftmaster()
         return subprocess.call([str(binary), *args[1:]])
     if args[0] == 'setpass':
+        if args[1:] == ['help']:
+            print(SETPASS_HELP)
+            return 0
         if len(args) != 3:
-            print('Usage: setpass <username> <password>', file=sys.stderr)
+            print(SETPASS_HELP, file=sys.stderr)
             return 2
         _api('/api/lan/setpass', body={
             'username': args[1], 'password': args[2],
@@ -559,11 +649,18 @@ def execute(args: list[str]) -> int:
         print('HTML menus: ' + ('visible' if state['show'] else 'hidden'), flush=True)
         return 0
     if args[0] == 'code':
+        if args[1:] == ['help']:
+            print(CODE_HELP)
+            return 0
+        if args[1:] == ['status']:
+            status = _api('/api/status')
+            print('CinterForge Code:', 'enabled' if status.get('devtools_installed') else 'disabled')
+            return 0
         # Use the same host workspace and theme store as the Code-OSS UI.
         # Bash has already parsed quoted POSIX paths into a single argument.
         operation = {'session_id': os.environ.get('CINTER_TERMINAL_SESSION_ID', '')}
         usage = 'Usage: code [run | mode light|dark | open "<absolute path>"]'
-        if len(args) == 1 or args[1:] == ['run']:
+        if len(args) == 1 or args[1:] in (['run'], ['open']):
             operation['operation'] = 'run'
         elif len(args) == 3 and args[1] == 'mode' and args[2] in ('light', 'dark'):
             operation.update(operation='mode', theme=args[2])
@@ -581,11 +678,14 @@ def execute(args: list[str]) -> int:
             print('Opening Code-OSS workbench.', flush=True)
         return 0
     if args[0] == 'discord':
+        if args[1:] == ['help']:
+            print(DISCORD_HELP)
+            return 0
         # Bash strips quotes and leaves optional trailing commas from the
         # human-friendly: discord "user", "server", "channel" syntax.
         fields = [part.strip().strip(',').strip() for part in args[1:]]
         if len(fields) != 3 or not all(fields):
-            print('Usage: discord "Hope AI Dev" "CinterForge Internal" "builds"', file=sys.stderr)
+            print(DISCORD_HELP, file=sys.stderr)
             return 2
         result = _api('/api/discord/open', body={
             'username': fields[0], 'guild': fields[1], 'channel': fields[2],
@@ -593,14 +693,10 @@ def execute(args: list[str]) -> int:
         print('Discord tab opening: ' + result['guild'] + ' / #' + result['channel'] +
               ' (connected as bot ' + result['bot'] + ')', flush=True)
         return 0
-    if args[0] == 'minecraft':
-        if len(args) != 1:
-            print('Usage: minecraft', file=sys.stderr)
-            return 2
-        return minecraft_console()
     command, *options = args
-    catalog = _cli_if_catalog()
     if command == 'games':
+        if options == ['download']:
+            return _games_download()
         if options:
             print('Usage: games', file=sys.stderr)
             return 2
@@ -611,31 +707,28 @@ def execute(args: list[str]) -> int:
         if options:
             print('Usage: stories', file=sys.stderr)
             return 2
-        for name, entry in catalog.items():
+        for name, entry in _cli_if_catalog().items():
             print(f"{name:30} {entry['title']}")
         return 0
-    if command == 'wargames':
-        if options:
-            print('Usage: wargames', file=sys.stderr)
+    if command == 'play':
+        selected = ' '.join(options).strip()
+        if not selected:
+            print('Usage: play <game-or-story-name>', file=sys.stderr)
             return 2
-        return _launch_wargames()
-    if command == 'infinite-mac':
-        if options:
-            print('Usage: infinite-mac', file=sys.stderr)
-            return 2
-        for slug, game in _cli_mac_catalog().items():
-            print(f"{slug:30} {game['title']}")
-        return 0
-    mac_catalog = _cli_mac_catalog()
-    if command in mac_catalog:
-        if options:
-            print('Usage: '+command, file=sys.stderr)
-            return 2
-        return _mac_launch(command, mac_catalog[command])
-    if command in catalog:
-        if len(options) > 1 or (options and options[0] not in ('install', 'start', 'stop', 'status')):
-            return _if_command(command, 'invalid', catalog[command])
-        return _if_command(command, options[0] if options else 'start', catalog[command])
+        # Accept an exact command slug or a displayed title (case-insensitive).
+        stories = _cli_if_catalog()
+        games = _game_catalog()
+        by_title = {str(entry['title']).casefold(): name for name, entry
+                    in {**stories, **games}.items()}
+        name = selected if selected in stories or selected in games else by_title.get(selected.casefold(), selected)
+        if name in stories:
+            return _if_command(name, 'play', stories[name])
+        if name == 'wargames':
+            return _launch_wargames()
+        if name in games:
+            return _mac_launch(name, games[name])
+        print('Unknown game/story: ' + selected + '. Type games or stories.', file=sys.stderr)
+        return 2
     # Easter egg: deliberately not listed in help, menu commands, or CLI usage.
     if command == 'lagomorph':
         if options:
@@ -652,11 +745,6 @@ def execute(args: list[str]) -> int:
             print('Opening a Macintosh...')
             return 0
         return 1
-    if command == 'install':
-        if options != ['devtools']:
-            print('Usage: install devtools', file=sys.stderr)
-            return 2
-        return _CinterForgeDevTools.install_devtools()
     if command == 'debugger':
         option = options or ['open']
         if len(option) != 1 or option[0] not in ('open', 'status', 'help'):
@@ -683,14 +771,12 @@ def execute(args: list[str]) -> int:
             for world in state.get('worlds', []):
                 print('  ' + world['name'] + '  [' + world['folder'] + ']')
             if not state.get('worlds'):
-                print('  (none installed)')
+                print('  (no installed Bedrock worlds)')
             print('Available Java worlds:')
             for world in state.get('java_worlds', []):
                 print('  ' + world['name'] + '  [' + world['folder'] + ']')
-            if not state.get('java_worlds'):
-                print('  (none discovered)')
             if state.get('java_error'):
-                print('  CraftMaster inventory unavailable: ' + state['java_error'])
+                print('  (Java discovery error: ' + state['java_error'] + ')')
             print('Launch with: bedrock <world name>')
             return 0
         selected = ' '.join(options).strip()
@@ -730,7 +816,7 @@ def execute(args: list[str]) -> int:
                 print('[bedrock] ' + str(progress), flush=True)
                 last_progress = progress
         print('[bedrock] Starting ' + selected + ' in a new interactive terminal tab…', flush=True)
-        result = _api('/api/bedrock/run', body={'name': selected})
+        result = _open_bedrock_with_progress(selected)
         if not result.get('terminal_session'):
             raise RuntimeError('Bedrock did not create its interactive terminal tab')
         print('[bedrock] Opened ' + selected + '; close its tab to stop the server.', flush=True)

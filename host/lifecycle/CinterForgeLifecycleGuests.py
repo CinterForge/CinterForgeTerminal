@@ -153,70 +153,41 @@ def _image_archive(sdk: Path, kind: str) -> tuple[Path, str]:
     # Wine/MSYS2 Windows tools. Two UI platforms, ONE running container.
     folder = sdk / 'WindowsCross'
     selected_file = folder / 'active-image.json'
-    if selected_file.exists():
-        # DevTools Build commits one exact OCI image. Steam Stage can retain
-        # older unowned files, so sorting *.json by name is not deterministic.
-        if selected_file.is_symlink():
-            raise RuntimeError('Active DevTools guest image selection is redirected')
-        try:
-            active = json.loads(selected_file.read_text(encoding='utf-8'))
-        except (OSError, ValueError) as exc:
-            raise RuntimeError('Invalid active DevTools guest image selector') from exc
-        if (active.get('schema') != 'cinterforge.terminal.active-guest-image.v1' or
-                active.get('wine_version') != 'wine-11.15' or
-                not re.fullmatch(r'[0-9a-f]{64}', str(active.get('dockerfile_sha256', '')))):
-            raise RuntimeError('Unsupported active DevTools guest image selector')
-        digest = active['dockerfile_sha256']
-        receipt_file = folder / (digest[:16] + '.json')
-        tar = folder / (digest[:16] + '.tar')
-        if receipt_file.is_symlink() or tar.is_symlink() or not tar.is_file():
-            raise RuntimeError('Selected DevTools guest OCI image is missing or redirected')
-        try:
-            receipt = json.loads(receipt_file.read_text(encoding='utf-8'))
-        except (OSError, ValueError) as exc:
-            raise RuntimeError('Cannot read selected DevTools OCI manifest') from exc
-        if (any(receipt.get(k) != active.get(k) for k in
-                ('dockerfile_sha256', 'image', 'archive_sha256', 'wine_version')) or
-                not isinstance(active.get('image'), str) or
-                not active['image'].startswith('cinterforge-terminal-windows-cross:')):
-            raise RuntimeError('Active OCI image does not match its sealed manifest')
-        checksum = hashlib.sha256()
-        with tar.open('rb') as src:
-            for block in iter(lambda: src.read(4 * 1024 * 1024), b''):
-                checksum.update(block)
-        if checksum.hexdigest() != active['archive_sha256']:
-            raise RuntimeError('Selected DevTools OCI image differs from its sealed SHA-256')
-        return tar, active['image']
-    # Legacy DevTools release (no explicit selection). New releases MUST
-    # include the active selector to prevent a stale-image regression.
-    receipts = sorted(folder.glob('*.json'))
-    for receipt in receipts:
-        if receipt.is_symlink():
-            continue
-        try:
-            record = json.loads(receipt.read_text(encoding='utf-8'))
-        except (OSError, ValueError):
-            continue
-        # Archive selection must not silently fall back to an old stock-Wine
-        # image when multiple valid hashes remain in installed DevTools.
-        if record.get('wine_version') != 'wine-11.15':
-            continue
-        digest = record.get('dockerfile_sha256', '')
-        name = record.get('image')
-        tar = folder / (str(digest)[:16] + '.tar')
-        if not tar.is_file() or tar.is_symlink() or not name or '/' in str(name).split(':')[0]:
-            continue
-        expected = record.get('archive_sha256')
-        if not isinstance(expected, str) or len(expected) != 64:
-            continue
-        checksum = hashlib.sha256()
-        with tar.open('rb') as src:
-            for block in iter(lambda: src.read(4 * 1024 * 1024), b''):
-                checksum.update(block)
-        if checksum.hexdigest() != expected:
-            raise RuntimeError('DevTools OCI image differs from its recorded SHA-256: ' + str(tar))
-        return tar, str(name)
-    raise RuntimeError(f'Unified DevTools has no verified {kind} container image')
+    if not selected_file.is_file() or selected_file.is_symlink():
+        raise RuntimeError("Missing single Setup-owned WindowsCross active-image.json selector at " + str(selected_file))
+    # DevTools Build commits one exact OCI image. Steam Stage can retain
+    # older unowned files, so sorting *.json by name is not deterministic.
+    if selected_file.is_symlink():
+        raise RuntimeError('Active DevTools guest image selection is redirected')
+    try:
+        active = json.loads(selected_file.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('Invalid active DevTools guest image selector') from exc
+    if (active.get('schema') != 'cinterforge.terminal.active-guest-image.v1' or
+            active.get('wine_version') != 'wine-11.15' or
+            not re.fullmatch(r'[0-9a-f]{64}', str(active.get('dockerfile_sha256', '')))):
+        raise RuntimeError('Unsupported active DevTools guest image selector')
+    digest = active['dockerfile_sha256']
+    receipt_file = folder / (digest[:16] + '.json')
+    tar = folder / (digest[:16] + '.tar')
+    if receipt_file.is_symlink() or tar.is_symlink() or not tar.is_file():
+        raise RuntimeError('Selected DevTools guest OCI image is missing or redirected')
+    try:
+        receipt = json.loads(receipt_file.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('Cannot read selected DevTools OCI manifest') from exc
+    if (any(receipt.get(k) != active.get(k) for k in
+            ('dockerfile_sha256', 'image', 'archive_sha256', 'wine_version')) or
+            not isinstance(active.get('image'), str) or
+            not active['image'].startswith('cinterforge-terminal-windows-cross:')):
+        raise RuntimeError('Active OCI image does not match its sealed manifest')
+    checksum = hashlib.sha256()
+    with tar.open('rb') as src:
+        for block in iter(lambda: src.read(4 * 1024 * 1024), b''):
+            checksum.update(block)
+    if checksum.hexdigest() != active['archive_sha256']:
+        raise RuntimeError('Selected DevTools OCI image differs from its sealed SHA-256')
+    return tar, active['image']
 
 def _lifecycle_guest_shell_command(sdk: Path, kind: str, workspace: Path | None) -> list[str]:
     """One real interactive Docker/Wine Bash, shared by all Code-OSS attachments."""

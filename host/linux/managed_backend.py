@@ -334,7 +334,7 @@ def ensure_backend(source: Path) -> tuple[str, dict[str, str]]:
     # Terminal Setup has already installed these tools. Never silently
     # adopt Homebrew/Docker Desktop or an unrelated Colima instance.
     builds = storage_root(source).parents[1]
-    mac = builds / 'CinterForgeTerminal/Toolchains/mac'
+    mac = builds / 'Toolchains/mac'
     docker = mac / 'env/bin/docker'
     colima = mac / 'env/bin/colima'
     lima_cli = mac / 'lima/bin/limactl'

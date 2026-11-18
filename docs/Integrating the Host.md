@@ -29,7 +29,7 @@ Terminal's **native operating-system menu** owns New Game, New Minecraft, New Ma
 
 `code` launches the shared Code-OSS workbench and an actual **user-selected local folder/workspace**. Its native file capability supports safe directory browsing, edit/save and last-workspace persistence across relaunch, with normal user filesystem permissions, explicit workspace trust and scoped, authenticated bridge operations. The same workbench recognizes a trusted `CinterForgeTerminal` checkout and runs that repository's actual `./Cinter` lifecycle from real integrated shells. The bridge must not expose arbitrary filesystem paths or unauthenticated process execution to a game page.
 
-The optional `devtools install|uninstall|list|report` family belongs to this development environment. It operates on the **single unified three-platform** toolchain archive and emits a Markdown tool report under `Builds/Logs`, while preserving the core game's lightweight runtime and all user content. Developer Setup/Build/Stage/Test/Publish remain distinct operations; calling `all all` never publishes.
+The optional `devtools install <path/to/source>` / `devtools update|uninstall|version|help|report` family belongs to this development environment. It operates on the **single unified three-platform** toolchain archive and emits a Markdown tool report under `Builds/Logs`, while preserving the core game's lightweight runtime and all user content. Developer Setup/Build/Stage/Test/Publish remain distinct operations; calling `all all` never publishes.
 
 ## Python environment and runtime closure
 

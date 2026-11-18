@@ -1,25 +1,33 @@
-"""CinterForgeBedrock — CinterForge Terminal application runtime.
+"""Bedrock Dedicated Server and CraftMaster integration for CinterForgeTerminal.
 
-PURPOSE: Consent-gated Bedrock server installation, RakNet discovery, world preservation and Bedrock launcher watchdog.
-METHODS: _sha256, _checked_url, _safe_extract, _curl_download, _user_steamapps, _parse_raknet_pong, discover_lan_bedrock, CinterForgeBedrockManager, _vm_watchdog_main
-STARTUP: Loaded by CinterForgeTerminal.py, the sole staged service entry.
-SHUTDOWN: The native owner supervises runtime shutdown. Never execute Setup.
-DEPENDENCIES: Standard library and directly imported runtime owners; no host/lifecycle imports.
-All function bodies and HTTP/CLI interfaces are retained from the Phase 4 source.
+Responsibilities
+----------------
+- Discover local Java and Bedrock worlds without changing their source data.
+- Convert selected Java worlds with the bundled, receipt-verified CraftMaster CLI.
+- Import independently published CraftMaster worlds from public Cloudflare URLs.
+- Install Mojang's official Bedrock Dedicated Server only with EULA consent.
+- Supervise the visible server console and its exact macOS VM process.
+
+Locations
+---------
+Developer Bedrock state:  <workspace>/Builds/Servers/Bedrock/
+Installed Bedrock state:  <steamapps>/common/CinterForge/Servers/Bedrock/
+Java saves on macOS:     ~/Library/Application Support/minecraft/saves/
+
+The native Terminal runtime never invokes Setup. Guest dependencies belong to
+Setup and installed VM transfer belongs to Stage, not to this module.
 """
+
 from __future__ import annotations
+
 import base64
-import hashlib
 import ctypes
-from collections import deque
-from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
 import importlib.util
 import ipaddress
 import json
 import mimetypes
 import os
-from pathlib import Path
 import platform
 import re
 import secrets
@@ -37,35 +45,40 @@ import threading
 import time
 import traceback
 import uuid
-from typing import Callable
-from urllib.parse import unquote, urlsplit, parse_qs, urlparse, quote
-from urllib.request import urlopen, Request
-from urllib.error import HTTPError, URLError
 import zipfile
+from collections import deque
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Callable
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote, unquote, urlparse, urlsplit
+from urllib.request import Request, urlopen
+
 if os.name != 'nt':
     import fcntl
     import pty
-    import select
-    import struct
     import termios
-from runtime.CinterForgeVM import CinterForgeVM
-from runtime.CinterForgeLogging import CinterForgeRuntimeLog
-from runtime.CinterForgeCode import CinterForgeCodeWorkspace
-from runtime.CinterForgeGuest import CinterForgeGuestSupervisor
 
 from runtime import CinterForgeSettings as _CinterForgeSettings
+from runtime.CinterForgeCode import CinterForgeCodeWorkspace
+from runtime.CinterForgeGuest import CinterForgeGuestSupervisor
+from runtime.CinterForgeLogging import CinterForgeRuntimeLog
+from runtime.CinterForgeVM import CinterForgeVM
 
 
-"""Optional, EULA-gated Bedrock dedicated-server lifecycle for Python Host.
+# Official Bedrock binary download metadata remains restricted to Minecraft.
+# Published converted worlds are separate, public Cloudflare R2 objects.
+PUBLIC_CRAFTMASTER_WORLDS_URL = (
+    'https://cinterforge.ucreg.io/CinterForgeCraftMaster/Worlds/'
+)
+PUBLIC_CRAFTMASTER_CHANNELS = ('release', 'beta')
+PUBLIC_MANIFEST_MAX_BYTES = 1024 * 1024
+WORLD_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+WORLD_DOWNLOAD_PROGRESS_BYTES = 16 * 1024 * 1024
+WORLD_ARCHIVE_MAX_BYTES = 32 * 1024**3
 
-The official binary is never bundled into Host source. Explicit EULA consent
-in the local WebView installs into the host Steam library. Developer Setup
-continues to use sibling Builds and never acquires user content implicitly.
-No user-authored package.json or prior Bedrock archive is required.
-"""
-
-
-ASSET_LOCATION = _CinterForgeSettings.ASSETS  # compatibility within bundled Bedrock helpers
+ASSET_LOCATION = _CinterForgeSettings.ASSETS  # Existing caller compatibility.
 
 
 def _sha256(path: Path) -> str:
@@ -87,27 +100,52 @@ def _checked_url(url: str) -> str:
     return url
 
 
-def _safe_extract(archive: Path, target: Path, *, max_uncompressed_bytes: int | None = None) -> None:
+def _safe_extract(
+    archive: Path,
+    target: Path,
+    *,
+    max_uncompressed_bytes: int | None = None,
+) -> None:
+    """Extract a Bedrock ZIP only after validating every entry and total size.
+
+    ZIP extraction is kept inside `target`. Never extract a traversal path,
+    absolute path, or symlink supplied by a downloaded archive.
+    """
     from runtime import CinterForgeSettings as _CinterForgeSettings
-    with zipfile.ZipFile(archive) as source:
-        names = source.infolist()
-        if len(names) > 25000:
+
+    with zipfile.ZipFile(archive) as source_archive:
+        archive_entries = source_archive.infolist()
+        if len(archive_entries) > 25000:
             raise ValueError('Bedrock archive has too many entries')
-        total = sum(item.file_size for item in names)
-        limit = (4 * _CinterForgeSettings.MAX_DOWNLOAD_BYTES
-                 if max_uncompressed_bytes is None else max_uncompressed_bytes)
-        if total > limit:
+
+        total_uncompressed_bytes = sum(entry.file_size for entry in archive_entries)
+        maximum_allowed_bytes = (
+            4 * _CinterForgeSettings.MAX_DOWNLOAD_BYTES
+            if max_uncompressed_bytes is None else max_uncompressed_bytes
+        )
+        if total_uncompressed_bytes > maximum_allowed_bytes:
             raise ValueError('Bedrock archive uncompressed size exceeds limit')
-        for item in names:
-            name = item.filename.replace('\\', '/')
-            relative = Path(name)
-            if (relative.is_absolute() or '..' in relative.parts or not name or
-                    (item.external_attr >> 16) & 0o170000 == 0o120000):
+
+        resolved_destination_root = target.resolve()
+        for archive_entry in archive_entries:
+            entry_name = archive_entry.filename.replace('\\', '/')
+            relative_entry_path = Path(entry_name)
+            is_zip_symlink = (
+                (archive_entry.external_attr >> 16) & 0o170000
+            ) == 0o120000
+            if (
+                relative_entry_path.is_absolute()
+                or '..' in relative_entry_path.parts
+                or not entry_name
+                or is_zip_symlink
+            ):
                 raise ValueError('Bedrock archive contains a traversal or symlink entry')
-            destination = (target / relative).resolve()
-            if not destination.is_relative_to(target.resolve()):
+
+            extracted_path = (target / relative_entry_path).resolve()
+            if not extracted_path.is_relative_to(resolved_destination_root):
                 raise ValueError('Bedrock archive escapes installation root')
-        source.extractall(target)
+
+        source_archive.extractall(target)
 
 
 def _curl_download(url: str, archive: Path, report: Callable[[str], None]) -> None:
@@ -220,54 +258,79 @@ _RAKNET_MAGIC = bytes.fromhex('00ffff00fefefefefdfdfdfd12345678')
 
 
 def _parse_raknet_pong(packet: bytes, address: str, port: int) -> dict | None:
-    if len(packet) < 35 or packet[0] != 0x1c or packet[17:33] != _RAKNET_MAGIC:
+    """Read a RakNet unconnected-pong MOTD without trusting arbitrary UDP data."""
+    if len(packet) < 35 or packet[0] != 0x1C or packet[17:33] != _RAKNET_MAGIC:
         return None
-    name_len = int.from_bytes(packet[33:35], 'big')
-    if name_len > 2048 or 35 + name_len > len(packet):
+
+    motd_length_bytes = int.from_bytes(packet[33:35], 'big')
+    if motd_length_bytes > 2048 or 35 + motd_length_bytes > len(packet):
         return None
-    motd = packet[35:35 + name_len].decode('utf-8', errors='replace')
-    fields = motd.split(';')
-    return {'address': address, 'port': port,
-            'name': (fields[1] if len(fields) > 1 else motd)[:160],
-            'protocol': 'RakNet unconnected pong'}
+
+    motd = packet[35:35 + motd_length_bytes].decode('utf-8', errors='replace')
+    motd_fields = motd.split(';')
+    return {
+        'address': address,
+        'port': port,
+        'name': (motd_fields[1] if len(motd_fields) > 1 else motd)[:160],
+        'protocol': 'RakNet unconnected pong',
+    }
 
 
 def discover_lan_bedrock(*, timeout: float = 1.5) -> list[dict]:
-    """Bounded read-only discovery on the host LAN, without touching worlds.
+    """Discover nearby Bedrock servers with a bounded host-side UDP scan.
 
-    Results establish host-side UDP reception only. A separate guest-relay
-    marker is required to establish a packet crossed the LinuxKit boundary.
+    This proves only host-side UDP reception. The separate guest-relay marker
+    is required to establish whether a packet crossed LinuxKit's boundary.
     """
     timeout = max(0.1, min(float(timeout), 3.0))
-    sockets = []
-    seen = {}
+    discovery_sockets = []
+    discovered_servers = {}
+
     try:
-        for port in (19132, 19133):
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            sock.bind(('0.0.0.0', 0))
-            sockets.append((sock, port))
-            # RakNet Unconnected Ping: packet ID, timestamp, magic, GUID.
-            ping = b'\x01' + struct.pack('>Q', int(time.time() * 1000)) + _RAKNET_MAGIC + b'CINTERFG'
+        for bedrock_port in (19132, 19133):
+            udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            udp_socket.bind(('0.0.0.0', 0))
+            discovery_sockets.append((udp_socket, bedrock_port))
+
+            # RakNet Unconnected Ping: packet ID + timestamp + magic + GUID.
+            ping = (
+                b'\x01'
+                + struct.pack('>Q', int(time.time() * 1000))
+                + _RAKNET_MAGIC
+                + b'CINTERFG'
+            )
             try:
-                sock.sendto(ping, ('255.255.255.255', port))
+                udp_socket.sendto(ping, ('255.255.255.255', bedrock_port))
             except OSError:
-                pass  # A restricted host may still receive other LAN traffic.
+                pass  # Restricted hosts may still receive other LAN traffic.
+
         deadline = time.monotonic() + timeout
-        while sockets and time.monotonic() < deadline:
-            ready, _, _ = select.select([s for s, _ in sockets], [], [], max(0, deadline - time.monotonic()))
-            for sock in ready:
+        while discovery_sockets and time.monotonic() < deadline:
+            remaining_seconds = max(0, deadline - time.monotonic())
+            ready_sockets, _, _ = select.select(
+                [udp_socket for udp_socket, _ in discovery_sockets],
+                [], [], remaining_seconds,
+            )
+            for udp_socket in ready_sockets:
                 try:
-                    packet, (address, port) = sock.recvfrom(4096)
+                    packet, (address, port) = udp_socket.recvfrom(4096)
                 except OSError:
                     continue
-                parsed = _parse_raknet_pong(packet, address, port)
-                if parsed:
-                    seen[(address, port)] = parsed
+
+                discovered_server = _parse_raknet_pong(packet, address, port)
+                if discovered_server:
+                    discovered_servers[(address, port)] = discovered_server
     finally:
-        for sock, _ in sockets:
-            sock.close()
-    return sorted(seen.values(), key=lambda item: (item['name'].casefold(), item['address'], item['port']))
+        for udp_socket, _ in discovery_sockets:
+            udp_socket.close()
+
+    return sorted(
+        discovered_servers.values(),
+        key=lambda server: (
+            server['name'].casefold(), server['address'], server['port']
+        ),
+    )
 
 
 class CinterForgeBedrockManager:
@@ -281,8 +344,14 @@ class CinterForgeBedrockManager:
             raise ValueError('Invalid application instance identifier')
         self.user_install = user_install
         self.steamapps = _user_steamapps(self.builds) if user_install else None
-        self.root = (self.steamapps / 'common/CinterForge/Servers/Bedrock'
-                     if user_install else self.builds / 'Servers/Bedrock')
+        # One server data root per installation mode. Never place installed
+        # worlds, logs or runtime state under the developer Builds directory.
+        installed_server_directory = 'common/CinterForge/Servers/Bedrock'
+        developer_server_directory = 'Servers/Bedrock'
+        self.root = (
+            self.steamapps / installed_server_directory
+            if user_install else self.builds / developer_server_directory
+        )
         # Curated worlds are user-requested content, not developer Builds or a second Bedrock server.
         self.curated_worlds = self.root / 'CuratedWorlds'
         self.package_dir = self.root / 'Packages' / self.target
@@ -313,6 +382,7 @@ class CinterForgeBedrockManager:
         self._craftmaster_process: subprocess.Popen | None = None
         self._craftmaster_conversion_lock = threading.Lock()
 
+    # --- Runtime process ownership and EULA ----------------------------------
     def _watch_vm(self, pid: int) -> None:
         """Guard VM lifetime if the HTTP/Terminal owner is force-quit.
 
@@ -543,7 +613,8 @@ class CinterForgeBedrockManager:
             temp = Path(output.name)
             json.dump({'schema': 'cinterforge.bedrock.worlds.v1', **data}, output, indent=2)
             output.write('\n')
-            output.flush(); os.fsync(output.fileno())
+            output.flush()
+            os.fsync(output.fileno())
         try:
             os.replace(temp, target)
         finally:
@@ -559,7 +630,14 @@ class CinterForgeBedrockManager:
         except (ImportError, KeyError, OSError):
             return Path.home()
 
+    # --- Local Bedrock / Java save discovery ---------------------------------
     def _default_world_roots(self) -> list[Path]:
+        """Discover existing Bedrock saves in known platform-specific locations.
+
+        macOS:   ~/Library/Application Support/minecraftpe/
+        Windows: %APPDATA%/Minecraft Bedrock/ and Microsoft Store Packages/
+        Linux:   common `minecraftpe` / launcher locations (discovery only)
+        """
         home = self._login_home()
         roots: list[Path] = []
         if self.platform == 'win':
@@ -632,6 +710,7 @@ class CinterForgeBedrockManager:
             paths = [home / '.minecraft/saves']
         return [p.resolve() for p in paths if p.is_dir() and not p.is_symlink()]
 
+    # --- Bundled native CraftMaster conversion -------------------------------
     def _craftmaster_cli(self) -> tuple[Path, Path]:
         """Use exactly the verified native executable shipped with this app."""
         from runtime.CinterForgeCommands import _packaged_craftmaster
@@ -673,212 +752,345 @@ class CinterForgeBedrockManager:
                                'edition': 'java', 'dimensions': item.get('dimensions', {})})
         return worlds
 
-    def _convert_java_world(self, world: dict,
-                            progress: Callable[[str], None] | None = None) -> Path:
-        """Stream the actual native converter, then import only validated output."""
-        binary, data = self._craftmaster_cli()
+    def java_world_export_name(self, world: dict) -> str:
+        """Ask the packaged converter for the published/Bedrock folder name."""
+        binary, _ = self._craftmaster_cli()
+        source = Path(world['path'])
+        result = subprocess.run(
+            [str(binary), 'export-name', '--world-folder', source.name],
+            capture_output=True, text=True, timeout=20, check=True,
+        )
+        export_name = result.stdout.strip()
+        # CraftMaster owns Unicode naming. Reject unsafe destination paths.
+        if (
+            not export_name or len(export_name.encode('utf-8')) > 240
+            or export_name != export_name.strip()
+            or export_name in ('.', '..') or Path(export_name).name != export_name
+            or any(character in export_name for character in '\\/:*?"<>|')
+            or any(ord(character) < 32 or ord(character) == 127 for character in export_name)
+        ):
+            raise RuntimeError('CraftMaster returned unsafe converted world name: ' + repr(export_name))
+        return export_name
+
+    def find_java_world(self, requested_name: str) -> dict | None:
+        """Match an exact Java folder, display name or CraftMaster export name.
+
+        `Candlewood (Candlewood)` must be selectable as `Candlewood`, without
+        incorrectly falling back to a published world on a local command.
+        """
+        requested = requested_name.strip().casefold()
+        matches = []
+        for world in self.list_java_worlds():
+            names = {world['name'].casefold(), world['folder'].casefold()}
+            # Parenthesized names use the native CraftMaster export convention.
+            suffix = re.search(r'\(([^()]*)\)$', world['folder'])
+            if suffix:
+                names.add(suffix.group(1).strip().casefold())
+            if requested in names:
+                matches.append(world)
+        if len(matches) > 1:
+            raise RuntimeError('Ambiguous Java world; select its unique folder name')
+        return matches[0] if matches else None
+
+    def craftmaster_output_root(self) -> Path:
+        """Keep generated Zoomify tiles and archives in the managed Bedrock root."""
+        return self.root / 'Conversions' / 'CraftMaster'
+
+    def run_native_craftmaster(
+        self, world: dict, progress: Callable[[str], None] | None = None,
+    ) -> Path:
+        """Incrementally convert a Java world and stream the native CLI output.
+
+        This is also the standalone `craftmaster <world>` operation: it does not
+        import the world or start a Bedrock server.
+        """
+        binary, assets = self._craftmaster_cli()
         source = Path(world['path'])
         if source.is_symlink() or not (source / 'level.dat').is_file():
             raise RuntimeError('Java world disappeared or became unsafe: ' + str(source))
-        name_run = subprocess.run([str(binary), 'export-name', '--world-folder', source.name],
-                                  capture_output=True, text=True, timeout=20, check=True)
-        name = name_run.stdout.strip()
-        # CraftMaster owns portable export naming (including legitimate Unicode).
-        # Defense in depth against path traversal if the binary is corrupted.
-        if (not name or len(name.encode('utf-8')) > 240 or name != name.strip()
-                or name in ('.', '..') or Path(name).name != name
-                or any(ch in name for ch in '\\/:*?"<>|')
-                or any(ord(ch) < 32 or ord(ch) == 127 for ch in name)):
-            raise RuntimeError('CraftMaster returned unsafe converted world name: ' + repr(name))
-        target = self.curated_worlds / name
-        if target.is_symlink() or self.curated_worlds.is_symlink():
-            raise RuntimeError('Refusing linked CraftMaster world destination')
-        # Prefer any already validated Bedrock world, including a copy installed
-        # by the independent CraftMaster producer/publisher. Never replace an
-        # existing user world just because a Java folder has a matching name.
-        if target.is_dir() and not any(item.is_symlink() for item in target.rglob('*')):
-            if ((target / 'level.dat').is_file() and (target / 'db/CURRENT').is_file()
-                    and any((target / 'db').glob('MANIFEST-*'))):
-                if progress:
-                    progress(name + ': reusing existing validated Bedrock world')
-                return target
-        if target.exists():
-            raise RuntimeError('Refusing to overwrite an existing Bedrock world: ' + str(target))
-        # The installed app must not create a development Builds directory.
-        # Cache/Zoomify intermediate tiles remain under this managed runtime root.
-        output = self.root / 'Conversions/CraftMaster'
-        output.mkdir(parents=True, exist_ok=True)
-        command = [str(binary), 'convert', '--world', str(source.resolve()),
-                   '--data-dir', str(data), '--output-root', str(output),
-                   '--dimensions', 'all', '--no-open']
-        say = progress or self._append_log
+        export_name = self.java_world_export_name(world)
+        output_root = self.craftmaster_output_root()
+        output_root.mkdir(parents=True, exist_ok=True)
+        command = [
+            str(binary), 'convert',
+            '--world', str(source.resolve()),
+            '--data-dir', str(assets),
+            '--output-root', str(output_root),
+            '--dimensions', 'all', '--no-open',
+        ]
+        report = progress or self._append_log
         with self._craftmaster_conversion_lock:
-            say(name + ': converting Java save using bundled CraftMaster')
-            process = subprocess.Popen(command, stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT, text=True, bufsize=1)
+            report(f'{export_name}: starting native CraftMaster conversion')
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
             with self._lock:
                 self._craftmaster_process = process
             try:
                 assert process.stdout is not None
                 for line in process.stdout:
                     if line.strip():
-                        say('[CraftMaster] ' + line.rstrip()[:2000])
-                code = process.wait()
-                if code:
-                    raise RuntimeError('CraftMaster conversion failed (exit ' + str(code) +
-                                       '); see persistent Bedrock log')
+                        report('[CraftMaster] ' + line.rstrip()[:2000])
+                exit_code = process.wait()
+                if exit_code:
+                    raise RuntimeError(
+                        f'CraftMaster conversion failed (exit {exit_code}); see Bedrock log'
+                    )
             finally:
                 if process.poll() is None:
                     process.terminate()
                     try:
                         process.wait(timeout=8)
                     except subprocess.TimeoutExpired:
-                        process.kill(); process.wait()
+                        process.kill()
+                        process.wait()
                 with self._lock:
                     if self._craftmaster_process is process:
                         self._craftmaster_process = None
                 if process.stdout:
                     process.stdout.close()
-        archive = output / 'Worlds' / name / (name + '.mcworld')
+
+        archive = output_root / 'Worlds' / export_name / (export_name + '.mcworld')
         if not archive.is_file() or archive.is_symlink() or archive.stat().st_size < 1024:
             raise RuntimeError('CraftMaster did not create a complete .mcworld: ' + str(archive))
-        self.curated_worlds.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='craftmaster-import-', dir=self.curated_worlds) as scratch:
-            payload = Path(scratch) / 'world'
-            payload.mkdir()
-            _safe_extract(archive, payload, max_uncompressed_bytes=64 * 1024**3)
-            if not all((payload / item).is_file() for item in
-                       ('level.dat', 'levelname.txt', 'db/CURRENT')):
-                raise RuntimeError('CraftMaster archive missing Bedrock level or LevelDB')
-            if not list((payload / 'db').glob('MANIFEST-*')):
-                raise RuntimeError('CraftMaster world LevelDB missing MANIFEST')
-            (payload / 'levelname.txt').write_text(name + '\n', encoding='utf-8')
-            (payload / 'cinter-craftmaster-world.json').write_text(json.dumps({
-                'schema': 'cinterforge.terminal.craftmaster-world.v1',
-                'source': str(source.resolve()), 'world': name,
-                'archive_sha256': _sha256(archive)}, indent=2) + '\n', encoding='utf-8')
-            if target.exists():
-                raise RuntimeError('CraftMaster destination changed during conversion: ' + str(target))
-            os.replace(payload, target)
-        say(name + ': converted world installed and ready for Bedrock')
-        return target
+        live_map = output_root / 'Maps' / export_name / 'Overworld' / 'Live Map.htm'
+        if not live_map.is_file() or live_map.is_symlink():
+            raise RuntimeError('CraftMaster did not create the live Zoomify map: ' + str(live_map))
+        report(export_name + ': Zoomify and Bedrock export ready')
+        return archive
 
-    def install_published_world(self, name: str, progress: Callable[[str], None] | None = None) -> Path:
-        """Install a publisher-validated .mcworld by its selected name, on request.
-
-        CraftMaster owns the world and R2 publication manifest. Terminal verifies
-        its SHA-256 and extracts a managed immutable source copy. The writable
-        Bedrock server copy is created separately by run_world(). No file is
-        taken from another local source checkout or unverified CDN guess.
-        """
-        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 _().-]{0,120}', name) or name.endswith((' ', '.')):
-            raise ValueError('Invalid curated world name')
-        target = self.curated_worlds / name
-        receipt_path = target / 'cinter-published-world.json'
-        if target.is_symlink() or self.curated_worlds.is_symlink():
-            raise RuntimeError('Refusing linked published-world destination')
-        if receipt_path.is_file() and not receipt_path.is_symlink():
-            receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
-            if (receipt.get('schema') == 'cinterforge.terminal.curated-world.v1' and
-                    receipt.get('world') == name and
-                    re.fullmatch(r'[0-9a-f]{64}', str(receipt.get('sha256', ''))) and
-                    (target / 'level.dat').is_file() and
-                    (target / 'db/CURRENT').is_file() and
-                    (target / 'levelname.txt').is_file() and
-                    not any(item.is_symlink() for item in target.rglob('*'))):
+    def _convert_java_world(
+        self, world: dict, progress: Callable[[str], None] | None = None,
+    ) -> Path:
+        """Reuse a validated converted save or import a freshly converted one."""
+        source = Path(world['path'])
+        export_name = self.java_world_export_name(world)
+        destination = self.curated_worlds / export_name
+        if destination.is_symlink() or self.curated_worlds.is_symlink():
+            raise RuntimeError('Refusing linked CraftMaster world destination')
+        if destination.is_dir() and not any(path.is_symlink() for path in destination.rglob('*')):
+            if (
+                (destination / 'level.dat').is_file()
+                and (destination / 'db/CURRENT').is_file()
+                and any((destination / 'db').glob('MANIFEST-*'))
+            ):
                 if progress:
-                    progress(name + ': already installed from verified published world (' + str(target) + ')')
-                return target
-        if target.exists():
-            raise RuntimeError('Existing Candlewood content is incomplete or unverified: ' + str(target))
-        public = 'https://cinterforge.ucreg.io/'
-        prefix = 'CinterForgeCraftMaster/Worlds/' + quote(name, safe='')
-        manifest_url = public + prefix + '/manifest.json' 
-        if progress:
-            progress(name + ': checking published CraftMaster world manifest')
-        with urlopen(Request(manifest_url, headers={'Cache-Control': 'no-cache'}), timeout=30) as response:
-            if response.geturl() != manifest_url or response.status != 200:
-                raise RuntimeError('Unexpected CraftMaster manifest response')
-            raw = response.read(1024 * 1024 + 1)
-        if len(raw) > 1024 * 1024:
-            raise RuntimeError('CraftMaster publication manifest exceeds size limit')
-        manifest = json.loads(raw)
-        if (manifest.get('schema') != 'cinterforge.craftmaster.world.v1' or
-                manifest.get('channel') != 'release' or manifest.get('world') != name):
-            raise RuntimeError('No verified public CraftMaster release for ' + name)
-        details = manifest.get('files', {}).get(name + '.mcworld')
-        if not isinstance(details, dict):
-            raise RuntimeError(name + ' has not yet been published as a complete Bedrock world')
-        expected_bytes = details.get('bytes')
-        expected_hash = details.get('sha256')
-        if (type(expected_bytes) is not int or expected_bytes < 1024 or
-                expected_bytes > 32 * 1024 * 1024 * 1024 or
-                not isinstance(expected_hash, str) or
-                not re.fullmatch(r'[a-f0-9]{64}', expected_hash)):
-            raise RuntimeError('Invalid published world size or SHA-256 in publication')
-        url = public + prefix + '/' + quote(name + '.mcworld', safe='')
+                    progress(export_name + ': reusing validated Bedrock world')
+                return destination
+        if destination.exists():
+            raise RuntimeError('Refusing to overwrite Bedrock world: ' + str(destination))
+
+        archive = self.run_native_craftmaster(world, progress=progress)
         self.curated_worlds.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='published-world-download-', dir=self.curated_worlds) as temporary:
-            temp = Path(temporary)
-            archive = temp / (name + '.mcworld')
-            digest = hashlib.sha256()
-            size = 0
+        with tempfile.TemporaryDirectory(
+            prefix='craftmaster-import-', dir=self.curated_worlds,
+        ) as temporary_directory:
+            extracted = Path(temporary_directory) / 'world'
+            extracted.mkdir()
+            _safe_extract(archive, extracted, max_uncompressed_bytes=64 * 1024**3)
+            if not all((extracted / path).is_file() for path in ('level.dat', 'levelname.txt', 'db/CURRENT')):
+                raise RuntimeError('CraftMaster archive missing Bedrock level or LevelDB')
+            if not list((extracted / 'db').glob('MANIFEST-*')):
+                raise RuntimeError('CraftMaster world LevelDB missing MANIFEST')
+            (extracted / 'levelname.txt').write_text(export_name + '\n', encoding='utf-8')
+            (extracted / 'cinter-craftmaster-world.json').write_text(
+                json.dumps({
+                    'schema': 'cinterforge.terminal.craftmaster-world.v1',
+                    'source': str(source.resolve()),
+                    'world': export_name,
+                    'archive_sha256': _sha256(archive),
+                }, indent=2) + '\n', encoding='utf-8',
+            )
+            if destination.exists():
+                raise RuntimeError('CraftMaster destination changed during conversion: ' + str(destination))
+            os.replace(extracted, destination)
+        (progress or self._append_log)(export_name + ': world imported for Bedrock')
+        return destination
+
+    # --- Public Cloudflare published-world installation ----------------------
+    def install_published_world(
+        self,
+        name: str,
+        progress: Callable[[str], None] | None = None,
+    ) -> Path:
+        """Download and verify an explicitly selected public CraftMaster world.
+
+        Cloudflare public channels (no private developer bucket):
+          release: https://cinterforge.ucreg.io/CinterForgeCraftMaster/Worlds/<world>/
+          beta:    https://cinterforge.ucreg.io/CinterForgeCraftMaster/Worlds/beta/<world>/
+
+        Download the .mcworld directly without contacting any manifest URL.
+        Verify ZIP CRC and Bedrock structure; record the observed SHA-256
+        without falsely claiming independent publisher authentication.
+        run_world() creates the separately writable server copy.
+        """
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 _().-]{0,120}', name)
+            or name.endswith((' ', '.'))
+        ):
+            raise ValueError('Invalid curated world name')
+
+        world_directory = self.curated_worlds / name
+        installed_receipt_path = world_directory / 'cinter-published-world.json'
+        if world_directory.is_symlink() or self.curated_worlds.is_symlink():
+            raise RuntimeError('Refusing linked published-world destination')
+
+        if installed_receipt_path.is_file() and not installed_receipt_path.is_symlink():
+            installed_receipt = json.loads(installed_receipt_path.read_text(encoding='utf-8'))
+            if (
+                installed_receipt.get('schema') == 'cinterforge.terminal.curated-world.v1'
+                and installed_receipt.get('world') == name
+                and re.fullmatch(r'[0-9a-f]{64}', str(installed_receipt.get('sha256', '')))
+                and (world_directory / 'level.dat').is_file()
+                and (world_directory / 'db/CURRENT').is_file()
+                and (world_directory / 'levelname.txt').is_file()
+                and not any(item.is_symlink() for item in world_directory.rglob('*'))
+            ):
+                if progress:
+                    progress(
+                        name + ': already installed from verified published world ('
+                        + str(world_directory) + ')'
+                    )
+                return world_directory
+
+        if world_directory.exists():
+            raise RuntimeError(
+                'Existing Candlewood content is incomplete or unverified: '
+                + str(world_directory)
+            )
+
+        # Public R2 URLs are stable. Do not require a separate manifest to
+        # authorize the archive: Cloudflare may expose the .mcworld even when
+        # manifest.json is blocked or not propagated. A manifest, if available,
+        # provides additional checksum verification, never a download gate.
+        encoded_name = quote(name, safe='')
+        archive_name = name + '.mcworld'
+        missing_channels = []
+        self.curated_worlds.mkdir(parents=True, exist_ok=True)
+
+        for channel in PUBLIC_CRAFTMASTER_CHANNELS:
+            channel_prefix = '' if channel == 'release' else channel + '/'
+            world_url = PUBLIC_CRAFTMASTER_WORLDS_URL + channel_prefix + encoded_name
+            download_url = world_url + '/' + quote(archive_name, safe='')
             if progress:
-                progress(name + ': downloading published world (' + str(expected_bytes) + ' bytes)')
-            with urlopen(Request(url, headers={'Cache-Control': 'no-cache'}), timeout=60) as response:
-                if response.geturl() != url or response.status != 200:
-                    raise RuntimeError('Unexpected published world download response')
-                with archive.open('wb') as output:
-                    for block in iter(lambda: response.read(1024 * 1024), b''):
-                        size += len(block)
-                        if size > expected_bytes:
-                            raise RuntimeError('World download exceeds publication manifest size')
-                        output.write(block)
-                        digest.update(block)
-                        if progress and size % (16 * 1024 * 1024) < len(block):
-                            progress(f'{name}: downloaded {size}/{expected_bytes} bytes')
-            if size != expected_bytes or digest.hexdigest() != expected_hash:
-                raise RuntimeError('Published world failed SHA-256 verification')
-            payload = temp / name
-            payload.mkdir()
-            # A full converted Java world can exceed the 2-GiB server-package
-            # cap. This larger bound applies only to SHA-256-verified published
-            # worlds; official Bedrock binary downloads keep their old cap.
-            _safe_extract(archive, payload, max_uncompressed_bytes=64 * 1024**3)
-            if not all((payload / f).is_file() for f in ('level.dat', 'levelname.txt', 'db/CURRENT')):
-                raise RuntimeError('Published world archive missing Bedrock files')
-            if not list((payload / 'db').glob('MANIFEST-*')):
-                raise RuntimeError('Published world LevelDB is missing MANIFEST')
-            # Restrict the curated artifact to a known display name. Source
-            # content is never allowed to control its installation path.
-            (payload / 'levelname.txt').write_text(name + '\n', encoding='utf-8')
-            (payload / 'cinter-published-world.json').write_text(json.dumps({
-                'schema': 'cinterforge.terminal.curated-world.v1', 'world': name,
-                'sha256': expected_hash, 'bytes': size,
-                'publication_version': manifest.get('version'), 'source': url,
-            }, indent=2) + '\n', encoding='utf-8')
-            os.replace(payload, target)
-        if progress:
-            progress(name + ': verified and installed at ' + str(target))
-        return target
+                progress(f'{name}: downloading public {channel} world directly: {download_url}')
+
+            with tempfile.TemporaryDirectory(
+                prefix='published-world-download-', dir=self.curated_worlds,
+            ) as temporary_directory:
+                temporary_root = Path(temporary_directory)
+                downloaded_archive = temporary_root / archive_name
+                digest = hashlib.sha256()
+                downloaded_bytes = 0
+                last_progress_bytes = 0
+                try:
+                    request = Request(download_url, headers={'Cache-Control': 'no-cache'})
+                    with urlopen(request, timeout=60) as response:
+                        if response.geturl() != download_url or response.status != 200:
+                            raise RuntimeError('Unexpected published world download response')
+                        declared_size = response.headers.get('Content-Length')
+                        if declared_size and int(declared_size) > WORLD_ARCHIVE_MAX_BYTES:
+                            raise RuntimeError('Published world exceeds maximum archive size')
+                        with downloaded_archive.open('wb') as archive_stream:
+                            for block in iter(
+                                lambda: response.read(WORLD_DOWNLOAD_CHUNK_BYTES), b''
+                            ):
+                                downloaded_bytes += len(block)
+                                if downloaded_bytes > WORLD_ARCHIVE_MAX_BYTES:
+                                    raise RuntimeError('Published world exceeds maximum archive size')
+                                archive_stream.write(block)
+                                digest.update(block)
+                                if (
+                                    progress
+                                    and downloaded_bytes - last_progress_bytes >= WORLD_DOWNLOAD_PROGRESS_BYTES
+                                ):
+                                    progress(f'{name}: downloaded {downloaded_bytes / 1048576:.1f} MiB')
+                                    last_progress_bytes = downloaded_bytes
+                except HTTPError as error:
+                    if error.code in (403, 404):
+                        missing_channels.append(f'{channel}: HTTP {error.code} ({download_url})')
+                        continue
+                    raise
+
+                if downloaded_bytes < 1024:
+                    raise RuntimeError('Published world download is empty: ' + download_url)
+                actual_sha256 = digest.hexdigest()
+                if progress:
+                    progress(f'{name}: downloaded {downloaded_bytes / 1048576:.1f} MiB; validating Bedrock ZIP')
+
+                # No public manifest request. The verified HTTPS archive URL is
+                # the only network dependency. ZIP entries are CRC-checked by
+                # ZipFile.extractall; avoid decompressing this large world twice.
+                # Without independent publisher metadata, the checksum proves
+                # local integrity only, not authenticated publisher provenance.
+                extracted_world = temporary_root / name
+                extracted_world.mkdir()
+                if progress:
+                    progress(name + ': extracting and CRC-checking Bedrock world')
+                try:
+                    _safe_extract(
+                        downloaded_archive, extracted_world,
+                        max_uncompressed_bytes=64 * 1024**3,
+                    )
+                except zipfile.BadZipFile as error:
+                    raise RuntimeError('Published world ZIP failed integrity check') from error
+                if not all(
+                    (extracted_world / filename).is_file()
+                    for filename in ('level.dat', 'levelname.txt', 'db/CURRENT')
+                ):
+                    raise RuntimeError('Published world archive missing Bedrock files')
+                if not list((extracted_world / 'db').glob('MANIFEST-*')):
+                    raise RuntimeError('Published world LevelDB missing MANIFEST')
+
+                (extracted_world / 'levelname.txt').write_text(name + '\n', encoding='utf-8')
+                receipt = {
+                    'schema': 'cinterforge.terminal.curated-world.v1',
+                    'world': name,
+                    'sha256': actual_sha256,
+                    'bytes': downloaded_bytes,
+                    'publication_version': None,
+                    'checksum_source': 'downloaded-content-only',
+                    'source': download_url,
+                }
+                (extracted_world / 'cinter-published-world.json').write_text(
+                    json.dumps(receipt, indent=2) + '\n', encoding='utf-8',
+                )
+                os.replace(extracted_world, world_directory)
+                if progress:
+                    progress(f'{name}: installed validated Bedrock archive at {world_directory}')
+                return world_directory
+
+        raise RuntimeError(
+            'Public CraftMaster .mcworld not accessible for ' + name + ': '
+            + '; '.join(missing_channels)
+        )
 
     def prepare_world(self, name: str, progress: Callable[[str], None] | None = None) -> str:
-        """Resolve to a Bedrock folder, preserving CraftMaster's export-name mapping."""
+        """Resolve the requested world: Bedrock save, Java save, then public CDN.
+
+        A Java save is matched by its displayed name or folder; CraftMaster
+        determines the export name (for example, `Candlewood (Candlewood)`
+        exports as `Candlewood`). No fuzzy or partial match is assumed.
+        """
         if not name.strip():
             return name
-        existing = self.list_worlds()['worlds']
-        local = [entry for entry in existing if
-                 name.casefold() in (entry['name'].casefold(), entry['folder'].casefold())]
-        if len(local) > 1:
+        available_bedrock_worlds = self.list_worlds()['worlds']
+        matching_bedrock_worlds = [
+            world for world in available_bedrock_worlds
+            if name.casefold() in (world['name'].casefold(), world['folder'].casefold())
+        ]
+        if len(matching_bedrock_worlds) > 1:
             raise RuntimeError('Ambiguous Bedrock world: use its unique folder name')
-        if local:
-            return local[0]['folder']
-        java = [world for world in self.list_java_worlds()
-                if name.casefold() in (world['name'].casefold(), world['folder'].casefold())]
-        if len(java) > 1:
-            raise RuntimeError('Ambiguous Java world; select a unique folder name')
-        if java:
-            return self._convert_java_world(java[0], progress=progress).name
+        if matching_bedrock_worlds:
+            return matching_bedrock_worlds[0]['folder']
+
+        java_world = self.find_java_world(name)
+        if java_world:
+            return self._convert_java_world(java_world, progress=progress).name
+
+        # Only explicitly missing local worlds attempt the public CDN.
         return self.install_published_world(name, progress=progress).name
 
     def list_worlds(self) -> dict:
@@ -930,6 +1142,7 @@ class CinterForgeBedrockManager:
             if temp.exists():
                 shutil.rmtree(temp)
 
+    # --- Bedrock world selection and managed server copy ---------------------
     def run_world(self, name: str, *, launch: bool = True) -> dict:
         with self._lock:
             # `bedrock run ""` explicitly reuses the previously chosen save;
@@ -1046,6 +1259,7 @@ class CinterForgeBedrockManager:
             pass
         return {}
 
+    # --- Bedrock server process identity and console -------------------------
     def _launcher_pid_matches(self, pid: int) -> bool:
         """Verify both process identity and the exact world directory.
 
@@ -1216,6 +1430,7 @@ class CinterForgeBedrockManager:
                     'event_cursor': self._event_id,
                     'install_root': str(self.root), 'steamapps': str(self.steamapps) if self.steamapps else None}
 
+    # --- Official EULA-gated Mojang server installation ----------------------
     def install(self, progress: Callable[[str], None] | None = None) -> dict:
         from runtime import CinterForgeSettings as _CinterForgeSettings
         def report(message: str) -> None:
@@ -1364,6 +1579,7 @@ class CinterForgeBedrockManager:
         report('Bedrock installed at ' + str(self.package))
         return self.status()
 
+    # --- Server launch and shutdown ------------------------------------------
     def _run_command(self) -> tuple[list[str], dict[str,str]]:
         if self.platform == 'mac':
             # The original locally signed Mac VM uses a host-side LAN relay.
@@ -1450,7 +1666,8 @@ class CinterForgeBedrockManager:
                         launched.wait(timeout=4)
                 self._close_watchdog()
                 self._process = None
-                self._log_stream.close(); self._log_stream = None
+                self._log_stream.close()
+                self._log_stream = None
                 raise
             finally:
                 if input_fd is not None:

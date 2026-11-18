@@ -152,7 +152,7 @@ def ensure_qemu(builds: Path) -> dict[str, str]:
     Do not install Homebrew, build QEMU, start a VM, or modify system paths.
     The entire portable bin/lib/share closure is retained for unified DevTools.
     """
-    root = builds / 'CinterForgeTerminal/Toolchains/mac'
+    root = builds / 'Toolchains/mac'
     stage = root / 'qemu'
     receipt = stage / 'cinter-qemu-receipt.json'
     expected_receipt = {'package': QEMU_PACKAGE, 'version': QEMU_VERSION,
@@ -219,7 +219,7 @@ def ensure_qemu(builds: Path) -> dict[str, str]:
 
 
 def _mamba(builds: Path) -> Path:
-    toolchain = builds / 'CinterForgeTerminal/Toolchains/mac'
+    toolchain = builds / 'Toolchains/mac'
     executable = toolchain / 'mamba/bin/micromamba'
     if executable.is_file():
         return executable
@@ -245,7 +245,7 @@ def ensure_macos_tools(builds: Path) -> dict[str, str]:
         raise RuntimeError('Mac bootstrapper is macOS-only')
     if not shutil.which('xcrun'):
         raise RuntimeError('Full Xcode/Command Line Tools required before setup')
-    tools = builds / 'CinterForgeTerminal/Toolchains/mac'
+    tools = builds / 'Toolchains/mac'
     prefix = tools / 'env'
     mamba = _mamba(builds)
     expected = {'cmake': prefix / 'bin/cmake', 'ninja': prefix / 'bin/ninja',
@@ -340,7 +340,7 @@ def managed_environment(builds: Path) -> dict[str, str]:
             Path(env['COLIMA_HOME']) != state / 'c' or
             Path(env['DOCKER_CONFIG']) != state / 'docker'):
         raise RuntimeError('LinuxKit c backend does not match the supplied sibling Builds root')
-    tools = builds.resolve() / 'CinterForgeTerminal/Toolchains/mac'
+    tools = builds.resolve() / 'Toolchains/mac'
     env['PATH'] = os.pathsep.join((str(tools / 'qemu/bin'),
                                   str(tools / 'linuxkit/bin'),
                                   str(tools / 'lima/bin'), str(tools / 'env/bin'),
@@ -350,7 +350,7 @@ def managed_environment(builds: Path) -> dict[str, str]:
 
 def _stage_lima(builds: Path) -> Path:
     """Install official SHA-256 pinned Lima + guest agents entirely in Builds."""
-    root = builds / 'CinterForgeTerminal/Toolchains/mac'
+    root = builds / 'Toolchains/mac'
     stage = root / 'lima'
     binpath = stage / 'bin/limactl'
     sources = ((LIMA_URL, LIMA_SHA256, 'lima'),
@@ -442,7 +442,7 @@ def _ensure_buildx_plugin(builds: Path, env: dict[str, str]) -> Path:
     A retry replaces an outdated managed plugin atomically without removing
     the Conda-managed executable or any cached VM state.
     """
-    source = builds.resolve() / 'CinterForgeTerminal/Toolchains/mac/env/bin/docker-buildx'
+    source = builds.resolve() / 'Toolchains/mac/env/bin/docker-buildx'
     if not source.is_file() or source.is_symlink():
         raise RuntimeError(f'Mac Setup missing pinned docker-buildx executable: {source}')
     config = Path(env['DOCKER_CONFIG'])
@@ -467,7 +467,7 @@ def _ensure_buildx_plugin(builds: Path, env: dict[str, str]) -> Path:
             temporary.replace(target)
         finally:
             temporary.unlink(missing_ok=True)
-    docker = builds.resolve() / 'CinterForgeTerminal/Toolchains/mac/env/bin/docker'
+    docker = builds.resolve() / 'Toolchains/mac/env/bin/docker'
     probe = _probe([str(docker), 'buildx', 'version'], env=env)
     if probe.returncode or 'buildx' not in probe.stdout.lower():
         raise RuntimeError('Managed Docker Buildx plugin is not operational: ' + probe.stdout[-800:])
@@ -513,7 +513,7 @@ def ensure_docker(builds: Path) -> str:
                            + health.stdout[-1200:])
     state = managed_state_root(builds)
     state.mkdir(parents=True, exist_ok=True)
-    root = builds / 'CinterForgeTerminal/Toolchains/mac'
+    root = builds / 'Toolchains/mac'
     manifest = state / 'backend.json'
     paths = ('lima/bin/limactl', 'env/bin/colima', 'env/bin/docker',
              'env/bin/docker-buildx')
@@ -547,7 +547,7 @@ def stop_linuxkit_build_backend(builds: Path) -> None:
     profile_home = Path(env['COLIMA_HOME']) / profile
     if not instance.exists() and not profile_home.exists():
         return
-    root = builds / 'CinterForgeTerminal/Toolchains/mac'
+    root = builds / 'Toolchains/mac'
     colima = root / 'env/bin/colima'
     if not colima.is_file():
         raise RuntimeError('LinuxKit managed VM exists but Colima executable is missing')
@@ -584,7 +584,7 @@ def cleanup_watchdog(builds: Path) -> int:
             if state.is_dir() and (state / 'c/t/colima.yaml').is_file():
                 from host.lifecycle.CinterForgeLifecycleVM import CinterForgeLifecycleVM
                 vm = CinterForgeLifecycleVM(builds)
-                sdk = builds / 'CinterForgeTerminal/Toolchains'
+                sdk = builds / 'Toolchains'
                 env = vm.environment(sdk)
                 if not vm.native_owner_active(env):
                     print('[MAC BOOTSTRAP] Recovering interrupted x86-64 t Setup VM',
@@ -601,7 +601,7 @@ def ensure_linuxkit_cli(builds: Path) -> Path:
     LinuxKit's root v1.3.0 Go module does NOT contain src/cmd/linuxkit.
     Work only under sibling Builds; no Homebrew/global installs.
     """
-    root = builds / 'CinterForgeTerminal/Toolchains/mac'
+    root = builds / 'Toolchains/mac'
     executable = root / 'linuxkit/bin/linuxkit'
     if executable.is_file():
         _run([str(executable), 'version'])

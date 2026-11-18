@@ -13,6 +13,8 @@ import ctypes
 from collections import deque
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from html import escape as html_escape
+from html.parser import HTMLParser
 import importlib.util
 import ipaddress
 import json
@@ -54,11 +56,74 @@ from runtime.CinterForgeGuest import CinterForgeGuestSupervisor
 
 
 
+# One URL root maps to the one staged webapp directory. Dynamic API handlers
+# run before this function; Python sources and hidden files are never static.
+# This is a file-type safety policy, not a per-filename route registry.
+_BROWSER_ASSET_EXTENSIONS = frozenset({
+    '.avif', '.css', '.gif', '.html', '.ico', '.jpeg', '.jpg', '.js',
+    '.json', '.map', '.mp3', '.mp4', '.ogg', '.pdf', '.png', '.svg',
+    '.ttf', '.txt', '.wasm', '.wav', '.webm', '.webp', '.woff', '.woff2',
+})
+
+
+def _webapp_static_file(root: Path, url_path: str) -> Path | None:
+    """Resolve /path directly into the staged webapp/, never outside it."""
+    path = unquote(url_path)
+    if not path.startswith('/') or path.startswith('//'):
+        return None
+    relative = 'index.html' if path == '/' else path[1:]
+    members = relative.split('/')
+    if ('\\' in relative or '\x00' in relative or
+            any(not member or member in ('.', '..') or member.startswith('.') for member in members) or
+            members[0] in ('runtime', 'codeoss') or
+            Path(members[-1]).suffix.lower() not in _BROWSER_ASSET_EXTENSIONS):
+        return None
+    if not root.is_dir() or root.is_symlink():
+        return None
+    asset = root.joinpath(*members)
+    # Reject symlinked parents as well as final symlink targets. A generic
+    # root-relative mapping must never expose host files through a link.
+    if asset.is_symlink() or any(parent.is_symlink() for parent in asset.parents if parent == root or root in parent.parents):
+        return None
+    if not asset.is_file() or not asset.resolve().is_relative_to(root.resolve()):
+        return None
+    return asset
+
+
+class _IndexScripts(HTMLParser):
+    """The authored index.html is the single source for classic script order."""
+    def __init__(self) -> None:
+        super().__init__()
+        self.sources: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != 'script':
+            return
+        src = dict(attrs).get('src')
+        if src is None:
+            return
+        # Only scripts in our own staged webapp may be loaded into the player.
+        if (not src.startswith('/') or src.startswith('//') or '\\' in src or
+                '\x00' in src or '?' in src or '#' in src or
+                any(part in ('', '.', '..') for part in src[1:].split('/'))):
+            raise RuntimeError('Invalid script reference in bundled index.html: ' + src)
+        self.sources.append(src)
+
+
+def _player_script_tags(index: Path) -> str:
+    parser = _IndexScripts()
+    parser.feed(index.read_text(encoding='utf-8'))
+    parser.close()
+    if not parser.sources:
+        raise RuntimeError('Bundled index.html has no client scripts')
+    return ''.join('<script defer src="' + html_escape(src, quote=True) + '"></script>'
+                   for src in parser.sources)
 
 
 class CinterForgeHTTPRoutes:
     def do_GET(self) -> None:
         from runtime import CinterForgeAuthentication as _CinterForgeAuthentication
+        from runtime import CinterForgeCraftMasterMap as _CinterForgeCraftMasterMap
         from runtime import CinterForgeDiscord as _CinterForgeDiscord
         from runtime import CinterForgeIF as _CinterForgeIF
         from runtime import CinterForgeSessions as _CinterForgeSessions
@@ -118,6 +183,8 @@ class CinterForgeHTTPRoutes:
                     self._json(200, self._code_shell_output(code_id))
             except (OSError, ValueError) as error:
                 self._json(400, {'error': str(error)})
+            return
+        if _CinterForgeCraftMasterMap.serve_map_asset(self, path):
             return
         if self._serve_artifact(path):
             return
@@ -282,8 +349,7 @@ class CinterForgeHTTPRoutes:
                       '</style><div id="if-status"></div><div id="if-output"></div>'
                       '<input id="if-input" aria-label="Story command" autofocus>'
                       '<button id="if-stop" type="button">Stop game</button>'
-                      + ''.join('<script src="/' + item + '" defer></script>'
-                                for item in _CinterForgeSettings.CLIENT_SCRIPTS)
+                      + _player_script_tags(_CinterForgeSettings.ASSETS / 'index.html')
                       + '</html>')
             # Only the dedicated player document may be embedded by this same-origin Terminal.
             self._send(200, markup.encode(), 'text/html; charset=utf-8', same_origin_frame=True)
@@ -362,6 +428,15 @@ class CinterForgeHTTPRoutes:
                     self.server.wargames_requests -= 1
             self._json(200, {'open':ready})
             return
+        if path == '/api/games/verification':
+            if not self._authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            # Return copies, not the live mutable host-owned records.
+            with self.server.debug_lock:
+                inventory = json.loads(json.dumps(self.server.game_verification))
+            self._json(200, {'verification': inventory})
+            return
         if path == '/api/macgames/next':
             if not self._authorized():
                 self._json(403, {'error':'not authorized'})
@@ -369,7 +444,7 @@ class CinterForgeHTTPRoutes:
             with self.server.debug_lock:
                 request = self.server.macgame_request
                 self.server.macgame_request = None
-            self._json(200, {'game':request})
+            self._json(200, request or {'game': None})
             return
         if path == '/api/lagomorph/next':
             if not self._authorized():
@@ -387,6 +462,15 @@ class CinterForgeHTTPRoutes:
             else:
                 self._json(503, {'error': 'Bedrock requires a host Steam library: '
                                  + self.server.bedrock_error})
+            return
+        if path == '/api/craftmaster/map/next':
+            if not self._authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            with self.server.craftmaster_map_lock:
+                pending = (self.server.craftmaster_map_requests.popleft()
+                           if self.server.craftmaster_map_requests else None)
+            self._json(200, pending or {})
             return
         if path == '/api/bedrock/terminal/next':
             if not self._authorized():
@@ -434,7 +518,16 @@ class CinterForgeHTTPRoutes:
             if not self._authorized():
                 self._json(403, {'error': 'not authorized'})
                 return
-            self._json(200, self.server.bedrock.list_worlds())
+            try:
+                worlds = self.server.bedrock.list_worlds()
+            except Exception as error:
+                # Never drop the HTTP connection on world-discovery failures;
+                # preserve the full traceback in the persistent Server log.
+                self.server.log_event('[BEDROCK] World discovery failed: '
+                                      + traceback.format_exc())
+                self._json(500, {'error': 'Bedrock world discovery failed: ' + str(error)})
+                return
+            self._json(200, worlds)
             return
         if path == '/api/bedrock/status':
             if not self._authorized():
@@ -462,24 +555,23 @@ class CinterForgeHTTPRoutes:
             return
         # The native UI is always immediately available. With DevTools the
         # read-only Server tab shows startup; no splash replaces index.html.
-        info = _CinterForgeSettings.STATIC_FILES.get(path)
-        if not info:
+        file = _webapp_static_file(_CinterForgeSettings.ASSETS, path)
+        if file is None:
             self._json(404, {'error': 'not found'})
             return
-        name, ctype = info
-        file = _CinterForgeSettings.ASSETS / name
-        if not file.is_file():
-            self._json(503, {'error': f'Incomplete shell package: {name}'})
-            return
+        mime = mimetypes.guess_type(file.name)[0] or 'application/octet-stream'
+        if file.suffix.lower() in ('.js', '.css', '.html', '.json', '.txt', '.svg'):
+            mime += '; charset=utf-8'
         data = file.read_bytes()
-        if name == 'index.html':
+        if file.name == 'index.html' and file.parent == _CinterForgeSettings.ASSETS:
             data = data.replace(b'__CPH_TOKEN__', self.server.token.encode('ascii'))
             data = data.replace(b'__CPH_PLATFORM__', self.server.system.encode('ascii'))
-        self._send(200, data, ctype)
+        self._send(200, data, mime)
 
 
     def do_POST(self) -> None:
         from runtime import CinterForgeAuthentication as _CinterForgeAuthentication
+        from runtime import CinterForgeCraftMasterMap as _CinterForgeCraftMasterMap
         from runtime import CinterForgeDiscord as _CinterForgeDiscord
         from runtime import CinterForgeGuestShells as _CinterForgeGuestShells
         from runtime import CinterForgeIF as _CinterForgeIF
@@ -825,6 +917,20 @@ class CinterForgeHTTPRoutes:
             if route == '/api/bedrock/command':
                 self._json(200, self.server.bedrock.console_command(body.get('command')))
                 return
+            if route == '/api/craftmaster/map/run':
+                self._json(200, _CinterForgeCraftMasterMap.run_map_conversion(
+                    self.server, str(body.get('name', ''))))
+                return
+            if route == '/api/craftmaster/map/close':
+                map_id = str(body.get('id', ''))
+                with self.server.craftmaster_map_lock:
+                    self.server.craftmaster_maps.pop(map_id, None)
+                    self.server.craftmaster_map_requests = deque(
+                        request for request in self.server.craftmaster_map_requests
+                        if request['id'] != map_id
+                    )
+                self._json(200, {'closed': True})
+                return
             if route == '/api/bedrock/run':
                 self._json(200, _CinterForgeSessions.open_bedrock_terminal(self.server,
                     str(body.get('name', '')), body.get('cols', 80), body.get('rows', 24)))
@@ -847,24 +953,15 @@ class CinterForgeHTTPRoutes:
                 backend=body.get('backend', 'native')
                 self.server.log_event('opening terminal session: backend=' + str(backend) +
                     ' platform=' + self.server.system)
-                if backend not in ('native','mac','linux','win','minecraft'):
+                if backend not in ('native','mac','linux','win'):
                     raise ValueError('Unknown Terminal backend')
                 # On macOS these are Code-OSS development-only shells. Do not
                 # create a guest Bash Session through direct API calls either.
                 if self.server.system == 'mac' and backend in ('linux', 'win'):
                     raise ValueError(backend.title() + ' Bash is available only inside Code-OSS')
                 command=None
-                if backend=='minecraft':
-                    if self.server.bedrock is None:
-                        raise RuntimeError('Minecraft needs an installed Bedrock server')
-                    state=self.server.bedrock.status()
-                    if not (state.get('running') or state.get('starting')):
-                        raise RuntimeError('Minecraft disabled: start Bedrock first with bedrock run')
-                    if state.get('console_available') is False:
-                        raise RuntimeError('Bedrock console attachment unavailable')
-                    command=[sys.executable, str(_CinterForgeSettings.ASSETS/'CinterForgeTerminal.py'),'--terminal-cli','minecraft']
-                elif backend in ('mac','linux','win') and backend!=self.server.system:
-                    raise RuntimeError(backend+' Bash unavailable on '+self.server.system+'; refusing native-shell fallback')
+                if backend in ('mac','linux','win') and backend != self.server.system:
+                    raise RuntimeError(backend + ' Bash unavailable on ' + self.server.system)
                 with self.server.sessions_lock:
                     if len(self.server.sessions) >= _CinterForgeSettings.MAX_SESSIONS:
                         raise ValueError('Maximum terminal sessions reached')
@@ -877,7 +974,7 @@ class CinterForgeHTTPRoutes:
                     self.server.sessions[terminal.id] = terminal
                 self.server.log_event('terminal opened: id=' + terminal.id[:10] +
                     ' command=' + Path(terminal.shell[0]).name + ' output=' + str(terminal.output_log.name if terminal.output_log else 'none'))
-                self._json(200, {'id': terminal.id, 'shell': 'Minecraft' if backend=='minecraft' else (backend.title()+' Bash' if self.server.system == 'mac' and backend in ('win','linux') else Path(terminal.shell[0]).name),
+                self._json(200, {'id': terminal.id, 'shell': backend.title()+' Bash' if self.server.system == 'mac' and backend in ('win','linux') else Path(terminal.shell[0]).name,
                                  'platform': backend if backend!='native' else self.server.system})
                 return
             if route in ('/api/if/start','/api/if/stop'):
@@ -982,11 +1079,70 @@ class CinterForgeHTTPRoutes:
                 return
             if route == '/api/macgames/open':
                 command = body.get('command')
-                if not isinstance(command,str) or command not in _CinterForgeSessions._mac_catalog():
+                catalog = _CinterForgeSessions._mac_catalog()
+                if not isinstance(command, str) or command not in catalog:
                     raise ValueError('Unknown Macintosh game command')
+                entry = catalog[command]
+                # A library_path is a repository pathname, NOT a playable URL.
+                # Only explicit HTTPS media candidates in the authored catalog
+                # may be attempted. Failed URLs remain skipped until session end.
+                raw_urls = entry.get('download_urls', [])
+                if not isinstance(raw_urls, list):
+                    raise ValueError('Invalid game download_urls list')
+                urls = []
+                for raw in raw_urls:
+                    if not isinstance(raw, str) or len(raw) > 2048:
+                        raise ValueError('Invalid game download URL')
+                    parsed = urlsplit(raw)
+                    if (parsed.scheme != 'https' or not parsed.netloc or
+                            parsed.username or parsed.password or parsed.fragment):
+                        raise ValueError('Game media must use public HTTPS URLs')
+                    if raw not in urls:
+                        urls.append(raw)
                 with self.server.debug_lock:
-                    self.server.macgame_request = command
-                self._json(200,{'requested':True,'command':command})
+                    state = self.server.game_verification.setdefault(command, {
+                        'verified_url': None, 'failed_urls': [],
+                        'last_attempt_url': None, 'last_outcome': None,
+                        'status': 'unverified'})
+                    preferred = state.get('verified_url')
+                    selected = preferred if preferred in urls else next(
+                        (url for url in urls if url not in state['failed_urls']), None)
+                    state['last_attempt_url'] = selected
+                    if not selected and urls and not preferred:
+                        state['status'] = 'all_sources_failed'
+                    self.server.macgame_request = {
+                        'game': command, 'url': selected, 'verified': bool(selected and selected == preferred)}
+                self._json(200, {'requested': True, 'command': command,
+                                 'source_url': selected})
+                return
+            if route == '/api/games/feedback':
+                command = body.get('command')
+                succeeded = body.get('succeeded')
+                if (not isinstance(command, str) or
+                        command not in _CinterForgeSessions._mac_catalog() or
+                        not isinstance(succeeded, bool)):
+                    raise ValueError('Invalid game feedback')
+                with self.server.debug_lock:
+                    state = self.server.game_verification.get(command)
+                    if state is None:
+                        raise ValueError('Game was not played in this Terminal process')
+                    attempted = state.get('last_attempt_url')
+                    if attempted and succeeded:
+                        state['verified_url'] = attempted
+                        state['status'] = 'verified'
+                    elif attempted:
+                        if attempted not in state['failed_urls']:
+                            state['failed_urls'].append(attempted)
+                        if state.get('verified_url') == attempted:
+                            state['verified_url'] = None
+                        state['status'] = 'failed'
+                    else:
+                        # No real downloadable candidate was supplied; never
+                        # promote a made-up URL just because an emulator booted.
+                        state['status'] = 'unverified'
+                    state['last_outcome'] = 'success' if succeeded else 'failure'
+                    updated = dict(state)
+                self._json(200, {'ok': True, 'verification': updated})
                 return
             if route == '/api/lagomorph/open':
                 with self.server.debug_lock:

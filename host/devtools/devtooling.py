@@ -318,7 +318,7 @@ def ensure(builds: Path) -> Path:
 
     host = platform.system()
     if host == 'Darwin':
-        prefix = builds / 'CinterForgeTerminal/Toolchains/mac'
+        prefix = builds / 'Toolchains/mac'
         binaries = prefix / 'env/bin'
         for name, executable, args in MAC_TOOLS:
             if name == 'Xcode':
@@ -380,7 +380,7 @@ def ensure(builds: Path) -> Path:
                 return _guest(lambda command, cwd: _merge_output(execute(command, cwd)), n, b, a, cwd=builds)
             check('Linux amd64 (native WebKitGTK)', name, linux_probe)
 
-    root = builds / 'CinterForgeTerminal/Toolchains/Windows/MSYS2'
+    root = builds / 'Toolchains/Windows/MSYS2'
     if host in ('Darwin', 'Linux', 'Windows'):
         windows_versions = None
         windows_error = None

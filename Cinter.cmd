@@ -16,9 +16,9 @@ rem Keep all provisioned tools in the sibling Builds directory.
 set "CF_REPO=%~dp0"
 for %%I in ("%CF_REPO%..") do set "CF_WORKSPACE=%%~fI"
 set "CF_BUILDS=%CF_WORKSPACE%\Builds"
-set "CF_MSYS=%CF_BUILDS%\CinterForgeTerminal\Toolchains\Windows\MSYS2"
+set "CF_MSYS=%CF_BUILDS%\Toolchains\Windows\MSYS2"
 set "CF_UCRT=%CF_MSYS%\ucrt64\bin"
-set "CF_DOWNLOAD=%CF_BUILDS%\CinterForgeTerminal\Toolchains\Windows\Downloads"
+set "CF_DOWNLOAD=%CF_BUILDS%\Toolchains\Windows\Downloads"
 set "CF_INSTALLER=%CF_DOWNLOAD%\msys2-x86_64-20260927.exe"
 set "CF_URL=https://repo.msys2.org/distrib/x86_64/msys2-x86_64-20260927.exe"
 if not exist "%CF_BUILDS%" mkdir "%CF_BUILDS%" || goto :error

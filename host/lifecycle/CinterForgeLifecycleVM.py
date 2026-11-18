@@ -55,17 +55,15 @@ class CinterForgeLifecycleVM:
         receipt participates in lifecycle execution. A native app's active
         owner is checked separately before mutation.
         """
-        roots = [parent / 'CFTVM/T'
-                 for parent in reversed((self.builds, *self.builds.parents))
-                 if parent.name == 'Builds' and parent.is_dir() and not parent.is_symlink()]
+        root = self.builds / 'CFTVM/T'
         tail = '/l/colima-t/ssh.sock.1234567890123456'
-        for root in roots:
-            if len(os.fsencode(str(root) + tail)) < 96:
-                if root.is_symlink() or (root.exists() and not root.is_dir()):
-                    raise RuntimeError('Unsafe lifecycle VM state: ' + str(root))
-                root.mkdir(parents=True, exist_ok=True)
-                return root
-        raise RuntimeError('Managed lifecycle VM socket root too long within Builds')
+        if len(os.fsencode(str(root) + tail)) >= 96:
+            raise RuntimeError('Shared Builds/CFTVM/T is too long for Lima sockets: ' + str(root))
+        if root.is_symlink() or (root.exists() and not root.is_dir()):
+            raise RuntimeError('Unsafe lifecycle VM state: ' + str(root))
+        root.mkdir(parents=True, exist_ok=True)  # Setup alone provisions it.
+        return root
+
 
     def environment(self, sdk: Path) -> dict[str, str]:
         """Build-owned isolated Colima/Docker env, independent of app runtime."""
@@ -167,6 +165,75 @@ class CinterForgeLifecycleVM:
         return [(Path('/'), '/host/mac')]
 
 
+    @staticmethod
+    def colima_yaml_scalar(raw: str) -> str:
+        """Read a saved Colima YAML scalar without treating comments as values.
+
+        Colima rewrites its YAML on VM startup. Its equivalent quoted/unquoted
+        scalars, comments and harmless whitespace must not invalidate Setup.
+        This is deliberately limited to the scalar fields we own; it is not
+        a general YAML parser.
+        """
+        raw = raw.strip()
+        if raw.startswith('"'):
+            try:
+                value, end = json.JSONDecoder().raw_decode(raw)
+                if isinstance(value, str) and (not raw[end:].strip() or
+                                               raw[end:].lstrip().startswith('#')):
+                    return value
+            except ValueError:
+                pass
+            return raw
+        if raw.startswith("'"):
+            match = re.fullmatch(r"'((?:[^']|'')*)'(?:\s*#.*)?", raw)
+            if match:
+                return match.group(1).replace("''", "'")
+            return raw
+        return re.split(r'\s+#', raw, maxsplit=1)[0].strip()
+
+
+    @staticmethod
+    def colima_emulation_settings() -> dict[str, str]:
+        """The Setup-owned immutable architecture and Wine-safe VM settings."""
+        return {'rosetta': 'false', 'binfmt': 'false', 'arch': 'x86_64',
+                'vmType': 'qemu', 'mountType': '9p'}
+
+
+    def colima_emulation_differences(self, yaml: str) -> list[str]:
+        """Compare effective values, not Colima's serialized YAML formatting."""
+        differences = []
+        for key, desired in self.colima_emulation_settings().items():
+            values = re.findall(r'(?m)^' + re.escape(key) + r':\s*([^\n]*)$', yaml)
+            observed = [self.colima_yaml_scalar(value) for value in values]
+            normalized = [value.lower() for value in observed]
+            if key == 'arch':
+                normalized = ['x86_64' if value == 'amd64' else value
+                              for value in normalized]
+            if len(normalized) != 1 or normalized[0] != desired:
+                differences.append(f'{key}: expected {desired}, got '
+                                   + (repr(observed) if observed else '<missing>'))
+        return differences
+
+
+    def colima_configuration_differences(self, env: dict[str, str],
+                                         mounts: list[tuple[Path, str]]) -> list[str]:
+        """Read-only Build/Setup verification of the persisted t configuration."""
+        config = Path(env['COLIMA_HOME']) / self.profile / 'colima.yaml'
+        if config.is_symlink() or config.parent.is_symlink():
+            return ['colima.yaml: unsafe symlink']
+        if not config.is_file():
+            return ['colima.yaml: missing Setup-provisioned profile']
+        yaml = config.read_text(encoding='utf-8')
+        differences = self.colima_emulation_differences(yaml)
+        observed = self.colima_mount_entries(yaml)
+        expected = [(str(host), guest, True) for host, guest in mounts]
+        if observed != expected:
+            differences.append(f'mounts: expected {expected!r}, got '
+                               + ('<unrecognized syntax>' if observed is None
+                                  else repr(observed)))
+        return differences
+
+
     def colima_mount_entries(self, yaml: str) -> list[tuple[str, str, bool]] | None:
         """Read only the narrow mount schema that our Colima profile uses.
 
@@ -179,34 +246,22 @@ class CinterForgeLifecycleVM:
         if match is None:
             return None
 
-        def scalar(raw: str) -> str:
-            raw = raw.strip()
-            if raw.startswith('"'):
-                try:
-                    result = json.loads(raw)
-                    return result if isinstance(result, str) else raw
-                except ValueError:
-                    return raw
-            if len(raw) >= 2 and raw[0] == raw[-1] == "'":
-                return raw[1:-1].replace("''", "'")
-            return raw
-
         records: list[dict[str, str]] = []
         for line in match.group(1).splitlines():
             item = re.match(r'^\s*-\s+location:\s*(.*?)\s*$', line)
             if item:
-                records.append({'location': scalar(item.group(1))})
+                records.append({'location': self.colima_yaml_scalar(item.group(1))})
                 continue
             attribute = re.match(r'^\s+(mountPoint|writable):\s*(.*?)\s*$', line)
             if attribute and records:
-                records[-1][attribute.group(1)] = scalar(attribute.group(2))
+                records[-1][attribute.group(1)] = self.colima_yaml_scalar(attribute.group(2))
             elif line.strip() and not line.lstrip().startswith('#'):
                 return None
         if not records or any(set(item) != {'location', 'mountPoint', 'writable'} for item in records):
             return None
-        if any(item['writable'] not in ('true', 'false') for item in records):
+        if any(item['writable'].lower() not in ('true', 'false') for item in records):
             return None
-        return [(item['location'], item['mountPoint'], item['writable'] == 'true')
+        return [(item['location'], item['mountPoint'], item['writable'].lower() == 'true')
                 for item in records]
 
 
@@ -267,21 +322,19 @@ class CinterForgeLifecycleVM:
         if not config.is_file():
             return False
         original = config.read_text(encoding='utf-8')
-        desired = {'rosetta': 'false', 'binfmt': 'false',
-                   'arch': 'x86_64', 'vmType': 'qemu', 'mountType': '9p'}
-        updated = original
-        for key, value in desired.items():
-            pattern = r'(?m)^(' + re.escape(key) + r':)[^\n]*$'
-            if re.search(pattern, updated):
-                updated = re.sub(pattern, lambda match: match.group(1) + ' ' + value, updated)
-            else:
-                # An earlier ARM64/VZ profile may omit explicit architecture
-                # fields. Leaving them absent lets Colima reuse the wrong ABI.
-                updated = key + ': ' + value + '\n' + updated
-        if updated == original:
+        if not self.colima_emulation_differences(original):
             return False
         if dry_run:
             return True
+        updated = original
+        for key, value in self.colima_emulation_settings().items():
+            pattern = r'(?m)^(' + re.escape(key) + r':)[^\n]*$'
+            if re.search(pattern, updated):
+                # A stale value is an actual Setup repair; a formatting-only
+                # difference never gets here. Missing keys are explicit.
+                updated = re.sub(pattern, lambda match: match.group(1) + ' ' + value, updated)
+            else:
+                updated = key + ': ' + value + '\n' + updated
         pending = config.with_name('colima.yaml.emulation.pending')
         if pending.is_symlink():
             raise RuntimeError('Unsafe managed Terminal VM pending configuration')

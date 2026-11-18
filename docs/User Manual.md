@@ -104,7 +104,7 @@ native output logs.
 | **16 interactive-fiction titles** | Story-driven text games with a bundled JavaScript Z-machine player | `stories` |
 | **48 classic-Mac configurations** | Browse and launch supported historical Macintosh emulator configurations | Museum / `infinite-mac` |
 | **19 terminal styles** | Explore historical and modern screen aesthetics, distinct from real OS emulation | Museum / terminal styles |
-| **Minecraft Bedrock** | Install/manage an official dedicated server and use its live command console | `bedrock help` |
+| **Minecraft Bedrock** | Launch local Java or Bedrock saves and use the live server console | `bedrock` |
 | **Cross-platform shells** | Actual Mac, Windows and Linux sessions where supported environments are present | Native Terminal menu / Code-OSS |
 | **Code-OSS** | Edit and save local projects, use integrated terminals and build tools | `code run`, File → New CinterForge Code Terminal |
 | **Application platform** | Native WebView shell plus a supervised Python/HTTP backend | [Architecture](Architecture.md) |
@@ -122,8 +122,9 @@ stories              List 16 interactive-fiction titles
 infinite-mac         List 67 classic Macintosh game commands
 simcity              Example: open a classic Mac game
 lagomorph            Launch the special Quadra 650 easter egg
-bedrock help         See server operations
-bedrock status       Check Bedrock install/run status
+bedrock              List local Java and Bedrock worlds
+bedrock Candlewood   Convert a Java save if needed and open a live map and server tab
+craftmaster Candlewood  Convert/update a Java world and open its live Zoomify map
 minecraft            Attach a live console to an already-running server
 code [run]           Open Code-OSS in a new or existing tab
 code mode light|dark Set and remember the Code-OSS theme
@@ -154,31 +155,38 @@ A **terminal style** changes the visual presentation, for example color, charact
 
 CinterForge Terminal manages the official **Minecraft Bedrock Dedicated Server**. It provides world selection, a dedicated server Session with real output, console commands, and a second reconnectable console without launching a duplicate server.
 
-### List, convert and launch Minecraft worlds
+### List, convert and launch worlds
 
 ```text
-bedrock                            List Bedrock and local Java Minecraft saves
-bedrock "Candlewood (Candlewood)"  Convert Java if needed; start the Bedrock server
-bedrock "My World"                 Launch an existing Bedrock save
+bedrock                         List local Java saves and Bedrock worlds
+bedrock "Candlewood"            Convert a local Java save as needed, then launch Bedrock
+craftmaster "Candlewood"        Convert/update the Java save and open its live Zoomify map
 ```
 
-`bedrock` scans the standard Java saves directory as well as the installed
-Bedrock world directories. A Java-world selection invokes the native
-CraftMaster executable bundled with Terminal, preserves the Java source,
-converts all present dimensions, validates its `.mcworld`, and imports the
-Bedrock copy. A previously validated Bedrock world is reused instead of being
-converted again. Other names can still use the existing verified public
-published-world fallback; an in-progress beta upload is not a complete release.
-The official Bedrock Dedicated Server is installed only after the one-time
-EULA acceptance.
+Java worlds are selected by exact display name, folder name, or their
+CraftMaster export name; for example `Candlewood` resolves the local folder
+`Candlewood (Candlewood)`. CraftMaster writes 512×512 Zoomify tiles and a live
+`Live Map.htm` viewer as it converts. Terminal opens that viewer immediately in
+a separate **Map** tab. Switching to the Bedrock console does not close the
+map; it continues displaying incremental tile updates in its own tab.
+
+The public `craftmaster <world>` shortcut starts an incremental local conversion
+without starting Bedrock. Native CLI subcommands such as `craftmaster worlds
+--json` and `craftmaster convert --world ...` retain their original interface.
+
+If the selected world is absent locally, `bedrock <world>` tries the public
+release and beta `.mcworld` archive URLs directly. It validates ZIP contents
+and Bedrock/LevelDB structure before installing, without depending on a separate
+publication manifest. A locally recorded SHA-256 verifies the downloaded bytes
+but, without independently published metadata, is not a publisher signature.
+The official Bedrock Dedicated Server is downloaded separately, only after
+explicit EULA acceptance.
 
 Type Minecraft server commands such as `list` directly into the live Bedrock
-tab. Closing that tab stops its owned server and helper processes, without
+tab. Closing that tab stops its owned server and helper processes without
 deleting the world. From another Terminal Session, `minecraft` attaches an
 additional console to the running server. Closing that client console only
-detaches it. On macOS the managed server uses the supported LinuxKit/Rosetta
-runtime and host LAN relay; reachability depends on the host network and the
-official Bedrock server terms apply.
+detaches it. The Zoomify Map tab does not own or stop the server.
 
 ## 7. Real terminals on three platforms
 
@@ -200,7 +208,7 @@ Server log or Minecraft console sessions. **Server** is a read-only Terminal tab
 
 Use **Terminal → Open Logs Folder** to reveal the active app or development log directory directly in Finder, Explorer, or your Linux file manager. In repository lifecycle/development mode it opens `<repo>/../Builds/Logs/CinterForgeTerminal/`; Steam-installed apps use `steamapps/common/CinterForge/Logs/CinterForgeTerminal/`; standalone macOS apps without Steam use `~/Library/Logs/CinterForgeTerminal/`. This tree includes lifecycle (Setup, Build, Stage, Test), native launch and shutdown output, the Server and session logs, Bedrock, CMake diagnostic copies, and preserved guest/VM startup, Docker, Bash, X11 and VNC logs. Some external utilities must keep their **active** files in their own state directories (for example Lima serial/host-agent logs in the VM cache and CMake diagnostics in its build tree); Terminal also copies their readable diagnostics into the central log tree. macOS system-generated crash reports remain in Apple’s `~/Library/Logs/DiagnosticReports/` and are not relocated by the app.
 
-A Steam-installed application stores its persistent player/session data and logs in its selected Steam library, including `steamapps/common/CinterForge/Logs/CinterForgeTerminal/`. **The standalone download does not require Steam:** without an installed Steam library it keeps user state in `~/Library/Application Support/CinterForgeTerminal/` and logs in `~/Library/Logs/CinterForgeTerminal/` on macOS. **Temporary files do not belong in `steamapps`.** On macOS, the app-owned Colima/Lima VM disk, Docker caches and other transient guest state live in the user OS cache (`~/Library/Caches/CFTVM/`); resumable DevTools download ZIPs and disposable shell scratch use the user OS cache under `~/Library/Caches/CinterForgeTerminal/`. Setup/build/test use sibling `<repo>/../Builds` for VM, intermediates, temporary files and lifecycle logs. The read-only app bundle can contain a folder named `Builds` as a packaged resource layout; that is **not** a writable developer Builds directory. An installed app must not create `Builds` on ordinary launch. After explicit consent to `devtools install`, it shows and creates the selected workspace `Builds` folder, installs the unified SDK at `Builds/CinterForgeTerminal/Toolchains/`, and remembers the destination. Guest VM caches remain in OS cache; runtime logs use Steam when installed through Steam, otherwise the OS user log directory.
+A Steam-installed application stores its persistent player/session data and logs in its selected Steam library, including `steamapps/common/CinterForge/Logs/CinterForgeTerminal/`. **The standalone download does not require Steam:** without an installed Steam library it keeps user state in `~/Library/Application Support/CinterForgeTerminal/` and logs in `~/Library/Logs/CinterForgeTerminal/` on macOS. **Temporary files do not belong in `steamapps`.** On macOS, the single Colima/Lima VM disk and Docker state live under the explicitly selected workspace `Builds/CFTVM/T/` when DevTools is installed; resumable DevTools ZIP downloads and disposable shell scratch still use the user OS cache under `~/Library/Caches/CinterForgeTerminal/`. Setup/build/test use sibling `<repo>/../Builds` for VM, intermediates, temporary files and lifecycle logs. The read-only app bundle can contain a folder named `Builds` as a packaged resource layout; that is **not** a writable developer Builds directory. An installed app must not create `Builds` on ordinary launch. After explicit consent to `devtools install`, it shows and creates the selected workspace `Builds` folder, installs the unified SDK at `Builds/Toolchains/`, and remembers the destination. The installed application reuses the shared workspace VM and does not create a second copy; runtime logs use Steam when installed through Steam, otherwise the OS user log directory.
 
 In repository development mode—when using `./Cinter` or an explicit repository/VS Code development launch—the **sibling `Builds`** holds development logs, caches and toolchains. The live Server tab reports the log path chosen for its own launch context. This distinction is based on how Terminal was launched, not whether VS Code happens to be open elsewhere.
 
@@ -250,7 +258,10 @@ In an authorized developer shell, the documented command family is:
 | Command | What happens |
 |---|---|
 | `devtools list` | Inspect tools and their availability by platform |
-| `devtools install` | Review size/location; confirm; download with progress and verify contents/versions |
+| `devtools install <path/to/source>` | Select the Source folder, create/update shared `Builds/Toolchains` (or adopt Setup-verified tools) |
+| `devtools update` | Update the selected toolchains from the Cloudflare manifest, reusing unchanged files |
+| `devtools uninstall` | Remove only manifest-owned toolchain files |
+| `devtools version` / `devtools report` / `devtools help` | Inspect the shared installation and command syntax |
 | `devtools uninstall` | Remove only the confirmed managed optional toolchain |
 | `devtools report` | Produce a detailed tool/version report under `Builds/Logs/CinterForgeTerminal/` |
 

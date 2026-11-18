@@ -88,6 +88,29 @@ CinterForgeState.activateTab = async function activateTab(tab) {
     CinterForgeState.session = tab.session;
     CinterForgeState.selected = tab.profileId;
     CinterForgeState.display = tab.display;
+    // Keep every CraftMaster map iframe alive while switching to Bedrock,
+    // Code-OSS or a shell. Hidden maps continue refreshing their ZFY tiles.
+    for (const openTab of CinterForgeState.tabs) {
+      if (openTab.kind === 'craftmaster-map' && openTab.mapFrame)
+        openTab.mapFrame.hidden = true;
+    }
+    if (tab.kind === 'craftmaster-map') {
+      if (CinterForgeState.terminalOverlay.dataset.codeWrapperHidden === 'true')
+        CinterForgeState.setCodeWrapperHidden(false);
+      CinterForgeState.$('terminal-screen').hidden = true;
+      CinterForgeState.$('terminal-input').disabled = true;
+      CinterForgeState.$('terminal-keys').hidden = true;
+      CinterForgeState.computerView.hidden = false;
+      CinterForgeState.codeFrame.hidden = true;
+      CinterForgeState.frame.hidden = true;
+      CinterForgeState.codeError.hidden = true;
+      tab.mapFrame.hidden = false;
+      CinterForgeState.$('terminal-shell').textContent = tab.label + ' · live Zoomify map';
+      CinterForgeState.notice('CraftMaster map refreshes as the native converter writes tiles');
+      CinterForgeState.renderTabs();
+      CinterForgeState.saveTerminalLayout();
+      return;
+    }
     if (tab.kind === 'launcher') {
       if (CinterForgeState.terminalOverlay.dataset.codeWrapperHidden === 'true') CinterForgeState.setCodeWrapperHidden(false);
       CinterForgeState.$('terminal-screen').hidden = true;
@@ -189,6 +212,33 @@ CinterForgeState.closeTab = async function closeTab(tab) {
       if (owner) {
         try { await CinterForgeState.api('/host/code-shell-close-owner', {owner}); }
         catch (e) { console.error('Code-OSS PTY cleanup:', e); }
+      }
+    }
+    if (tab.kind === 'craftmaster-map') {
+      tab.mapFrame?.remove();
+      if (tab.mapId) void CinterForgeState.api('/api/craftmaster/map/close', {
+        id: tab.mapId
+      }).catch(() => {});
+    }
+    // Record a human outcome only after a game tab is intentionally closed.
+    // A catalog file is not proof of compatibility, nor a playable URL.
+    if (typeof tab.profileId === 'string' && tab.profileId.startsWith('macgame-')) {
+      const command = tab.profileId.slice('macgame-'.length);
+      const profile = CinterForgeState.profiles.find(item => item.id === tab.profileId);
+      if (profile?.gameUnverified) {
+        setTimeout(async () => {
+          const answer = window.prompt('Did ' + (profile.name || command) +
+            ' play correctly? Type yes, no, or skip.', 'skip');
+          if (!answer || !['yes', 'no'].includes(answer.trim().toLowerCase())) return;
+          try {
+            const result = await CinterForgeState.api('/api/games/feedback', {
+              command, succeeded: answer.trim().toLowerCase() === 'yes'
+            });
+            CinterForgeState.notice(result.verification?.verified_url
+              ? 'Verified source URL for ' + command
+              : 'Recorded ' + command + ' result; no playable URL verified');
+          } catch (error) { CinterForgeState.notice('Game feedback: ' + error.message); }
+        }, 0);
       }
     }
     // Late PTY connections and IF downloads cannot revive a closed tab.

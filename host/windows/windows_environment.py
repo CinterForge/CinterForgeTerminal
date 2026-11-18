@@ -174,34 +174,22 @@ class WindowsCrossEnvironment:
         self._wine_volume_checked = None
 
     def _native_ready(self) -> bool:
-        """Find complete host tools in PATH OR their existing Builds stage.
-
-        Reuse staged executables without introducing host-global installations.
-        The native provider still validates tool versions before compilation.
-        """
-        candidates = (
-            self.builds / 'CinterForgeTerminal/Toolchains/WindowsCross/bin',
-            self.builds / 'CinterForgeTerminal/Toolchains/WindowsCross/usr/bin',
-            self.builds / 'CinterForgeTerminal/Toolchains/Linux/WindowsCross/bin',
-            self.builds / 'Toolchains/WindowsCross/bin',
-            self.builds / 'Toolchains/MinGW/bin',
-            self.builds / 'Toolchains/Wine/bin',
-        )
-        valid = [str(path) for path in candidates if path.is_dir() and not path.is_symlink()]
-        self.native_path = os.pathsep.join([*valid, os.environ.get('PATH', '')])
+        """Check only the managed WindowsCross/bin root; never host PATH or Wine aliases."""
+        directory = self.builds / 'Toolchains/WindowsCross/bin'
+        if directory.is_symlink() or not directory.is_dir():
+            return False
+        self.native_path = str(directory)
         required = ('x86_64-w64-mingw32-gcc', 'x86_64-w64-mingw32-g++',
                     'wine', 'cmake', 'ninja')
         if not all(shutil.which(command, path=self.native_path) for command in required):
             return False
-        # Do not silently select an older host Wine instead of patched Wine.
-        # The optional host provider must match the exact Setup-managed version.
         version = _run(['wine', '--version'], quiet=True, timeout=15,
                        env=dict(os.environ, PATH=self.native_path))
         return version.returncode == 0 and version.stdout.strip() == PINNED_WINE_VERSION
 
     @property
     def stage(self) -> Path:
-        return self.builds / 'CinterForgeTerminal/Toolchains/WindowsCross'
+        return self.builds / 'Toolchains/WindowsCross'
 
     def _docker_available(self) -> str:
         """Reuse an already operational Docker or Podman engine.
@@ -212,7 +200,7 @@ class WindowsCrossEnvironment:
         required if Setup can provision it.
         """
         engines = []
-        bundled_cli = self.builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/docker'
+        bundled_cli = self.builds / 'Toolchains/mac/env/bin/docker'
         if platform.system() == 'Darwin':
             # The Mac bootstrap / LinuxKit c producer is ARM64 and must NEVER
             # build the Debian AMD64 Wine image. Setup enters the dedicated
@@ -265,7 +253,7 @@ class WindowsCrossEnvironment:
     def validate_staged(cls, builds: Path) -> tuple[Path, dict]:
         """Verify the offline Docker image without consulting the Docker daemon."""
         digest = _image_recipe_sha256()
-        staged = builds / 'CinterForgeTerminal/Toolchains/WindowsCross'
+        staged = builds / 'Toolchains/WindowsCross'
         archive = staged / f'{digest[:16]}.tar'
         manifest = staged / f'{digest[:16]}.json'
         if not archive.is_file() or not manifest.is_file() or archive.is_symlink():
@@ -288,7 +276,7 @@ class WindowsCrossEnvironment:
         from host.lifecycle.amd64_backend import require_managed_t_docker
         require_managed_t_docker(self.builds)
         assert self.docker
-        skopeo = self.builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/skopeo'
+        skopeo = self.builds / 'Toolchains/mac/env/bin/skopeo'
         if not skopeo.is_file() or skopeo.is_symlink():
             raise RuntimeError('Mac Bootstrap did not provision pinned native skopeo; '
                                're-run ./Cinter setup all')
@@ -410,7 +398,25 @@ class WindowsCrossEnvironment:
         self.provider = 'docker-linux-amd64-wine'
         self.docker = self._docker_available()
         self._ensure_image()
-        self.validate_staged(self.builds)
+        folder, chosen = self.validate_staged(self.builds)
+        # Setup owns ONE image selection in the one shared Builds/Toolchains.
+        # Build and app runtime require this exact receipt, never scan older
+        # archives or select a historical image as a fallback.
+        selector = folder / 'active-image.json'
+        if selector.is_symlink():
+            raise RuntimeError('Unsafe active WindowsCross image selector')
+        active = {key: chosen[key] for key in
+                  ('dockerfile_sha256', 'image', 'archive_sha256', 'wine_version')}
+        active['schema'] = 'cinterforge.terminal.active-guest-image.v1'
+        encoded = json.dumps(active, indent=2, sort_keys=True) + '\n'
+        if not selector.is_file() or selector.read_text(encoding='utf-8') != encoded:
+            pending = folder / 'active-image.json.pending'
+            if pending.is_symlink():
+                raise RuntimeError('Unsafe pending WindowsCross image selector')
+            pending.write_text(encoded, encoding='utf-8')
+            pending.replace(selector)
+            print('[WINDOWS CROSS] Selected exactly one verified guest image: '
+                  + chosen['image'], flush=True)
         return self
 
     def ensure(self) -> 'WindowsCrossEnvironment':

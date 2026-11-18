@@ -328,7 +328,7 @@ HFS_DEB_SHA256 = '068f90fac9397de360e4673e117d0e3ee7e8c576649e6f2dc4752ba308f7d0
 
 def _hfs_package(builds: Path) -> Path:
     """Setup-owned download only; no Homebrew or global host installation."""
-    folder = builds / 'CinterForgeTerminal/Toolchains/Linux/hfsutils/3.2.6-15'
+    folder = builds / 'Toolchains/Linux/hfsutils/3.2.6-15'
     folder.mkdir(parents=True, exist_ok=True)
     package = folder / HFS_DEB_NAME
     if package.is_file() and sha256(package) == HFS_DEB_SHA256:
@@ -359,7 +359,7 @@ def _stage_hfs_linux(builds: Path, temp: Path,
     from host.lifecycle.amd64_backend import docker_bind_source
     from host.lifecycle.three_samples import _docker_image
     from host.windows.windows_environment import _run
-    docker = builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/docker'
+    docker = builds / 'Toolchains/mac/env/bin/docker'
     if not docker.is_file():
         raise RuntimeError('Setup-owned t Docker CLI is missing')
     log = builds / 'Logs/CinterForgeTerminal/lagomorph-linux-hfs.log'

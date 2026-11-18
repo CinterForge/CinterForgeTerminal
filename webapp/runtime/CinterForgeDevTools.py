@@ -1,7 +1,7 @@
 """CinterForgeDevTools — CinterForge Terminal application runtime.
 
 PURPOSE: Optional on-demand DevTools download, verification, receipts, installation and development root selection.
-METHODS: _devtools_release, _devtools_builds_pin, _devtools_builds_root, _devtools_destination, _legacy_devtools_destination, _save_devtools_builds_root, _public_manifest, _file_sha256, _devtools_download_partial, _download_public_devtools, _stage_devtools_zip, _verify_native_devtools, install_devtools
+METHODS: _devtools_release, _devtools_builds_pin, _devtools_builds_root, _devtools_destination, _save_devtools_builds_root, _public_manifest, _file_sha256, _devtools_download_partial, _download_public_devtools, _stage_devtools_zip, _verify_native_devtools, install_devtools
 STARTUP: Loaded by CinterForgeTerminal.py, the sole staged service entry.
 SHUTDOWN: The native owner supervises runtime shutdown. Never execute Setup.
 DEPENDENCIES: Standard library and directly imported runtime owners; no host/lifecycle imports.
@@ -72,78 +72,109 @@ def _devtools_release() -> str:
 
 
 def _devtools_builds_pin() -> Path | None:
-    """Remember the consented development Builds location across workspaces.
+    """One installed-app Source selection, never a home-cache fallback.
 
-    This file is user configuration in the selected Steam library, not an SDK
-    or transient build artifact. Merely checking DevTools must not create it.
+    The developer command uses CINTER_BUILDS_ROOT directly and has no pin.
+    Installed Terminal requires its actual Steam library's one selection file.
+    No lookup or copying of alternate DevTools/Toolchains installations.
     """
+    if os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'developer':
+        return None
     from runtime import CinterForgeSessions as _CinterForgeSessions
     from runtime import CinterForgeSettings as _CinterForgeSettings
     steam = _CinterForgeSessions._steam_library_for_installed_root(_CinterForgeSettings.ASSETS.parent)
     if steam is None:
-        # Persist the selected Builds path for standalone installs as well;
-        # the receipt is user configuration, not an SDK or VM disk.
-        return _CinterForgeSessions._standalone_state_root(create=False) / 'devtools-builds.json'
+        raise RuntimeError('Installed DevTools require the actual Steam application library; '
+                           'no alternate user-cache installation is supported')
     return steam / 'common/CinterForge/Applications/TerminalState/devtools-builds.json'
 
 
 def _devtools_builds_root() -> Path:
-    """Resolve the actual developer Builds location without creating it.
+    """One explicit location: developer Builds or the installed Source pin.
 
-    A downloaded Terminal has no right to create Builds on normal launch.
-    `devtools install` is the explicit opt-in which creates that folder.
-    Repository development uses the same sibling Builds as ./Cinter.
+    No scanning HOME/Source, Documents, Code-OSS workspace, Steam SDKs, or
+    packaged application resources. A missing selection means not installed.
     """
-    from runtime import CinterForgeSessions as _CinterForgeSessions
-    supplied = os.environ.get('CINTER_BUILDS_ROOT', '').strip()
-    if supplied:
-        root = Path(supplied).expanduser()
+    raw = os.environ.get('CINTER_BUILDS_ROOT', '').strip()
+    if os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'developer':
+        if not raw:
+            raise RuntimeError('Developer CINTER_BUILDS_ROOT is not set')
+        root = Path(raw).expanduser()
+    elif raw:
+        # An explicit process environment override selects exactly one Builds.
+        # There is never a search through other installed toolchain locations.
+        root = Path(raw).expanduser()
     else:
-        pinned = _devtools_builds_pin()
-        if pinned is not None and pinned.is_file():
-            if pinned.is_symlink():
-                raise RuntimeError('Unsafe DevTools Builds selection')
-            try:
-                record = json.loads(pinned.read_text(encoding='utf-8'))
-                if record.get('schema') != 'cinterforge.devtools-builds.v1':
-                    raise ValueError('Unknown DevTools Builds configuration')
-                root = Path(record['builds'])
-            except (ValueError, KeyError, TypeError, OSError) as error:
-                raise RuntimeError('Invalid saved DevTools Builds location: ' + str(pinned)) from error
-        else:
-            home = _CinterForgeSessions._real_login_home()
-            selected = os.environ.get('CINTER_CODE_WORKSPACE', '').strip()
-            workspace = Path(selected).expanduser() if selected else None
-            if workspace is not None and (not workspace.is_absolute() or
-                                          not workspace.is_dir()):
-                raise RuntimeError('Selected Code-OSS workspace is not an existing absolute folder')
-            if workspace is None:
-                base = (home / 'Source' if (home / 'Source').is_dir() else
-                        home / 'Documents' if (home / 'Documents').is_dir() else home)
-            else:
-                workspace = workspace.resolve(strict=True)
-                if workspace.name == 'Builds':
-                    base = workspace.parent
-                elif (workspace / 'Cinter').is_file() and (workspace / 'CMakeLists.txt').is_file():
-                    base = workspace.parent  # the repository's sibling Builds
-                elif (home / 'Source').is_dir() and workspace.is_relative_to(home / 'Source'):
-                    base = home / 'Source'
-                elif (home / 'Documents').is_dir() and workspace.is_relative_to(home / 'Documents'):
-                    base = home / 'Documents'
-                else:
-                    base = workspace
-            root = base / 'Builds'
-    if not root.is_absolute() or root.name != 'Builds':
-        raise RuntimeError('Developer toolchains require an absolute Builds directory: ' + str(root))
-    if root.is_symlink() or (root.exists() and not root.is_dir()):
-        raise RuntimeError('Unsafe developer Builds location: ' + str(root))
-    resolved = root.resolve(strict=False)
-    # Never extract DevTools into the immutable app, a Steam library, or a
-    # packaged subdirectory merely named Builds.
-    if any(part.lower() == 'steamapps' or part.endswith('.app')
-           for part in resolved.parts):
-        raise RuntimeError('DevTools Builds must be outside Steam and signed apps: ' + str(resolved))
-    return resolved
+        pin = _devtools_builds_pin()
+        if pin is None or pin.is_symlink() or not pin.is_file():
+            raise RuntimeError('No DevTools Source selected: run devtools install <path/to/source>')
+        try:
+            record = json.loads(pin.read_text(encoding='utf-8'))
+            if record.get('schema') != 'cinterforge.devtools-builds.v1':
+                raise ValueError('Invalid selection schema')
+            root = Path(record['builds'])
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise RuntimeError('Invalid DevTools Source selection: ' + str(pin)) from error
+    if (not root.is_absolute() or root.name != 'Builds' or root.is_symlink() or
+            not root.is_dir()):
+        raise RuntimeError('Selected Builds directory is missing or unsafe: ' + str(root))
+    root = root.resolve(strict=True)
+    if any(part.lower() == 'steamapps' or part.endswith('.app') for part in root.parts):
+        raise RuntimeError('DevTools Builds must be outside Steam and app bundles: ' + str(root))
+    # Installed apps inherit the selection from their saved user configuration.
+    # Export the canonical environment key for the entire runtime (including
+    # sessions and managed-VM helpers) after checking the ONE selected root.
+    os.environ['CINTER_BUILDS_ROOT'] = str(root)
+    return root
+
+
+def _builds_from_source(source_path: str) -> Path:
+    """Explicit, existing Source directory; never silently choose a workspace."""
+    source = Path(source_path).expanduser()
+    if not source.is_absolute() or not source.is_dir() or source.is_symlink():
+        raise ValueError('devtools install requires an existing absolute Source directory')
+    source = source.resolve(strict=True)
+    if source.name == 'Builds' or any(part.lower() == 'steamapps' or part.endswith('.app')
+                                     for part in source.parts):
+        raise ValueError('Select the Source directory, outside Steam and application bundles')
+    builds = source / 'Builds'
+    if builds.is_symlink() or (builds.exists() and not builds.is_dir()):
+        raise ValueError('Unsafe existing Builds directory: ' + str(builds))
+    if (builds / 'Toolchains').is_symlink():
+        raise ValueError('Unsafe Toolchains redirect: ' + str(builds / 'Toolchains'))
+    return builds
+
+
+def _setup_receipt_verifies_toolchains(builds: Path) -> bool:
+    """Recognize Terminal Setup's fully completed shared toolchain closure.
+
+    Setup creates this receipt only after provisioning and verifying its
+    dependencies. This is read-only: installed app launch never repairs or
+    creates Builds. Runtime also checks its actual required executables.
+    """
+    receipt = builds / 'Intermediates/CinterForgeTerminal/SetupCache/all.json'
+    if receipt.is_symlink() or not receipt.is_file():
+        return False
+    try:
+        record = json.loads(receipt.read_text(encoding='utf-8'))
+        if not isinstance(record, dict):
+            return False
+        required = ('Toolchains/mac', 'Toolchains/WindowsCross',
+                    'Toolchains/Windows', 'Toolchains/WebView', 'Toolchains/WebView2')
+        outputs = record.get('outputs')
+        if (record.get('schema') != 'cinterforge.terminal.setup-dirty.v1' or
+                record.get('scope') != 'all' or
+                record.get('builds') != str(builds.resolve(strict=True)) or
+                not isinstance(outputs, dict)):
+            return False
+        return all((builds / name).is_dir() and not (builds / name).is_symlink() and
+                   isinstance(outputs.get(name), dict) and
+                   isinstance(outputs[name].get('fingerprint'), str) and
+                   len(outputs[name]['fingerprint']) == 64 and
+                   isinstance(outputs[name].get('files'), int) and
+                   outputs[name]['files'] > 0 for name in required)
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
 
 
 def _devtools_destination(release: str) -> Path:
@@ -151,35 +182,11 @@ def _devtools_destination(release: str) -> Path:
     return _devtools_builds_root() / 'CinterForgeTerminal/DevTools' / release
 
 
-def _staged_devtools_destination(release: str) -> Path | None:
-    """Resolve the exact unified SDK installed by ``./Cinter stage all``.
-
-    Stage places its complete, hashed DevTools payload alongside the platform
-    apps, under the *same* Steam library. This is a read-only lookup; normal
-    application launch must not download tools, create Builds, or copy an SDK.
-    """
-    from runtime import CinterForgeSessions as _CinterForgeSessions
-    from runtime import CinterForgeSettings as _CinterForgeSettings
-    steam = _CinterForgeSessions._steam_library_for_installed_root(_CinterForgeSettings.ASSETS.parent)
-    if steam is None:
-        return None
-    return steam / 'common/CinterForge/Applications/DevTools/CinterForge Terminal' / release
-
-
-def _legacy_devtools_destination(release: str) -> Path | None:
-    """Read only: previously installed Steam SDKs remain usable until moved."""
-    from runtime import CinterForgeSessions as _CinterForgeSessions
-    from runtime import CinterForgeSettings as _CinterForgeSettings
-    steam = _CinterForgeSessions._steam_library_for_installed_root(_CinterForgeSettings.ASSETS.parent)
-    if steam is None:
-        return None
-    return steam / 'common/CinterForge/Applications/DevTools/CinterForge Terminal' / release
-
-
-def _save_devtools_builds_root() -> None:
+def _save_devtools_builds_root(builds: Path) -> None:
     """Persist the selected destination only after a verified installation."""
     pin = _devtools_builds_pin()
     if pin is None:
+        os.environ['CINTER_BUILDS_ROOT'] = str(builds)
         return  # explicit developer source tree; no installed-app preference
     if pin.is_symlink() or (pin.exists() and not pin.is_file()):
         raise RuntimeError('Unsafe DevTools Builds selection file: ' + str(pin))
@@ -191,9 +198,13 @@ def _save_devtools_builds_root() -> None:
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as stream:
             json.dump({'schema': 'cinterforge.devtools-builds.v1',
-                       'builds': str(_devtools_builds_root())}, stream, indent=2)
+                       'builds': str(builds)}, stream, indent=2)
             stream.write('\n')
         os.replace(name, pin)
+        # A child CLI process cannot mutate its parent's environment. The pin
+        # above is therefore the durable handoff for the NEXT app launch.
+        # Set this process's CINTER_BUILDS_ROOT too for subsequent commands.
+        os.environ['CINTER_BUILDS_ROOT'] = str(builds)
     finally:
         Path(name).unlink(missing_ok=True)
 
@@ -209,7 +220,7 @@ def _public_manifest(release: str) -> tuple[dict, str]:
     import time
     from urllib.request import Request, urlopen
     from urllib.error import HTTPError, URLError
-    url = f'{_CinterForgeSettings.PUBLIC_DISTRIBUTION}/{release}/four-artifacts.json'
+    url = f'{_CinterForgeSettings.PUBLIC_DISTRIBUTION}/four-artifacts.json'
     headers = {'Accept': 'application/json', 'Cache-Control': 'no-cache',
                'User-Agent': ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                               'AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -237,7 +248,7 @@ def _public_manifest(release: str) -> tuple[dict, str]:
             set(data['artifacts']) != {'mac', 'linux', 'win', 'devtools'}):
         raise RuntimeError('Public release manifest does not identify all four bundles')
     entry = data['artifacts']['devtools']
-    if (entry.get('filename') != f'CinterForgeTerminal-devtools-{release}.zip' or
+    if (entry.get('filename') != 'CinterForgeTerminal-devtools.zip' or
             not isinstance(entry.get('bytes'), int) or entry['bytes'] <= 0 or
             not re.fullmatch(r'[0-9a-f]{64}', str(entry.get('sha256', '')))):
         raise RuntimeError('Public DevTools release manifest is invalid')
@@ -253,17 +264,11 @@ def _file_sha256(path):
     return h.hexdigest()
 
 
-def _devtools_download_partial(release: str, filename: str) -> Path:
-    """Store multi-GB resumable downloads outside installed Steam libraries.
-
-    Only the verified, unpacked DevTools distribution is an installed app;
-    incomplete ZIPs are disposable OS-cache content.
-    """
-    from runtime import CinterForgeSessions as _CinterForgeSessions
+def _devtools_download_partial(builds: Path, release: str, filename: str) -> Path:
+    """One download location inside selected Builds/Toolchains, never OS cache."""
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', filename):
         raise ValueError('Unsafe DevTools download filename')
-    return (_CinterForgeSessions._installed_cache_root(_CinterForgeSessions._real_login_home()) / 'Downloads' / release /
-            (filename + '.partial'))
+    return builds / 'Toolchains/Downloads' / release / (filename + '.partial')
 
 
 def _download_public_devtools(url: str, partial, *, length: int, digest: str):
@@ -387,6 +392,7 @@ def _stage_devtools_zip(archive_path, destination, release: str, artifact: dict)
     builds = destination.parents[2]
     if builds.name != 'Builds' or builds.is_symlink():
         raise RuntimeError('DevTools must be extracted into the developer Builds directory')
+    installed_members = {}
     with zipfile.ZipFile(archive_path) as archive:
         contents = archive.namelist()
         if len(set(contents)) != len(contents) or 'release-manifest.json' not in contents:
@@ -403,7 +409,7 @@ def _stage_devtools_zip(archive_path, destination, release: str, artifact: dict)
             # generated by _devtools_assets. It is not a traversal or SDK path.
             if (not isinstance(info, dict) or
                     (name != 'DevTools/README.txt' and
-                     (len(parts) < 4 or parts[:2] != ('DevTools', 'Builds'))) or
+                     (len(parts) < 4 or parts[:3] != ('DevTools', 'Builds', 'Toolchains'))) or
                     name.startswith('/') or '\\' in name or '..' in parts or '.' in parts or
                     archive.getinfo(name).is_dir() or
                     stat.S_IFMT(archive.getinfo(name).external_attr >> 16) == stat.S_IFLNK or
@@ -437,6 +443,16 @@ def _stage_devtools_zip(archive_path, destination, release: str, artifact: dict)
                 backup = destination.parent / 'Previous DevTools Conflicts' / uuid.uuid4().hex / name
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 item.replace(backup)
+            # Avoid rewriting multi-GB unchanged toolchains and invalidating
+            # Ninja/Setup incremental-build timestamps on every update.
+            if (item.is_file() and not item.is_symlink() and
+                    item.stat().st_size == info['bytes'] and
+                    _file_sha256(item) == info['sha256']):
+                if (item.stat().st_mode & 0o777) != info['mode']:
+                    item.chmod(info['mode'])
+                installed_members[name] = info['sha256']
+                completed += info['bytes']
+                continue
             fd, temp_path = tempfile.mkstemp(prefix='Installing-', dir=item.parent)
             _os.close(fd)
             temp = Path(temp_path)
@@ -454,15 +470,21 @@ def _stage_devtools_zip(archive_path, destination, release: str, artifact: dict)
                 temp.replace(item)
             finally:
                 temp.unlink(missing_ok=True)
+            installed_members[name] = info['sha256']
             completed += info['bytes']
             now = time.monotonic()
             if now - last >= 2:
                 print(f'[DEVTOOLS] install {100 * completed / total:.1f}% '
                       f'({completed / 1073741824:.2f}/{total / 1073741824:.2f} GiB)', flush=True)
                 last = now
+    # Do not publish an installation receipt for an SDK whose host-native
+    # binaries cannot execute. Runtime readiness must never trust that state.
+    if not _verify_native_devtools(destination):
+        raise RuntimeError('DevTools native binary verification failed')
     destination.mkdir(parents=True, exist_ok=True)
     receipt = {'schema': _CinterForgeSettings.FOUR_SCHEMA, 'release': release, 'target': 'devtools',
-               'artifact': artifact, 'source': 'public', 'bedrock': 'excluded-until-app-eula-acceptance'}
+               'artifact': artifact, 'source': 'public', 'files': installed_members,
+               'bedrock': 'excluded-until-app-eula-acceptance'}
     temp_receipt = destination / 'stage-receipt.pending'
     temp_receipt.write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n')
     temp_receipt.replace(destination / 'stage-receipt.json')
@@ -474,7 +496,7 @@ def _verify_native_devtools(destination) -> bool:
     import platform
     import subprocess
     targets = []
-    root = destination.parents[2] / 'CinterForgeTerminal/Toolchains'
+    root = destination.parents[2] / 'Toolchains'
     if platform.system() == 'Darwin':
         for name in ('cmake', 'ninja', 'python3', 'node'):
             targets.append(root / 'mac/env/bin' / name)
@@ -507,69 +529,236 @@ def _verify_native_devtools(destination) -> bool:
     return complete
 
 
-def install_devtools() -> int:
-    """User-initiated public download only; never run during Terminal startup."""
-    from runtime import CinterForgeCommands as _CinterForgeCommands
-    from runtime import CinterForgeRuntimeBootstrap as _CinterForgeRuntimeBootstrap
+def _verify_installed_members(builds: Path, destination: Path, record: dict) -> bool:
+    """Check every receipt-owned byte, not just a few executable probes.
+
+    A stale receipt must not cause an interrupted update, missing MSYS2 DLL or
+    corrupted OCI archive to be advertised as current. This read-only check is
+    used only for an explicit install/update command, not at app startup.
+    """
+    from pathlib import PurePosixPath
+    files = record.get('files')
+    if not isinstance(files, dict) or not files:
+        return False
+    for name, expected_sha in files.items():
+        parts = PurePosixPath(name).parts
+        if name == 'DevTools/README.txt':
+            path = destination / 'README.txt'
+        elif (len(parts) >= 4 and parts[:3] == ('DevTools', 'Builds', 'Toolchains') and
+              '..' not in parts and '.' not in parts and '\\' not in name):
+            path = builds.joinpath(*parts[2:])
+        else:
+            return False
+        if not isinstance(expected_sha, str) or len(expected_sha) != 64:
+            return False
+        parent = path.parent
+        while parent != builds.parent:
+            if parent.is_symlink():
+                return False
+            if parent == parent.parent:
+                return False
+            parent = parent.parent
+        if not path.is_file() or path.is_symlink() or _file_sha256(path) != expected_sha:
+            return False
+    return True
+
+
+def _activate_selected_devtools() -> None:
+    """Apply a new source selection to the native HTTP owner.
+
+    CLI commands run in child processes; their environment changes cannot
+    reach an already-running native owner. The durable Builds pin is read on
+    restart, where CINTER_BUILDS_ROOT is exported before guest startup.
+    """
+    from runtime import CinterForgeCommands as commands
+    try:
+        commands._api('/api/lifecycle/reboot', body={'component': 'app'})
+    except (OSError, RuntimeError, ValueError) as error:
+        print('[DEVTOOLS] Source selected; relaunch Terminal to activate: ' +
+              str(error), flush=True)
+
+
+def install_devtools(source_path: str | None = None, *, update: bool = False) -> int:
+    """Explicit workspace install or pinned-workspace update from Cloudflare."""
     from runtime import CinterForgeSettings as _CinterForgeSettings
-    import zipfile
-    from pathlib import Path
     release = _devtools_release()
-    destination = _devtools_destination(release)
+    if update:
+        if source_path is not None:
+            raise ValueError('devtools update uses the previously installed Source directory')
+        if os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') != 'developer':
+            pin = _devtools_builds_pin()
+            if pin is None or not pin.is_file() or pin.is_symlink():
+                raise RuntimeError('No selected Source directory; first run devtools install <path/to/source>')
+        builds = _devtools_builds_root()
+    else:
+        if not source_path:
+            raise ValueError('Usage: devtools install <path/to/source>')
+        builds = _builds_from_source(source_path)
+    destination = builds / 'CinterForgeTerminal/DevTools' / release
     receipt_file = destination / 'stage-receipt.json'
-    if receipt_file.is_file() and not receipt_file.is_symlink():
-        # The installed-receipt check must agree with the Windows/Linux guest
-        # launcher. Directory presence alone wrongly treated partial or
-        # manually deleted SDKs as installed and skipped the consent dialog.
-        try:
-            sdk = _CinterForgeRuntimeBootstrap.sdk_root()
-        except (ImportError, OSError, ValueError, RuntimeError):
-            sdk = None
-        if sdk is not None and sdk == destination.parents[2] / 'CinterForgeTerminal/Toolchains':
-            print(f'[DEVTOOLS] already staged in Builds: {destination.parents[2]}', flush=True)
-            return 0 if _verify_native_devtools(destination) else 1
-        print('[DEVTOOLS] Existing installation incomplete; reinstall requires your consent.', flush=True)
+    # An existing successful ./Cinter setup all IS an installed local SDK.
+    # Selecting it must not require a separate DevTools download/receipt.
+    if (not update and _setup_receipt_verifies_toolchains(builds) and
+            _verify_native_devtools(destination)):
+        _save_devtools_builds_root(builds)
+        print('[DEVTOOLS] selected existing Setup-verified toolchains: ' +
+              str(builds / 'Toolchains'), flush=True)
+        _activate_selected_devtools()
+        return 0
+    # Always check published metadata on explicit update; no install is
+    # considered current merely because the receipt file exists.
     artifact, manifest = _public_manifest(release)
-    url = f'{_CinterForgeSettings.PUBLIC_DISTRIBUTION}/{release}/{artifact["filename"]}'
-    print('Unified macOS + Linux + Windows developer toolchains:', flush=True)
-    print(f'  Public release: {manifest}', flush=True)
+    url = f'{_CinterForgeSettings.PUBLIC_DISTRIBUTION}/{artifact["filename"]}'
+    previous = {}
+    if receipt_file.is_file() and not receipt_file.is_symlink():
+        try:
+            previous = json.loads(receipt_file.read_text(encoding='utf-8'))
+        except (OSError, ValueError, TypeError):
+            previous = {}
+    previous_artifact = previous.get('artifact')
+    if (isinstance(previous_artifact, dict) and
+            previous_artifact.get('sha256') == artifact['sha256'] and
+            previous.get('source') == 'public' and
+            (builds / 'Toolchains').is_dir() and
+            _verify_installed_members(builds, destination, previous) and
+            _verify_native_devtools(destination)):
+        _save_devtools_builds_root(builds)
+        print(f'[DEVTOOLS] current: {builds / "Toolchains"} ({release})', flush=True)
+        _activate_selected_devtools()
+        return 0
+    print(f'[DEVTOOLS] {"Update" if update else "Install"} unified macOS/Linux/Windows toolchains:', flush=True)
+    print(f'  Source: {builds.parent}', flush=True)
+    print(f'  Toolchains: {builds / "Toolchains"}', flush=True)
+    print(f'  Public manifest: {manifest}', flush=True)
     print(f'  Package: {url}', flush=True)
-    print(f'  Download: {artifact["bytes"] / 1073741824:.2f} GiB', flush=True)
-    print(f'  Developer Builds: {destination.parents[2]}', flush=True)
-    print(f'  SDK files: {destination.parents[2] / "CinterForgeTerminal/Toolchains"}', flush=True)
-    print(f'  Installation receipt: {destination / "stage-receipt.json"}', flush=True)
-    print('  Builds will be created here after confirmation if it does not exist.', flush=True)
-    if input('Type INSTALL to confirm download and installation: ').strip() != 'INSTALL':
-        print('[DEVTOOLS] canceled; nothing downloaded', flush=True)
+    print(f'  Transfer size: {artifact["bytes"] / 1073741824:.2f} GiB', flush=True)
+    if input('Type INSTALL to confirm: ').strip() != 'INSTALL':
+        print('[DEVTOOLS] canceled; no files changed', flush=True)
         return 1
-    pending = _devtools_download_partial(release, artifact['filename'])
+    pending = _devtools_download_partial(builds, release, artifact['filename'])
     try:
         _download_public_devtools(url, pending, length=artifact['bytes'], digest=artifact['sha256'])
         _stage_devtools_zip(pending, destination, release, artifact)
     except (OSError, RuntimeError, ValueError, zipfile.BadZipFile) as error:
-        print(f'[DEVTOOLS] installation failed: {type(error).__name__}: {error}', flush=True)
-        print('[DEVTOOLS] Mac Session remains open; retry INSTALL to resume any saved download.',
-              flush=True)
+        print(f'[DEVTOOLS] install failed: {error}; verified download retained for repair', flush=True)
         return 1
-    # Keep the already downloaded, verified archive until the installed SDK
-    # has passed its local tool checks. Otherwise a failed version probe forces
-    # another multi-GiB network download even though the ZIP is still valid.
-    if not _verify_native_devtools(destination):
-        print('[DEVTOOLS] Installed files retained, as is the verified ZIP for '
-              'a local repair; no re-download is needed.', flush=True)
-        return 1
-    _save_devtools_builds_root()
+    _save_devtools_builds_root(builds)
     pending.unlink(missing_ok=True)
-    print(f'[DEVTOOLS] installed into Builds: {destination.parents[2]}', flush=True)
-    # A completed optional install changes startup capabilities. Relaunch the
-    # existing native owner so its single boot supervisor checks both shells
-    # BEFORE it displays the normal UI. Do not boot Colima in this PTY worker.
-    try:
-        _CinterForgeCommands._api('/api/lifecycle/reboot', body={'component': 'app'})
-        print('[DEVTOOLS] Relaunching CinterForge Terminal to initialize DevTools...', flush=True)
-    except (OSError, RuntimeError, ValueError) as error:
-        print('[DEVTOOLS] Installed, but automatic relaunch failed: ' + str(error) +
-              '; relaunch Terminal normally to initialize the guests.', flush=True)
-        return 1
+    print(f'[DEVTOOLS] ready: {builds / "Toolchains"}', flush=True)
+    _activate_selected_devtools()
     return 0
 
+
+def _selected_devtools_receipt() -> tuple[Path, Path, dict]:
+    builds = _devtools_builds_root()
+    destination = builds / 'CinterForgeTerminal/DevTools' / _devtools_release()
+    receipt = destination / 'stage-receipt.json'
+    if receipt.is_symlink() or not receipt.is_file():
+        if _setup_receipt_verifies_toolchains(builds):
+            return builds, destination, {'source': 'setup', 'release': _devtools_release()}
+        raise RuntimeError('DevTools installation missing at ' + str(builds / 'Toolchains'))
+    record = json.loads(receipt.read_text(encoding='utf-8'))
+    if record.get('target') != 'devtools':
+        raise RuntimeError('Invalid DevTools receipt: ' + str(receipt))
+    return builds, destination, record
+
+
+def version_devtools() -> int:
+    builds, _destination, record = _selected_devtools_receipt()
+    print('DevTools: ' + str(record.get('release', 'unknown')))
+    print('Source: ' + str(record.get('source', 'unknown')))
+    print('Toolchains: ' + str(builds / 'Toolchains'))
+    print('SHA-256: ' + str(record.get('artifact', {}).get('sha256', 'Setup-verified')))
+    return 0
+
+
+def report_devtools() -> int:
+    """Write the explicit selected toolchain inventory into Builds/Logs."""
+    builds, _destination, record = _selected_devtools_receipt()
+    tools = builds / 'Toolchains'
+    names = ('mac/env/bin/colima', 'mac/env/bin/docker',
+             'mac/env/bin/cmake', 'mac/env/bin/ninja',
+             'Windows/MSYS2/usr/bin/bash.exe', 'WindowsCross')
+    installed_release = str(record.get('release', 'unknown'))
+    staged_release = _devtools_release()
+    lines = ['# CinterForge DevTools', '',
+             'Installed release: ' + installed_release, '',
+             'Staged release (this Terminal): ' + staged_release, '',
+             'Source: ' + str(record.get('source', 'unknown')), '',
+             'Toolchains: `' + str(tools) + '`', '',
+             '| Component | Present |', '|---|---|']
+    for name in names:
+        path = tools / name
+        present = path.exists() and not path.is_symlink()
+        lines.append('| `' + name + '` | ' + ('yes' if present else 'MISSING') + ' |')
+    lines.append('')
+    lines.append('Managed archive members: ' + str(len(record.get('files', {}))))
+    location = builds / 'Logs/CinterForgeTerminal/DevToolsReport.md'
+    if location.parent.is_symlink():
+        raise RuntimeError('Unsafe toolchain report directory')
+    location.parent.mkdir(parents=True, exist_ok=True)
+    import tempfile
+    with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=location.parent,
+                                     prefix='devtools-report-', delete=False) as handle:
+        temp = Path(handle.name)
+        handle.write('\n'.join(lines) + '\n')
+    temp.replace(location)
+    print('Installed DevTools version: ' + installed_release, flush=True)
+    print('Staged DevTools version (this Terminal): ' + staged_release, flush=True)
+    print('DevTools report: ' + str(location), flush=True)
+    return 0
+
+
+def uninstall_devtools() -> int:
+    """Delete only verifiably owned toolchain members; retain all user outputs."""
+    pin = _devtools_builds_pin()
+    if pin is None or not pin.is_file() or pin.is_symlink():
+        raise RuntimeError('No explicit DevTools installation to uninstall')
+    builds = _devtools_builds_root()
+    destination = builds / 'CinterForgeTerminal/DevTools' / _devtools_release()
+    receipt = destination / 'stage-receipt.json'
+    if receipt.is_symlink() or not receipt.is_file():
+        raise RuntimeError('Missing managed DevTools receipt; refusing to delete shared toolchains')
+    record = json.loads(receipt.read_text(encoding='utf-8'))
+    files = record.get('files')
+    if (record.get('source') != 'public' or not isinstance(files, dict) or
+            not files or record.get('target') != 'devtools'):
+        raise RuntimeError('No complete managed-file inventory; refusing unsafe uninstall')
+    toolchains = builds / 'Toolchains'
+    if toolchains.is_symlink():
+        raise RuntimeError('Unsafe shared Toolchains redirect')
+    print(f'[DEVTOOLS] Remove {len(files)} verified managed files from {toolchains}', flush=True)
+    print('Other applications, outputs, and user-authored files will be preserved.', flush=True)
+    if input('Type UNINSTALL to confirm: ').strip() != 'UNINSTALL':
+        return 1
+    from pathlib import PurePosixPath
+    deleted = 0
+    for name, sha in files.items():
+        parts = PurePosixPath(name).parts
+        if name == 'DevTools/README.txt':
+            target = destination / 'README.txt'
+        elif (len(parts) >= 4 and parts[:3] == ('DevTools', 'Builds', 'Toolchains') and
+              '..' not in parts and '.' not in parts and '\\' not in name):
+            target = builds.joinpath(*parts[2:])
+        else:
+            raise RuntimeError('Unsafe managed member: ' + name)
+        if not isinstance(sha, str) or len(sha) != 64:
+            raise RuntimeError('Invalid managed SHA-256: ' + name)
+        for ancestor in target.parents:
+            if ancestor == builds.parent:
+                break
+            if ancestor.is_symlink():
+                raise RuntimeError('Unsafe managed-file parent: ' + str(ancestor))
+        if target.is_file() and not target.is_symlink() and _file_sha256(target) == sha:
+            target.unlink()
+            deleted += 1
+    # Keep a stale receipt from authorizing a second destructive operation.
+    receipt.unlink()
+    print(f'[DEVTOOLS] removed {deleted} unchanged managed files; other content preserved', flush=True)
+    return 0
+
+
+def devtools_help() -> int:
+    from runtime.CinterForgeCommands import DEVTOOLS_HELP
+    print(DEVTOOLS_HELP)
+    return 0

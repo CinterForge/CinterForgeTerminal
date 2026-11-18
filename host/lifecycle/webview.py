@@ -48,7 +48,7 @@ def _files(root: Path) -> dict[str, str]:
     for p in root.rglob('*'):
         if p.is_symlink():
             raise RuntimeError(f'WebView source contains nonportable link: {p}')
-        if p.is_file() and p.name != 'manifest.json':
+        if p.is_file() and p.name not in ('manifest.json', '.DS_Store'):
             result[p.relative_to(root).as_posix()] = _sha(p)
     if 'CMakeLists.txt' not in result:
         raise RuntimeError('WebView source lacks CMakeLists.txt')
@@ -84,21 +84,13 @@ def _extract(archive: Path, target: Path) -> None:
     _files(target)
 
 
-def provision(builds: Path) -> Path:
-    builds = builds.resolve()
-    if builds.name != 'Builds' or not builds.is_dir():
-        raise ValueError('WebView must be staged within existing sibling Builds')
-    output = builds / 'Toolchains/WebView' / TAG / 'source'
-    manifest = output / 'manifest.json'
-    if output.exists():
-        if not manifest.is_file():
-            raise RuntimeError(f'Incomplete WebView source stage: {output}')
-        data = json.loads(manifest.read_text(encoding='utf-8'))
-        if data.get('schema') != SCHEMA or data.get('tag') != TAG or data.get('files') != _files(output):
-            raise RuntimeError(f'WebView source stage has been modified: {output}')
-        return output
+def _source_archive(builds: Path, *, expected_sha256: str | None = None) -> Path:
+    """Setup-only acquisition; never accept a cache with the wrong pinned digest."""
     cache = builds / 'Intermediates/CinterForgeTerminal/WebView' / f'webview-{TAG}.tar.gz'
     cache.parent.mkdir(parents=True, exist_ok=True)
+    if cache.is_file() and expected_sha256 and _sha(cache) != expected_sha256:
+        print('[WEBVIEW SETUP] Cached source archive digest changed; downloading pinned copy', flush=True)
+        cache.unlink()
     if not cache.is_file():
         with tempfile.NamedTemporaryFile(prefix='webview-', suffix='.part', dir=cache.parent, delete=False) as out:
             temporary = Path(out.name)
@@ -108,18 +100,88 @@ def provision(builds: Path) -> Path:
                 if response.status != 200:
                     raise RuntimeError(f'WebView source download returned HTTP {response.status}')
                 shutil.copyfileobj(response, dest)
+            if expected_sha256 and _sha(temporary) != expected_sha256:
+                raise RuntimeError('Downloaded WebView archive does not match verified Setup digest')
             temporary.replace(cache)
         finally:
             temporary.unlink(missing_ok=True)
+    return cache
+
+
+def _replace_source_stage(candidate: Path, output: Path) -> None:
+    """Replace only the Setup-owned directory, restoring the original on failure."""
+    if output.is_symlink():
+        raise RuntimeError(f'Refusing linked WebView source directory: {output}')
+    if not output.exists():
+        candidate.rename(output)
+        return
+    with tempfile.TemporaryDirectory(prefix='WebView-old-', dir=output.parent) as temporary:
+        backup = Path(temporary) / 'source'
+        output.rename(backup)
+        try:
+            candidate.rename(output)
+        except BaseException:
+            backup.rename(output)
+            raise
+
+
+def provision(builds: Path, *, repair: bool = False) -> Path:
+    """Validate the sole staged source; Setup may reconstruct it, Build may not."""
+    builds = builds.resolve()
+    if builds.name != 'Builds' or not builds.is_dir():
+        raise ValueError('WebView must be staged within existing sibling Builds')
+    output = builds / 'Toolchains/WebView' / TAG / 'source'
+    manifest = output / 'manifest.json'
+    original = None
+    if output.is_symlink():
+        raise RuntimeError('WebView source stage must not be a symlink: ' + str(output))
+    if output.is_dir():
+        try:
+            original = json.loads(manifest.read_text(encoding='utf-8'))
+            if (original.get('schema') == SCHEMA and original.get('tag') == TAG and
+                    original.get('source') == URL and original.get('files') == _files(output)):
+                return output
+        except (OSError, ValueError, UnicodeError, RuntimeError):
+            pass
+    elif output.exists():
+        raise RuntimeError('WebView source path is not a directory: ' + str(output))
+    if not repair:
+        raise RuntimeError('WebView source missing or changed; run ./Cinter setup all: ' + str(output))
+
+    expected = (original.get('archive_sha256') if isinstance(original, dict) and
+                original.get('schema') == SCHEMA and original.get('tag') == TAG and
+                original.get('source') == URL else None)
+    if expected is not None and (not isinstance(expected, str) or len(expected) != 64):
+        raise RuntimeError('Invalid pinned WebView archive SHA-256 in Setup receipt')
+    print('[WEBVIEW SETUP] Repairing verified source stage: ' + str(output), flush=True)
+    cache = _source_archive(builds, expected_sha256=expected)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='WebView-', dir=output.parent) as scratch:
         candidate = Path(scratch) / 'source'
         candidate.mkdir()
-        _extract(cache, candidate)
-        receipt = {'schema': SCHEMA, 'tag': TAG, 'source': URL, 'archive_sha256': _sha(cache),
-                   'files': _files(candidate)}
+        try:
+            _extract(cache, candidate)
+        except (tarfile.TarError, OSError):
+            # The archive is disposable. Re-fetch only during Setup, and never
+            # replace the existing stage unless extraction/validation succeeds.
+            if expected:
+                raise
+            print('[WEBVIEW SETUP] Cached source archive unusable; downloading pinned copy', flush=True)
+            cache.unlink(missing_ok=True)
+            cache = _source_archive(builds)
+            shutil.rmtree(candidate)
+            candidate.mkdir()
+            _extract(cache, candidate)
+        files = _files(candidate)
+        if (isinstance(original, dict) and original.get('schema') == SCHEMA and
+                original.get('tag') == TAG and original.get('source') == URL and
+                isinstance(original.get('files'), dict) and files != original['files']):
+            raise RuntimeError('WebView upstream archive differs from verified Setup source receipt')
+        receipt = {'schema': SCHEMA, 'tag': TAG, 'source': URL,
+                   'archive_sha256': _sha(cache), 'files': files}
         (candidate / 'manifest.json').write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n', encoding='utf-8')
-        candidate.rename(output)
+        _replace_source_stage(candidate, output)
+    print('[WEBVIEW SETUP] PASS verified WebView source (' + str(len(files)) + ' files)', flush=True)
     return output
 
 
@@ -144,7 +206,7 @@ def _webview2_files(root: Path, *, legacy_headers_only: bool = False) -> dict[st
     for p in root.rglob('*'):
         if p.is_symlink():
             raise RuntimeError(f'WebView2 SDK contains a symlink: {p}')
-        if p.is_file() and p.name != 'manifest.json':
+        if p.is_file() and p.name not in ('manifest.json', '.DS_Store'):
             relative = p.relative_to(root).as_posix()
             if legacy_headers_only and relative == WEBVIEW2_LOADER:
                 continue
@@ -152,10 +214,13 @@ def _webview2_files(root: Path, *, legacy_headers_only: bool = False) -> dict[st
     return dict(sorted(files.items()))
 
 
-def _webview2_archive(builds: Path) -> Path:
+def _webview2_archive(builds: Path, *, expected_sha256: str | None = None) -> Path:
     """Acquire only during Setup; check the pinned upstream NuGet identity."""
     cache = builds / 'Intermediates/CinterForgeTerminal/WebView2' / f'Microsoft.Web.WebView2.{WEBVIEW2_VERSION}.nupkg'
     cache.parent.mkdir(parents=True, exist_ok=True)
+    if cache.is_file() and expected_sha256 and _sha(cache) != expected_sha256:
+        print('[WEBVIEW2 SETUP] Cached SDK archive digest changed; downloading pinned copy', flush=True)
+        cache.unlink()
     if not cache.is_file():
         with tempfile.NamedTemporaryFile(prefix='webview2-', suffix='.part', dir=cache.parent, delete=False) as out:
             temporary = Path(out.name)
@@ -165,6 +230,8 @@ def _webview2_archive(builds: Path) -> Path:
                 if response.status != 200:
                     raise RuntimeError('WebView2 NuGet request returned HTTP ' + str(response.status))
                 shutil.copyfileobj(response, dest)
+            if expected_sha256 and _sha(temporary) != expected_sha256:
+                raise RuntimeError('Downloaded WebView2 archive does not match verified Setup digest')
             temporary.replace(cache)
         finally:
             temporary.unlink(missing_ok=True)
@@ -201,49 +268,70 @@ def _extract_webview2(archive: Path, destination: Path, *, loader_only: bool = F
             raise RuntimeError('Official WebView2Loader.dll is not a valid Windows PE')
 
 
-def provision_webview2(builds: Path) -> Path:
-    """Setup: seal SDK headers + official loader and migrate old header-only stages."""
+def provision_webview2(builds: Path, *, repair: bool = False) -> Path:
+    """Verify the sole WebView2 SDK; reconstruct/migrate only during Setup."""
     builds = builds.resolve()
     if builds.name != 'Builds' or not builds.is_dir():
         raise ValueError('WebView2 SDK must be staged within sibling Builds')
     output = builds / 'Toolchains/WebView2' / WEBVIEW2_VERSION / 'source'
     manifest = output / 'manifest.json'
-    if output.exists():
-        if not manifest.is_file():
-            raise RuntimeError(f'Incomplete WebView2 SDK stage: {output}')
-        data = json.loads(manifest.read_text(encoding='utf-8'))
-        if data.get('version') != WEBVIEW2_VERSION or data.get('source') != WEBVIEW2_URL:
-            raise RuntimeError(f'WebView2 SDK stage changed: {output}')
-        if data.get('schema') == WEBVIEW2_SCHEMA:
-            if data.get('files') != _webview2_files(output):
-                raise RuntimeError(f'WebView2 SDK stage changed: {output}')
-            return output
-        # The previous Setup deliberately extracted headers only. Keep their
-        # verified bytes and recover the official loader from the SAME pinned
-        # archive, rather than re-downloading during Build or Stage.
-        if (data.get('schema') != WEBVIEW2_OLD_SCHEMA or
-                data.get('files') != _webview2_files(output, legacy_headers_only=True)):
-            raise RuntimeError(f'Legacy WebView2 SDK stage changed: {output}')
-        cache = _webview2_archive(builds)
-        if data.get('archive_sha256') != _sha(cache):
-            raise RuntimeError('WebView2 NuGet archive differs from the verified legacy stage')
-        _extract_webview2(cache, output, loader_only=True)
-        data['schema'] = WEBVIEW2_SCHEMA
-        data['files'] = _webview2_files(output)
-        manifest.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n', encoding='utf-8')
-        print('[WEBVIEW2 SETUP] Upgraded pinned SDK with official x64 WebView2Loader.dll', flush=True)
-        return output
-    cache = _webview2_archive(builds)
+    original = None
+    if output.is_symlink():
+        raise RuntimeError('WebView2 SDK stage must not be a symlink: ' + str(output))
+    if output.is_dir():
+        try:
+            original = json.loads(manifest.read_text(encoding='utf-8'))
+            if (original.get('schema') == WEBVIEW2_SCHEMA and
+                    original.get('version') == WEBVIEW2_VERSION and
+                    original.get('source') == WEBVIEW2_URL and
+                    original.get('files') == _webview2_files(output)):
+                return output
+        except (OSError, ValueError, UnicodeError, RuntimeError):
+            pass
+    elif output.exists():
+        raise RuntimeError('WebView2 SDK stage is not a directory: ' + str(output))
+    if not repair:
+        raise RuntimeError('WebView2 SDK missing or changed; run ./Cinter setup all: ' + str(output))
+
+    expected = (original.get('archive_sha256') if isinstance(original, dict) and
+                original.get('version') == WEBVIEW2_VERSION and
+                original.get('source') == WEBVIEW2_URL and
+                original.get('schema') in (WEBVIEW2_SCHEMA, WEBVIEW2_OLD_SCHEMA) else None)
+    if expected is not None and (not isinstance(expected, str) or len(expected) != 64):
+        raise RuntimeError('Invalid pinned WebView2 archive SHA-256 in Setup receipt')
+    print('[WEBVIEW2 SETUP] Repairing verified SDK stage: ' + str(output), flush=True)
+    cache = _webview2_archive(builds, expected_sha256=expected)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='WebView2-', dir=output.parent) as scratch:
         candidate = Path(scratch) / 'source'
         candidate.mkdir()
-        _extract_webview2(cache, candidate)
+        try:
+            _extract_webview2(cache, candidate)
+        except (zipfile.BadZipFile, OSError):
+            if expected:
+                raise
+            print('[WEBVIEW2 SETUP] Cached SDK archive unusable; downloading pinned copy', flush=True)
+            cache.unlink(missing_ok=True)
+            cache = _webview2_archive(builds)
+            shutil.rmtree(candidate)
+            candidate.mkdir()
+            _extract_webview2(cache, candidate)
+        files = _webview2_files(candidate)
+        if (isinstance(original, dict) and
+                original.get('version') == WEBVIEW2_VERSION and
+                original.get('source') == WEBVIEW2_URL and
+                isinstance(original.get('files'), dict)):
+            if original.get('schema') == WEBVIEW2_SCHEMA and files != original['files']:
+                raise RuntimeError('WebView2 archive differs from verified Setup SDK receipt')
+            if (original.get('schema') == WEBVIEW2_OLD_SCHEMA and
+                    _webview2_files(candidate, legacy_headers_only=True) != original['files']):
+                raise RuntimeError('WebView2 archive differs from verified legacy SDK receipt')
         receipt = {'schema': WEBVIEW2_SCHEMA, 'version': WEBVIEW2_VERSION,
                    'source': WEBVIEW2_URL, 'archive_sha256': _sha(cache),
-                   'files': _webview2_files(candidate)}
+                   'files': files}
         (candidate / 'manifest.json').write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n', encoding='utf-8')
-        candidate.rename(output)
+        _replace_source_stage(candidate, output)
+    print('[WEBVIEW2 SETUP] PASS verified SDK (' + str(len(files)) + ' files)', flush=True)
     return output
 
 

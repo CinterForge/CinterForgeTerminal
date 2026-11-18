@@ -326,84 +326,31 @@ def _progress(label: str, done: int, total: int) -> None:
     print(f'[TERMINAL PROGRESS] {label} {percent:.1f}% '
           f'({done / 1048576:.1f}/{total / 1048576:.1f} MiB)', flush=True)
 
-HOST_ASSETS = (
-    'CinterForgeTerminal.py',
-    'data/if_titles.json',
-    'data/mac_games.json',
-    'index.html',
-    'data/terminal_styles.json',
-    'CinterForgeTerminal.js',
-    'terminal.css',
-    'views/startup.html',
-    'startup.js',
-    'views/discord.html',
-    'runtime/__init__.py',
-    'runtime/CinterForgeLogging.py',
-    'runtime/CinterForgeCode.py',
-    'runtime/CinterForgeGuest.py',
-    'runtime/CinterForgeVM.py',
-    'client/CinterForgeClientState.js',
-    'client/CinterForgeCodeOSS.js',
-    'client/CinterForgeEmulators.js',
-    'client/CinterForgeSessions.js',
-    'client/CinterForgeLaunchers.js',
-    'client/CinterForgeDiscord.js',
-    'client/CinterForgeLAN.js',
-    'client/CinterForgeIF.js',
-    'client/CinterForgeSessionIO.js',
-    'client/CinterForgeInput.js',
-    'client/CinterForgeMenus.js',
-    'client/CinterForgeLayout.js',
-    'client/CinterForgeKeyboard.js',
-    'client/CinterForgeBedrock.js',
-    'client/CinterForgeGuestStatus.js',
-    'client/CinterForgeCommands.js',
-    'runtime/CinterForgeApplication.py',
-    'runtime/CinterForgeAuthentication.py',
-    'runtime/CinterForgeBedrock.py',
-    'runtime/CinterForgeCommands.py',
-    'runtime/CinterForgeContainers.py',
-    'runtime/CinterForgeDevTools.py',
-    'runtime/CinterForgeDiscord.py',
-    'runtime/CinterForgeDiscovery.py',
-    'runtime/CinterForgeGuestShells.py',
-    'runtime/CinterForgeHTTP.py',
-    'runtime/CinterForgeIF.py',
-    'runtime/CinterForgeLaunchers.py',
-    'runtime/CinterForgeRuntimeBootstrap.py',
-    'runtime/CinterForgeRuntimeWatchdog.py',
-    'runtime/CinterForgeService.py',
-    'runtime/CinterForgeSessions.py',
-    'runtime/CinterForgeSettings.py',
-    'runtime/CinterForgeVMOperations.py',
-    'runtime/CinterForgeHTTPAuthorization.py',
-    'runtime/CinterForgeHTTPCode.py',
-    'runtime/CinterForgeHTTPRoutes.py',
-)
-
-
 def _authored_webapp_assets(repo: Path) -> tuple[str, ...]:
-    """Inventory all first-party browser/service resources used by guest apps.
+    """Inventory the entire authored webapp once, with no filename allowlist.
 
-    The module split creates new runtime/client files without editing a fixed
-    allowlist. Match Host Stage's actual authored webapp closure so Build/Stage
-    cannot ship a stale service entry with missing sibling modules. Code-OSS
-    production remains independently owned by host/codeoss.
+    New client scripts, images, views and supporting runtime files are shipped
+    automatically on every platform. Ignore only non-source OS/cache metadata.
     """
-    base = repo / 'webapp'
-    result = set(HOST_ASSETS)
-    for child in base.iterdir():
-        if child.is_file() and child.suffix.lower() in ('.py', '.js', '.css', '.html', '.json'):
-            result.add(child.name)
-    for folder in ('client', 'runtime', 'data', 'views', 'launcher', 'joshua'):
-        root = base / folder
-        for child in root.rglob('*'):
-            if child.is_file() and not _python_cache_member(child.relative_to(base)) and not child.name.startswith('._') and child.name != '.DS_Store':
-                result.add(child.relative_to(base).as_posix())
-    for name in result:
-        if not (base / name).is_file():
-            raise FileNotFoundError('Authored webapp resource missing: ' + name)
-    return tuple(sorted(result))
+    root = repo / 'webapp'
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeError('Missing authored webapp directory: ' + str(root))
+    members: list[str] = []
+    for item in sorted(root.rglob('*')):
+        relative = item.relative_to(root)
+        if _python_cache_member(relative):
+            continue
+        if item.is_symlink():
+            raise RuntimeError('Authored webapp symlink forbidden: ' + str(item))
+        if item.is_dir():
+            continue
+        if not item.is_file():
+            raise RuntimeError('Unsupported authored webapp resource: ' + str(item))
+        members.append(relative.as_posix())
+    for required in ('index.html', 'CinterForgeTerminal.py'):
+        if required not in members:
+            raise FileNotFoundError('Authored webapp resource missing: ' + required)
+    return tuple(members)
 
 
 def _files_under(source: Path, prefix: str, *, require: bool = True) -> dict[str, Path]:
@@ -559,7 +506,7 @@ def _verify_mac_if_runtime(app: Path) -> None:
     # yet fail with FileNotFoundError before a command is entered.
     shell = staged_service.parent
     authored = current_service.parent
-    for name in HOST_ASSETS:
+    for name in _authored_webapp_assets(authored.parent):
         member = shell / name
         source = authored / name
         if not member.is_file() or not source.is_file() or member.read_bytes() != source.read_bytes():
@@ -616,10 +563,6 @@ def _app_assets(builds: Path, target: str, release: str) -> dict[str, Path | byt
         # add files inside Contents after the bundle has been sealed.
         from host.mac.mac_app import _verify_signature
         _verify_signature(app)
-        # CraftMaster is already inside this signed bundle. Do not later
-        # replace its signed Mach-O with the unsigned standalone Stage bytes.
-        from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
-        verify_embedded_craftmaster(app, 'mac')
     else:
         prefix = 'CinterForge Terminal'
         builds_prefix = prefix + '/Builds'
@@ -639,7 +582,7 @@ def _app_assets(builds: Path, target: str, release: str) -> dict[str, Path | byt
             # DevTools package is optional and must NOT be required to launch
             # the lightweight Windows application. Ship its existing verified
             # shell runtime here, separate from the compiler/toolchain SDK.
-            msys = builds / 'CinterForgeTerminal/Toolchains/Windows/MSYS2'
+            msys = builds / 'Toolchains/Windows/MSYS2'
             for required in ('usr/bin/bash.exe', 'usr/bin/cygpath.exe',
                              'usr/bin/msys-2.0.dll'):
                 if not (msys / required).is_file():
@@ -727,14 +670,12 @@ exec "$HERE/CinterForge Terminal" --builds "$BUILDS" --python "$BUILDS/Python/En
         assets[host_root + '/python/worker.py'] = repo / 'host/worker.py'
         for name in _authored_webapp_assets(repo):
             assets[host_root + '/webapp/' + name] = repo / 'webapp' / name
-    # CraftMaster owns its converter. Linux/Windows releases consume their
-    # verified Stage bytes here; the Mac executable was embedded and signed
-    # earlier, so its already-sealed contents must not be overwritten.
-    if target != 'mac':
-        # Linux/Windows have no signed .app: take their validated Stage bytes.
-        from host.lifecycle.craftmaster_dependency import packaged_craftmaster_assets
-        assets.update(packaged_craftmaster_assets(builds, target,
-                      builds_prefix + '/CinterForgeCraftMaster/' + target))
+    # CraftMaster owns its converter. Each Terminal release consumes the
+    # platform-matched, verified Stage bytes through its explicit dependency
+    # boundary. No source checkout or network operation is used in Build.
+    from host.lifecycle.craftmaster_dependency import packaged_craftmaster_assets
+    assets.update(packaged_craftmaster_assets(builds, target,
+                  builds_prefix + '/CinterForgeCraftMaster/' + target))
     if any('/Servers/Bedrock/' in k or k.endswith('/bedrock_server') or k.endswith('/bedrock_server.exe')
            for k in assets):
         raise RuntimeError('Bedrock server must never ship in Setup/Build/Stage')
@@ -744,9 +685,9 @@ exec "$HERE/CinterForge Terminal" --builds "$BUILDS" --python "$BUILDS/Python/En
 def _devtools_assets(builds: Path) -> dict[str, Path | bytes]:
     """One three-OS SDK closure, without live Colima VM disks or Bedrock."""
     required = (
-        'CinterForgeTerminal/Toolchains/mac',
-        'CinterForgeTerminal/Toolchains/WindowsCross',
-        'CinterForgeTerminal/Toolchains/Windows/MSYS2',
+        'Toolchains/mac',
+        'Toolchains/WindowsCross',
+        'Toolchains/Windows/MSYS2',
         'Toolchains/WebView',
         'Toolchains/WebView2',
     )
@@ -759,7 +700,7 @@ def _devtools_assets(builds: Path) -> dict[str, Path | bytes]:
     # keep just its archive; never select the oldest digest lexicographically.
     from host.windows.windows_environment import WindowsCrossEnvironment
     _, chosen = WindowsCrossEnvironment.validate_staged(builds)
-    prefix = 'DevTools/Builds/CinterForgeTerminal/Toolchains/WindowsCross/'
+    prefix = 'DevTools/Builds/Toolchains/WindowsCross/'
     selected_stem = chosen['dockerfile_sha256'][:16]
     for member in list(assets):
         if member.startswith(prefix):
@@ -776,9 +717,17 @@ def _devtools_assets(builds: Path) -> dict[str, Path | bytes]:
     }, indent=2, sort_keys=True) + '\n').encode()
     # The installer builder is provisioned by Setup; legacy SDK fixtures
     # predate the MSI addition and still exercise unchanged SDK behavior.
-    msi_root = 'CinterForgeTerminal/Toolchains/WindowsMSI'
+    msi_root = 'Toolchains/WindowsMSI'
     assets.update(_files_under(builds / msi_root, 'DevTools/Builds/' + msi_root,
                                require=False))
+    # Shared optional toolchains are also part of DevTools. Never copy them
+    # into per-application directories or Steam; their canonical owner is
+    # Setup's Builds/Toolchains. Disposable caches (such as NpmCache and the
+    # Windows download staging folder) are not distribution inputs.
+    for rel in ('Toolchains/Linux', 'Toolchains/PowerShell',
+                'Toolchains/Python', 'Toolchains/TargetRunners'):
+        assets.update(_files_under(builds / rel, 'DevTools/Builds/' + rel,
+                                   require=False))
     # Old Test runs wrote their MSI acceptance receipts into Toolchains.
     # They are mutable evidence, not shipped tools: never snapshot them in
     # an immutable Build/Stage/Publish inventory, even on existing builders.
@@ -787,14 +736,14 @@ def _devtools_assets(builds: Path) -> dict[str, Path | bytes]:
     # An empty MSYS2 /tmp disappears when the SDK is archived. The Windows
     # guest overlays this directory with writable tmpfs; preserve the mount
     # point without making the SDK tree itself writable at runtime.
-    tmp_member = 'DevTools/Builds/CinterForgeTerminal/Toolchains/Windows/MSYS2/tmp/README.txt'
+    tmp_member = 'DevTools/Builds/Toolchains/Windows/MSYS2/tmp/README.txt'
     if tmp_member not in assets:
         assets[tmp_member] = b'MSYS2 /tmp mount point; Windows guest provides writable tmpfs.\n'
     assets['DevTools/README.txt'] = (
         'CinterForgeTerminal optional unified development tools for macOS, Linux and Windows.\n'
         'The macOS platform compiler is supplied by Xcode on macOS; it cannot be redistributed.\n'
         'Toolchain containers are immutable archives. Do not import running Colima/Lima disk state.\n'
-        'Producer Stage copies SDK into Steam; explicit user DevTools install populates Builds.\n').encode()
+        'DevTools install/update populates the shared Builds/Toolchains; Stage copies apps only.\n').encode()
     return assets
 
 

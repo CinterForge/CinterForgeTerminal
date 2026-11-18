@@ -54,7 +54,7 @@ flowchart LR
 
 ## Startup and readiness
 
-The script first calls `/api/status`, obtains the platform and installed DevTools/guest state, then loads `/terminal_styles.json` and `/mac_games.json`. It populates the shared profile/menu model and initializes tabs.
+The script first calls `/api/status`, obtains the platform and installed DevTools/guest state, then loads `/data/terminal_styles.json` and `/data/mac_games.json`. It populates the shared profile/menu model and initializes tabs.
 
 - **Mac without verified installed DevTools:** immediately open real **Mac Bash** Session mode. The optional guest VM is not required.
 - **Mac with DevTools:** immediately open real **Mac Bash**; Server Log remains a background tab. Boot is managed by Python, not by JS; the UI polls `/api/lifecycle/guest-status` and displays live output without stealing focus.

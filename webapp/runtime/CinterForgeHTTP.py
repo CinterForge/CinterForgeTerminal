@@ -110,6 +110,10 @@ class CinterForgeHTTPServer(ThreadingHTTPServer):
         self.sessions_lock = threading.Lock()
         self.bedrock_terminal_lock = threading.Lock()
         self.bedrock_terminal_requests = deque()
+        # Browser map tabs are read-only views of the existing CraftMaster ZFY cache.
+        self.craftmaster_map_lock = threading.RLock()
+        self.craftmaster_map_requests = deque()
+        self.craftmaster_maps = {}
         self.devtools_requested = False
         # One app-owned guest initialization, never one per opened terminal tab.
         self.guest_start_lock = threading.Lock()
@@ -124,6 +128,10 @@ class CinterForgeHTTPServer(ThreadingHTTPServer):
         self.debug_requests = 0
         self.lagomorph_requests = 0
         self.macgame_request = None
+        # Authoritative per-process game verification state. No fabricated URLs
+        # and no persistence until the user explicitly runs `games download`.
+        self.game_verification: dict[str, dict] = {}
+
         self.wargames_requests = 0
         # Ordered shell-to-Code actions: run/reselect versus settings refresh.
         self.code_actions = deque()

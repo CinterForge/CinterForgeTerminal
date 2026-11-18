@@ -147,7 +147,7 @@ def find_python(builds: Path, version: str, system: str, *, bootstrap: bool) -> 
     """Reuse configured Python or pinned pyenv; install interpreter only if opted in.
 
     Unlike old Server setup, no `pyenv local` writes to any source checkout.
-    Pyenv-managed versions live under Builds/Python/Toolchains when possible.
+    Pyenv-managed versions live under the shared Builds/Toolchains/Python when possible.
     """
     root = python_root(builds)
     override = os.environ.get('CINTERFORGE_PYTHON_BOOTSTRAP')
@@ -157,7 +157,7 @@ def find_python(builds: Path, version: str, system: str, *, bootstrap: bool) -> 
             raise FileNotFoundError(f'CINTERFORGE_PYTHON_BOOTSTRAP missing: {exe}')
         return str(exe)
     # A local pyenv installation can provision pinned CPython under Builds.
-    tools = root / 'Toolchains'
+    tools = builds.resolve() / 'Toolchains/Python'
     pyenv_root = tools / ('pyenv-win' if system == 'win' else 'pyenv')
     pyenv = (pyenv_root / 'pyenv-win/bin/pyenv.bat' if system == 'win' else pyenv_root / 'bin/pyenv')
     discovered = str(pyenv) if pyenv.exists() else shutil.which('pyenv')
@@ -631,7 +631,7 @@ def build_host(builds: Path, *, zeroconf: bool = True, clean: bool = False,
         webview = None
     # Setup owns the macOS toolchain. Resolve CMake from that installation
     # instead of relying on a login-shell PATH (Xcode launches without one).
-    cmake = (str(builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/cmake')
+    cmake = (str(builds / 'Toolchains/mac/env/bin/cmake')
              if current_platform() == 'mac' else 'cmake')
     extra = []
     build_env = None

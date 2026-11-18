@@ -46,9 +46,23 @@ def _prepare_cross_cache(builds: Path, output: Path, toolchain: Path,
                 name, _, value = line.partition("=")
                 entries[name.partition(":")[0]] = value
         repo = Path(__file__).resolve().parents[2]
-        if (entries.get("CMAKE_TOOLCHAIN_FILE") != str(toolchain) or
-                entries.get("CMAKE_HOME_DIRECTORY") not in (None, source_root or str(repo))):
-            print("[WINDOWS CROSS] upstream toolchain changed; resetting Windows CMake tree only", flush=True)
+        # CMake strips trailing slashes in guest mount paths. Compare paths
+        # lexically after normalization instead of wiping a healthy Ninja
+        # build tree when /source/ and /source name the same directory.
+        def normalized(value: str | None) -> str | None:
+            return os.path.normpath(value) if value else None
+        expected_toolchain = normalized(str(toolchain))
+        expected_source = normalized(source_root or str(repo))
+        actual_toolchain = normalized(entries.get('CMAKE_TOOLCHAIN_FILE'))
+        actual_source = normalized(entries.get('CMAKE_HOME_DIRECTORY'))
+        differences = []
+        if actual_toolchain != expected_toolchain:
+            differences.append(f'toolchain {actual_toolchain!r} != {expected_toolchain!r}')
+        if actual_source is not None and actual_source != expected_source:
+            differences.append(f'source {actual_source!r} != {expected_source!r}')
+        if differences:
+            print('[WINDOWS CROSS] CMake cache inputs changed: ' + '; '.join(differences)
+                  + '; resetting Windows CMake tree only', flush=True)
             shutil.rmtree(output)
     output.mkdir(parents=True, exist_ok=True)
 

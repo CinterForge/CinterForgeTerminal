@@ -42,13 +42,10 @@ def require_managed_t_docker(builds: Path) -> str:
             Path(configured).expanduser().resolve() != builds or
             os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') != 'developer'):
         raise RuntimeError('Setup/Build must own the developer Builds t backend')
-    # The lifecycle VM picks the shortest real Builds ancestor so Lima
-    # stays under macOS's Unix socket length limit.
-    roots = [parent / 'CFTVM/T' for parent in reversed((builds, *builds.parents))
-             if parent.name == 'Builds' and parent.is_dir() and not parent.is_symlink()]
-    root = Path(os.environ.get('COLIMA_HOME', '/__unmanaged__')).parent
-    if root not in roots or root.is_symlink():
-        raise RuntimeError('Setup/Build Docker COLIMA_HOME is not the managed t VM state')
+    # Exactly one VM state root, never an ancestor, OS cache or Steam copy.
+    root = builds / 'CFTVM/T'
+    if Path(os.environ.get('COLIMA_HOME', '/__unmanaged__')).parent != root or root.is_symlink():
+        raise RuntimeError('Setup/Build Docker COLIMA_HOME is not the one Builds/CFTVM/T state')
     expected = {
         'COLIMA_HOME': str(root / 'c'),
         'LIMA_HOME': str(root / 'l'),
@@ -82,6 +79,53 @@ def docker_bind_source(path: Path) -> str:
     return resolved
 
 
+def _setup_guest_rsync(builds: Path, vm, sdk: Path, environment: dict[str, str]) -> None:
+    """Install and verify Lima's required rsync *inside* the real x86-64 t VM.
+
+    The Mac host's rsync and the Docker container's rsync are not substitutes:
+    Lima's 9p/host-volume bootstrap runs in the Ubuntu VM itself. This is an
+    explicit Setup-only operation, never a Build, Stage, Test or app-start repair.
+    """
+    colima = str(sdk / 'mac/env/bin/colima')
+    ssh = [colima, 'ssh', '--profile', vm.profile, '--']
+    probe = [*ssh, 'sh', '-c',
+             'command -v rsync >/dev/null 2>&1 && '
+             'rsync --version >/dev/null 2>&1 || exit 42']
+
+    def check_guest_rsync() -> int:
+        result = subprocess.run(probe, env=environment, capture_output=True,
+                                text=True, check=False, timeout=45)
+        if result.returncode not in (0, 42):
+            raise RuntimeError(
+                'Setup cannot check the managed t guest over SSH; '
+                'repair guest SSH before installing any packages. Detail: ' +
+                (result.stderr or result.stdout).strip()[-600:])
+        return result.returncode
+
+    if check_guest_rsync() == 42:
+        vm.progress('Setup: rsync missing in managed x86-64 t guest; installing it there')
+        vm.run_checked(
+            [*ssh, 'sudo', 'sh', '-c',
+             'export DEBIAN_FRONTEND=noninteractive; '
+             'apt-get update && '
+             'apt-get install -y --no-install-recommends rsync'],
+            environment,
+            title='Setup provisioning required guest rsync (Ubuntu VM)',
+            timeout=600,
+        )
+        if check_guest_rsync() != 0:
+            raise RuntimeError(
+                'Setup installed rsync, but the managed t guest cannot execute it; '
+                'refusing to seal an incomplete DevTools VM')
+    vm.progress('PASS Setup guest rsync: executable verified inside t Ubuntu')
+
+    # The Setup cache may skip VM boot only if the same instance was verified.
+    # Disk contents are mutable, so the receipt identifies the profile's own
+    # directories, not timestamps of its large writable Docker/Ubuntu disk.
+    from host.lifecycle.setup_dirty import record_verified_t_guest
+    record_verified_t_guest(builds)
+
+
 @contextmanager
 def managed_amd64_backend(builds: Path, *, setup: bool = True):
     """Start/reuse the single t guest after Bedrock and stop it on every exit.
@@ -97,7 +141,7 @@ def managed_amd64_backend(builds: Path, *, setup: bool = True):
 
     builds = builds.resolve(strict=True)
     vm = CinterForgeLifecycleVM(builds)
-    sdk = builds / 'CinterForgeTerminal/Toolchains'
+    sdk = builds / 'Toolchains'
     previous = {key: os.environ.get(key) for key in (
         'CINTER_BUILDS_ROOT', 'CINTER_TERMINAL_RUNTIME_MODE',
         'DOCKER_CONTEXT', 'DOCKER_HOST', 'DOCKER_TLS_VERIFY',
@@ -105,6 +149,7 @@ def managed_amd64_backend(builds: Path, *, setup: bool = True):
         'COLIMA_CACHE_HOME', 'DOCKER_CONFIG', 'XDG_CONFIG_HOME',
         'XDG_CACHE_HOME', 'TMPDIR', 'PATH')}
     owns_vm = False
+    completed = False
     try:
         os.environ['CINTER_BUILDS_ROOT'] = str(builds)
         os.environ['CINTER_TERMINAL_RUNTIME_MODE'] = 'developer'
@@ -123,11 +168,13 @@ def managed_amd64_backend(builds: Path, *, setup: bool = True):
                 if not profile_file.is_file() or not plugin.is_file():
                     raise RuntimeError('Setup-provisioned x86-64 Terminal guest/Buildx missing; '
                                        'run ./Cinter setup all')
-                if (vm.configure_colima_runtime_emulation(env, dry_run=True) or
-                        vm.configure_colima_host_mounts(env, vm.mac_host_mounts(),
-                                                              dry_run=True)):
+                differences = vm.colima_configuration_differences(
+                    env, vm.mac_host_mounts())
+                if differences:
                     raise RuntimeError('Setup-provisioned Terminal guest config changed; '
-                                       'Build cannot repair it')
+                                       'Build cannot repair it. Differences: ' +
+                                       '; '.join(differences) +
+                                       '. Run ./Cinter setup all to repair the owned profile')
             # Set ownership before start: even a partially booted VM is ours
             # to stop if an exception or timeout interrupts the start.
             owns_vm = True
@@ -145,6 +192,8 @@ def managed_amd64_backend(builds: Path, *, setup: bool = True):
                                    f'(actual={actual!r}): {arch.stderr[-500:]}')
             print('[TERMINAL AMD64] PASS: one QEMU x86-64 t guest, '
                   'Docker daemon architecture=' + actual, flush=True)
+            if setup:
+                _setup_guest_rsync(builds, vm, sdk, env)
         # Replace every Docker selector as a unit, including a previous c
         # context. dict.update() alone leaves stale keys in os.environ.
         for key in ('DOCKER_CONTEXT', 'DOCKER_HOST', 'DOCKER_TLS_VERIFY',
@@ -154,11 +203,34 @@ def managed_amd64_backend(builds: Path, *, setup: bool = True):
         os.environ.update(env)
         require_managed_t_docker(builds)
         yield docker
+        completed = True
     finally:
         try:
             if owns_vm:
                 print('[TERMINAL AMD64] Releasing Setup/Build-owned t guest', flush=True)
                 vm.stop(sdk)
+                if setup and completed:
+                    # Colima --save-config can rewrite its YAML *during boot*.
+                    # Seal the final persisted topology only after the owned
+                    # guest has shut down. Build must never do this repair.
+                    with vm.managed_vm_lock(env):
+                        if vm.native_owner_active(env) or vm.owned_qemu_pids(env, sdk):
+                            raise RuntimeError('Setup cannot seal t configuration while '
+                                               'a native owner or QEMU remains active')
+                        emulation_changed = vm.configure_colima_runtime_emulation(env)
+                        mounts_changed = vm.configure_colima_host_mounts(
+                            env, vm.mac_host_mounts())
+                        differences = vm.colima_configuration_differences(
+                            env, vm.mac_host_mounts())
+                        if differences:
+                            raise RuntimeError('Setup could not seal t VM configuration: '
+                                               + '; '.join(differences))
+                        print('[TERMINAL AMD64] PASS Setup sealed stopped t VM '
+                              'configuration (emulation=' +
+                              ('normalized' if emulation_changed else 'current') +
+                              ', mounts=' +
+                              ('normalized' if mounts_changed else 'current') + ')',
+                              flush=True)
         finally:
             for key, value in previous.items():
                 if value is None:

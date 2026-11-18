@@ -61,7 +61,7 @@ def _builds(builds: Path) -> Path:
 
 
 def _stage(builds: Path) -> Path:
-    return builds / 'CinterForgeTerminal/Toolchains/WindowsMSI'
+    return builds / 'Toolchains/WindowsMSI'
 
 
 def _sha(path: Path) -> str:
@@ -130,7 +130,7 @@ class _MacNativeMSITools:
     provider = 'host'
 
     def __init__(self, builds: Path):
-        self.bin = builds / 'CinterForgeTerminal/Toolchains/mac/env/bin'
+        self.bin = builds / 'Toolchains/mac/env/bin'
 
     def path(self, path: Path) -> str:
         return str(path)
@@ -667,7 +667,7 @@ def setup(builds: Path) -> dict:
         raise RuntimeError('Setup missing pinned Windows MSI producer image')
     import platform
     if platform.system() == 'Darwin' and platform.machine() == 'arm64':
-        native = builds / 'CinterForgeTerminal/Toolchains/mac/env/bin'
+        native = builds / 'Toolchains/mac/env/bin'
         for name in ('wixl', 'msiinfo', 'msiextract'):
             path = native / name
             if not path.is_file() or path.is_symlink():

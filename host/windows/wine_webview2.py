@@ -50,7 +50,7 @@ def _hash(path: Path) -> str:
 
 
 def _install_archive(builds: Path) -> tuple[Path, str]:
-    stage = builds / 'CinterForgeTerminal/Toolchains/WindowsCross/WebView2Runtime'
+    stage = builds / 'Toolchains/WindowsCross/WebView2Runtime'
     stage.mkdir(parents=True, exist_ok=True)
     installer = stage / 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
     manifest = stage / 'manifest.json'

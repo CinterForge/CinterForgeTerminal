@@ -70,14 +70,14 @@ def ensure(builds: Path) -> Path:
     builds = builds.resolve()
     if builds.name != 'Builds' or not builds.is_dir():
         raise RuntimeError('MSYS2 installation requires sibling Builds directory')
-    root = builds / 'CinterForgeTerminal/Toolchains/Windows/MSYS2'
+    root = builds / 'Toolchains/Windows/MSYS2'
     if all((root / name).is_file() for name in REQUIRED):
         print('[WINDOWS MSYS2] Reusing complete staged UCRT64 installation', flush=True)
         return root
     logs = builds / 'Logs/CinterForgeTerminal'
     logs.mkdir(parents=True, exist_ok=True)
     log = logs / 'windows-msys2-setup.log'
-    downloads = builds / 'CinterForgeTerminal/Toolchains/Windows/Downloads'
+    downloads = builds / 'Toolchains/Windows/Downloads'
     downloads.mkdir(parents=True, exist_ok=True)
     installer = downloads / f'msys2-x86_64-{MSYS2_VERSION}.exe'
     if not (root / 'usr/bin/pacman.exe').is_file():

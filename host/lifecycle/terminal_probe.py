@@ -69,7 +69,7 @@ def msys_root(builds: Path) -> Path:
     isn't silently considered packaged. During Setup an existing installation
     can be adopted by copying it here, without compiling MSYS2 or Bash.
     """
-    root = builds.resolve() / 'Toolchains/MSYS2/win/x64'
+    root = builds.resolve(strict=True) / 'Toolchains/Windows/MSYS2'
     required = ('usr/bin/bash.exe', 'usr/bin/ls.exe', 'ucrt64/bin/g++.exe',
                 'ucrt64/bin/gcc.exe', 'ucrt64/bin/cmake.exe', 'ucrt64/bin/ninja.exe')
     if root.is_symlink() or any((root / item).is_symlink() for item in required):

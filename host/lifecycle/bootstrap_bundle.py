@@ -510,8 +510,8 @@ def bundle_target(builds: Path, system: str, arch: str) -> Path:
         toolchain_roots = {'mac': ('mac', 'linux'),
                            'linux': ('linux',), 'win': ('win',)}[system]
         for target in toolchain_roots:
-            folder = (builds / 'CinterForgeTerminal/Toolchains/Windows/MSYS2' if target == 'win' and system == 'win'
-                      else builds / 'CinterForgeTerminal/Toolchains/Build' / target)
+            folder = (builds / 'Toolchains/Windows/MSYS2' if target == 'win' and system == 'win'
+                      else builds / 'Toolchains/Build' / target)
             _stage_copy(folder, candidate / 'BuildTools' / target)
         if system == 'mac' and data.get('toolchain', {}).get('cross_provider') == 'docker-linux-amd64-wine':
             # The actual cross-compiler/Wine image must travel with the Mac
@@ -699,13 +699,13 @@ def _registered_runners(builds: Path, native: str) -> tuple[dict[str, list[str]]
             # Target tool installers may stage the runner here as part of Setup.
             # This convention does not assume a LinuxKit Bedrock appliance can
             # execute arbitrary Python/PowerShell or Windows programs.
-            executable = (builds / 'CinterForgeTerminal/Toolchains/TargetRunners' /
+            executable = (builds / 'Toolchains/TargetRunners' /
                           target / 'run')
             if executable.is_file():
                 command = [str(executable), '{bootstrap}', '--builds', '{builds}', '--setup-local']
         if (not isinstance(command, list) or not command or
                 not all(isinstance(item, str) and item for item in command)):
-            expected = (builds / 'CinterForgeTerminal/Toolchains/TargetRunners' /
+            expected = (builds / 'Toolchains/TargetRunners' /
                         target / 'run')
             missing[target] = (f'No managed {target} target runner at {expected}. '
                 'A general-purpose Linux or Windows Bash/Python/WebView target runner '
@@ -837,7 +837,7 @@ def provision_zmachine(builds: Path) -> Path:
                 raise RuntimeError('Damaged staged ZMachine file: ' + name)
         return dest
     source = 'https://github.com/daniellockard/zmachine.git'
-    tools = builds / 'CinterForgeTerminal/Toolchains/mac/env/bin'
+    tools = builds / 'Toolchains/mac/env/bin'
     git = shutil.which('git')
     npm = str(tools / 'npm') if (tools / 'npm').is_file() else shutil.which('npm')
     node = str(tools / 'node') if (tools / 'node').is_file() else shutil.which('node')
@@ -852,7 +852,7 @@ def provision_zmachine(builds: Path) -> Path:
         package = json.loads((clone/'package.json').read_text())
         if package.get('version') != version or package.get('name') != 'zmachine':
             raise RuntimeError(f'Upstream ZMachine version differs from vetted {version}: {package.get("version")}')
-        env = dict(os.environ, npm_config_cache=str(builds/'CinterForgeTerminal/Toolchains/NpmCache'),
+        env = dict(os.environ, npm_config_cache=str(builds/'Toolchains/NpmCache'),
                    npm_config_update_notifier='false', HUSKY='0')
         subprocess.run([npm,'ci','--ignore-scripts','--no-audit','--no-fund'],cwd=clone,env=env,check=True)
         subprocess.run([npm,'run','build'],cwd=clone,env=env,check=True)

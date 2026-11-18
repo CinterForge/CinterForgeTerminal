@@ -136,7 +136,7 @@ def ensure(builds: Path, *, executor=None) -> Path:
             result = subprocess.run(command, text=True, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, timeout=1200)
         elif platform.system() == 'Darwin':
-            bins = builds / 'CinterForgeTerminal/Toolchains/mac/env/bin'
+            bins = builds / 'Toolchains/mac/env/bin'
             seven = next((bins / n for n in ('7zz', '7z') if (bins / n).is_file()), None)
             if not seven:
                 raise RuntimeError('Mac Setup must install 7zip into Builds to unpack WebView2 CAB')

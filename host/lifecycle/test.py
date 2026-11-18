@@ -255,7 +255,7 @@ def _run_with_guest_test_environment(builds: Path) -> dict:
         raise RuntimeError('Guest runtime acceptance must use the existing sibling Builds')
     if platform.system() != 'Darwin':
         raise RuntimeError('Managed macOS Linux/Windows guest acceptance requires a Mac producer')
-    sdk = builds / 'CinterForgeTerminal/Toolchains'
+    sdk = builds / 'Toolchains'
     # Setup has already provisioned these inputs. Test must not install them.
     required = ('mac/env/bin/colima', 'mac/env/bin/docker', 'mac/lima/bin/limactl',
                 'Windows/MSYS2/usr/bin/bash.exe')
@@ -454,6 +454,8 @@ class RealStagedSystemSmoke(unittest.TestCase):
         self.assertLessEqual(set(self.receipt['targets']), set(FOUR_TARGETS))
         status = status_four(self.builds)
         for target, report in self.receipt['targets'].items():
+            if target == 'devtools':
+                continue  # shared Builds/Toolchains is never Steam-staged
             with self.subTest(target=target):
                 self.assertEqual(report['file_count'], len(report['files']))
                 self.assertGreater(report['bytes'], 0)
@@ -520,30 +522,24 @@ class RealStagedSystemSmoke(unittest.TestCase):
             with self.subTest(staged_code_runtime=rel):
                 self.assertTrue(path.is_file() and not path.is_symlink(),
                                 f'Installed Code-OSS editor dependency missing: {path}')
-        # Use the staged Python interpreter and staged HTTP source to resolve
-        # DevTools in INSTALLED mode, exactly as the signed app does. No mocks,
-        # no source-tree import path, no SDK installation or VM changes.
-        if 'devtools' in self.receipt['targets']:
-            python = embedded / 'Python/Environments/mac/arm64/cinterterminalenv/bin/python'
-            webapp = embedded / f'Python/Host/mac/arm64/{self.release}/webapp'
-            expected = (Path(stage['targets']['devtools']['steam_root']) /
-                        'DevTools/Builds/CinterForgeTerminal/Toolchains').resolve()
-            env = dict(os.environ)
-            env.pop('CINTER_BUILDS_ROOT', None)
-            env['CINTER_TERMINAL_RUNTIME_MODE'] = 'installed'
-            env['CINTER_STEAMAPPS'] = str(steam)
-            code_check = ('from runtime.CinterForgeRuntimeBootstrap import sdk_root; '
-                          'p=sdk_root(); print(str(p) if p else "MISSING")')
-            probe = subprocess.run([str(python), '-B', '-c', code_check], cwd=webapp,
-                                   env=env, capture_output=True, text=True,
-                                   timeout=40, check=False)
-            self.assertEqual(probe.returncode, 0,
-                             'Installed signed app SDK resolver failed: ' + probe.stderr[-1000:])
-            self.assertEqual(probe.stdout.strip(), str(expected),
-                             'Installed app did not resolve the SDK from its own Steam Stage; '
-                             'actual=' + probe.stdout.strip())
-            print('[TEST STAGE] PASS installed app resolves exact Stage DevTools: ' +
-                  str(expected), flush=True)
+        # The staged native app is lightweight. Its optional SDK remains
+        # under the developer workspace, not a second Steam copy. Verify the
+        # exact shared path via the staged runtime's developer lookup.
+        python = embedded / 'Python/Environments/mac/arm64/cinterterminalenv/bin/python'
+        webapp = embedded / f'Python/Host/mac/arm64/{self.release}/webapp'
+        expected = (self.builds / 'Toolchains').resolve()
+        env = dict(os.environ, CINTER_BUILDS_ROOT=str(self.builds),
+                   CINTER_TERMINAL_RUNTIME_MODE='developer')
+        code_check = ('from runtime.CinterForgeRuntimeBootstrap import sdk_root; '
+                      'p=sdk_root(); print(str(p) if p else "MISSING")')
+        probe = subprocess.run([str(python), '-B', '-c', code_check], cwd=webapp,
+                               env=env, capture_output=True, text=True,
+                               timeout=40, check=False)
+        self.assertEqual(probe.returncode, 0,
+                         'Shared DevTools resolver failed: ' + probe.stderr[-1000:])
+        self.assertEqual(probe.stdout.strip(), str(expected),
+                         'Runtime did not resolve Builds/Toolchains: ' + probe.stdout.strip())
+        print('[TEST STAGE] PASS shared developer toolchains: ' + str(expected), flush=True)
         # A passing receipt or developer VM is not enough: exercise the real
         # signed binary installed in Steam and its own Python HTTP service.
         accept_native_ui(self.builds, launcher=app / 'Contents/MacOS/CinterForgeTerminal',

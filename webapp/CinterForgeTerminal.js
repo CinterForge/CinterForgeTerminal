@@ -20,14 +20,14 @@
       document.documentElement?.setAttribute?.('data-cinter-platform', CinterForgeState.platform);
       CinterForgeState.setWindowsApplicationMenus();
 
-      const data = await (await fetch('/terminal_styles.json', { cache: 'no-store' })).json();
+      const data = await (await fetch('/data/terminal_styles.json', { cache: 'no-store' })).json();
       CinterForgeState.profiles = [
         ...(data.profiles || []),
         ...(data.emulators || []),
         data.codeoss,
         { id: 'joshua', name: 'JOSHUA', year: 2026, kind: 'joshua' }
       ].filter(Boolean);
-      const macData = await (await fetch('/mac_games.json', { cache: 'no-store' })).json();
+      const macData = await (await fetch('/data/mac_games.json', { cache: 'no-store' })).json();
       CinterForgeState.macCatalog = new Map((macData.games || []).map(game => [game.command, game]));
       const byId = new Map(CinterForgeState.profiles.map(profile => [profile.id, profile]));
       const stored = localStorage.getItem('cinterterminal.profile.' + CinterForgeState.platform);

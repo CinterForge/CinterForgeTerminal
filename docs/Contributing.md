@@ -6,7 +6,7 @@ CinterForge Terminal is a public, source-built native application and reusable H
 
 The application opens in **Game** mode (modified Cinter-styled WarGames/JOSHUA), with direct support for Infinite Mac, interactive-fiction titles, Minecraft/Bedrock and the special `lagomorph` easter egg. Its other terminal modes are **Minecraft**, **Mac**, **Win** and **Linux**. Mac/Win/Linux are **real Code-OSS integrated shells**. Native system menus own New Terminal and Edit commands; HTML must not render competing transient Terminal/Edit menus. Developer commands and Bash belong in Code-OSS, not the Game Terminal.
 
-The `code` command launches a true local-folder/workspace editor, persists the selected workspace across relaunch and provides three Mac-hosted platform terminals or one host-native terminal on Windows/Linux. With this source repository open, the user may edit, build, stage, test and explicitly publish the real four-artifact release from those terminals. `devtools install|uninstall|list|report` controls the optional **single unified** developer-tool package.
+The `code` command launches a true local-folder/workspace editor, persists the selected workspace across relaunch and provides three Mac-hosted platform terminals or one host-native terminal on Windows/Linux. With this source repository open, the user may edit, build, stage, test and explicitly publish the real four-artifact release from those terminals. `devtools install <path/to/source>` / `devtools update|uninstall|version|help|report` controls the optional **single unified** developer-tool package.
 
 See the [User Manual](User%20Manual.md), [Architecture](Architecture.md) and [Build and Release](Build%20and%20Release.md) before modifying any of these entry points.
 

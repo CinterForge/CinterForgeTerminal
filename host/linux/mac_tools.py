@@ -49,7 +49,7 @@ def expose(builds: Path) -> Path:
     if result.returncode or not result.stdout.strip():
         raise RuntimeError('Xcode Command Line Tools do not expose swiftc')
     locations = list(dict.fromkeys(str(Path(tools[name]).resolve().parent) for name in REQUIRED))
-    output = builds / 'CinterForgeTerminal/Toolchains/mac/env.sh'
+    output = builds / 'Toolchains/mac/env.sh'
     output.parent.mkdir(parents=True, exist_ok=True)
     # This is a read-only PATH facade over the same installed tools, not a
     # second toolchain or a modification of the user's shell startup scripts.

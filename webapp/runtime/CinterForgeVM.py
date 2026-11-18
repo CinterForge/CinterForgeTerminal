@@ -8,8 +8,8 @@ PURPOSE
     VM driver, a new daemon, or an alternate architecture.
 
 CLASS / METHODS
-    CinterForgeVM.state_root: developer Builds versus installed user-cache
-        state selection, symlink checks and short Lima socket path constraints.
+    CinterForgeVM.state_root: the single shared Builds/CFTVM/T state for both
+        developer and installed runtime, plus safe short Lima socket paths.
     environment: construct the process-local HOME, COLIMA_HOME, LIMA_HOME,
         Docker socket and pinned Setup toolchain PATH for the owned profile.
     managed_vm_lock: cross-process flock protecting profile mutations.
@@ -62,42 +62,45 @@ class CinterForgeVM:
         self.real_login_home = real_login_home
 
     def state_root(self) -> Path:
-        """VM scratch: sibling Builds for development, macOS cache when installed.
+        """Use the one selected Builds/CFTVM/T for developer and installed apps.
 
-        Steam is strictly applications and persistent user data. No Lima/Colima
-        disks, Docker images, caches, or temporary files may be created there.
-        Normal installed-app startup must not create a developer Builds directory.
+        The installed app resolves the Source folder explicitly selected by
+        ``devtools install`` (or the verified Setup workspace). It must never
+        clone a second VM into ~/Library/Caches or create a Builds folder on
+        ordinary lightweight launch. The caller requires a verified SDK first.
         """
         installed = os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'installed'
         if installed:
-            # An optional SDK can be installed from a standalone DMG without
-            # Steam. The managed VM is transient and belongs in the OS cache.
             if platform.system() != 'Darwin':
                 raise RuntimeError('Managed macOS guest VM requires a macOS runtime')
-            # A short Lima socket path is mandatory on macOS. Cache contains only
-            # disposable app-owned VM state; installed DevTools live in selected Builds.
-            roots = [self.real_login_home() / 'Library/Caches/CFTVM/T']
+            from runtime import CinterForgeDevTools as devtools
+            builds = devtools._devtools_builds_root()
         else:
             configured = os.environ.get('CINTER_BUILDS_ROOT', '')
             if not configured:
                 raise RuntimeError('Developer VM state requires explicit CINTER_BUILDS_ROOT')
-            source = Path(configured).expanduser()
-            if source.name != 'Builds' or source.is_symlink() or not source.is_dir():
-                raise RuntimeError('CINTER_BUILDS_ROOT must identify the existing developer Builds directory')
-            # The explicit repository Builds is authoritative. Older developer
-            # stages can also contain nested signed .app/Contents/Resources/Builds;
-            # those copies are read-only and must not hold VM state. Prefer the
-            # shortest *containing* Builds, not a home-directory fallback.
-            roots = [parent / 'CFTVM/T' for parent in reversed((source, *source.parents))
-                     if parent.name == 'Builds' and parent.is_dir() and not parent.is_symlink()]
+            builds = Path(configured).expanduser()
+        if (not builds.is_absolute() or builds.name != 'Builds' or
+                builds.is_symlink() or not builds.is_dir()):
+            raise RuntimeError('Managed VM requires an existing selected Builds directory')
+        builds = builds.resolve(strict=True)
+        root = builds / 'CFTVM/T'
         tail = '/l/colima-t/ssh.sock.1234567890123456'
-        for root in roots:
-            if len(os.fsencode(str(root) + tail)) < 96:
-                if root.is_symlink() or (root.exists() and not root.is_dir()):
-                    raise RuntimeError('Unsafe managed VM state: ' + str(root))
-                root.mkdir(parents=True, exist_ok=True)
-                return root
-        raise RuntimeError('Managed VM socket root too long under developer Builds or user cache')
+        if len(os.fsencode(str(root) + tail)) >= 96:
+            raise RuntimeError('Shared Builds/CFTVM/T path is too long for Lima sockets: ' + str(root))
+        vm_parent = builds / 'CFTVM'
+        if (vm_parent.is_symlink() or (vm_parent.exists() and not vm_parent.is_dir()) or
+                root.is_symlink() or (root.exists() and not root.is_dir())):
+            raise RuntimeError('Unsafe managed VM state: ' + str(root))
+        if not root.is_dir():
+            raise RuntimeError('Missing Setup-owned Builds/CFTVM/T; run ./Cinter setup all')
+        profile = root / 'c' / self.profile / 'colima.yaml'
+        lima = root / 'l' / ('colima-' + self.profile)
+        if (profile.is_symlink() or not profile.is_file() or
+                lima.is_symlink() or not lima.is_dir()):
+            raise RuntimeError('Missing Setup-owned t Colima/Lima state at ' + str(root) +
+                               '; runtime cannot provision or clone VMs')
+        return root
 
 
     def environment(self, sdk: Path, *, state_root) -> dict[str, str]:
@@ -107,7 +110,8 @@ class CinterForgeVM:
             path = root / rel
             if path.is_symlink() or (path.exists() and not path.is_dir()):
                 raise RuntimeError('Unsafe managed VM directory: ' + str(path))
-            path.mkdir(parents=True, exist_ok=True)
+            if not path.is_dir():
+                raise RuntimeError('Missing Setup-owned managed VM directory: ' + str(path))
         lima_home = root / 'l'
         socket = lima_home / ('colima-' + self.profile) / 'ssh.sock.1234567890123456'
         if len(os.fsencode(socket)) >= 100:
@@ -117,7 +121,7 @@ class CinterForgeVM:
             env.pop(key, None)
         # Colima owns the single t daemon socket.  Connect to it directly: the
         # Docker context JSON is disposable and may be absent after VM restart,
-        # particularly in the installed-app cache.  DOCKER_CONTEXT would override
+        # including when an installed app reuses the shared VM.  DOCKER_CONTEXT would override
         # DOCKER_HOST and fail with `context colima-t not found` despite a healthy VM.
         socket_url = 'unix://' + str(root / 'c' / self.profile / 'docker.sock')
         env.update(HOME=str(root/'h'), COLIMA_HOME=str(root/'c'),
@@ -133,12 +137,10 @@ class CinterForgeVM:
 
     @contextmanager
     def managed_vm_lock(self, env: dict[str, str]):
-        """Serialize Colima mutations across native and Code-OSS Session processes.
+        """Serialize Colima changes across Setup and every Terminal runtime.
 
-        Linux and Windows guest shells start as independent children. A thread lock
-        cannot protect against two concurrent `colima start` invocations, which can
-        race for the same Lima host-agent PID/socket and leave a stale Docker context.
-        The lock resides in the permitted app-owned cache/Builds VM state only.
+        Stage no longer replaces VM directories, so all owners lock the same
+        stable file in the shared Builds/CFTVM/T/c state.
         """
         home = Path(env['COLIMA_HOME'])
         lock_file = home / 'CinterForgeTerminalGuestVM.lock'
@@ -393,78 +395,42 @@ class CinterForgeVM:
                                    'download a replacement VM. Repair the managed '
                                    'guest explicitly before using Linux/Windows Bash')
 
-        # Check the app-owned profile's *saved* topology as well as live paths.
-        # A legacy t-profile may still be running with the old overlapping mount
-        # config. A healthy Docker socket alone cannot prove that all host drives
-        # will survive the next Colima start.
+        # Runtime is strictly read-only for Setup-provisioned VM configuration.
+        # No initial Colima profile creation, no YAML rewrite, no repair and no
+        # alternate state root. Starting/stopping the pre-existing t VM is OK.
+        profile = Path(env['COLIMA_HOME']) / self.profile / 'colima.yaml'
+        lima = Path(env['LIMA_HOME']) / ('colima-' + self.profile)
+        if not profile.is_file() or profile.is_symlink() or not lima.is_dir():
+            raise RuntimeError('Setup-owned managed t profile missing; run ./Cinter setup all')
+        if configure_host_mounts(env, mounts, dry_run=True):
+            raise RuntimeError('Saved t guest host mounts do not match Setup; '
+                               'runtime refuses to rewrite colima.yaml')
+        if configure_runtime_emulation(env, dry_run=True):
+            raise RuntimeError('Saved t guest architecture/emulation differs from Setup; '
+                               'runtime refuses to rewrite colima.yaml')
         required = ['/host/mac', '/host/mac' + str(sdk)]
         if workspace is not None:
             required.append('/host/mac' + str(workspace))
-        installed_profile = bool(env.get('COLIMA_HOME')) and (
-            Path(env['COLIMA_HOME']) / self.profile / 'colima.yaml').is_file()
-        mount_changed = configure_host_mounts(env, mounts, dry_run=True)
-        # Installed profiles have immutable VM type/architecture. Updating their
-        # YAML cannot convert an already-created ARM/VZ disk to AMD64/QEMU.
-        # Inspect the *running* engine rather than rewriting these settings.
-        emulation_changed = (False if installed and installed_profile else
-                             configure_runtime_emulation(env, dry_run=True))
-        config_changed = mount_changed or emulation_changed
         ping = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=20)
-        if ping.returncode == 0 and installed:
-            require_native_installed_architecture()
         if ping.returncode == 0:
+            require_native_installed_architecture()
             missing = [path for path in required if not guest_directory(path)]
-            if not missing and not config_changed:
-                return docker  # One already-ready VM; every tab uses docker exec.
+            if not missing:
+                return docker
             if active_containers(via_guest=False):
-                recover_stale_owned_guests()  # Verifies labels before stopping.
-            reason = ('Rosetta translator disabled for real Wine/MSYS2 Bash'
-                      if emulation_changed else
-                      'outdated overlapping host mount configuration' if mount_changed else
-                      'inaccessible host paths: ' + ', '.join(missing))
-            progress('Reconfiguring owned Terminal VM: ' + reason)
+                recover_stale_owned_guests()
+            raise RuntimeError('Setup-owned t guest missing host mounts: ' + ', '.join(missing))
+        status = call([colima, 'status', self.profile])
+        if status.returncode == 0:
+            if active_containers(via_guest=True):
+                raise RuntimeError('Managed Terminal VM has live guest containers '
+                                   'but its Docker socket is unavailable; refusing restart')
             run_checked([colima, 'stop', self.profile], env,
-                         title='Stopping idle guest VM for corrected host mounts', timeout=120)
-        else:
-            status = call([colima, 'status', self.profile])
-            if status.returncode == 0:
-                if active_containers(via_guest=True):
-                    raise RuntimeError('Managed Terminal VM has live guest containers '
-                                       'but its Docker socket is unavailable; refusing restart')
-                run_checked([colima, 'stop', self.profile], env,
-                             title='Recovering idle VM with stale Docker socket', timeout=120)
-
-        configure_host_mounts(env, mounts)
-        if not installed or not installed_profile:
-            configure_runtime_emulation(env)
-        progress('Sharing accessible Mac filesystem under /host/mac')
-        # Only the terminal-owned runtime profile t changes. Boot the actual
-        # QEMU x86_64 Linux guest; Wine/MSYS2 runs natively inside that guest.
-        # Do not run amd64 Wine through ARM64 binfmt or Rosetta user translation.
-        # Pass the full-root share explicitly. On first profile creation Colima
-        # constructs its configuration from CLI flags; --save-config otherwise
-        # writes the default mounts over the YAML edited above. The three-part
-        # flag preserves the nondefault guest mount point and write permission.
-        # Keep the YAML normalization for existing profiles and the live path
-        # probes below: neither a successful VM boot nor a saved config proves
-        # that VirtioFS actually mounted the host's source tree.
-        # Only initial profile creation needs immutable QEMU/architecture flags.
-        # Reusing a saved installed profile with those flags causes warnings and
-        # cannot change its VM. Do not rebuild an existing profile at app launch.
-        args = ([colima, 'start', self.profile, '--runtime', 'docker']
-                if installed and installed_profile else
-                [colima, 'start', self.profile, '--runtime', 'docker',
-                 '--vm-type', 'qemu', '--mount-type', '9p',
-                 '--mount', '/:/host/mac:w', '--arch', 'x86_64',
-                 '--cpus', '4', '--memory', '8', '--disk', '32', '--save-config'])
-        if installed and not installed_profile:
-            progress('Initializing new x86-64 t profile (no existing VM to replace)')
-        # The saved installed t profile may require several minutes to bring SSH
-        # up even when cloud-init reports a failed final-stage unit. Let Colima's
-        # actual SSH result, not that message alone, determine readiness.
-        # Do not replace its disk or repeatedly boot the same broken guest.
-        run_checked(args, env, title='Starting managed guest VM with host volumes',
-                     timeout=600, cancel_event=cancel_event)
+                         title='Stopping idle t VM with stale Docker socket', timeout=120)
+        progress('Starting existing Setup-owned t VM from ' + str(Path(env['COLIMA_HOME']).parent))
+        run_checked([colima, 'start', self.profile, '--runtime', 'docker'], env,
+                    title='Starting managed guest VM with host volumes',
+                    timeout=600, cancel_event=cancel_event)
         daemon = call([docker, 'info', '--format', '{{.ServerVersion}}'], timeout=45)
         if daemon.returncode:
             raise RuntimeError('Managed Terminal Docker socket still unavailable after VM start: ' +

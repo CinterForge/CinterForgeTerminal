@@ -42,32 +42,33 @@ All receipts, logs and downloads remain under the sibling `Builds` directory.
 Build, Stage, Test and installed native-app runtime never provision or repair
 Setup-owned dependencies.
 
-## CraftMaster source-build dependency (all three native targets)
+## Optional published CraftMaster dependency
 
-`cinterforge-craftmaster` remains its own Git repository and maintains its native
-`Cinter` lifecycle, converter source, Java world scanner and Zoomify map pipeline.
-Terminal Setup clones missing `cinterforge-craftmaster` and its real
-`cinterforge-leveldb` sibling into the workspace; existing checkouts are
-**never reset, pulled, or overwritten**. No published CraftMaster ZIP or previous
-CraftMaster Stage output is required for Terminal Setup.
+CraftMaster's native C++ CLI is maintained in the separate
+`cinterforge-craftmaster` repository, not compiled from Terminal. Until its
+first complete release is published, Terminal Setup leaves it alone. When
+explicitly selected, **Setup alone** downloads the channel's signed R2 or
+public HTTPS manifest and each native ZIP, verifies size and SHA-256, extracts
+the staged assets, and rechecks local file hashes on subsequent Setup runs.
 
-Terminal Setup provisions the macOS compiler and the existing managed x86-64
-Debian/MinGW toolchain, then runs CraftMaster's native `setup` prerequisites.
-Terminal Build invokes CraftMaster's standalone `build` and its internal
-asset-copy `stage` for macOS, Linux x86-64 and Windows x86-64, validating all
-three native executable signatures and resource manifests. Terminal's own
-Stage still only installs completed unpacked Terminal build products; Publish
-alone packages and uploads release archives.
+```sh
+CINTER_CRAFTMASTER_CHANNEL=beta ./Cinter setup all
+# Use internal (private CDN) or release instead of beta when appropriate.
+```
 
-Every native Terminal release embeds the matching CraftMaster CLI and its
-checked source-produced resource closure under
-`Builds/CinterForgeCraftMaster/<platform>/`. The installed Terminal never
-requires the Git checkout and does not run another CraftMaster HTTP server.
-At runtime `bedrock` inventories local Java and Bedrock saves, and
-`bedrock <world>` invokes the bundled converter only when needed before using
-the established Bedrock server tab. Conversion tiles and intermediate maps
-remain in the existing managed runtime tree, not inside the final `Worlds/`
-output. The conversion never assembles a giant full-world PNG.
+The packages are stored under
+`<workspace>/Builds/CinterForgeTerminal/Dependencies/CraftMaster/{mac,linux,win}/`.
+`./Cinter setup win` selects only the Windows package. The shared Cloudflare
+contract is `CinterForgeCraftMaster/Distribution/` in the private developer
+bucket and public release bucket, and `CinterForgeCraftMaster/Distribution/beta/`
+in the public beta bucket. There is no new CraftMaster HTTP server or port.
+
+**The initial CLI advertises `java_to_bedrock=false` and cannot convert worlds.**
+Downloading its placeholder package is not acceptance of working world
+conversion or automatic inclusion in the installed Terminal app; native
+Build/Stage packaging and runtime job orchestration remain separate integration
+work. Do not enable a user-facing Convert action until the exporter is linked
+and accepted.
 
 ## Existing lifecycle tests and durable lifecycle logs
 
@@ -130,7 +131,7 @@ remains read-only and does not create logs. See [Lifecycle Testing](Lifecycle%20
 | **Inspect** | Identify source, platform/ABI, rights and licenses, required inputs and hashes; report readiness | Change an installed user environment as an implicit side effect |
 | **Setup** | Download/verify and **extract verified published ZIPs/DMGs only here**, into canonical sibling `Builds` when needed; provision pinned toolchains, **native Debian wixl/msitools toolchain inputs**; no smoke/acceptance tests | Leave Setup VMs running; shift extraction to Build or Stage |
 | **Build** | Compile and sign three unpacked native apps; record the unified DevTools input inventory directly in `Builds` | ZIP/UnZIP, download, Stage or restart |
-| **Stage** | Copy already-built unpacked files straight to `steamapps` and validate receipts; skip unchanged DevTools | ZIP/UnZIP, provision, download or rebuild |
+| **Stage** | Copy only built native application outputs to `steamapps`; do not stage DevTools, which stays at shared `Builds/Toolchains` | ZIP/UnZIP, provision, download or rebuild |
 | **Test** | Run `host/lifecycle/test.py` (12 real source/artifact/system smoke checks), Bedrock, guest Bash/VNC, native MSI compiler acceptance; record evidence | ZIP/UnZIP, provision or download |
 | **Publish** | Create the **Mac DMG, three ZIPs and Windows enterprise MSI only here**; notarize beta/release Mac DMGs; perform read-only CDN checks on dryrun, otherwise upload and verify | Run during ordinary `all all`, upload without an explicit destination or provision toolchains |
 | **Reboot** | Restart only named running component: `server`, `docker`, `colima` or `app` | Build, Setup, Stage, ZIP/UnZIP or Publish |
@@ -181,7 +182,7 @@ compiles the identical minimal installer schema with the actual application
 launcher filenames. No unsupported WiX UI extension or branding elements are used.
 Results are recorded in
 `Builds/Logs/CinterForgeTerminal/windows-msi-preflight.json` and
-`Builds/CinterForgeTerminal/Toolchains/WindowsMSI/msi-preflight.json`.
+`Builds/Toolchains/WindowsMSI/msi-preflight.json`.
 Setup fails if those real acceptance checks fail; a tool version probe alone
 cannot pass. Only Setup provisions or changes the OCI image; Publish checks the
 existing staged image and Setup acceptance receipt. The other patched Wine 11.15
@@ -228,7 +229,7 @@ On Apple Silicon, Setup also provisions pinned `msitools=0.106` through the
 existing micromamba-managed macOS prefix under `Builds`, without Homebrew or
 global installs. The subsequent Test phase compiles and inspects a native ARM64 smoke
 MSI and the full installer template. Once Test acceptance is recorded in
-`Builds/CinterForgeTerminal/Toolchains/WindowsMSI/mac-native-msi-preflight.json`,
+`Builds/Toolchains/WindowsMSI/mac-native-msi-preflight.json`,
 Publish uses native `wixl`, `msiinfo` and `msiextract`, avoiding Docker/QEMU for
 MSI assembly. Publish **never installs tools**. Older verified Test receipts, other
 hosts and native compiler failures use the already-provisioned Debian AMD64
@@ -400,6 +401,16 @@ Build creates `Builds/CinterForgeTerminal/Distribution/four-built.json`, contain
 ```
 
 Unchanged DevTools files are not copied again. Stage preserves unrelated files and existing user data and retains the macOS app replacement/rollback mechanism. It never downloads, extracts or creates an archive.
+
+**Shared macOS VM:** Stage does not copy or provision guest state. Repository Setup
+prepares the single `Builds/CFTVM/T/` guest. Once the user explicitly selects a
+Source directory for DevTools, both developer and installed Terminal use that
+same `Builds/CFTVM/T/`, protected by the existing exclusive Colima lifetime and
+VM mutation locks. No second `~/Library/Caches/CFTVM/T` disk is staged. VM
+state is not included in the application or DevTools distribution archive;
+only the corresponding verified toolchains are published. Normal lightweight
+app launch does not create `Builds` or start a guest.
+
 
 ## Reboot and application-owned guest lifetime
 

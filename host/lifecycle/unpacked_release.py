@@ -327,46 +327,78 @@ def _mac_install(builds: Path, root: Path, files: dict, *, target: str) -> int:
         shutil.rmtree(candidate, ignore_errors=True)
 
 
-def _verify_staged_devtools_for_native_app(steam: Path, release: str) -> None:
-    """Stage-time cross-product verification; no VM boot or provisioning.
+def _activate_staged_setup_devtools(builds: Path, steam: Path) -> None:
+    """Select Setup-owned DevTools once; never override an explicit install.
 
-    A signed installed app must resolve the *same* DevTools directory that
-    Stage just installed. Checking independent target receipts alone missed a
-    different hierarchy and let `all all` pass while the app used stale tools.
+    Stage mac copies the native app to Steam but never moves Toolchains or the
+    managed VM. The selection is a small durable configuration file under the
+    actual Steam library. `devtools install <path/to/source>` may later select
+    ANY other explicit Source folder, and subsequent stages must preserve it.
     """
-    up = _up()
-    sdk_release = up._steam_release_path(steam, 'devtools', release)
-    sdk = sdk_release / 'DevTools/Builds/CinterForgeTerminal/Toolchains'
-    required = (
-        'mac/env/bin/colima', 'mac/env/bin/docker',
-        'mac/lima/bin/limactl', 'mac/qemu/bin/qemu-system-x86_64',
-        'mac/qemu/cinter-qemu-receipt.json',
-        'Windows/MSYS2/usr/bin/bash.exe',
-        'Windows/MSYS2/usr/bin/msys-2.0.dll',
-        'WindowsCross/active-image.json',
-    )
-    for name in required:
-        path = sdk / name
-        if path.is_symlink() or not path.is_file():
-            raise RuntimeError('Stage installed DevTools unusable by Mac app: missing ' + str(path))
-    selection = json.loads((sdk / 'WindowsCross/active-image.json').read_text(encoding='utf-8'))
-    if (selection.get('schema') != 'cinterforge.terminal.active-guest-image.v1' or
-            selection.get('wine_version') != 'wine-11.15' or
-            not re.fullmatch(r'[a-f0-9]{64}', str(selection.get('dockerfile_sha256', ''))) or
-            not re.fullmatch(r'[a-f0-9]{64}', str(selection.get('archive_sha256', '')))):
-        raise RuntimeError('Staged DevTools active guest image receipt is invalid')
-    prefix = selection['dockerfile_sha256'][:16]
-    manifest = sdk / 'WindowsCross' / (prefix + '.json')
-    archive = sdk / 'WindowsCross' / (prefix + '.tar')
-    if (manifest.is_symlink() or archive.is_symlink() or
-            not manifest.is_file() or not archive.is_file()):
-        raise RuntimeError('Staged DevTools selected Windows/Linux OCI image is missing')
-    pinned = json.loads(manifest.read_text(encoding='utf-8'))
-    if any(selection.get(key) != pinned.get(key) for key in
-           ('dockerfile_sha256', 'image', 'archive_sha256', 'wine_version')):
-        raise RuntimeError('Staged DevTools active image does not match its pinned receipt')
-    print('[TERMINAL STAGE] PASS: release Mac app can discover its staged '
-          f'DevTools closure and selected Linux/Windows OCI image at {sdk_release}', flush=True)
+    if __import__('platform').system() != 'Darwin':
+        return
+    selection = steam / 'common/CinterForge/Applications/TerminalState/devtools-builds.json'
+    if (selection.is_symlink() or
+            (selection.exists() and not selection.is_file()) or
+            selection.parent.is_symlink()):
+        raise RuntimeError('Unsafe installed DevTools selection: ' + str(selection))
+    if selection.is_file():
+        try:
+            saved = json.loads(selection.read_text(encoding='utf-8'))
+            if (not isinstance(saved, dict) or
+                    saved.get('schema') != 'cinterforge.devtools-builds.v1' or
+                    not isinstance(saved.get('builds'), str) or
+                    not Path(saved['builds']).is_absolute() or
+                    Path(saved['builds']).name != 'Builds'):
+                raise ValueError('Invalid Source selection')
+        except (OSError, ValueError, TypeError) as error:
+            raise RuntimeError('Invalid installed DevTools selection: ' + str(selection)) from error
+        print('[TERMINAL STAGE] Preserved selected DevTools: ' + saved['builds'] +
+              ' (no VM or SDK copy)', flush=True)
+        return
+    # Stage only activates a verified Setup-owned developer workspace. An
+    # unverified root must not become an installed app's default toolchain.
+    setup_receipt = builds / 'Intermediates/CinterForgeTerminal/SetupCache/all.json'
+    if setup_receipt.is_symlink():
+        raise RuntimeError('Unsafe Setup DevTools receipt: ' + str(setup_receipt))
+    if not setup_receipt.is_file():
+        # DevTools are optional. Staging the lightweight Mac app must work
+        # without them; Stage cannot provision or infer an unverified SDK.
+        print('[TERMINAL STAGE] DevTools not provisioned; no Source selected', flush=True)
+        return
+    try:
+        record = json.loads(setup_receipt.read_text(encoding='utf-8'))
+        required = ('Toolchains/mac', 'Toolchains/WindowsCross', 'Toolchains/Windows',
+                    'Toolchains/WebView', 'Toolchains/WebView2')
+        outputs = record.get('outputs')
+        if (record.get('schema') != 'cinterforge.terminal.setup-dirty.v1' or
+                record.get('scope') != 'all' or
+                record.get('builds') != str(builds) or
+                not isinstance(outputs, dict) or
+                any(not isinstance(outputs.get(name), dict) or
+                    not isinstance(outputs[name].get('fingerprint'), str) or
+                    len(outputs[name]['fingerprint']) != 64 or
+                    not isinstance(outputs[name].get('files'), int) or
+                    outputs[name]['files'] < 1 for name in required)):
+            raise RuntimeError('Setup all receipt does not certify the unified toolchains')
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise RuntimeError('Invalid Setup DevTools receipt: ' + str(setup_receipt)) from error
+    sdk = builds / 'Toolchains'
+    required_files = ('mac/env/bin/colima', 'mac/env/bin/docker',
+                      'mac/lima/bin/limactl', 'mac/qemu/bin/qemu-system-x86_64',
+                      'mac/qemu/cinter-qemu-receipt.json',
+                      'Windows/MSYS2/usr/bin/bash.exe',
+                      'Windows/MSYS2/usr/bin/msys-2.0.dll',
+                      'WindowsCross/active-image.json')
+    for name in required_files:
+        file = sdk / name
+        if file.is_symlink() or not file.is_file():
+            raise RuntimeError('Cannot select missing Setup toolchain: ' + str(file))
+    _atomic_json(selection, {'schema': 'cinterforge.devtools-builds.v1',
+                             'builds': str(builds)})
+    os.environ['CINTER_BUILDS_ROOT'] = str(builds)
+    print('[TERMINAL STAGE] DevTools selected: ' + str(sdk) +
+          ' (one Setup-owned VM; no VM or SDK copy)', flush=True)
 
 
 def stage_four(builds: Path, *, release: str | None = None,
@@ -376,9 +408,10 @@ def stage_four(builds: Path, *, release: str | None = None,
     release = release or up.HOST_RELEASE
     builds = _safe_builds(builds)
     record = _load(builds, release)
-    selected = targets or up.FOUR_TARGETS
-    if not selected or not set(selected) <= set(up.FOUR_TARGETS) or len(set(selected)) != len(selected):
-        raise ValueError('Invalid Stage targets')
+    selected = targets or ('mac', 'linux', 'win')
+    if (not selected or not set(selected) <= {'mac', 'linux', 'win'} or
+            len(set(selected)) != len(selected)):
+        raise ValueError('Stage installs native apps only; DevTools live in Builds/Toolchains')
     steam = up.steamapps_root(steamapps)
     for target in selected:
         info = record['targets'][target]
@@ -439,11 +472,15 @@ def stage_four(builds: Path, *, release: str | None = None,
                                      'target': target, 'build_fingerprint': info['fingerprint'],
                                      'installed_state': state})
         print(f'[TERMINAL STAGE] {target}: {changed} refreshed files directly from Builds', flush=True)
-    # Check the cross-target contract after the SDK target is installed. Keep
-    # Stage responsible only for placement/integrity; real guest boot belongs
-    # to Test, and no SDK files are copied to a second Builds location.
-    if 'mac' in selected and 'devtools' in selected:
-        _verify_staged_devtools_for_native_app(steam, release)
+    # A full developer Stage activates the same Setup-owned DevTools in the
+    # installed Mac app. The only write is a small selection in its Steam state.
+    # Target-only stages do not implicitly change an explicit selection.
+    if 'mac' in selected:
+        _activate_staged_setup_devtools(builds, steam)
+    # VM state has one canonical owner at Builds/CFTVM/T. Stage never clones,
+    # modifies, starts, or stops that VM. Both developer and installed Terminal
+    # resolve the same workspace after DevTools is explicitly installed.
+    # Build, Stage and Test consume the Setup-provisioned toolchains unchanged.
     return steam / 'common/CinterForge/Applications'
 
 
@@ -496,7 +533,7 @@ def status_four(builds: Path, *, release: str | None = None, steamapps: Path | N
     except (OSError, RuntimeError, ValueError):
         steam = None
     states = {}
-    for target in up.FOUR_TARGETS:
+    for target in ('mac', 'linux', 'win'):
         info = record.get('targets', {}).get(target, {})
         root = up._steam_release_path(steam, target, release) if steam else None
         reason = None
@@ -766,9 +803,9 @@ def setup_restore_if_needed(builds: Path, *, release: str | None = None,
     up = _up()
     release = release or up.HOST_RELEASE
     builds = _safe_builds(builds)
-    required = (builds / 'CinterForgeTerminal/Toolchains/mac/env/bin/colima',
-                builds / 'CinterForgeTerminal/Toolchains/Windows/MSYS2/usr/bin/bash.exe',
-                builds / 'CinterForgeTerminal/Toolchains/WindowsCross')
+    required = (builds / 'Toolchains/mac/env/bin/colima',
+                builds / 'Toolchains/Windows/MSYS2/usr/bin/bash.exe',
+                builds / 'Toolchains/WindowsCross')
     if all(path.exists() and not path.is_symlink() for path in required):
         return {'source': 'existing-provisioned-Builds', 'downloaded': False}
     destination = builds / 'CinterForgeTerminal/Distribution'

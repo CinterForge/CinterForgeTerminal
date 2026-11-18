@@ -58,121 +58,92 @@ from runtime import CinterForgeSettings as _CinterForgeSettings
 
 
 def sdk_root() -> Path | None:
-    """Locate provisioned developer tools or a receipt-backed installed SDK.
+    """Select one Setup-owned SDK at Builds/Toolchains, never scan fallbacks.
 
-    Developer Build & Run uses sibling Builds directly, as Setup and Test do.
-    Installed apps still require the SDK installation receipt. The selected
-    OCI image is verified separately when first loaded into Docker.
+    None means only that no Source was selected. Any incomplete/incorrect
+    selected installation is a diagnostic failure, not "not installed".
     """
-    from runtime import CinterForgeDevTools as _CinterForgeDevTools
-    from runtime import CinterForgeSettings as _CinterForgeSettings
-    if os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'developer':
-        # Xcode Build & Run uses the exact sibling Builds provisioned by Setup.
-        # `./Cinter all all` stages DevTools to Steam, NOT a downloaded-SDK
-        # receipt in Builds/CinterForgeTerminal/DevTools/<release>. Requiring
-        # that receipt (or falling back to a potentially stale Steam SDK)
-        # prevented the native Xcode app from starting the already-working
-        # Linux/Windows VM, Bash and VNC guests.
-        supplied = os.environ.get('CINTER_BUILDS_ROOT', '')
-        builds = Path(supplied).expanduser() if supplied else None
-        if (builds is None or not builds.is_absolute() or builds.name != 'Builds'
-                or builds.is_symlink() or not builds.is_dir()):
-            return None
-        sdk = builds.resolve(strict=True) / 'CinterForgeTerminal/Toolchains'
-    else:
-        # Prefer the SDK installed by the same Stage as this native application.
-        # Previously this was only a legacy fallback behind a user-selected
-        # Builds receipt. Prefer the exact Stage product for a staged release;
-        # Test also verifies the selected SDK rather than inferring it.
-        release = _CinterForgeDevTools._devtools_release()
-        staged = _CinterForgeDevTools._staged_devtools_destination(release)
-        candidates: list[tuple[Path, bool, bool]] = []
-        if staged is not None:
-            candidates.append((staged, True, True))
-        # A separately downloaded application can still use the explicitly
-        # installed, receipt-backed Builds SDK. Never create Builds on launch.
-        try:
-            candidates.append((_CinterForgeDevTools._devtools_destination(release), False, False))
-        except (RuntimeError, OSError, ValueError):
-            # A malformed user Builds preference must not hide the correctly
-            # staged SDK that this installed release owns.
-            pass
-        legacy = _CinterForgeDevTools._legacy_devtools_destination(release)
-        if legacy is not None and legacy != staged:
-            candidates.append((legacy, True, False))
-        sdk = None
-        for destination, steam_layout, stage_managed in candidates:
-            receipt = destination / 'stage-receipt.json'
-            if (destination.is_symlink() or not destination.is_dir() or
-                    receipt.is_symlink() or not receipt.is_file()):
-                continue
+    from runtime import CinterForgeDevTools as devtools
+    developer = os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'developer'
+    if not developer and not os.environ.get('CINTER_BUILDS_ROOT', '').strip():
+        selection = devtools._devtools_builds_pin()
+        if selection is None:
+            return None  # DevTools never selected; lightweight Terminal only.
+        if selection.is_symlink():
+            raise RuntimeError('Unsafe DevTools Source selection: ' + str(selection))
+        if not selection.exists():
+            return None  # No Source selected; do not create one at startup.
+        if not selection.is_file():
+            raise RuntimeError('Invalid DevTools Source selection: ' + str(selection))
+    builds = devtools._devtools_builds_root()  # EXACTLY one selected Builds.
+    if not developer:
+        installed = devtools._devtools_destination(devtools._devtools_release())
+        receipt = installed / 'stage-receipt.json'
+        public_install = False
+        if receipt.is_symlink():
+            raise RuntimeError('Redirected DevTools installation receipt: ' + str(receipt))
+        if receipt.is_file():
             try:
                 record = json.loads(receipt.read_text(encoding='utf-8'))
-            except (OSError, ValueError, TypeError):
-                continue
-            if (record.get('schema') not in (
-                    _CinterForgeSettings.FOUR_SCHEMA, 'cinterforge.terminal.unpacked-build.v1') or
-                    record.get('target') != 'devtools' or record.get('release') != release):
-                continue
-            # Stage-managed SDKs require the complete Build fingerprint and
-            # installed-file inventory; consented public downloads use an
-            # artifact receipt sealed by their own manifest instead.
-            if stage_managed and (
-                    not isinstance(record.get('build_fingerprint'), str) or
-                    not isinstance(record.get('installed_state'), str)):
-                continue
-            if not stage_managed and not (
-                    record.get('source') == 'public' and
-                    isinstance(record.get('artifact'), dict) or
-                    isinstance(record.get('build_fingerprint'), str)):
-                continue
-            candidate = (destination / 'DevTools/Builds/CinterForgeTerminal/Toolchains'
-                         if steam_layout else
-                         destination.parents[2] / 'CinterForgeTerminal/Toolchains')
-            if candidate.is_dir() and not candidate.is_symlink():
-                sdk = candidate
-                break
-        if sdk is None:
-            return None
+            except (OSError, ValueError, TypeError) as error:
+                raise RuntimeError('Malformed DevTools installation receipt: ' + str(receipt)) from error
+            if not isinstance(record, dict):
+                raise RuntimeError('Malformed DevTools installation receipt: ' + str(receipt))
+            public_install = (record.get('schema') == _CinterForgeSettings.FOUR_SCHEMA and
+                              record.get('target') == 'devtools' and
+                              record.get('release') == devtools._devtools_release() and
+                              record.get('source') == 'public' and
+                              isinstance(record.get('artifact'), dict))
+            if not public_install:
+                raise RuntimeError('Unrecognized DevTools installation receipt: ' + str(receipt))
+        if not public_install and not devtools._setup_receipt_verifies_toolchains(builds):
+            raise RuntimeError('Selected Builds lacks the completed Setup all toolchain receipt: ' +
+                               str(builds / 'Intermediates/CinterForgeTerminal/SetupCache/all.json'))
+    sdk = builds / 'Toolchains'
+    if sdk.is_symlink() or not sdk.is_dir():
+        raise RuntimeError('Selected Toolchains missing or redirected: ' + str(sdk))
     needed = ('mac/env/bin/colima', 'mac/env/bin/docker', 'mac/lima/bin/limactl',
               'mac/qemu/bin/qemu-img', 'mac/qemu/bin/qemu-system-x86_64',
+              'mac/qemu/cinter-qemu-receipt.json',
               'Windows/MSYS2/usr/bin/bash.exe', 'Windows/MSYS2/usr/bin/msys-2.0.dll')
-    if any(not (sdk / name).is_file() or (sdk / name).is_symlink() for name in needed):
-        return None
-    if (not (sdk / 'mac/qemu/share/qemu').is_dir() or
-            (sdk / 'mac/qemu/share/qemu').is_symlink() or
-            not (sdk / 'mac/qemu/cinter-qemu-receipt.json').is_file()):
-        return None
-    for kind in ('WindowsCross',):
-        directory = sdk / kind
-        if not directory.is_dir() or directory.is_symlink():
-            return None
-        valid = False
-        for manifest in directory.glob('*.json'):
-            if manifest.is_symlink():
-                continue
-            try:
-                data = json.loads(manifest.read_text(encoding='utf-8'))
-            except (OSError, ValueError):
-                continue
-            digest, sha, image = (data.get('dockerfile_sha256'),
-                                  data.get('archive_sha256'), data.get('image'))
-            # An older DevTools archive may contain WineHQ instead of MSYS2's
-            # patched Wine. Never consider that Windows closure runtime-ready.
-            if data.get('wine_version') != 'wine-11.15':
-                continue
-            # Linux and Windows share the one pinned WindowsCross image;
-            # reject obsolete LinuxSample-only SDKs instead of asking the user
-            # to reinstall a valid unified package on each launch.
-            if (isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest) and
-                    isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{64}', sha) and
-                    isinstance(image, str) and image and
-                    (directory / (digest[:16] + '.tar')).is_file() and
-                    not (directory / (digest[:16] + '.tar')).is_symlink()):
-                valid = True
-                break
-        if not valid:
-            return None
+    for name in needed:
+        file = sdk / name
+        if file.is_symlink() or not file.is_file():
+            raise RuntimeError('Selected Toolchains missing or unsafe file: ' + str(file))
+    qemu = sdk / 'mac/qemu/share/qemu'
+    if qemu.is_symlink() or not qemu.is_dir():
+        raise RuntimeError('Selected QEMU data directory missing: ' + str(qemu))
+    # Exactly ONE OCI image. No globbing historical WindowsCross receipts.
+    image_dir = sdk / 'WindowsCross'
+    selector = image_dir / 'active-image.json'
+    if image_dir.is_symlink() or not image_dir.is_dir() or selector.is_symlink() or not selector.is_file():
+        raise RuntimeError('Missing single Setup-selected WindowsCross image: ' + str(selector))
+    try:
+        active = json.loads(selector.read_text(encoding='utf-8'))
+    except (OSError, ValueError, TypeError) as error:
+        raise RuntimeError('Invalid selected WindowsCross image: ' + str(selector)) from error
+    if not isinstance(active, dict):
+        raise RuntimeError('Invalid selected WindowsCross image: ' + str(selector))
+    digest = active.get('dockerfile_sha256')
+    archive_sha = active.get('archive_sha256')
+    if (active.get('schema') != 'cinterforge.terminal.active-guest-image.v1' or
+            active.get('wine_version') != 'wine-11.15' or
+            not isinstance(digest, str) or not re.fullmatch(r'[a-f0-9]{64}', digest) or
+            not isinstance(archive_sha, str) or not re.fullmatch(r'[a-f0-9]{64}', archive_sha) or
+            not isinstance(active.get('image'), str)):
+        raise RuntimeError('Unsupported selected WindowsCross image: ' + str(selector))
+    receipt = image_dir / (digest[:16] + '.json')
+    archive = image_dir / (digest[:16] + '.tar')
+    if (receipt.is_symlink() or not receipt.is_file() or
+            archive.is_symlink() or not archive.is_file()):
+        raise RuntimeError('Selected WindowsCross image receipt/archive missing: ' + str(receipt))
+    try:
+        manifest = json.loads(receipt.read_text(encoding='utf-8'))
+    except (OSError, ValueError, TypeError) as error:
+        raise RuntimeError('Invalid WindowsCross image receipt: ' + str(receipt)) from error
+    if not isinstance(manifest, dict) or any(manifest.get(key) != active.get(key) for key in
+           ('dockerfile_sha256', 'archive_sha256', 'wine_version', 'image')):
+        raise RuntimeError('Selected WindowsCross image does not match its receipt: ' + str(receipt))
     return sdk
 
 
@@ -186,71 +157,41 @@ def _image_archive(sdk: Path, kind: str) -> tuple[Path, str]:
     # Wine/MSYS2 Windows tools. Two UI platforms, ONE running container.
     folder = sdk / 'WindowsCross'
     selected_file = folder / 'active-image.json'
-    if selected_file.exists():
-        # DevTools Build commits one exact OCI image. Steam Stage can retain
-        # older unowned files, so sorting *.json by name is not deterministic.
-        if selected_file.is_symlink():
-            raise RuntimeError('Active DevTools guest image selection is redirected')
-        try:
-            active = json.loads(selected_file.read_text(encoding='utf-8'))
-        except (OSError, ValueError) as exc:
-            raise RuntimeError('Invalid active DevTools guest image selector') from exc
-        if (active.get('schema') != 'cinterforge.terminal.active-guest-image.v1' or
-                active.get('wine_version') != 'wine-11.15' or
-                not re.fullmatch(r'[0-9a-f]{64}', str(active.get('dockerfile_sha256', '')))):
-            raise RuntimeError('Unsupported active DevTools guest image selector')
-        digest = active['dockerfile_sha256']
-        receipt_file = folder / (digest[:16] + '.json')
-        tar = folder / (digest[:16] + '.tar')
-        if receipt_file.is_symlink() or tar.is_symlink() or not tar.is_file():
-            raise RuntimeError('Selected DevTools guest OCI image is missing or redirected')
-        try:
-            receipt = json.loads(receipt_file.read_text(encoding='utf-8'))
-        except (OSError, ValueError) as exc:
-            raise RuntimeError('Cannot read selected DevTools OCI manifest') from exc
-        if (any(receipt.get(k) != active.get(k) for k in
-                ('dockerfile_sha256', 'image', 'archive_sha256', 'wine_version')) or
-                not isinstance(active.get('image'), str) or
-                not active['image'].startswith('cinterforge-terminal-windows-cross:')):
-            raise RuntimeError('Active OCI image does not match its sealed manifest')
-        checksum = hashlib.sha256()
-        with tar.open('rb') as src:
-            for block in iter(lambda: src.read(4 * 1024 * 1024), b''):
-                checksum.update(block)
-        if checksum.hexdigest() != active['archive_sha256']:
-            raise RuntimeError('Selected DevTools OCI image differs from its sealed SHA-256')
-        return tar, active['image']
-    # Legacy DevTools release (no explicit selection). New releases MUST
-    # include the active selector to prevent a stale-image regression.
-    receipts = sorted(folder.glob('*.json'))
-    for receipt in receipts:
-        if receipt.is_symlink():
-            continue
-        try:
-            record = json.loads(receipt.read_text(encoding='utf-8'))
-        except (OSError, ValueError):
-            continue
-        # Archive selection must not silently fall back to an old stock-Wine
-        # image when multiple valid hashes remain in installed DevTools.
-        if record.get('wine_version') != 'wine-11.15':
-            continue
-        digest = record.get('dockerfile_sha256', '')
-        name = record.get('image')
-        tar = folder / (str(digest)[:16] + '.tar')
-        if not tar.is_file() or tar.is_symlink() or not name or '/' in str(name).split(':')[0]:
-            continue
-        expected = record.get('archive_sha256')
-        if not isinstance(expected, str) or len(expected) != 64:
-            continue
-        checksum = hashlib.sha256()
-        with tar.open('rb') as src:
-            for block in iter(lambda: src.read(4 * 1024 * 1024), b''):
-                checksum.update(block)
-        if checksum.hexdigest() != expected:
-            raise RuntimeError('DevTools OCI image differs from its recorded SHA-256: ' + str(tar))
-        return tar, str(name)
-    raise RuntimeError(f'Unified DevTools has no verified {kind} container image')
-
+    if not selected_file.is_file() or selected_file.is_symlink():
+        raise RuntimeError("Missing single Setup-owned WindowsCross active-image.json selector at " + str(selected_file))
+    # DevTools Build commits one exact OCI image. Steam Stage can retain
+    # older unowned files, so sorting *.json by name is not deterministic.
+    if selected_file.is_symlink():
+        raise RuntimeError('Active DevTools guest image selection is redirected')
+    try:
+        active = json.loads(selected_file.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('Invalid active DevTools guest image selector') from exc
+    if (active.get('schema') != 'cinterforge.terminal.active-guest-image.v1' or
+            active.get('wine_version') != 'wine-11.15' or
+            not re.fullmatch(r'[0-9a-f]{64}', str(active.get('dockerfile_sha256', '')))):
+        raise RuntimeError('Unsupported active DevTools guest image selector')
+    digest = active['dockerfile_sha256']
+    receipt_file = folder / (digest[:16] + '.json')
+    tar = folder / (digest[:16] + '.tar')
+    if receipt_file.is_symlink() or tar.is_symlink() or not tar.is_file():
+        raise RuntimeError('Selected DevTools guest OCI image is missing or redirected')
+    try:
+        receipt = json.loads(receipt_file.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('Cannot read selected DevTools OCI manifest') from exc
+    if (any(receipt.get(k) != active.get(k) for k in
+            ('dockerfile_sha256', 'image', 'archive_sha256', 'wine_version')) or
+            not isinstance(active.get('image'), str) or
+            not active['image'].startswith('cinterforge-terminal-windows-cross:')):
+        raise RuntimeError('Active OCI image does not match its sealed manifest')
+    checksum = hashlib.sha256()
+    with tar.open('rb') as src:
+        for block in iter(lambda: src.read(4 * 1024 * 1024), b''):
+            checksum.update(block)
+    if checksum.hexdigest() != active['archive_sha256']:
+        raise RuntimeError('Selected DevTools OCI image differs from its sealed SHA-256')
+    return tar, active['image']
 
 def _lima_boot_log_directory() -> Path | None:
     """Store native Colima boot evidence beside the user's other Terminal logs."""
@@ -275,7 +216,8 @@ def _lima_boot_log_directory() -> Path | None:
 
 def _follow_lima_boot_diagnostics(env: dict[str, str], stop: threading.Event,
                                   report: Callable[[str], None],
-                                  archive: Path | None) -> None:
+                                  archive: Path | None,
+                                  boot_failures: dict[str, int] | None = None) -> None:
     """Forward *new* Lima host-agent and serial output while Colima waits for SSH.
 
     These files are where the actual guest/kernel/SSH failure appears; Colima's
@@ -328,6 +270,17 @@ def _follow_lima_boot_diagnostics(env: dict[str, str], stop: threading.Event,
                 for line in lines[-160:]:
                     clean = line.decode('utf-8', errors='replace').strip()[:1200]
                     if clean:
+                        # Keep only first-party guest service evidence. The
+                        # installed VM's failing SSH must not silently consume
+                        # the entire Colima startup budget. A failed
+                        # cloud-final alone is NOT sufficient evidence.
+                        if boot_failures is not None and name.startswith('serial'):
+                            if 'Failed to start ssh.service' in clean:
+                                boot_failures['ssh'] += 1
+                            elif 'Failed to start dnsmasq.service' in clean:
+                                boot_failures['dnsmasq'] += 1
+                            elif 'Failed to start cloud-final.service' in clean:
+                                boot_failures['cloud_final'] += 1
                         report('[DEVTOOLS BOOT ' + name + '] ' + clean)
                         if ('cloud-final.service' in clean and
                                 ('Failed to start' in clean or '[FAILED]' in clean)):
@@ -396,6 +349,7 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str,
     diagnostic_stop = threading.Event()
     diagnostic_thread = None
     archive = None
+    boot_failures = {'ssh': 0, 'dnsmasq': 0, 'cloud_final': 0}
     if title == 'Starting managed guest VM with host volumes':
         try:
             archive = _lima_boot_log_directory()
@@ -405,7 +359,7 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str,
             report('[DEVTOOLS] Could not open VM diagnostics folder: ' + str(error))
         diagnostic_thread = threading.Thread(
             target=_follow_lima_boot_diagnostics,
-            args=(env, diagnostic_stop, report, archive),
+            args=(env, diagnostic_stop, report, archive, boot_failures),
             daemon=True, name='cinter-lima-boot-log')
         diagnostic_thread.start()
         report('[DEVTOOLS] Lima boot diagnostics: ' + str(archive) if archive else
@@ -433,6 +387,22 @@ def _run_checked(command: list[str], env: dict[str, str], *, title: str,
                         remaining = timeout - elapsed
                         if remaining <= 0:
                             raise subprocess.TimeoutExpired(command, timeout)
+                        # Only abort a conclusively unhealthy *installed*
+                        # guest, after the usual healthy Colima/SSH startup
+                        # interval. Do not penalize successful slow boots or
+                        # developer lifecycle VMs. Preserve the diagnostics;
+                        # the native guest owner stops its own failed VM.
+                        if (os.environ.get('CINTER_TERMINAL_RUNTIME_MODE') == 'installed'
+                                and title == 'Starting managed guest VM with host volumes'
+                                and elapsed >= 90
+                                and boot_failures['ssh'] >= 2
+                                and boot_failures['dnsmasq'] >= 1
+                                and boot_failures['cloud_final'] >= 1):
+                            raise RuntimeError(
+                                'Installed t guest failed SSH, dnsmasq and cloud-final; '
+                                'Colima cannot reach readiness. Preserving the '
+                                'app-owned VM disk for offline repair. '
+                                'Captured guest boot logs: ' + str(archive or '(Server Log)'))
                         for key, _ in selector.select(timeout=min(1, remaining)):
                             chunk = os.read(key.fd, 65536)
                             if not chunk:

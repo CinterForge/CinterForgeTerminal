@@ -23,7 +23,7 @@ if [[ ! -d "$BUILDS" ]]; then
 fi
 # Xcode does not inherit the interactive shell's PATH. Use the toolchain
 # installed by Setup for the native build and authored-resource refresh.
-export PATH="$BUILDS/CinterForgeTerminal/Toolchains/mac/env/bin:$PATH"
+export PATH="$BUILDS/Toolchains/mac/env/bin:$PATH"
 # An ordinary Xcode Build or Run is ALWAYS the local source-edit loop. Xcode
 # uses ACTION=install for Archive, which is the only Xcode action that needs
 # the signed Release producer. Selecting Release manually for Run must not
