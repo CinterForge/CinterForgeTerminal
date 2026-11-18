@@ -340,7 +340,38 @@ CinterForgeState.reconnectTab = async function reconnectTab() {
 CinterForgeState.send = function send(data) {
     if (CinterForgeState.activeTab?.kind === 'if' || CinterForgeState.activeTab?.kind === 'discord') return;
     const tab = CinterForgeState.activeTab;
-    if (tab?.session) CinterForgeState.terminalSocketCommand(tab, {type:'input', data});
+    if (!tab?.session) return;
+    if (tab.kind !== 'bedrock') {
+      CinterForgeState.terminalSocketCommand(tab, {type:'input', data});
+      return;
+    }
+    // BDS has no interactive shell prompt. Edit a line in the WebView and
+    // submit exactly one whole command to the existing server console API.
+    // This prevents asynchronous server output from corrupting typed input.
+    let draft = tab.bedrockDraft || '';
+    for (const char of String(data)) {
+      if (char === '\r' || char === '\n') {
+        const command = draft.trim();
+        draft = '';
+        if (!command) continue;
+        tab.display.push('\r\nminecraft> ' + command + '\r\n');
+        const previous = tab.bedrockCommands || Promise.resolve();
+        tab.bedrockCommands = previous.catch(() => {}).then(() =>
+          CinterForgeState.api('/api/bedrock/command', {command})
+        ).catch(error => {
+          if (!tab.closed) CinterForgeState.notice('Minecraft: ' + error.message);
+        });
+      } else if (char === '\x7f' || char === '\b') {
+        draft = Array.from(draft).slice(0, -1).join('');
+      } else if (char >= ' ' && char !== '\x7f' && draft.length < 2048) {
+        draft += char;
+      }
+    }
+    tab.bedrockDraft = draft;
+    // An unsubmitted command is visible IN the console, never in the status
+    // bar. It is presentation-only; Enter alone sends it to the server.
+    if (CinterForgeState.activeTab === tab)
+      CinterForgeState.$('terminal-output').dataset.bedrockEcho = 'minecraft> ' + draft;
   };
 
   // Original source lines 2064–2072

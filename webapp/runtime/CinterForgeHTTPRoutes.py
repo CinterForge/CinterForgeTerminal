@@ -456,7 +456,7 @@ class CinterForgeHTTPRoutes:
                     self.server.lagomorph_requests -= 1
             self._json(200, {'open': ready, 'profile': 'quadra-650' if ready else None})
             return
-        if path in ('/api/bedrock/log', '/api/bedrock/events', '/api/bedrock/status', '/api/bedrock/worlds', '/api/bedrock/lan') and self.server.bedrock is None:
+        if path in ('/api/bedrock/log', '/api/bedrock/events', '/api/bedrock/status', '/api/bedrock/worlds', '/api/bedrock/lan', '/api/bedrock/access') and self.server.bedrock is None:
             if not self._authorized():
                 self._json(403, {'error': 'not authorized'})
             else:
@@ -513,6 +513,12 @@ class CinterForgeHTTPRoutes:
                 self._json(403, {'error': 'not authorized'})
                 return
             self._json(200, self.server.bedrock.lan_discovery())
+            return
+        if path == '/api/bedrock/access':
+            if not self._authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            self._json(200, self.server.bedrock.access.snapshot())
             return
         if path == '/api/bedrock/worlds':
             if not self._authorized():
@@ -913,6 +919,10 @@ class CinterForgeHTTPRoutes:
                 return
             if route == '/api/bedrock/path':
                 self._json(200, self.server.bedrock.set_world_path(body.get('path', '')))
+                return
+            if route == '/api/bedrock/access':
+                self._json(200, self.server.bedrock.access.change(
+                    body.get('kind'), body.get('action'), body.get('name')))
                 return
             if route == '/api/bedrock/command':
                 self._json(200, self.server.bedrock.console_command(body.get('command')))

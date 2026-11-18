@@ -1,0 +1,37 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "CinterForge Server Status Relay",
+    "description": "Relay in-world chat and explicit script events to the Terminal status bar",
+    "uuid": "a7d28648-798d-4328-a91e-917b65aa2fea",
+    "version": [
+      1,
+      0,
+      0
+    ],
+    "min_engine_version": [
+      1,
+      21,
+      0
+    ]
+  },
+  "modules": [
+    {
+      "type": "script",
+      "language": "javascript",
+      "entry": "scripts/main.js",
+      "uuid": "d97fa921-1d6d-48f7-9875-3c70c7407ce1",
+      "version": [
+        1,
+        0,
+        0
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "module_name": "@minecraft/server",
+      "version": "2.0.0"
+    }
+  ]
+}

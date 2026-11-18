@@ -65,14 +65,26 @@ def _bounded_size(cols: int, rows: int) -> tuple[int, int]:
 
 
 def _windows_msys2_root(writable_root: Path) -> Path:
-    """Read exactly the selected shared Builds/Toolchains/Windows/MSYS2."""
-    from runtime import CinterForgeDevTools as devtools
-    builds = devtools._devtools_builds_root()
-    root = builds / 'Toolchains/Windows/MSYS2'
-    if root.is_symlink() or not (root / 'usr/bin/bash.exe').is_file():
-        raise RuntimeError('Windows MSYS2 missing at ' + str(root) +
-                           '; install DevTools in the selected Builds workspace')
-    return root
+    """Read Bash from immutable packaged resources, not the Steam state tree.
+
+    The downloaded Windows application bundles its MSYS2 runtime under its
+    read-only Builds/ resources directory; native session state must instead
+    be written under the selected steamapps/TerminalState directory. A source
+    lifecycle run may use its provisioned developer MSYS2 closure directly.
+    """
+    from runtime import CinterForgeSettings as _CinterForgeSettings
+    for ancestor in _CinterForgeSettings.ASSETS.resolve().parents:
+        if ancestor.name == 'Builds':
+            candidate = ancestor / 'CinterForgeTerminal/Runtime/MSYS2'
+            if (candidate / 'usr/bin/bash.exe').is_file():
+                return candidate
+    for relative in ('CinterForgeTerminal/Runtime/MSYS2',
+                     'CinterForgeTerminal/Toolchains/Windows/MSYS2'):
+        candidate = writable_root / relative
+        if (candidate / 'usr/bin/bash.exe').is_file():
+            return candidate
+    raise RuntimeError('Packaged Windows MSYS2 UCRT64 Bash is missing; '
+                       'rebuild the Windows application with the complete runtime')
 
 
 def _shell_command(system: str, scripts: Path, builds: Path | None = None) -> list[str]:
@@ -123,7 +135,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     python = str(Path(sys.executable).resolve())
     functions = '\n'.join(
         f'{name}() {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in ('help', 'debugger', 'bedrock', 'play', 'lagomorph', 'infinite-mac', 'discord', 'setpass', 'code', 'htmlmenus', 'craftmaster'))
+        for name in ('help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'discord', 'setpass', 'code', 'htmlmenus', 'craftmaster'))
     # These exact source filenames are the shell commands. Load the bundled
     # Terminal manifest; no sibling WebApp source or story package is required.
     catalog = json.loads((_CinterForgeSettings.ASSETS / 'data/if_titles.json').read_text(encoding='utf-8'))
@@ -139,16 +151,17 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
         raise RuntimeError('Duplicate IF commands')
     functions += '\n' + '\n'.join(
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in ['games', 'stories'])
-    # All games and stories are selected using the single play command.
-    reserved = {'help', 'debugger', 'bedrock', 'lagomorph', 'play', 'games',
-                'stories', 'discord', 'setpass', 'code', 'htmlmenus',
-                'craftmaster', 'devtools'}
-    if set(story_names) & reserved or set(_mac_catalog()) & reserved:
-        raise RuntimeError('Game or story title collides with a Terminal command')
-    # Explicit shared workspace selection; never copy SDK into Steam.
-    functions += ('\ndevtools() { ' + shlex.quote(python) + ' '
-                  + shlex.quote(str(cli)) + ' --terminal-cli devtools "$@"; }')
+        for name in ['games', 'stories'] + story_names)
+    mac_names = list(_mac_catalog())
+    if set(mac_names) & set(['help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories', 'install', 'craftmaster'] + story_names):
+        raise RuntimeError('Mac game command collides with existing Terminal command')
+    functions += '\n' + '\n'.join(
+        f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
+        for name in mac_names)
+    # only the explicitly requested `install devtools` native-app command.
+    functions += ('\ninstall() { if [ "$1" = devtools ]; then '
+                  + shlex.quote(python) + ' ' + shlex.quote(str(cli))
+                  + ' --terminal-cli install "$@"; else command install "$@"; fi; }')
     # The package controls MSYSTEM, UCRT64 PATH and HOME. Sourcing the global
     # /etc/profile on every interactive Session reruns MSYS2 first-start hooks
     # (pacman-key, /dev/shm and /dev/mqueue setup), even for read-only bundles.
@@ -399,6 +412,11 @@ class CinterForgeTerminalSession:
                     break
             except (OSError, EOFError):
                 break
+            # Never acquire the Bedrock manager's lock while holding this
+            # Session's output lock: shutdown takes them in the other order.
+            bedrock_manager = getattr(self, 'manager', None)
+            if bedrock_manager is not None and getattr(self, 'kind', None) == 'bedrock':
+                bedrock_manager.observe_console_output(data)
             with self.lock:
                 if self.output_log is not None:
                     try:
@@ -406,8 +424,12 @@ class CinterForgeTerminalSession:
                         self.output_log.flush()
                     except (OSError, ValueError):
                         pass  # The terminal itself remains readable if logging fails.
-                self.output.append(data)
-                self.output_size += len(data)
+                # Bedrock keeps the complete native VM trace in its persistent
+                # log, but presents a *console*, not the VM's kernel debugger.
+                visible = self._visible_output(data)
+                if visible:
+                    self.output.append(visible)
+                    self.output_size += len(visible)
                 # Bound memory on a stalled browser, never allow unbounded output.
                 while self.output_size > _CinterForgeSettings.MAX_OUTPUT and self.output:
                     self.output_size -= len(self.output.popleft())
@@ -415,6 +437,10 @@ class CinterForgeTerminalSession:
         with self.lock:
             self.closed = True
             self.lock.notify_all()
+
+    def _visible_output(self, data: bytes) -> bytes:
+        """Default terminal transports every PTY byte without filtering."""
+        return data
 
     def poll(self, wait_ms: int) -> tuple[bytes, bool]:
         with self.lock:
@@ -481,6 +507,10 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
     """
     def __init__(self, manager, builds: Path, system: str, cols: int, rows: int,
                  *, url: str, token: str):
+        # This state must exist before the parent starts the PTY reader thread.
+        self._bedrock_console_live = False
+        self._bedrock_console_announced = False
+        self._bedrock_boot_buffer = b''
         command, extra = manager._run_command()  # Same run-mac-bds.sh as acceptance.
         if extra:
             raise RuntimeError('Bedrock Session needs an unsupported environment override')
@@ -512,6 +542,45 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
             # Never abandon a VM if its owner/watchdog fails to initialize.
             self.close()
             raise
+
+    def _visible_output(self, data: bytes) -> bytes:
+        """Quiet VM boot chatter in the tab; retain every byte in the log.
+
+        Once the actual Bedrock `Server started.` marker arrives, switch to
+        byte-exact PTY streaming. That keeps live command echo, output and
+        interactive input working without introducing a second console.
+        """
+        if self._bedrock_console_live:
+            return data
+        heading = b''
+        if not self._bedrock_console_announced:
+            self._bedrock_console_announced = True
+            heading = (b'[Bedrock] Starting server. Full VM boot output is in '
+                       b'the persistent Bedrock log.\r\n')
+        pending = self._bedrock_boot_buffer + data
+        marker = pending.find(b'Server started.')
+        if marker != -1:
+            end = pending.find(b'\n', marker)
+            if end == -1:
+                # Wait for a complete line before switching to raw output.
+                self._bedrock_boot_buffer = pending[-4096:]
+                return heading
+            self._bedrock_console_live = True
+            self._bedrock_boot_buffer = b''
+            return (heading + b'[Bedrock] Server ready. Type commands here '
+                    b'(e.g. list); close this tab to stop the server.\r\n'
+                    + pending[end + 1:])
+        # Only essential startup errors and readiness markers belong in the
+        # user console. Everything else is already preserved in output_log.
+        lines = pending.split(b'\n')
+        self._bedrock_boot_buffer = lines.pop()[-512:]
+        important = (b'CINTER_VM_ERROR', b'CINTER_BDS_ERROR',
+                     b'CINTER_BDS_NETHERNET_FAIL',
+                     b'CINTER_BDS_LAN_RELAY_ERROR')
+        for line in lines:
+            if any(marker in line for marker in important):
+                heading += line + b'\n'
+        return heading
 
     def close(self) -> None:
         try:

@@ -314,7 +314,19 @@ def _mac_install(builds: Path, root: Path, files: dict, *, target: str) -> int:
             from host.mac.mac_app import _verify_signature
             _verify_signature(current)
         if moved:
-            shutil.rmtree(backup)
+            # The promoted application is already signature-verified.  A live
+            # process can still create files in the renamed old bundle while
+            # rmtree walks it (macOS ENOTEMPTY, often on its Builds folder).
+            # Cleanup is not part of the install transaction: never roll back
+            # a verified new app to a potentially partially deleted backup.
+            # Preserve whatever remains for the existing interrupted-Stage
+            # recovery path on the next Stage run.
+            try:
+                shutil.rmtree(backup)
+            except OSError as error:
+                print('[TERMINAL STAGE] WARNING: verified Mac app installed, '
+                      'but obsolete previous-stage cleanup was incomplete; '
+                      f'backup retained at {backup}: {error}', flush=True)
         return len(files)
     except BaseException:
         if moved and backup.is_dir() and not backup.is_symlink():

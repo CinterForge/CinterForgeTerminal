@@ -84,6 +84,8 @@ CinterForgeState.activateTab = async function activateTab(tab) {
       CinterForgeState.activeTab.display.render();
     }
     CinterForgeState.activeTab = tab;
+    if (tab.kind !== 'bedrock')
+      CinterForgeState.$('terminal-output').removeAttribute('data-bedrock-echo');
     CinterForgeState.updateCodeMenuMode();
     CinterForgeState.session = tab.session;
     CinterForgeState.selected = tab.profileId;
@@ -146,6 +148,9 @@ CinterForgeState.activateTab = async function activateTab(tab) {
     }
     CinterForgeState.$('terminal-input').value = '';
     CinterForgeState.$('terminal-output').removeAttribute('data-if-echo');
+    if (tab.kind === 'bedrock')
+      CinterForgeState.$('terminal-output').dataset.bedrockEcho = 'minecraft> ' + (tab.bedrockDraft || '');
+    else CinterForgeState.$('terminal-output').removeAttribute('data-bedrock-echo');
     CinterForgeState.display.target = CinterForgeState.$('terminal-output');
     CinterForgeState.display.render();
     const profile = CinterForgeState.profiles.find(p => p.id === tab.profileId) || CinterForgeState.profiles[0];

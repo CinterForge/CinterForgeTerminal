@@ -91,11 +91,18 @@ CODE_HELP = '''code [open|status|help]
   code open <workspace>     Open the specified workspace in the CinterForge Code editor
 '''
 
-BEDROCK_HELP = '''bedrock [world name]
-  bedrock             List installed Bedrock worlds (including CraftMaster conversions)
-  bedrock <world>     Install as needed and open its interactive server tab
-  Close the Bedrock tab to stop its server; accept the EULA once when prompted.
-'''
+BEDROCK_HELP = """bedrock [world name]
+  bedrock                      List local Bedrock and Java worlds
+  bedrock <world>              Start a world in its own interactive console tab
+  bedrock op                   List persistent server operators
+  bedrock op <gamertag>       Remember an operator and also allowlist them
+  bedrock op remove <name>    Remove persistent operator privilege
+  bedrock allowlist            List server-wide allowed players
+  bedrock allowlist <name>     Allow a player onto this server
+  bedrock allowlist remove <name>  Remove allowed player (if not an op)
+  Operators are assigned by Xbox XUID once their authenticated player joins.
+  These rules persist across world changes. Close Bedrock tab to stop server.
+"""
 
 DEVTOOLS_HELP = '''devtools [install|update|uninstall|version|report|help]
     devtools install <path/to/source>  Install a local Developer Tools source tree
@@ -765,16 +772,47 @@ def execute(args: list[str]) -> int:
                 print('If no Inspector appears, open Safari > Develop > CinterForge Terminal.')
         return 0
     if command == 'bedrock':
+        if options and options[0].casefold() in ('op', 'allowlist'):
+            kind = options[0].casefold()
+            remainder = options[1:]
+            if not remainder or remainder[0].casefold() in ('list', 'show') and len(remainder) == 1:
+                state = _api('/api/bedrock/access')
+            else:
+                action = 'remove' if remainder[0].casefold() in ('remove', 'delete', 'del') else 'add'
+                names = remainder[1:] if action == 'remove' else (
+                    remainder[1:] if remainder[0].casefold() == 'add' else remainder)
+                name = ' '.join(names).strip()
+                if not name:
+                    print(BEDROCK_HELP, file=sys.stderr)
+                    return 2
+                state = _api('/api/bedrock/access', body={'kind': kind, 'action': action, 'name': name})
+            if kind == 'op':
+                print('Server operators (all worlds):')
+                for item in state.get('operators', []):
+                    print('  ' + item['name'] + (' [XUID ' + item['xuid'] + ']' if item.get('xuid') else ' [pending authenticated join]'))
+                for xuid in state.get('other_operator_xuids', []):
+                    print('  [existing operator XUID ' + xuid + ']')
+                if not state.get('operators') and not state.get('other_operator_xuids'):
+                    print('  (none)')
+            else:
+                print('Server allowlist (all worlds):')
+                for name in state.get('allowlist', []):
+                    print('  ' + name)
+                if not state.get('allowlist'):
+                    print('  (none)')
+            if state.get('allowlist') and not state.get('allowlist_enabled'):
+                print('Note: allow-list will be enabled on the next server launch.')
+            return 0
         if not options:
             state = _api('/api/bedrock/worlds')
             print('Available Bedrock worlds:')
             for world in state.get('worlds', []):
-                print('  ' + world['name'] + '  [' + world['folder'] + ']')
+                print('  ' + world.get('command_name', world['name']))
             if not state.get('worlds'):
                 print('  (no installed Bedrock worlds)')
             print('Available Java worlds:')
             for world in state.get('java_worlds', []):
-                print('  ' + world['name'] + '  [' + world['folder'] + ']')
+                print('  ' + world.get('command_name', world['name']))
             if state.get('java_error'):
                 print('  (Java discovery error: ' + state['java_error'] + ')')
             print('Launch with: bedrock <world name>')

@@ -546,7 +546,7 @@ def main(argv: list[str]) -> int:
             build_terminal(BUILDS, docker=docker,
                            logfile=BUILDS / 'Logs/CinterForgeTerminal/linux-native-build.log')
             build_craftmaster(BUILDS, targets=('linux', 'win'), docker=docker)
-        from host.lifecycle.unpacked_release import build_four
+        from host.lifecycle.universal_package import build_four
         report = build_four(BUILDS)
         if set(report['artifacts']) != {'mac', 'linux', 'win', 'devtools'}:
             raise RuntimeError('Build did not capture exactly four unpacked outputs')
@@ -554,7 +554,7 @@ def main(argv: list[str]) -> int:
     if argv == ['status', 'all']:
         # Read-only: useful even when a previous Build/Stage stopped midway.
         import json
-        from host.lifecycle.unpacked_release import status_four
+        from host.lifecycle.universal_package import status_four
         print(json.dumps(status_four(BUILDS), indent=2, sort_keys=True), flush=True)
         return 0
     if argv in (['stage', 'win'], ['stage', 'linux']):
@@ -564,10 +564,8 @@ def main(argv: list[str]) -> int:
     if argv in (['stage', 'all'], ['stage', 'cfterminal', 'all']):
         if not BUILDS.is_dir():
             raise RuntimeError('No Setup/Build outputs to stage; run ./Cinter all all')
-        # Stage installs only native applications. Toolchains remain at the
-        # single shared Builds/Toolchains location provisioned by Setup.
-        from host.lifecycle.unpacked_release import stage_four
-        stage_four(BUILDS, targets=('mac', 'linux', 'win'))
+        from host.lifecycle.universal_package import stage_four
+        stage_four(BUILDS)
         return 0
     if (len(argv) in (2, 3, 4) and argv[0] == 'all' and
             argv[1] in ('mac', 'win', 'linux', 'all') and
@@ -607,7 +605,7 @@ def main(argv: list[str]) -> int:
         os.environ.update(managed_environment(BUILDS))
         action = argv[0]
         if action == 'stage':
-            from host.lifecycle.unpacked_release import stage_four
+            from host.lifecycle.universal_package import stage_four
             stage_four(BUILDS, targets=('mac',))
         else:
             if action == 'test':
@@ -674,10 +672,13 @@ def main(argv: list[str]) -> int:
                '--builds', str(BUILDS),
                *(['--require-cross'] if platform.system() == 'Darwin' else []))
         return 0
-    if argv and argv[0] == 'devtools':
-        # Application and repository entry points use the same manager.
+    if argv == ['install', 'devtools']:
+        # The same self-contained command is bundled into each native app.
+        # It retrieves the optional shared SDK from the published public URLs
+        # ONLY after showing size/path and receiving explicit confirmation.
+        # Explicit app command runs as its own process, not as a Host import.
         invoke(sys.executable, '-B', str(REPO / 'webapp/CinterForgeTerminal.py'),
-               '--terminal-cli', 'devtools', *argv[1:])
+               '--terminal-cli', 'install', 'devtools')
         return 0
     if argv in (['verify', 'public'], ['verify', 'release'], ['verify', 'beta']):
         from host.lifecycle.universal_package import verify_public_four, update_readme_public_downloads
@@ -809,14 +810,14 @@ def main(argv: list[str]) -> int:
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'mac')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'linux')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'win')
-        from host.lifecycle.unpacked_release import status_four, _steam_release_path, steamapps_root, APP_ROOTS
+        from host.lifecycle.unpacked_release import status_four
+        from host.lifecycle.universal_package import _steam_release_path, steamapps_root, APP_ROOTS, HOST_RELEASE
         from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
         steam = steamapps_root()
         for target in ('mac', 'linux', 'win'):
             verify_embedded_craftmaster(
                 _steam_release_path(steam, target,
-                    __import__('host.lifecycle.universal_package', fromlist=['HOST_RELEASE']).HOST_RELEASE)
-                / APP_ROOTS[target], target)
+                    HOST_RELEASE) / APP_ROOTS[target], target)
         result = status_four(BUILDS)
         if not result['complete_build_receipt'] or not result['complete_stage_receipt']:
             raise RuntimeError('Automated Test requires four built and staged verified releases; '
@@ -848,8 +849,7 @@ def main(argv: list[str]) -> int:
                      '       ./Cinter pull lagomorph    # private source + public HFS media into Builds\n'
                      '       ./Cinter fetch all       # fetch published ZIPs into Builds (Setup only)\n'
                      '       ./Cinter fetch public    # production R2 -> Builds Distribution\n'
-                     '       ./Cinter devtools install ~/Source # shared Builds/Toolchains\n'
-                     '       ./Cinter devtools update|uninstall|version|help|report\n'
+                     '       ./Cinter install devtools # confirm optional public SDK install to Steam\n'
                      '       ./Cinter launch cinterforge-os linuxkit Release --server <directory>')
 
 

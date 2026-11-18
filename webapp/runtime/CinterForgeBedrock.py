@@ -61,6 +61,7 @@ if os.name != 'nt':
     import termios
 
 from runtime import CinterForgeSettings as _CinterForgeSettings
+from runtime.CinterForgeBedrockAccess import BedrockServerAccess
 from runtime.CinterForgeCode import CinterForgeCodeWorkspace
 from runtime.CinterForgeGuest import CinterForgeGuestSupervisor
 from runtime.CinterForgeLogging import CinterForgeRuntimeLog
@@ -79,6 +80,20 @@ WORLD_DOWNLOAD_PROGRESS_BYTES = 16 * 1024 * 1024
 WORLD_ARCHIVE_MAX_BYTES = 32 * 1024**3
 
 ASSET_LOCATION = _CinterForgeSettings.ASSETS  # Existing caller compatibility.
+
+
+def _world_command_name(world: dict) -> str:
+    """A single, human-facing name suitable for `bedrock <name>`.
+
+    Java world exports follow CraftMaster's final parenthesized folder suffix.
+    Bedrock level names are authoritative; their opaque folder IDs are not
+    commands unless the caller explicitly supplies an existing ID.
+    """
+    raw = str(world.get('folder') if world.get('edition') == 'java' else world.get('name') or '')
+    suffix = re.search(r'\(([^()]*)\)\s*$', raw)
+    if suffix and suffix.group(1).strip():
+        return suffix.group(1).strip()
+    return str(world.get('name') or world.get('folder') or '').strip()
 
 
 def _sha256(path: Path) -> str:
@@ -381,6 +396,38 @@ class CinterForgeBedrockManager:
         self._lock = threading.RLock()
         self._craftmaster_process: subprocess.Popen | None = None
         self._craftmaster_conversion_lock = threading.Lock()
+        # Server access rules belong to this installation, not any selected
+        # level. All world launches reuse this one policy and Run directory.
+        self.access = BedrockServerAccess(
+            self.root, self.run_root,
+            live=lambda: self._live_session_locked()[0] is not None,
+            send=self._access_send,
+            event=self._access_event,
+        )
+
+    def _access_send(self, command: str) -> None:
+        self.console_command(command)
+
+    def _access_event(self, message: str, *, kind: str = 'server-access') -> None:
+        with self._lock:
+            self._event_id += 1
+            self._events.append({'id': self._event_id, 'kind': kind,
+                                 'message': str(message)[:512]})
+
+    def observe_console_output(self, data: bytes) -> None:
+        # PTY reader calls this only for the owning Bedrock Session. This is
+        # not a second console and does not launch a VM.
+        with self._lock:
+            try:
+                self.access.observe(data)
+            except (OSError, RuntimeError, ValueError, TypeError) as error:
+                # A malformed policy or disk failure must not terminate the
+                # sole PTY reader or kill the active Minecraft console.
+                message = 'Bedrock access policy observer: ' + str(error)
+                if getattr(self, '_access_observer_error', None) != message:
+                    self._access_observer_error = message
+                    self._access_event(message, kind='server-access-error')
+
 
     # --- Runtime process ownership and EULA ----------------------------------
     def _watch_vm(self, pid: int) -> None:
@@ -747,9 +794,11 @@ class CinterForgeBedrockManager:
                         not path.resolve().parent == root or
                         not (path / 'level.dat').is_file() or (path / 'db').is_dir()):
                     continue
-                worlds.append({'name': item['name'], 'folder': path.name,
-                               'path': str(path.resolve()), 'root': str(root),
-                               'edition': 'java', 'dimensions': item.get('dimensions', {})})
+                world = {'name': item['name'], 'folder': path.name,
+                         'path': str(path.resolve()), 'root': str(root),
+                         'edition': 'java', 'dimensions': item.get('dimensions', {})}
+                world['command_name'] = _world_command_name(world)
+                worlds.append(world)
         return worlds
 
     def java_world_export_name(self, world: dict) -> str:
@@ -781,11 +830,8 @@ class CinterForgeBedrockManager:
         requested = requested_name.strip().casefold()
         matches = []
         for world in self.list_java_worlds():
-            names = {world['name'].casefold(), world['folder'].casefold()}
-            # Parenthesized names use the native CraftMaster export convention.
-            suffix = re.search(r'\(([^()]*)\)$', world['folder'])
-            if suffix:
-                names.add(suffix.group(1).strip().casefold())
+            names = {world['name'].casefold(), world['folder'].casefold(),
+                     _world_command_name(world).casefold()}
             if requested in names:
                 matches.append(world)
         if len(matches) > 1:
@@ -986,7 +1032,15 @@ class CinterForgeBedrockManager:
                 downloaded_bytes = 0
                 last_progress_bytes = 0
                 try:
-                    request = Request(download_url, headers={'Cache-Control': 'no-cache'})
+                    # Match an ordinary public browser GET.  In particular,
+                    # do NOT send Cache-Control: no-cache: the public Cloudflare
+                    # edge may serve a cached object while rejecting an origin
+                    # revalidation that a normal browser never asks it to do.
+                    request = Request(download_url, headers={
+                        'User-Agent': ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                                       'AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15'),
+                        'Accept': 'application/octet-stream, application/zip, */*',
+                    })
                     with urlopen(request, timeout=60) as response:
                         if response.geturl() != download_url or response.status != 200:
                             raise RuntimeError('Unexpected published world download response')
@@ -1010,7 +1064,18 @@ class CinterForgeBedrockManager:
                                     last_progress_bytes = downloaded_bytes
                 except HTTPError as error:
                     if error.code in (403, 404):
-                        missing_channels.append(f'{channel}: HTTP {error.code} ({download_url})')
+                        # A 404 means no published object on this channel; a 403
+                        # means this HTTP client was denied.  Neither establishes
+                        # anything about other channels or a user's browser.
+                        status = 'not published' if error.code == 404 else 'request denied'
+                        ray = error.headers.get('CF-Ray', '') if error.headers else ''
+                        detail = (f'{channel}: HTTP {error.code} ({status}) '
+                                  f'for GET {download_url}')
+                        if ray:
+                            detail += f' (Cloudflare Ray {ray})'
+                        missing_channels.append(detail)
+                        if progress:
+                            progress(name + ': ' + detail)
                         continue
                     raise
 
@@ -1063,7 +1128,7 @@ class CinterForgeBedrockManager:
                 return world_directory
 
         raise RuntimeError(
-            'Public CraftMaster .mcworld not accessible for ' + name + ': '
+            'Public CraftMaster download failed for ' + name + ': '
             + '; '.join(missing_channels)
         )
 
@@ -1079,7 +1144,8 @@ class CinterForgeBedrockManager:
         available_bedrock_worlds = self.list_worlds()['worlds']
         matching_bedrock_worlds = [
             world for world in available_bedrock_worlds
-            if name.casefold() in (world['name'].casefold(), world['folder'].casefold())
+            if name.casefold() in (world['name'].casefold(), world['folder'].casefold(),
+                                   _world_command_name(world).casefold())
         ]
         if len(matching_bedrock_worlds) > 1:
             raise RuntimeError('Ambiguous Bedrock world: use its unique folder name')
@@ -1108,9 +1174,11 @@ class CinterForgeBedrockManager:
                     name = name_file.read_text('utf-8-sig', errors='replace')[:2048].strip() if name_file.is_file() else folder.name
                 except OSError:
                     name = folder.name
-                entries.append({'name': name or folder.name, 'folder': folder.name,
-                                'path': str(folder.resolve()), 'root': str(root),
-                                'edition': 'bedrock'})
+                world = {'name': name or folder.name, 'folder': folder.name,
+                         'path': str(folder.resolve()), 'root': str(root),
+                         'edition': 'bedrock'}
+                world['command_name'] = _world_command_name(world)
+                entries.append(world)
         settings = self._world_settings()
         java_error = None
         try:
@@ -1142,6 +1210,52 @@ class CinterForgeBedrockManager:
             if temp.exists():
                 shutil.rmtree(temp)
 
+    def _install_world_status_bridge(self, target: Path) -> None:
+        """Attach the packaged, console-only chat relay to the managed COPY.
+
+        Other world packs and the source save are never modified. The bridge
+        only prints prefixed structured text into the existing PTY; it opens
+        no network listener and executes no JavaScript received from players.
+        """
+        authored = ASSET_LOCATION / 'data' / 'bedrock_status_bridge'
+        manifest_file = authored / 'manifest.json'
+        script_file = authored / 'scripts' / 'main.js'
+        if any(not f.is_file() or f.is_symlink() for f in (manifest_file, script_file)):
+            raise RuntimeError('Packaged CinterForge Minecraft status bridge is missing')
+        manifest = json.loads(manifest_file.read_text('utf-8'))
+        pack_id = manifest['header']['uuid']
+        version = manifest['header']['version']
+        destination = self.run_root / 'behavior_packs' / 'cinterforge-status-bridge'
+        if destination.parent.is_symlink():
+            raise RuntimeError('Refusing symlinked Bedrock behavior-packs root')
+        for folder in (destination, destination / 'scripts'):
+            if folder.is_symlink():
+                raise RuntimeError('Refusing symlinked Bedrock status bridge directory')
+            folder.mkdir(parents=True, exist_ok=True)
+        for source, output in ((manifest_file, destination / 'manifest.json'),
+                               (script_file, destination / 'scripts' / 'main.js')):
+            if output.is_symlink():
+                raise RuntimeError('Refusing symlinked Bedrock status bridge asset')
+            if not output.is_file() or output.read_bytes() != source.read_bytes():
+                output.write_bytes(source.read_bytes())
+
+        registry_path = target / 'world_behavior_packs.json'
+        if registry_path.is_symlink():
+            raise RuntimeError('Refusing symlinked world behavior-pack registry')
+        entries = json.loads(registry_path.read_text('utf-8')) if registry_path.is_file() else []
+        if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
+            raise RuntimeError('Invalid existing Bedrock world behavior-pack registry: ' + str(registry_path))
+        entry = {'pack_id': pack_id, 'version': version}
+        current = [item for item in entries if item.get('pack_id') != pack_id]
+        current.append(entry)
+        if entries != current:
+            temporary = registry_path.with_name(registry_path.name + '-' + uuid.uuid4().hex + '.tmp')
+            try:
+                temporary.write_text(json.dumps(current, indent=2) + '\n', encoding='utf-8')
+                os.replace(temporary, registry_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+
     # --- Bedrock world selection and managed server copy ---------------------
     def run_world(self, name: str, *, launch: bool = True) -> dict:
         with self._lock:
@@ -1153,7 +1267,8 @@ class CinterForgeBedrockManager:
                 if not name:
                     raise ValueError('No Bedrock save selected; type bedrock start to list saves')
             matches = [world for world in self.list_worlds()['worlds']
-                       if world['name'].casefold() == name.strip().casefold() or world['folder'].casefold() == name.strip().casefold()]
+                       if name.strip().casefold() in (world['name'].casefold(), world['folder'].casefold(),
+                                                      _world_command_name(world).casefold())]
             if not matches:
                 raise ValueError('No Bedrock save named ' + repr(name) + '; type bedrock start for the list')
             if len(matches) != 1:
@@ -1184,10 +1299,12 @@ class CinterForgeBedrockManager:
                 self._safe_world_copy(source, target)
             elif not (target / 'level.dat').is_file() or not (target / 'db').is_dir():
                 raise RuntimeError('Managed Bedrock world is incomplete: ' + str(target))
+            self._install_world_status_bridge(target)
             config = self.run_root / 'server.properties'
             original = config.read_text('utf-8') if config.is_file() else ''
-            lines = [line for line in original.splitlines() if not line.strip().startswith('level-name=')]
-            lines.append('level-name=' + managed_name)
+            lines = [line for line in original.splitlines()
+                     if not line.strip().startswith(('level-name=', 'content-log-console-output-enabled='))]
+            lines.extend(('level-name=' + managed_name, 'content-log-console-output-enabled=true'))
             temp = config.with_name('server.properties.tmp-' + uuid.uuid4().hex)
             try:
                 temp.write_text('\n'.join(lines) + '\n', 'utf-8')
@@ -1215,6 +1332,7 @@ class CinterForgeBedrockManager:
             elif source.is_file() and not destination.exists():
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
+        self.access.apply_before_launch()
 
     def installed(self) -> bool:
         executable = 'bedrock_server.exe' if self.target == 'win' else 'bedrock_server'
@@ -1733,6 +1851,8 @@ class CinterForgeBedrockManager:
                 raise RuntimeError('Bedrock server is not running; use bedrock run <save name>')
             try:
                 self._send_console_locked(command, pid=pid, own=owned, attachable=attachable)
+                if command.casefold().startswith('say ') and command[4:].strip():
+                    self._access_event('Server:' + command[4:].strip()[:240], kind='minecraft-say')
             except (BrokenPipeError, OSError, ValueError) as exc:
                 raise RuntimeError('Bedrock console input is no longer connected: ' + str(exc)) from exc
             return {'sent': True, 'command': command, 'pid': pid,
