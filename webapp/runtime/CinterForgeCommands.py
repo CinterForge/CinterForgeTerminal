@@ -312,10 +312,10 @@ def _api(path: str, *, body: dict | None = None) -> dict:
                       headers=headers, method='POST' if body is not None else 'GET')
     try:
         with urlopen(request, timeout=1800 if path == '/api/bedrock/run' else 120 if path in ('/api/bedrock/install', '/api/craftmaster/map/run') else 90 if path in ('/api/bedrock/stop', '/api/bedrock/restart') else 10) as response:
-            return json.loads(response.read(65536).decode('utf-8'))
+            return json.loads(response.read().decode('utf-8'))
     except HTTPError as error:
         try:
-            message = json.loads(error.read(65536).decode('utf-8')).get('error', error.reason)
+            message = json.loads(error.read().decode('utf-8')).get('error', error.reason)
         except (ValueError, UnicodeError):
             message = error.reason
         raise RuntimeError(str(message)) from error
