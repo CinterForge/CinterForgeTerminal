@@ -105,6 +105,7 @@ BEDROCK_HELP = """bedrock [world name]
 """
 
 DEVTOOLS_HELP = '''devtools [install|update|uninstall|version|report|help]
+    devtools                          Ask to start installed DevTools or install them
     devtools install <path/to/source>  Install a local Developer Tools source tree
     devtools update                    Update the installed Developer Tools to the latest staged version
     devtools uninstall                 Remove the installed Developer Tools
@@ -591,7 +592,29 @@ def execute(args: list[str]) -> int:
             return 2
         return 0
     if args[0] == 'devtools':
-        operation = args[1] if len(args) >= 2 else 'help'
+        operation = args[1] if len(args) >= 2 else 'start'
+        if operation == 'start' and len(args) == 1:
+            status = _api('/api/status')
+            if status.get('devtools_installed'):
+                if input('Start installed DevTools guests now? [y/N] ').strip().casefold() != 'y':
+                    print('DevTools not started.')
+                    return 0
+            else:
+                if input('DevTools are not installed. Install now? [y/N] ').strip().casefold() != 'y':
+                    print('DevTools not installed.')
+                    return 0
+                source = input('Absolute Source directory for DevTools: ').strip()
+                if not source or not Path(source).is_absolute():
+                    print('DevTools requires an existing absolute Source directory.', file=sys.stderr)
+                    return 2
+                result = _CinterForgeDevTools.install_devtools(source)
+                if result != 0:
+                    return result
+            response = _api('/api/lifecycle/guest-boot', body={})
+            if response.get('state') in ('failed', 'not-installed'):
+                raise RuntimeError(response.get('error') or 'DevTools failed to start')
+            print('DevTools guest startup requested; progress is in Server Log.', flush=True)
+            return 0
         if operation == 'install' and len(args) == 3:
             return _CinterForgeDevTools.install_devtools(args[2])
         if operation == 'update' and len(args) == 2:

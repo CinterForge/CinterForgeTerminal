@@ -32,7 +32,9 @@ CinterForgeState.frame.addEventListener('load', () => {
 
   // Original source lines 1010–1036
 CinterForgeState.openLauncherTab = async function openLauncherTab(kind) {
-    if (!Object.hasOwn(CinterForgeState.launcherKinds, kind) || !CinterForgeState.terminalActionEnabled('launcher:' + kind)) return;
+    if (!Object.hasOwn(CinterForgeState.launcherKinds, kind)) return;
+    if (!CinterForgeState.terminalActionEnabled('launcher:' + kind) &&
+        !await CinterForgeState.requestDevTools('launcher:' + kind)) return;
     const previous = CinterForgeState.tabs.find(tab => !tab.closed && tab.kind === 'launcher' && tab.backend === kind);
     if (previous) { await CinterForgeState.activateTab(previous); return previous; }
     const buffer = CinterForgeState.makeBuffer();

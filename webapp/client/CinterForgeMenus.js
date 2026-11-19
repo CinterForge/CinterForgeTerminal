@@ -74,12 +74,16 @@ CinterForgeState.codeTerminalKinds = Object.freeze({
   });
 
   // Original source lines 2360–2367
+  CinterForgeState.devToolsRequestable = kind => CinterForgeState.platform === 'mac' &&
+    (kind === 'code' || kind === 'win' || kind === 'linux' ||
+     kind === 'launcher:win' || kind === 'launcher:linux');
+
 CinterForgeState.terminalItems = function terminalItems() {
     // The EXISTING CinterForge application commands, used outside Code mode.
     // Code mode uses the real Code-OSS menu without overriding any of its items.
     return CinterForgeState.cinterTerminalActions.map(([kind, title]) => ({
       title, action: `terminal:${kind}`,
-      enabled: CinterForgeState.terminalActionEnabled(kind)
+      enabled: CinterForgeState.terminalActionEnabled(kind) || CinterForgeState.devToolsRequestable(kind)
     }));
   };
 
@@ -214,7 +218,7 @@ window.CinterMenuDispatch = async function(action) {
     if (action === 'edit:paste') return CinterForgeState.pasteClipboard();
     if (action.startsWith('terminal:')) {
       const kind = action.slice(9);
-      if (!CinterForgeState.terminalActionEnabled(kind)) return;
+      if (!CinterForgeState.terminalActionEnabled(kind) && !CinterForgeState.devToolsRequestable(kind)) return;
       return window.CinterTerminalNewTab(kind);
     }
     if (!CinterForgeState.codeIsActive() || !action.startsWith('code:') || !CinterForgeState.codeServiceActions.has(action)) return;

@@ -14,7 +14,10 @@
   // Original source lines 1191–1225
 window.CinterTerminalNewTab = async (kind = 'mac') => {
     // Launchers are singleton graphical Sessions, never Code-OSS shell PTYs.
-    if (typeof kind === 'string' && !CinterForgeState.terminalActionEnabled(kind)) return;
+    if (typeof kind === 'string' && !CinterForgeState.terminalActionEnabled(kind)) {
+      if (!CinterForgeState.devToolsRequestable(kind) ||
+          !await CinterForgeState.requestDevTools(kind)) return;
+    }
     if (typeof kind === 'string' && kind.startsWith('launcher:'))
       return CinterForgeState.openLauncherTab(kind.slice('launcher:'.length));
     if (kind === 'code') {

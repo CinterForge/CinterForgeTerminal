@@ -71,12 +71,12 @@ class CinterForgeGuestSupervisor:
 
 
     def schedule(self) -> dict:
-        """Exactly one app-owned initialization per run, including a later SDK install.
+        """Exactly one explicitly requested initialization per run, including a later SDK install.
 
         The HTTP service is already accepting requests when this is called. It
         publishes readiness explicitly rather than claiming the guests are ready
         just because the native WebView opened. An explicit reinstall may retry a
-        failed boot; ordinary terminal tabs never call this function.
+        failed boot; ordinary Terminal startup never calls this function.
         """
         server = self.server
         with server.guest_start_lock:
@@ -117,7 +117,7 @@ class CinterForgeGuestSupervisor:
                 server.guest_start_error = 'Cannot start guest supervisor: ' + str(error)
             server.log_event('Managed reusable guests FAILED: ' + str(error))
             return self.snapshot()
-        server.log_event('Managed reusable guests: starting Linux and Windows at application launch; '
+        server.log_event('Managed reusable guests: starting Linux and Windows on explicit request; '
                          'runtime=' + os.environ.get('CINTER_TERMINAL_RUNTIME_MODE', 'unknown') +
                          '; sdk=' + str(selected_sdk))
         return self.snapshot()

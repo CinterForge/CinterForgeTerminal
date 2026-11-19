@@ -11,6 +11,57 @@
   'use strict';
   const CinterForgeState = window.CinterForgeClientState || (window.CinterForgeClientState = Object.create(null));
 
+  // The same app-owned guest supervisor is started only after a requested
+  // Code/Bash/VNC action and explicit consent. Restoring old tabs never boots it.
+  CinterForgeState.requestDevTools = async function requestDevTools(kind) {
+    if (CinterForgeState.terminalActionEnabled(kind)) return true;
+    if (!CinterForgeState.devToolsRequestable(kind)) return false;
+    if (CinterForgeState.devToolsBootRequest) return CinterForgeState.devToolsBootRequest;
+    CinterForgeState.devToolsBootRequest = (async () => {
+      try {
+        const status = await CinterForgeState.api('/api/status');
+        CinterForgeState.updateGuestCapabilities(status);
+        if (!status.devtools_installed) {
+          if (!window.confirm('Developer Tools are not installed. Install them in a Mac Bash Terminal?')) return false;
+          const source = window.prompt('Absolute Source directory for DevTools installation:', '');
+          if (!source?.startsWith('/') || /[\r\n]/.test(source)) {
+            CinterForgeState.notice('DevTools installation requires an absolute Source directory');
+            return false;
+          }
+          // Run the existing interactive, verified CLI installer in an actual
+          // Mac Bash PTY; do not install from a browser worker or skip consent.
+          await CinterForgeState.openSession('modern', 'native');
+          const id = CinterForgeState.activeTab?.session?.id;
+          if (!id) throw new Error('Mac Bash did not connect for DevTools installation');
+          const quoted = "'" + source.replace(/'/g, "'\\''") + "'";
+          await CinterForgeState.api('/api/terminal/input', {
+            id, data: 'devtools install ' + quoted + '\n'
+          });
+          CinterForgeState.notice('DevTools installation started in Mac Bash; follow its prompts');
+          return false;
+        }
+        if (!window.confirm('Start installed DevTools for ' + kind + '? This loads the Linux/Windows guest VM.')) return false;
+        const result = await CinterForgeState.api('/api/lifecycle/guest-boot', {});
+        if (result.state === 'failed' || result.state === 'not-installed')
+          throw new Error(result.error || 'DevTools did not start');
+        CinterForgeState.notice('Starting DevTools guests; monitoring readiness…');
+        for (let attempt = 0; attempt < 300; ++attempt) {
+          const snapshot = await CinterForgeState.api('/api/lifecycle/guest-status');
+          CinterForgeState.updateGuestCapabilities(snapshot);
+          if (CinterForgeState.terminalActionEnabled(kind)) return true;
+          if (snapshot.state === 'failed') throw new Error(snapshot.error || 'DevTools guest startup failed');
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+        throw new Error('DevTools guests did not become ready; see Server Log');
+      } catch (error) {
+        CinterForgeState.notice('DevTools: ' + error.message);
+        return false;
+      }
+    })();
+    try { return await CinterForgeState.devToolsBootRequest; }
+    finally { CinterForgeState.devToolsBootRequest = null; }
+  };
+
   // Original source lines 2908–2942
 CinterForgeState.updateGuestCapabilities = function updateGuestCapabilities(status) {
     const snapshot = window.CinterForgeCapabilities.normalize(status, {

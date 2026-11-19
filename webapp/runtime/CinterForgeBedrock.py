@@ -1397,6 +1397,39 @@ class CinterForgeBedrockManager:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
         self.access.apply_before_launch()
+        # Server-wide policy, not per-world state: every Bedrock launch uses
+        # cheats, including existing imported saves and CraftMaster updates.
+        properties = self.run_root / 'server.properties'
+        if properties.is_symlink():
+            raise RuntimeError('Refusing linked Bedrock server.properties')
+        if not properties.is_file():
+            raise RuntimeError('Bedrock server.properties is missing')
+        original = properties.read_text('utf-8')
+        lines = []
+        seen = False
+        changed = False
+        for line in original.splitlines():
+            key = line.split('=', 1)[0].strip().casefold() if '=' in line and not line.lstrip().startswith('#') else ''
+            if key == 'allow-cheats':
+                if seen:
+                    changed = True
+                    continue
+                seen = True
+                if line.strip() != 'allow-cheats=true':
+                    changed = True
+                lines.append('allow-cheats=true')
+            else:
+                lines.append(line)
+        if not seen:
+            lines.append('allow-cheats=true')
+            changed = True
+        if changed:
+            temporary = properties.with_name('server.properties.tmp-' + uuid.uuid4().hex)
+            try:
+                temporary.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+                os.replace(temporary, properties)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def installed(self) -> bool:
         executable = 'bedrock_server.exe' if self.target == 'win' else 'bedrock_server'

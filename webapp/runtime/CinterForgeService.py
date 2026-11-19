@@ -179,11 +179,9 @@ def handle(method: str, params: dict) -> dict:
             threading.Thread(target=_watch_native_http_parent,
                              args=(_server, os.getppid()),
                              name='cinter-native-http-owner', daemon=True).start()
-            if platform.system() == 'Darwin':
-                # Start as part of native application startup. The WebView can
-                # render while the one owned VM and two reusable guests boot.
-                # A tab must only wait for this work, never start it again.
-                _server.guest_supervisor.schedule()
+            # DevTools are optional: merely opening the Terminal never boots
+            # Colima, Docker, Linux/Windows guests, or their VNC endpoints.
+            # One explicit guest-boot request owns the same existing supervisor.
         except Exception:
             _server.stop()
             _server = None

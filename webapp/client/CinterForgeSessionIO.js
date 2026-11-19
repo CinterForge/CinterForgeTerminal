@@ -124,14 +124,10 @@ CinterForgeState.openSession = async function openSession(profileId, backend = '
     // The museum, typed `code`, restored layouts and native menus all go
     // through this single readiness gate. A saved Code-OSS tab must never
     // load guest PTYs while the VM is still connecting.
-    if (profileId === 'codeoss' && !CinterForgeState.terminalActionEnabled('code')) {
-      CinterForgeState.notice('Code-OSS disabled until installed DevTools guests connect; see Server Log');
-      return;
-    }
-    if ((backend === 'linux' || backend === 'win') && !CinterForgeState.terminalActionEnabled(backend)) {
-      CinterForgeState.notice(backend + ' Bash is not connected; see Server Log');
-      return;
-    }
+    if (profileId === 'codeoss' && !CinterForgeState.terminalActionEnabled('code') &&
+        !await CinterForgeState.requestDevTools('code')) return;
+    if ((backend === 'linux' || backend === 'win') && !CinterForgeState.terminalActionEnabled(backend) &&
+        !await CinterForgeState.requestDevTools(backend)) return;
     // CodeOSS owns a single workbench and guest terminal set. A second
     // click or restored layout MUST focus, not allocate a second worker.
     if (profileId === 'codeoss') {

@@ -1,8 +1,8 @@
 """Live CraftMaster Zoomify map tabs within the existing Terminal HTTP server.
 
-A map tab is queued before conversion so the user sees an interactive viewer
-as soon as CraftMaster writes its first tiles. No new listener, preview process,
-full-world PNG, or development Builds directory is created by the installed app.
+The Map tab only embeds the single live Zoomify viewer authored by CraftMaster.
+It waits for CraftMaster's atomic viewer/pyramid initialization rather than
+introducing a duplicate preview renderer or replacing a live viewer.
 
 Only generated assets under the selected, server-owned CraftMaster Maps tree are
 served. Java saves, archives, LevelDB and arbitrary host paths are never exposed.
@@ -10,20 +10,17 @@ served. Java saves, archives, LevelDB and arbitrary host paths are never exposed
 
 from __future__ import annotations
 
-import html
-import json
 import mimetypes
-import xml.etree.ElementTree as ET
 import re
-import time
 import threading
 import uuid
 from pathlib import Path
-from urllib.parse import quote, unquote
+from urllib.parse import unquote
 
 
 MAX_VISIBLE_MAPS = 16
 MAX_MAP_ASSET_BYTES = 8 * 1024 * 1024
+_MAX_MAP_LAYOUT_ENTRIES = 4096
 
 
 def open_map_tab(server, world: dict) -> dict:
@@ -48,7 +45,6 @@ def open_map_tab(server, world: dict) -> dict:
         server.craftmaster_maps[map_id] = {
             'name': world_name,
             'directory': map_directory,
-            'started_ns': time.time_ns(),
             'phase': 'preparing',
             'message': 'Preparing live Zoomify map…',
         }
@@ -131,8 +127,7 @@ def run_map_conversion(server, name: str) -> dict:
 # known world/dimension, without traversing other worlds or following links.
 _ZOOMIFY_TILE = re.compile(r'(\d+)-(\d+)-(\d+)\.(?:jpg|jpeg|png)', re.I)
 _TILE_GROUP = re.compile(r'TileGroup\d+')
-_MAX_LIVE_TILES = 4096
-_MAX_MAP_LAYOUT_ENTRIES = 128
+
 
 
 def _map_directories(state: dict) -> list[Path]:
@@ -197,98 +192,22 @@ def _map_layout(state: dict) -> tuple[Path, Path | None]:
     return (candidates[0], None) if candidates else (state['directory'], None)
 
 
-def _live_viewer_page(world_name: str) -> bytes:
-    '''A graphic tile surface while CraftMaster's authored viewer is pending.
+def _authored_viewer_ready(state: dict, dimension: Path, zfy: Path | None) -> bool:
+    """Recognize CraftMaster's committed viewer, not its file timestamps.
 
-    This is NOT a conversion-progress page. It uses only real ZFY tile files;
-    the authored Live Map.htm takes over as soon as it is published.
-    '''
-    name = html.escape(world_name, quote=True)
-    return ('''<!doctype html><html lang="en" data-craftmaster-live-map="1">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>''' + name + ''' — Live Zoomify</title>
-<style>
-html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#080c10;color:#abb9c9;font:12px system-ui}
-#cf-map-screen{position:absolute;inset:0;overflow:hidden;background:#050505;cursor:grab;touch-action:none}
-#cf-map-screen.dragging{cursor:grabbing}
-#cf-map-stage{position:absolute;top:0;left:0;transform-origin:0 0;will-change:transform}
-#cf-map-stage img{position:absolute;width:512px;height:512px;display:block;pointer-events:none;user-select:none}
-#cf-map-state{position:absolute;bottom:10px;left:10px;padding:4px 8px;background:#090f19bb;border-radius:5px;pointer-events:none}
-#cf-map-error{position:absolute;top:10px;left:10px;max-width:90%;padding:8px 11px;background:#4b1414d9;color:white;border-radius:5px;display:none}
-</style><script defer src="/client/CinterForgeCraftMasterMap.js"></script></head>
-<body><div id="cf-map-screen" aria-label="Interactive live Zoomify tiles"><div id="cf-map-stage"></div></div>
-<div id="cf-map-state">Waiting for Zoomify tiles…</div><div id="cf-map-error" role="alert"></div></body></html>''').encode('utf-8')
-
-
-def _live_tile_manifest(state: dict) -> dict:
-    """Enumerate real ZFY tiles from the discovered map layout, without XML/HTML."""
-    dimension, zfy = _map_layout(state)
-    manifest = {'phase': state['phase'], 'error': state['message'] if state['phase'] == 'failed' else '',
-                'native_ready': False, 'tiles': [], 'tile_size': 512,
-                'discovery': 'waiting-for-map' if not dimension.is_dir() else 'waiting-for-pyramid'}
+    CraftMaster atomically writes the authored HTML, JS and fixed pyramid
+    properties, and intentionally does not rewrite unchanged files. Therefore
+    their modification times (including LiveMap.status) do not indicate whether
+    a viewer is usable for this tab. The viewer itself owns tile refresh.
+    """
     if zfy is None:
-        if state['phase'] == 'ready':
-            manifest['error'] = 'CraftMaster finished, but no Zoomify TileGroup directory was found for this world.'
-        return manifest
-    native = dimension / 'Live Map.htm'
-    props = zfy / 'ImageProperties.xml'
-    # CraftMaster initializes the real live viewer and its ZFY index *before*
-    # region conversion. Use it as soon as the current conversion publishes its
-    # rendering status, not only after the Bedrock archive is complete. A stale
-    # viewer left by an earlier run must not be mistaken for a fresh map.
-    status = dimension / 'LiveMap.status'
-    status_ready = False
-    try:
-        if (status.is_file() and not status.is_symlink() and
-                status.stat().st_mtime_ns >= state.get('started_ns', 0) and
-                status.stat().st_size <= 64):
-            status_ready = status.read_text('utf-8').strip() in ('rendering', 'complete')
-    except (OSError, UnicodeError):
-        pass
-    manifest['native_ready'] = (state['phase'] != 'failed' and status_ready and
-                                native.is_file() and not native.is_symlink() and
-                                props.is_file() and not props.is_symlink() and
-                                (dimension / 'zoomify-viewer.min.js').is_file())
-    if manifest['native_ready']:
-        manifest['discovery'] = 'native-viewer'
-        return manifest
-    if props.is_file() and not props.is_symlink() and props.stat().st_size < 131072:
-        try:
-            xml = ET.fromstring(props.read_bytes())
-            manifest['width'] = int(xml.attrib['WIDTH'])
-            manifest['height'] = int(xml.attrib['HEIGHT'])
-        except (OSError, ET.ParseError, KeyError, TypeError, ValueError):
-            pass
-    manifest['discovery'] = 'waiting-for-tiles'
-    try:
-        groups = sorted((p for p in zfy.iterdir()
-                         if p.is_dir() and not p.is_symlink() and _TILE_GROUP.fullmatch(p.name)),
-                        key=lambda p: p.stat().st_mtime_ns, reverse=True)
-        for group in groups:
-            for tile in group.iterdir():
-                match = _ZOOMIFY_TILE.fullmatch(tile.name)
-                if not match or tile.is_symlink() or not tile.is_file():
-                    continue
-                info = tile.stat()
-                if info.st_size < 32 or info.st_size > MAX_MAP_ASSET_BYTES:
-                    continue
-                manifest['tiles'].append({
-                    'path': tile.relative_to(dimension).as_posix(),
-                    'level': int(match.group(1)), 'x': int(match.group(2)),
-                    'y': int(match.group(3)),
-                    'stamp': str(info.st_mtime_ns) + '-' + str(info.st_size),
-                })
-                if len(manifest['tiles']) >= _MAX_LIVE_TILES:
-                    manifest['discovery'] = 'streaming'
-                    return manifest
-    except OSError:
-        # Tiles can be concurrently committed or replaced by CraftMaster.
-        pass
-    if manifest['tiles']:
-        manifest['discovery'] = 'streaming'
-    elif state['phase'] == 'ready':
-        manifest['error'] = 'CraftMaster finished, but the Zoomify pyramid contains no readable tiles.'
-    return manifest
+        return False
+    return all(path.is_file() and not path.is_symlink() for path in (
+        dimension / 'Live Map.htm',
+        dimension / 'zoomify-viewer.min.js',
+        zfy / 'ImageProperties.xml',
+    ))
+
 
 
 def serve_map_asset(handler, path: str) -> bool:
@@ -317,8 +236,7 @@ def serve_map_asset(handler, path: str) -> bool:
         handler._json(404, {'error': 'Invalid map asset'})
         return True
     dimension, zoomify = _map_layout(state)
-    name = state['name']
-    if relative_text in ('Live Map.htm', 'tiles.json', 'zoomify-viewer.min.js', 'LiveMap.status'):
+    if relative_text in ('Live Map.htm', 'zoomify-viewer.min.js', 'LiveMap.status'):
         allowed = True
     else:
         # Only serve a true Zoomify tile/metadata file under the discovered
@@ -344,18 +262,14 @@ def serve_map_asset(handler, path: str) -> bool:
     if any((directory.joinpath(*parts[:index])).is_symlink() for index in range(1, len(parts) + 1)):
         handler._json(404, {'error': 'Unsafe map asset'})
         return True
-    if relative_text == 'tiles.json':
-        handler._send(200, json.dumps(_live_tile_manifest(state)).encode('utf-8'))
-        return True
     if not asset.is_file() or (relative_text == 'Live Map.htm' and
-                               not _live_tile_manifest(state)['native_ready']):
+                               not _authored_viewer_ready(state, dimension, zoomify)):
+        # HTTP 202 is a readiness response, not a second HTML viewer. Pollers
+        # must wait for HTTP 200 before navigating to the authored page.
         if relative_text == 'Live Map.htm':
-            handler._send(
-                200, _live_viewer_page(name), 'text/html; charset=utf-8',
-                same_origin_frame=True,
-            )
+            handler._json(202, {'ready': False, 'phase': state['phase']})
         else:
-            handler._json(404, {'error': 'Zoomify tile not ready'})
+            handler._json(404, {'error': 'Zoomify asset not ready'})
         return True
     if asset.stat().st_size > MAX_MAP_ASSET_BYTES:
         handler._json(413, {'error': 'Map tile exceeds size limit'})
