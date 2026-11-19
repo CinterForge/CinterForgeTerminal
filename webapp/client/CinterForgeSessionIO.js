@@ -354,6 +354,7 @@ CinterForgeState.send = function send(data) {
         const command = draft.trim();
         draft = '';
         if (!command) continue;
+        tab.bedrockDraft = '';
         tab.display.push('\r\nminecraft> ' + command + '\r\n');
         const previous = tab.bedrockCommands || Promise.resolve();
         tab.bedrockCommands = previous.catch(() => {}).then(() =>
@@ -370,8 +371,7 @@ CinterForgeState.send = function send(data) {
     tab.bedrockDraft = draft;
     // An unsubmitted command is visible IN the console, never in the status
     // bar. It is presentation-only; Enter alone sends it to the server.
-    if (CinterForgeState.activeTab === tab)
-      CinterForgeState.$('terminal-output').dataset.bedrockEcho = 'minecraft> ' + draft;
+    if (CinterForgeState.activeTab === tab) tab.display.render();
   };
 
   // Original source lines 2064–2072

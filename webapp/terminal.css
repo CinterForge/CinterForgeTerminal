@@ -384,15 +384,6 @@ a {
    font: inherit
 }
 
-/* Unsubmitted Bedrock commands appear in the console, NOT the status bar.
-   This pseudo-line follows asynchronous server output without altering it. */
-#terminal-output[data-bedrock-echo]::after {
-   content: attr(data-bedrock-echo);
-   white-space: pre-wrap;
-   color: var(--fg);
-   font: inherit
-}
-
 /* A real full-area keyboard target: the former invisible 1px textarea was not
    reliably focusable in native WebViews, leaving keys to the OS beep handler. */
 #terminal-input {

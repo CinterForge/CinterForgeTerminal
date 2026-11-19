@@ -170,9 +170,15 @@ CraftMaster export name; for example `Candlewood` resolves the local folder
 a separate **Map** tab. Switching to the Bedrock console does not close the
 map; it continues displaying incremental tile updates in its own tab.
 
-The public `craftmaster <world>` shortcut starts an incremental local conversion
-without starting Bedrock. Native CLI subcommands such as `craftmaster worlds
---json` and `craftmaster convert --world ...` retain their original interface.
+The public `craftmaster <world>` shortcut explicitly updates the Bedrock copy
+and opens a live Zoomify map as the tiles are written. If that world is running,
+Terminal stops its Bedrock server first, converts and validates the updated
+world, replaces the managed save, and relaunches it. If the world was stopped,
+it stays stopped. `bedrock <world>` launches a validated existing Bedrock save
+without starting CraftMaster; automatic conversion runs only if the save is
+missing and must finish before Bedrock starts. Native CLI subcommands such as
+`craftmaster worlds --json` and `craftmaster convert --world ...` retain their
+original interface.
 
 If the selected world is absent locally, `bedrock <world>` tries the public
 release and beta `.mcworld` archive URLs directly. It validates ZIP contents

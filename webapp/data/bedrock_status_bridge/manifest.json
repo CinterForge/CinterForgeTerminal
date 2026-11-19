@@ -1,13 +1,13 @@
 {
   "format_version": 2,
   "header": {
-    "name": "CinterForge Server Status Relay",
-    "description": "Relay in-world chat and explicit script events to the Terminal status bar",
+    "name": "CinterForge Terminal Event Relay",
+    "description": "Relay Minecraft status and commands to the existing Terminal host",
     "uuid": "a7d28648-798d-4328-a91e-917b65aa2fea",
     "version": [
       1,
       0,
-      0
+      2
     ],
     "min_engine_version": [
       1,
@@ -24,7 +24,7 @@
       "version": [
         1,
         0,
-        0
+        2
       ]
     }
   ],

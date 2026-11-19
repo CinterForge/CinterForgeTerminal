@@ -957,7 +957,8 @@ class CinterForgeHTTPRoutes:
                 self._json(200, self.server.bedrock.list_worlds())
                 return
             if route == '/api/bedrock/stop':
-                self._json(200, self.server.bedrock.stop())
+                with self.server.bedrock_terminal_lock:
+                    self._json(200, self.server.bedrock.stop())
                 return
             if route == '/api/terminal/open':
                 backend=body.get('backend', 'native')

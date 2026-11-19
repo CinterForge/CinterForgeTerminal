@@ -403,6 +403,7 @@ class CinterForgeBedrockManager:
             live=lambda: self._live_session_locked()[0] is not None,
             send=self._access_send,
             event=self._access_event,
+            command=self._bridge_host_command,
         )
 
     def _access_send(self, command: str) -> None:
@@ -413,6 +414,19 @@ class CinterForgeBedrockManager:
             self._event_id += 1
             self._events.append({'id': self._event_id, 'kind': kind,
                                  'message': str(message)[:512]})
+
+    def _bridge_host_command(self, sender: str, command: str) -> None:
+        # The Bedrock PTY reader is the ONLY event source. Its attached tab
+        # owns the existing host Bash command dispatcher and all visible IO.
+        session = self._terminal_session
+        if session is not None and not session.closed:
+            try:
+                session.forward_host_command(sender, command)
+            except (OSError, RuntimeError) as error:
+                session._append_host_output(
+                    ('[Bedrock] Host Bash input failed: ' + str(error) + '\r\n').encode('utf-8'))
+        else:
+            self._access_event('Minecraft host Bash is not connected', kind='server-access-error')
 
     def observe_console_output(self, data: bytes) -> None:
         # PTY reader calls this only for the owning Bedrock Session. This is
@@ -900,7 +914,7 @@ class CinterForgeBedrockManager:
         archive = output_root / 'Worlds' / export_name / (export_name + '.mcworld')
         if not archive.is_file() or archive.is_symlink() or archive.stat().st_size < 1024:
             raise RuntimeError('CraftMaster did not create a complete .mcworld: ' + str(archive))
-        live_map = output_root / 'Maps' / export_name / 'Overworld' / 'Live Map.htm'
+        live_map = output_root / 'Maps' / source.name / 'Overworld' / 'Live Map.htm'
         if not live_map.is_file() or live_map.is_symlink():
             raise RuntimeError('CraftMaster did not create the live Zoomify map: ' + str(live_map))
         report(export_name + ': Zoomify and Bedrock export ready')
@@ -908,15 +922,16 @@ class CinterForgeBedrockManager:
 
     def _convert_java_world(
         self, world: dict, progress: Callable[[str], None] | None = None,
+        *, force: bool = False,
     ) -> Path:
-        """Reuse a validated converted save or import a freshly converted one."""
+        """Reuse an installed save, or atomically import a converted update."""
         source = Path(world['path'])
         export_name = self.java_world_export_name(world)
         destination = self.curated_worlds / export_name
         if destination.is_symlink() or self.curated_worlds.is_symlink():
             raise RuntimeError('Refusing linked CraftMaster world destination')
         if destination.is_dir() and not any(path.is_symlink() for path in destination.rglob('*')):
-            if (
+            if not force and (
                 (destination / 'level.dat').is_file()
                 and (destination / 'db/CURRENT').is_file()
                 and any((destination / 'db').glob('MANIFEST-*'))
@@ -924,8 +939,11 @@ class CinterForgeBedrockManager:
                 if progress:
                     progress(export_name + ': reusing validated Bedrock world')
                 return destination
-        if destination.exists():
+        if destination.exists() and not force:
             raise RuntimeError('Refusing to overwrite Bedrock world: ' + str(destination))
+        if force and destination.exists() and (not destination.is_dir() or any(
+                entry.is_symlink() for entry in destination.rglob('*'))):
+            raise RuntimeError('Refusing unsafe existing CraftMaster world: ' + str(destination))
 
         archive = self.run_native_craftmaster(world, progress=progress)
         self.curated_worlds.mkdir(parents=True, exist_ok=True)
@@ -949,10 +967,56 @@ class CinterForgeBedrockManager:
                 }, indent=2) + '\n', encoding='utf-8',
             )
             if destination.exists():
-                raise RuntimeError('CraftMaster destination changed during conversion: ' + str(destination))
-            os.replace(extracted, destination)
+                if not force:
+                    raise RuntimeError('CraftMaster destination changed during conversion: ' + str(destination))
+                backup = self.curated_worlds / ('craftmaster-previous-' + uuid.uuid4().hex)
+                os.replace(destination, backup)
+                try:
+                    os.replace(extracted, destination)
+                except Exception:
+                    os.replace(backup, destination)
+                    raise
+                else:
+                    shutil.rmtree(backup)  # Converted and validated before replacing the old save.
+            else:
+                os.replace(extracted, destination)
         (progress or self._append_log)(export_name + ': world imported for Bedrock')
         return destination
+
+    def refresh_managed_world(self, source: Path) -> None:
+        """Replace an *offline* managed server copy after explicit CraftMaster update.
+
+        The Bedrock runtime copies curated saves to a fixed path keyed by their
+        source folder. Reusing an old copy would silently restart old blocks.
+        """
+        source = source.resolve(strict=True)
+        key = hashlib.sha256(str(source).encode('utf-8')).hexdigest()[:12]
+        destination = self.run_root / 'worlds' / ('CinterForge-' + key)
+        if destination.is_symlink():
+            raise RuntimeError('Refusing linked managed Bedrock world: ' + str(destination))
+        if not destination.exists():
+            return  # First launch creates it from the newly converted source.
+        # Never replace a world that Bedrock is still using.
+        with self._lock:
+            pid, _, _ = self._live_session_locked()
+            current = self._server_configuration().get('level-name', '')
+            if pid is not None and current == destination.name:
+                raise RuntimeError('Stop the active Bedrock world before replacing its save')
+        fresh = destination.parent / ('craftmaster-updated-' + uuid.uuid4().hex)
+        backup = destination.parent / ('craftmaster-backup-' + uuid.uuid4().hex)
+        try:
+            self._safe_world_copy(source, fresh)
+            os.replace(destination, backup)
+            try:
+                os.replace(fresh, destination)
+            except Exception:
+                os.replace(backup, destination)
+                raise
+            else:
+                shutil.rmtree(backup)
+        finally:
+            if fresh.exists():
+                shutil.rmtree(fresh)
 
     # --- Public Cloudflare published-world installation ----------------------
     def install_published_world(

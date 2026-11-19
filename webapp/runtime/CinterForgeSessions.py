@@ -135,7 +135,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     python = str(Path(sys.executable).resolve())
     functions = '\n'.join(
         f'{name}() {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in ('help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'discord', 'setpass', 'code', 'htmlmenus', 'craftmaster'))
+        for name in ('help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'discord', 'setpass', 'code', 'htmlmenus', 'craftmaster'))
     # These exact source filenames are the shell commands. Load the bundled
     # Terminal manifest; no sibling WebApp source or story package is required.
     catalog = json.loads((_CinterForgeSettings.ASSETS / 'data/if_titles.json').read_text(encoding='utf-8'))
@@ -153,7 +153,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
         for name in ['games', 'stories'] + story_names)
     mac_names = list(_mac_catalog())
-    if set(mac_names) & set(['help', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories', 'install', 'craftmaster'] + story_names):
+    if set(mac_names) & set(['help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories', 'install', 'craftmaster'] + story_names):
         raise RuntimeError('Mac game command collides with existing Terminal command')
     functions += '\n' + '\n'.join(
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
@@ -167,9 +167,12 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     # (pacman-key, /dev/shm and /dev/mqueue setup), even for read-only bundles.
     # Our explicit --rcfile requires no machine-wide profile or pacman setup.
     preamble = ("# Native CinterForge Terminal session (preconfigured UCRT64 environment)\n"
-                + "PS1='\\u@\\h \\w \\$ '\n"
-                + "HISTIGNORE='setpass *'\n"  # Do not retain credentials in Bash history.
-                + "printf 'Welcome to CinterForge. Type help for instructions.\\n'\n")
+                + 'if [ "${CINTER_TERMINAL_BRIDGE:-}" = bedrock ]; then\n'
+                + "  PS1=''\n  stty -echo\n"
+                + "else\n  PS1='\\u@\\h \\w \\$ '\n"
+                + "  printf 'Welcome to CinterForge. Type help for instructions.\\n'\n"
+                + "fi\n"
+                + "HISTIGNORE='setpass *'\n")  # Do not retain credentials in Bash history.
 
     (directory / 'terminal-init.sh').write_text(preamble + functions + '\n', encoding='utf-8')
     return directory
@@ -317,7 +320,8 @@ class CinterForgeTerminalSession:
     def __init__(self, builds: Path, system: str, cols: int, rows: int, *, url: str, token: str,
                  command: list[str] | None = None, working_directory: Path | None = None,
                  output_log: Path | None = None, internal_token: str | None = None,
-                 child_env: dict[str, str] | None = None):
+                 child_env: dict[str, str] | None = None,
+                 command_session_id: str | None = None):
         self.id = uuid.uuid4().hex
         self.system = system
         self.cols, self.rows = _bounded_size(cols, rows)
@@ -334,7 +338,7 @@ class CinterForgeTerminalSession:
         env.pop('CINTER_TERMINAL_CLI_TOKEN', None)
         if internal_token:
             env['CINTER_TERMINAL_CLI_TOKEN'] = internal_token
-        env['CINTER_TERMINAL_SESSION_ID'] = self.id
+        env['CINTER_TERMINAL_SESSION_ID'] = command_session_id or self.id
         # Preserve the existing persistent session working directory in Steam.
         # Only generated shell bindings and disposable files use OS cache.
         self.root = builds / 'Run' / 'CinterForgeTerminal' / system
@@ -380,6 +384,12 @@ class CinterForgeTerminalSession:
         else:
             self.fd, slave = pty.openpty()
             self._winsize(self.cols, self.rows)
+            if env.get('CINTER_TERMINAL_BRIDGE') == 'bedrock':
+                # Disable PTY echo BEFORE Bash starts. Minecraft's command
+                # echo is already rendered by its owning Terminal tab.
+                attributes = termios.tcgetattr(slave)
+                attributes[3] &= ~termios.ECHO
+                termios.tcsetattr(slave, termios.TCSANOW, attributes)
             try:
                 self.process = subprocess.Popen(self.shell, cwd=working_directory, env=env,
                                                 stdin=slave, stdout=slave, stderr=slave,
@@ -506,11 +516,14 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
     away from its tab does not detach, terminate, or restart the server.
     """
     def __init__(self, manager, builds: Path, system: str, cols: int, rows: int,
-                 *, url: str, token: str):
+                 *, url: str, token: str, internal_token: str):
         # This state must exist before the parent starts the PTY reader thread.
         self._bedrock_console_live = False
         self._bedrock_console_announced = False
         self._bedrock_boot_buffer = b''
+        self._bedrock_console_partial = b''
+        self.host_shell = None
+        self._host_shell_lock = threading.Lock()
         command, extra = manager._run_command()  # Same run-mac-bds.sh as acceptance.
         if extra:
             raise RuntimeError('Bedrock Session needs an unsupported environment override')
@@ -538,10 +551,71 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
             else:
                 tail = path.read_bytes()[-1600:].decode('utf-8', errors='replace') if path.is_file() else ''
                 raise RuntimeError(f'Bedrock VM exited immediately (code {self.process.returncode}): {tail}')
+            # This is a real host Bash PTY, with the SAME generated command
+            # bindings as Mac Bash. It is owned by the Minecraft tab, not a
+            # second interpreter, HTTP server or browser Session tab.
+            shell = CinterForgeTerminalSession(
+                builds, system, cols, rows, url=url, token=token,
+                internal_token=internal_token, command_session_id=self.id,
+                child_env={'CINTER_TERMINAL_BRIDGE': 'bedrock'},
+            )
+            with self._host_shell_lock:
+                if self.closed:
+                    shell.close()
+                    raise RuntimeError('Bedrock exited while host Bash was starting')
+                self.host_shell = shell
+            threading.Thread(target=self._relay_host_output,
+                             name='bedrock-host-bash-' + self.id[:8],
+                             daemon=True).start()
         except Exception:
             # Never abandon a VM if its owner/watchdog fails to initialize.
             self.close()
             raise
+
+    def _read_output(self) -> None:
+        try:
+            super()._read_output()
+        finally:
+            self._close_host_shell()  # Also on unexpected BDS/VM exit.
+
+    def _close_host_shell(self) -> None:
+        with self._host_shell_lock:
+            shell, self.host_shell = self.host_shell, None
+        if shell is not None:
+            shell.close()
+
+    def _append_host_output(self, data: bytes) -> None:
+        with self.lock:
+            if self.closed:
+                return
+            self.output.append(data)
+            self.output_size += len(data)
+            from runtime import CinterForgeSettings as _settings
+            while self.output_size > _settings.MAX_OUTPUT and self.output:
+                self.output_size -= len(self.output.popleft())
+            self.lock.notify_all()
+
+    def _relay_host_output(self) -> None:
+        shell = self.host_shell
+        while shell is not None and not self.closed:
+            data, closed = shell.poll(250)
+            if data:
+                self._append_host_output(data)
+            if closed:
+                break
+        if not self.closed:
+            self._append_host_output(b'\r\n[Bedrock] Host Bash session ended.\r\n')
+
+    def forward_host_command(self, sender: str, command: str) -> None:
+        """Enter one Minecraft command into this tab's persistent host Bash."""
+        shell = self.host_shell
+        if shell is None or shell.closed:
+            self._append_host_output(b'\r\n[Bedrock] Host Bash unavailable.\r\n')
+            return
+        self._append_host_output((f'\r\n{sender}>{command}\r\n').encode('utf-8'))
+        # No parsing, dispatch switch, whitelist or per-command subprocess:
+        # this is literally the existing Bash PTY's standard input.
+        shell.write(command + '\n')
 
     def _visible_output(self, data: bytes) -> bytes:
         """Quiet VM boot chatter in the tab; retain every byte in the log.
@@ -551,7 +625,17 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
         interactive input working without introducing a second console.
         """
         if self._bedrock_console_live:
-            return data
+            # Keep the source marker out of the visible transcript; the host
+            # Bash echo and command result replace it. Handle split PTY reads.
+            pending = self._bedrock_console_partial + data
+            lines = pending.split(b'\n')
+            self._bedrock_console_partial = lines.pop()
+            result = b''.join(line + b'\n' for line in lines
+                              if b'CINTERFORGE_MC_STATUS:' not in line)
+            if len(self._bedrock_console_partial) > 8192:
+                result += self._bedrock_console_partial
+                self._bedrock_console_partial = b''
+            return result
         heading = b''
         if not self._bedrock_console_announced:
             self._bedrock_console_announced = True
@@ -569,7 +653,7 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
             self._bedrock_boot_buffer = b''
             return (heading + b'[Bedrock] Server ready. Type commands here '
                     b'(e.g. list); close this tab to stop the server.\r\n'
-                    + pending[end + 1:])
+                    + self._visible_output(pending[end + 1:]))
         # Only essential startup errors and readiness markers belong in the
         # user console. Everything else is already preserved in output_log.
         lines = pending.split(b'\n')
@@ -578,7 +662,9 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
                      b'CINTER_BDS_NETHERNET_FAIL',
                      b'CINTER_BDS_LAN_RELAY_ERROR')
         for line in lines:
-            if any(marker in line for marker in important):
+            if b'CINTERFORGE_MC_STATUS_BRIDGE_READY' in line:
+                heading += b'[Bedrock] cinter: script-event bridge ready.\r\n'
+            elif any(marker in line for marker in important):
                 heading += line + b'\n'
         return heading
 
@@ -587,6 +673,7 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
             if getattr(self, 'manager', None) is not None and self.manager._terminal_session is self:
                 self.manager.stop()  # Deliver `stop` through this PTY first.
         finally:
+            self._close_host_shell()
             super().close()
 
 
@@ -808,55 +895,63 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
     A run request never steals the requesting shell. Switching sessions never
     affects process ownership; only explicit stop/close or app shutdown does.
     """
-    from runtime import CinterForgeSettings as _CinterForgeSettings
-    if server.bedrock is None:
-        raise RuntimeError('Bedrock is unavailable: ' + server.bedrock_error)
-    # Create the preview tab BEFORE conversion. Its HTML displays progress until
-    # the first Zoomify tile arrives; the browser polls independently of this
-    # potentially long-running request. The later Bedrock PTY is a separate tab.
-    from runtime import CinterForgeCraftMasterMap as _CinterForgeCraftMasterMap
-    java_world = server.bedrock.find_java_world(name) if name.strip() else None
-    map_request = (_CinterForgeCraftMasterMap.open_map_tab(server, java_world)
-                   if java_world is not None else None)
-
-    def report_progress(message: str) -> None:
-        if map_request is None:
-            server.bedrock._append_log(message)
-        else:
-            _CinterForgeCraftMasterMap.report_progress(server, map_request['id'], message)
-
-    # Keep the existing world preparation outside Session locks. Do not hold a
-    # browser/VM lock while converting Java chunks or downloading a public ZIP.
-    try:
-        server.bedrock.prepare_world(name, progress=report_progress)
-    except Exception as error:
-        if map_request is not None:
-            _CinterForgeCraftMasterMap.mark_finished(server, map_request['id'], error)
-        raise
-    if map_request is not None:
-        map_file = (server.bedrock.craftmaster_output_root() / 'Maps' /
-                    map_request['world'] / 'Overworld' / 'Live Map.htm')
-        if map_file.is_file():
-            _CinterForgeCraftMasterMap.mark_finished(server, map_request['id'])
-        else:
-            # The Bedrock import may have reused a validated save that predates
-            # Zoomify output. Produce its live map without delaying Bedrock.
-            def build_missing_map() -> None:
-                try:
-                    server.bedrock.run_native_craftmaster(
-                        java_world, progress=report_progress,
-                    )
-                except Exception as error:
-                    _CinterForgeCraftMasterMap.mark_finished(
-                        server, map_request['id'], error,
-                    )
-                else:
-                    _CinterForgeCraftMasterMap.mark_finished(server, map_request['id'])
-            threading.Thread(
-                target=build_missing_map, daemon=True,
-                name='bedrock-craftmaster-map',
-            ).start()
     with server.bedrock_terminal_lock:
+        from runtime import CinterForgeSettings as _CinterForgeSettings
+        if server.bedrock is None:
+            raise RuntimeError('Bedrock is unavailable: ' + server.bedrock_error)
+        # Existing Bedrock saves are authoritative. Never regenerate their maps or
+        # run CraftMaster just because a Java save with a similar name exists.
+        from runtime.CinterForgeBedrock import _world_command_name
+        requested = name.strip().casefold()
+        # Reopening an already-running world must not trigger any conversion.
+        if not restart:
+            with server.sessions_lock:
+                active = [item for item in server.sessions.values()
+                          if getattr(item, 'kind', None) == 'bedrock' and item.process.poll() is None]
+                if active:
+                    selected = server.bedrock._world_settings().get('selected') or {}
+                    if requested and requested not in (
+                            str(selected.get('name', '')).casefold(),
+                            str(selected.get('folder', '')).casefold(),
+                            str(selected.get('command_name', '')).casefold()):
+                        raise RuntimeError('A different Bedrock world is already running; stop it before switching')
+                    item = active[0]
+                    server.bedrock_terminal_requests.append({
+                        'id': item.id, 'label': 'Bedrock', 'kind': 'bedrock',
+                        'shell': 'Bedrock', 'platform': server.system})
+                    return {**server.bedrock.status(), 'terminal_session': item.id,
+                            'reused': True}
+        existing = [world for world in server.bedrock.list_worlds()['worlds']
+                    if requested in (world['name'].casefold(), world['folder'].casefold(),
+                                     _world_command_name(world).casefold())]
+        java_world = None
+        if not existing and requested:
+            java_world = server.bedrock.find_java_world(name)
+            if java_world is not None:
+                export_name = server.bedrock.java_world_export_name(java_world).casefold()
+                existing = [world for world in server.bedrock.list_worlds()['worlds']
+                            if export_name in (world['name'].casefold(), world['folder'].casefold(),
+                                               _world_command_name(world).casefold())]
+        from runtime import CinterForgeCraftMasterMap as _CinterForgeCraftMasterMap
+        map_request = (_CinterForgeCraftMasterMap.open_map_tab(server, java_world)
+                       if java_world is not None and not existing else None)
+
+        def report_progress(message: str) -> None:
+            if map_request is None:
+                server.bedrock._append_log(message)
+            else:
+                _CinterForgeCraftMasterMap.report_progress(server, map_request['id'], message)
+
+        # Preparation is synchronous. The Bedrock PTY must not start until a missing
+        # Java world has been fully converted, validated and imported.
+        try:
+            prepared_name = server.bedrock.prepare_world(name, progress=report_progress)
+        except Exception as error:
+            if map_request is not None:
+                _CinterForgeCraftMasterMap.mark_finished(server, map_request['id'], error)
+            raise
+        if map_request is not None:
+            _CinterForgeCraftMasterMap.mark_finished(server, map_request['id'])
         with server.sessions_lock:
             live = [item for item in server.sessions.values()
                     if getattr(item, 'kind', None) == 'bedrock' and
@@ -864,7 +959,7 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
             if live and not restart:
                 # Select the existing Bedrock tab only for the same saved world.
                 selected = (server.bedrock._world_settings().get('selected') or {})
-                if name.strip() and name.strip().casefold() not in (
+                if prepared_name.strip() and prepared_name.strip().casefold() not in (
                         str(selected.get('name', '')).casefold(),
                         str(selected.get('folder', '')).casefold()):
                     raise RuntimeError('A different Bedrock world is already running; stop it before switching')
@@ -889,11 +984,12 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
         with server.sessions_lock:
             if len(server.sessions) >= _CinterForgeSettings.MAX_SESSIONS:
                 raise ValueError('Maximum terminal sessions reached')
-        state = server.bedrock.run_world(name, launch=False)
+        state = server.bedrock.run_world(prepared_name, launch=False)
         if state.get('running'):
             raise RuntimeError('Bedrock already running outside a Session; stop it explicitly first')
         terminal = CinterForgeBedrockTerminalSession(server.bedrock, server.mutable_builds,
-            server.system, cols, rows, url=server.origin, token=server.token)
+            server.system, cols, rows, url=server.origin, token=server.token,
+            internal_token=server.cli_token)
         with server.sessions_lock:
             server.sessions[terminal.id] = terminal
         server.bedrock_terminal_requests.append({

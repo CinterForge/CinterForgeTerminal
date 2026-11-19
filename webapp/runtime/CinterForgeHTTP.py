@@ -108,7 +108,7 @@ class CinterForgeHTTPServer(ThreadingHTTPServer):
         self.token = secrets.token_urlsafe(36)
         self.sessions: dict[str, _CinterForgeSessions.CinterForgeTerminalSession] = {}
         self.sessions_lock = threading.Lock()
-        self.bedrock_terminal_lock = threading.Lock()
+        self.bedrock_terminal_lock = threading.RLock()
         self.bedrock_terminal_requests = deque()
         # Browser map tabs are read-only views of the existing CraftMaster ZFY cache.
         self.craftmaster_map_lock = threading.RLock()

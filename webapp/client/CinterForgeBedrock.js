@@ -84,19 +84,16 @@ CinterForgeState.monitorBedrockInstall = async () => {
 
   // The live server's compact events are separate from the VM's full PTY
   // transcript. Status messages are text only; Minecraft cannot execute JS.
-  let minecraftSayCursor = null;
+  let minecraftSayCursor = 0;
   let minecraftSayPolling = false;
   setInterval(async () => {
     if (document.visibilityState === 'hidden' || minecraftSayPolling) return;
     minecraftSayPolling = true;
     try {
-      const from = minecraftSayCursor === null ? 0 : minecraftSayCursor;
-      const response = await CinterForgeState.api('/api/bedrock/events?cursor=' + from);
-      if (minecraftSayCursor !== null) {
-        for (const event of response.events || []) {
-          if (event.id > minecraftSayCursor && event.kind === 'minecraft-say')
-            CinterForgeState.notice(String(event.message));
-        }
+      const response = await CinterForgeState.api('/api/bedrock/events?cursor=' + minecraftSayCursor);
+      for (const event of response.events || []) {
+        if (event.id > minecraftSayCursor && event.kind === 'minecraft-say')
+          CinterForgeState.notice(String(event.message));
       }
       minecraftSayCursor = Number(response.cursor) || 0;
     } catch (_) { /* No Bedrock installation, WebView closing, or offline host. */ }

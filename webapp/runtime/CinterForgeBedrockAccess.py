@@ -117,13 +117,14 @@ def _atomic_json(path: Path, data) -> None:
 
 
 class BedrockServerAccess:
-    def __init__(self, installation_root: Path, run_root: Path, *, live, send, event):
+    def __init__(self, installation_root: Path, run_root: Path, *, live, send, event, command):
         self.root = installation_root
         self.run_root = run_root
         self.path = installation_root / 'ServerAccess.json'
         self.live = live
         self.send = send
         self.event = event
+        self.command = command
         self._partial = ''
         self._promoted = set()
 
@@ -287,19 +288,29 @@ class BedrockServerAccess:
                         if 'Spawned:' in line:
                             self._promoted.add(name.casefold())
                             self.send('op ' + _quote(name))
-            # Script API chat and command-block events arrive as content-log
-            # lines. Native BDS does not print regular player chat itself.
-            # Decode bounded JSON and surface TEXT only; never evaluate it.
+            # Decode the Script API event line already present in the Bedrock
+            # console. Status/chat are display messages. Every cinter command
+            # goes directly to the owning Bedrock tab's real host Bash PTY.
             script_event = _SCRIPT_EVENT.search(line)
             if script_event:
                 try:
                     payload = json.loads(script_event.group(1))
-                    if not isinstance(payload, dict) or payload.get('type') not in ('chat', 'status'):
+                    if not isinstance(payload, dict):
                         continue
+                    kind = payload.get('type')
                     sender = str(payload.get('sender', 'World'))[:32].strip()
-                    message = str(payload.get('message', ''))[:240].strip()
-                    if sender and message and not any(ord(c) < 32 for c in sender + message):
-                        self.event(sender + ':' + message, kind='minecraft-say')
+                    if not sender or any(ord(c) < 32 for c in sender):
+                        continue
+                    if kind == 'command':
+                        command = payload.get('command')
+                        if (isinstance(command, str) and command.strip() and
+                                len(command.encode('utf-8')) <= 2048 and
+                                not any(c in command for c in '\r\n\x00')):
+                            self.command(sender, command)
+                    elif kind in ('chat', 'status'):
+                        message = str(payload.get('message', ''))[:240].strip()
+                        if message and not any(ord(c) < 32 for c in message):
+                            self.event(sender + ':' + message, kind='minecraft-say')
                 except (ValueError, TypeError):
                     pass
                 continue

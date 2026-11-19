@@ -126,6 +126,7 @@
       const parent = this.target.parentElement;
       const previousTop = parent?.scrollTop || 0, previousHeight = parent?.scrollHeight || 0;
       const visibleDiscord = this.target === getElement('terminal-output') && activeTab?.kind === 'discord';
+      const visibleBedrock = this.target === getElement('terminal-output') && activeTab?.kind === 'bedrock';
       const followTail = !visibleDiscord || activeTab.followTail;
       const line = this.lines[this.lines.length - 1] || '';
       const before = this.lines.slice(0, -1).join('\n');
@@ -138,7 +139,10 @@
       // compete with the draft caret, or leave a CSS-only echo behind on redraw.
       this.target.replaceChildren(...(visibleDiscord
         ? [document.createTextNode(prefix + suffix)]
-        : [document.createTextNode(prefix), caret, document.createTextNode(suffix)]));
+        : visibleBedrock
+          ? [document.createTextNode(prefix + suffix +
+              (line ? '\n' : '') + 'minecraft> ' + (activeTab.bedrockDraft || '')), caret]
+          : [document.createTextNode(prefix), caret, document.createTextNode(suffix)]));
       if (visibleDiscord) {
         activeTab.visibleDraft = null;
         paintDiscordDraft(activeTab);
