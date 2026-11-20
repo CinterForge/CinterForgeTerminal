@@ -135,7 +135,11 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     python = str(Path(sys.executable).resolve())
     functions = '\n'.join(
         f'{name}() {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in ('help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'discord', 'setpass', 'code', 'htmlmenus', 'craftmaster'))
+        for name in ('help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'setpass', 'code', 'htmlmenus', 'craftmaster'))
+    permitted = set(env.get('CINTER_TERMINAL_ALLOWED_COMMANDS', '').split(','))
+    functions += '\n' + '\n'.join(
+        f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
+        for name in ('assets', 'packs', 'discord') if name in permitted)
     # These exact source filenames are the shell commands. Load the bundled
     # Terminal manifest; no sibling WebApp source or story package is required.
     catalog = json.loads((_CinterForgeSettings.ASSETS / 'data/if_titles.json').read_text(encoding='utf-8'))
@@ -153,7 +157,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
         for name in ['games', 'stories'] + story_names)
     mac_names = list(_mac_catalog())
-    if set(mac_names) & set(['help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories', 'install', 'craftmaster'] + story_names):
+    if set(mac_names) & set(['help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories', 'install', 'craftmaster', 'assets', 'packs', 'discord'] + story_names):
         raise RuntimeError('Mac game command collides with existing Terminal command')
     functions += '\n' + '\n'.join(
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
@@ -269,6 +273,9 @@ def _session_environment(builds: Path, system: str) -> dict[str, str]:
     env = dict(os.environ)
     env['CINTER_USER_HOME'] = str(user_home)
     env['CINTER_TERMINAL_SCRATCH_ROOT'] = str(scratch)
+    # The local Assets commands use this already-owned writable state root.
+    # Installed apps must never derive or create a developer Builds tree.
+    env['CINTER_TERMINAL_STATE_ROOT'] = str(builds.resolve())
     # Guest shells have isolated HOME, but Mac Bash must retain the real
     # login HOME. Host signing, Keychain preferences, and normal ./Cinter
     # publishing must work from the integrated terminal without workaround.
@@ -316,10 +323,42 @@ def _session_environment(builds: Path, system: str) -> dict[str, str]:
     return env
 
 
+def _terminal_process_exit_code(process) -> int | None:
+    """Return an exit code for Popen or Windows pywinpty, or None if alive.
+
+    pywinpty's PtyProcess is not subprocess.Popen: it provides isalive()/wait()
+    but neither poll() nor a timeout argument on wait(). Only call its blocking
+    wait() after isalive() has reported the child exited.
+    """
+    poll = getattr(process, 'poll', None)
+    if callable(poll):
+        return poll()
+    if process.isalive():
+        return None
+    return process.wait()
+
+
+def _terminal_process_wait(process, timeout: float) -> int | None:
+    """Bounded wait using the real API of the owned process type."""
+    poll = getattr(process, 'poll', None)
+    if callable(poll):
+        return process.wait(timeout=timeout)
+    deadline = time.monotonic() + timeout
+    while True:
+        code = _terminal_process_exit_code(process)
+        if code is not None:
+            return code
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(getattr(process, 'pid', 'Bedrock PTY'), timeout)
+        time.sleep(min(0.05, remaining))
+
+
 class CinterForgeTerminalSession:
     def __init__(self, builds: Path, system: str, cols: int, rows: int, *, url: str, token: str,
                  command: list[str] | None = None, working_directory: Path | None = None,
                  output_log: Path | None = None, internal_token: str | None = None,
+                 capabilities: dict[str, bool] | None = None,
                  child_env: dict[str, str] | None = None,
                  command_session_id: str | None = None):
         self.id = uuid.uuid4().hex
@@ -331,6 +370,9 @@ class CinterForgeTerminalSession:
         self.closed = False
         self.output_log = None
         env = _session_environment(builds, system)
+        permits = capabilities or {}
+        env['CINTER_TERMINAL_ALLOWED_COMMANDS'] = ','.join(
+            name for name in ('assets', 'packs', 'discord') if permits.get(name))
         env['CINTER_TERMINAL_URL'] = url
         env['CINTER_TERMINAL_TOKEN'] = token
         # The local command helper can call the host API after setpass without
@@ -545,12 +587,12 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
             # Mirror CinterForgeBedrockManager.start(): a launcher rejected by macOS must
             # fail the run request instead of opening a misleading dead tab.
             try:
-                self.process.wait(timeout=0.7)
+                code = _terminal_process_wait(self.process, 0.7)
             except subprocess.TimeoutExpired:
                 pass
             else:
                 tail = path.read_bytes()[-1600:].decode('utf-8', errors='replace') if path.is_file() else ''
-                raise RuntimeError(f'Bedrock VM exited immediately (code {self.process.returncode}): {tail}')
+                raise RuntimeError(f'Bedrock launcher exited immediately (code {code}): {tail}')
             # This is a real host Bash PTY, with the SAME generated command
             # bindings as Mac Bash. It is owned by the Minecraft tab, not a
             # second interpreter, HTTP server or browser Session tab.
@@ -907,7 +949,7 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
         if not restart:
             with server.sessions_lock:
                 active = [item for item in server.sessions.values()
-                          if getattr(item, 'kind', None) == 'bedrock' and item.process.poll() is None]
+                          if getattr(item, 'kind', None) == 'bedrock' and _terminal_process_exit_code(item.process) is None]
                 if active:
                     selected = server.bedrock._world_settings().get('selected') or {}
                     if requested and requested not in (
@@ -955,7 +997,7 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
         with server.sessions_lock:
             live = [item for item in server.sessions.values()
                     if getattr(item, 'kind', None) == 'bedrock' and
-                    item.process.poll() is None]
+                    _terminal_process_exit_code(item.process) is None]
             if live and not restart:
                 # Select the existing Bedrock tab only for the same saved world.
                 selected = (server.bedrock._world_settings().get('selected') or {})
@@ -976,7 +1018,7 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
         with server.sessions_lock:
             ended = [(key, item) for key, item in server.sessions.items()
                      if getattr(item, 'kind', None) == 'bedrock' and
-                     item.process.poll() is not None]
+                     _terminal_process_exit_code(item.process) is not None]
             for key, _ in ended:
                 server.sessions.pop(key, None)
         for _, item in ended:
@@ -995,6 +1037,6 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
         server.bedrock_terminal_requests.append({
             'id': terminal.id, 'label': 'Bedrock', 'kind': 'bedrock',
             'shell': 'Bedrock', 'platform': server.system})
-        return {**state, 'running': terminal.process.poll() is None,
+        return {**state, 'running': _terminal_process_exit_code(terminal.process) is None,
                 'console_available': True, 'terminal_session': terminal.id}
 

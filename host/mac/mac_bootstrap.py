@@ -71,7 +71,8 @@ VM_STATE_FOLDER = 'CFTVM/U'
 PACKAGES = ('python=3.11', 'cmake=3.31', 'ninja=1.12', 'nodejs=22',
             'pkg-config', 'go=1.24', 'colima=0.10.3', 'docker-cli=29.8.1',
             'docker-buildx=0.35.0', 'git-lfs=3.8.0', '7zip=26.01',
-            'skopeo=1.24.1', 'msitools=0.106')
+            'skopeo=1.24.1', 'msitools=0.106',
+            'assimp', 'ffmpeg', 'imagemagick')
 SCHEMA = 'cinterforge.terminal.mac-bootstrap.v1'
 
 
@@ -248,6 +249,7 @@ def ensure_macos_tools(builds: Path) -> dict[str, str]:
     tools = builds / 'Toolchains/mac'
     prefix = tools / 'env'
     mamba = _mamba(builds)
+    from host.devtools.assimp_library import assimp_ready, prebuilt_assimp
     expected = {'cmake': prefix / 'bin/cmake', 'ninja': prefix / 'bin/ninja',
                 'python': prefix / 'bin/python3', 'node': prefix / 'bin/node',
                 'go': prefix / 'bin/go',
@@ -257,8 +259,11 @@ def ensure_macos_tools(builds: Path) -> dict[str, str]:
                 'git-lfs': prefix / 'bin/git-lfs',
                 'skopeo': prefix / 'bin/skopeo',
                 'wixl': prefix / 'bin/wixl', 'msiinfo': prefix / 'bin/msiinfo',
-                'msiextract': prefix / 'bin/msiextract'}
-    if not all(binary.is_file() for binary in expected.values()):
+                'msiextract': prefix / 'bin/msiextract',
+                'ffmpeg': prefix / 'bin/ffmpeg',
+                'ffprobe': prefix / 'bin/ffprobe',
+                'magick': prefix / 'bin/magick'}
+    if not all(binary.is_file() for binary in expected.values()) or not assimp_ready(prefix):
         if prefix.exists():
             # Let the package manager reconcile a partially populated prefix;
             # do not delete the user's Python/cache state on retries.
@@ -272,16 +277,20 @@ def ensure_macos_tools(builds: Path) -> dict[str, str]:
             raise RuntimeError(f'Clean-Mac tool provisioning incomplete: {name} absent at {path}')
         # Go and Docker Buildx use the `version` subcommand, not `--version`.
         _run([str(path), 'version' if name in ('go', 'buildx') else
+              '-version' if name in ('ffmpeg', 'ffprobe', 'magick') else
               '--help' if name in ('msiinfo', 'msiextract') else '--version'])
     if not any((prefix / 'bin' / name).is_file() for name in ('7zz', '7z')):
         # Some 7zip builds use 7zz and others use 7z. Both can expand CAB.
         _run([str(mamba), 'install', '--yes', '--prefix', str(prefix),
               '--channel', 'conda-forge', '7zip=26.01'],
              env=dict(os.environ, MAMBA_ROOT_PREFIX=str(tools / 'mamba-cache')))
+    assimp = prebuilt_assimp(prefix)
+    print(f'[MAC BOOTSTRAP] verified prebuilt Assimp {assimp["version"]} C API: {assimp["path"]}', flush=True)
     if not any((prefix / 'bin' / name).is_file() for name in ('7zz', '7z')):
         raise RuntimeError('Windows Fixed Runtime CAB extraction needs staged 7zip executable')
     _run(['xcrun', '--find', 'clang++'])
     result = {name: str(path) for name, path in expected.items()}
+    result['assimp_library'] = str(assimp['path'])
     # Persist the precise resolved transitive Conda dependency set: requested
     # top-level packages alone are not an offline closure.
     locked = subprocess.run([str(mamba), 'env', 'export', '--explicit',

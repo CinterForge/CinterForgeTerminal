@@ -180,7 +180,8 @@ class CinterForgeHTTPCode:
                     self.server.mutable_builds, self.server.system, 100, 30,
                     url=self.server.origin, token=self.server.token,
                     command=command, working_directory=cwd,
-                    internal_token=self.server.cli_token)
+                    internal_token=self.server.cli_token,
+                    capabilities=self.server.capabilities)
                 terminal.code_backend = backend
                 self.server.code_sessions[code_id] = terminal
             return {'opened': True, 'backend': backend, 'cwd': str(cwd)}

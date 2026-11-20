@@ -38,12 +38,17 @@ PACKAGES = (
     'mingw-w64-ucrt-x86_64-nodejs',
     'mingw-w64-ucrt-x86_64-pkgconf',
     'mingw-w64-ucrt-x86_64-binutils',
+    'mingw-w64-ucrt-x86_64-assimp',
+    'mingw-w64-ucrt-x86_64-ffmpeg',
+    'mingw-w64-ucrt-x86_64-imagemagick',
 )
 REQUIRED = ('usr/bin/bash.exe', 'usr/bin/pacman.exe',
             'usr/bin/ls.exe', 'usr/bin/rm.exe', 'usr/bin/tar.exe',
             'ucrt64/bin/objdump.exe', 'ucrt64/bin/gcc.exe', 'ucrt64/bin/g++.exe',
             'ucrt64/bin/cmake.exe', 'ucrt64/bin/ninja.exe',
-            'ucrt64/bin/python.exe', 'ucrt64/bin/node.exe')
+            'ucrt64/bin/python.exe', 'ucrt64/bin/node.exe',
+            'ucrt64/bin/assimp.exe', 'ucrt64/bin/ffmpeg.exe',
+            'ucrt64/bin/ffprobe.exe', 'ucrt64/bin/magick.exe')
 
 
 def _execute(command: list[str], *, cwd: Path, log: Path, timeout: int = 1200,

@@ -15,8 +15,10 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 
 TARGETS = ('mac', 'linux', 'win')
+WINDOWS_RUNTIME_SCHEMA = 'cinterforge.terminal.craftmaster.windows-runtime.v1'
 SOURCES = {
     'cinterforge-craftmaster': ('Cinter', 'CMakeLists.txt', 'lifecycle/driver.py', 'data/MCTemplate.mcworld'),
     'cinterforge-leveldb': ('CMakeLists.txt', 'include/leveldb/db.h'),
@@ -207,6 +209,8 @@ def build_craftmaster(builds: Path, *, targets: tuple[str, ...] = TARGETS,
             else:
                 _guest_lifecycle(builds, action, target, docker=docker)
         staged_craftmaster(builds, target)
+        if target == 'win':
+            _build_windows_runtime(builds)
         print('[CRAFTMASTER BUILD] PASS new native target ' + target, flush=True)
 
 
@@ -270,11 +274,113 @@ def staged_craftmaster(builds: Path, target: str) -> Path:
                        + '; '.join(problems))
 
 
+
+def _windows_runtime_root(builds: Path) -> Path:
+    # Build-generated files belong to Terminal, never to CraftMaster's verified Stage.
+    return builds / 'CinterForgeTerminal/Dependencies/CraftMaster/win'
+
+
+def _build_windows_runtime(builds: Path) -> None:
+    """Close CraftMaster's recursive PE DLL imports using Setup's pinned toolchain.
+
+    CraftMaster Stage owns its own receipt and cannot be modified by Terminal.
+    Terminal Build therefore stages only the additional, verified Windows DLLs
+    that must sit *beside* its executable after Terminal Stage installs it.
+    """
+    stage = staged_craftmaster(builds, 'win')
+    binary = stage / 'bin/CinterForgeCraftMaster.exe'
+    from host.windows.windows_environment import WindowsCrossEnvironment
+    from host.windows.windows_runtime_dlls import stage_cross
+    cross = WindowsCrossEnvironment(builds).ensure_portable_image()
+    destination = _windows_runtime_root(builds)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_symlink():
+        raise RuntimeError('Refusing linked CraftMaster Windows DLL closure')
+    with tempfile.TemporaryDirectory(prefix='craftmaster-dlls-', dir=destination.parent) as tmp:
+        candidate = Path(tmp) / 'runtime'
+        candidate.mkdir()
+        dlls = stage_cross(builds, cross, candidate, (binary,))
+        for name, digest in dlls.items():
+            staged = stage / 'bin' / name
+            if staged.is_file() and _digest(staged) != digest:
+                raise RuntimeError('CraftMaster Stage DLL conflicts with pinned Windows SDK: ' + name)
+        manifest = {'schema': WINDOWS_RUNTIME_SCHEMA,
+                    'binary_sha256': _digest(binary), 'files': dlls}
+        (candidate / 'manifest.json').write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+        # Never leave an old DLL set reachable after a new executable is built.
+        # The validated old output may be discarded: both directories are generated.
+        if destination.exists():
+            shutil.rmtree(destination)
+        candidate.rename(destination)
+    print('[CRAFTMASTER WINDOWS DLL] PASS ' + str(len(dlls)) +
+          ' recursive DLLs packaged for Windows CraftMaster', flush=True)
+
+
+def _verified_windows_runtime(builds: Path, binary: Path) -> tuple[Path, dict[str, str]]:
+    root = _windows_runtime_root(builds)
+    manifest_file = root / 'manifest.json'
+    if root.is_symlink() or not root.is_dir() or manifest_file.is_symlink() or not manifest_file.is_file():
+        raise RuntimeError('Missing CraftMaster Windows DLL closure; run ./Cinter build win')
+    doc = json.loads(manifest_file.read_text(encoding='utf-8'))
+    files = doc.get('files')
+    if (doc.get('schema') != WINDOWS_RUNTIME_SCHEMA or
+            doc.get('binary_sha256') != _digest(binary) or not isinstance(files, dict)):
+        raise RuntimeError('Stale CraftMaster Windows DLL closure; run ./Cinter build win')
+    from host.windows.windows_runtime_dlls import DLL_SAFE
+    if any(not isinstance(name, str) or not DLL_SAFE.fullmatch(name) or
+           not isinstance(digest, str) or len(digest) != 64 or
+           not all(c in '0123456789abcdef' for c in digest)
+           for name, digest in files.items()):
+        raise RuntimeError('Invalid CraftMaster Windows DLL receipt')
+    observed = {entry.name for entry in root.iterdir() if entry.is_file()}
+    if (observed != set(files) | {'manifest.json'} or
+            any(item.is_symlink() or not item.is_file() for item in root.iterdir())):
+        raise RuntimeError('CraftMaster Windows DLL closure inventory mismatch')
+    for name, digest in files.items():
+        file = root / name
+        if (not file.is_file() or file.is_symlink() or
+                file.open('rb').read(2) != b'MZ' or _digest(file) != digest):
+            raise RuntimeError('CraftMaster Windows DLL missing/corrupt: ' + name)
+    return root, files
+
+
+def verify_packaged_windows_runtime(folder: Path, binary: Path) -> None:
+    """Read-only validation of Terminal's installed supplemental PE closure."""
+    manifest = folder / 'windows-runtime.json'
+    if manifest.is_symlink() or not manifest.is_file():
+        raise RuntimeError('Installed CraftMaster Windows DLL receipt missing')
+    doc = json.loads(manifest.read_text('utf-8'))
+    files = doc.get('files')
+    if (doc.get('schema') != WINDOWS_RUNTIME_SCHEMA or
+            doc.get('binary_sha256') != _digest(binary) or not isinstance(files, dict)):
+        raise RuntimeError('Installed CraftMaster Windows DLL receipt mismatch')
+    from host.windows.windows_runtime_dlls import DLL_SAFE
+    for name, digest in files.items():
+        if (not isinstance(name, str) or not DLL_SAFE.fullmatch(name) or
+                not isinstance(digest, str) or len(digest) != 64 or
+                not all(c in '0123456789abcdef' for c in digest)):
+            raise RuntimeError('Invalid installed CraftMaster Windows DLL receipt')
+        file = binary.parent / name
+        if (file.is_symlink() or not file.is_file() or
+                file.open('rb').read(2) != b'MZ' or _digest(file) != digest):
+            raise RuntimeError('Installed CraftMaster Windows DLL missing/corrupt: ' + name)
+
+
 def packaged_craftmaster_assets(builds: Path, target: str, prefix: str) -> dict[str, Path]:
     """Return prevalidated regular files for Terminal Build's existing inventory."""
     stage = staged_craftmaster(builds, target)
-    return {prefix + '/' + file.relative_to(stage).as_posix(): file
-            for file in sorted(stage.rglob('*')) if file.is_file()}
+    assets = {prefix + '/' + file.relative_to(stage).as_posix(): file
+              for file in sorted(stage.rglob('*')) if file.is_file()}
+    if target == 'win':
+        root, files = _verified_windows_runtime(builds, stage / 'bin/CinterForgeCraftMaster.exe')
+        assets[prefix + '/windows-runtime.json'] = root / 'manifest.json'
+        for name in files:
+            asset = prefix + '/bin/' + name
+            if asset in assets and _digest(assets[asset]) != files[name]:
+                raise RuntimeError('CraftMaster Windows DLL collides with signed Stage: ' + name)
+            assets[asset] = root / name
+    return assets
 
 
 def verify_embedded_craftmaster(app_root: Path, target: str) -> Path:
@@ -315,4 +421,6 @@ def verify_embedded_craftmaster(app_root: Path, target: str) -> Path:
                ('Resources.json', 'Contours.json', 'MCTemplate.mcworld',
                 'world-template.htm', 'zoomify-viewer.min.js', 'preview.py')):
         raise RuntimeError('Installed CraftMaster runtime data is incomplete')
+    if target == 'win':
+        verify_packaged_windows_runtime(folder, binary)
     return binary

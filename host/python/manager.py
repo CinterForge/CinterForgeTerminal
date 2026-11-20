@@ -844,6 +844,16 @@ def stage_host(builds: Path) -> dict:
             shutil.copytree(repo / 'webapp' / directory,
                             candidate / 'webapp' / directory,
                             ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store'))
+        # Ship the existing Host-owned Cloudflare transport as a staged resource,
+        # not a duplicated authored implementation or a source-checkout import.
+        shutil.copy2(repo / 'host/publishing/cloudflare_r2_sync.py',
+                     candidate / 'webapp/data/cloudflare_r2_sync.py')
+        # Terminal-owned verified Asset Engine: no Converter Build dependency.
+        from host.lifecycle.assets_dependency import staged_terminal_assets
+        for relative, source in staged_terminal_assets(builds).items():
+            dest = candidate / 'webapp/data/asset_engine' / relative
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest)
         # JOSHUA remains self-contained (including its AGPL license) and is
         # embedded in the same authenticated Terminal origin, not a repo clone.
         shutil.copytree(repo / 'webapp/joshua', candidate / 'webapp/joshua')
@@ -1069,6 +1079,8 @@ def main(argv=None) -> int:
         if args.action in ('build', 'stage', 'test', 'all'):
             full = args.name == 'all'
             if args.action in ('build', 'all'):
+                from host.lifecycle.assets_dependency import build_asset_engine
+                build_asset_engine(builds)
                 build_host(builds, zeroconf=not args.without_zeroconf, clean=args.clean,
                            application_shell=args.application_shell)
                 if full:

@@ -68,6 +68,42 @@ from runtime.CinterForgeLogging import CinterForgeRuntimeLog
 from runtime.CinterForgeVM import CinterForgeVM
 
 
+def _owned_bedrock_exit_code(process) -> int | None:
+    """Check either subprocess.Popen or Windows pywinpty without blocking."""
+    poll = getattr(process, 'poll', None)
+    if callable(poll):
+        return poll()
+    if process.isalive():
+        return None
+    return process.wait()  # pywinpty.wait() has no timeout; now safely exited.
+
+
+def _wait_owned_bedrock(process, timeout: float) -> int | None:
+    """Bounded wait for the actual launch owner, not an unrelated PID."""
+    if callable(getattr(process, 'poll', None)):
+        return process.wait(timeout=timeout)
+    deadline = time.monotonic() + timeout
+    while True:
+        code = _owned_bedrock_exit_code(process)
+        if code is not None:
+            return code
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(getattr(process, 'pid', 'Bedrock PTY'), timeout)
+        time.sleep(min(0.05, remaining))
+
+
+def _terminate_owned_bedrock(process, *, force: bool) -> None:
+    """Use pywinpty's force argument only for Windows PTYs."""
+    if callable(getattr(process, 'poll', None)):
+        if force:
+            process.kill()
+        else:
+            process.terminate()
+    else:
+        process.terminate(force=force)
+
+
 # Official Bedrock binary download metadata remains restricted to Minecraft.
 # Published converted worlds are separate, public Cloudflare R2 objects.
 PUBLIC_CRAFTMASTER_WORLDS_URL = (
@@ -1537,13 +1573,13 @@ class CinterForgeBedrockManager:
     def _live_session_locked(self) -> tuple[int | None, bool, bool]:
         """(pid, owned by this manager, reconnectable console)."""
         process = self._process
-        if process is not None and process.poll() is None:
+        if process is not None and _owned_bedrock_exit_code(process) is None:
             if (self._terminal_session is not None and
                     self._terminal_session.process is process and
                     not self._terminal_session.closed):
                 return process.pid, True, True
             if self.platform != 'mac':
-                return process.pid, True, process.stdin is not None
+                return process.pid, True, getattr(process, 'stdin', None) is not None
             return process.pid, True, self._fifo_is_live() or getattr(process, 'stdin', None) is not None
         pid = self._external_vm_pid()
         record = self._session_record()
@@ -1573,7 +1609,7 @@ class CinterForgeBedrockManager:
             finally:
                 os.close(fd)
             return
-        if own and self._process is not None and self._process.stdin is not None:
+        if own and self._process is not None and getattr(self._process, 'stdin', None) is not None:
             self._process.stdin.write((command + '\n').encode('utf-8'))
             self._process.stdin.flush()
             return
@@ -1614,7 +1650,7 @@ class CinterForgeBedrockManager:
             output = b''
         if b'Server started.' in output:
             self._ready = True
-        elif owned and self._process is not None and self._process.poll() is not None:
+        elif owned and self._process is not None and _owned_bedrock_exit_code(self._process) is not None:
             errors = [line for line in output.decode('utf-8', errors='replace').splitlines()
                       if ('CINTER_VM_ERROR' in line or 'CINTER_BDS_ERROR' in line)]
             self._startup_error = ' | '.join(errors[-4:]) or f'VM exited; see {path}'
@@ -1623,8 +1659,8 @@ class CinterForgeBedrockManager:
         with self._lock:
             pid, owned, attachable = self._live_session_locked()
             self._refresh_readiness_locked(pid=pid, owned=owned)
-            if pid is None and self._process is not None and self._process.poll() is not None and not self._startup_error:
-                self._startup_error = f'Bedrock VM launcher exited (code {self._process.returncode}); see {self._log_path()}'
+            if pid is None and self._process is not None and _owned_bedrock_exit_code(self._process) is not None and not self._startup_error:
+                self._startup_error = f'Bedrock launcher exited (code {_owned_bedrock_exit_code(self._process)}); see {self._log_path()}'
             live = pid is not None
             return {'platform': self.target, 'host': self.platform, 'application': self.app,
                     'server_configuration': self._server_configuration(),
@@ -2044,13 +2080,14 @@ class CinterForgeBedrockManager:
                     self._send_console_locked('stop', pid=pid, own=owned, attachable=attachable)
                     if owned and self._process:
                         try:
-                            self._process.wait(timeout=12)
+                            _wait_owned_bedrock(self._process, 12)
                         except subprocess.TimeoutExpired:
-                            self._process.terminate()
-                            try: self._process.wait(timeout=4)
+                            _terminate_owned_bedrock(self._process, force=False)
+                            try:
+                                _wait_owned_bedrock(self._process, 4)
                             except subprocess.TimeoutExpired:
-                                self._process.kill()
-                                self._process.wait(timeout=4)
+                                _terminate_owned_bedrock(self._process, force=True)
+                                _wait_owned_bedrock(self._process, 4)
             self._close_watchdog()
             self._process = None
             self._terminal_session = None

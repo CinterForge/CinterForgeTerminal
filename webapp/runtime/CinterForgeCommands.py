@@ -69,7 +69,6 @@ HELP = '''CinterForgeTerminal custom commands
   devtools                      Manage Developer Tools. See devtools help
   code                          Open CinterForge Code. See code help
 
-  discord                       Open a Discord bot-connected Session tab. See discord help
   setpass                       Set this host's LAN login credentials. See setpass help
 
   Other commands                Run in the real OS shell (zsh, bash, or PowerShell).
@@ -104,12 +103,13 @@ BEDROCK_HELP = """bedrock [world name]
   These rules persist across world changes. Close Bedrock tab to stop server.
 """
 
-DEVTOOLS_HELP = '''devtools [install|update|uninstall|version|report|help]
+DEVTOOLS_HELP = '''devtools [install|update|uninstall|version|list|report|help]
     devtools                          Ask to start installed DevTools or install them
     devtools install <path/to/source>  Install a local Developer Tools source tree
     devtools update                    Update the installed Developer Tools to the latest staged version
     devtools uninstall                 Remove the installed Developer Tools
     devtools version                   Show the installed Developer Tools version
+    devtools list                      List managed media utilities for all three platforms
     devtools report                    Show the installed Developer Tools version and staged version
     devtools help                      Show this help
 
@@ -118,6 +118,44 @@ DevTools and Linux opens WebKitGTK Inspector. On macOS, Terminal requests the
 WKWebView Inspector and enables inspection through Safari > Develop as the
 supported fallback if direct opening is unavailable.
 '''
+
+ASSETS_HELP = '''assets [report|import|view|setup|publish]
+  assets report                    Open/refresh the local Assets gallery tab
+  assets import [absolute path]   Import a GLB/GLTF or canonical UCI folder/ZIP
+  assets view <uci>               Open/refresh one UCI asset viewer tab
+  assets setup <channel>          Download verified individual Assets files without overwriting edits
+  assets publish <channel>        Upload individual Assets web files and commit their index
+  channels: internal | beta | release
+
+Native file picker: assets import with no path offers the OS file selection dialog
+in Terminal. Blockify batch generation is not yet connected to these commands.
+'''
+
+PACKS_HELP = '''packs
+  packs                   List complete behavior packs in Assets/ContentPacks
+  packs set <pack>        Select the one user behavior pack for the next Bedrock launch
+  packs report <pack>     Open the pack gallery (when a report is present)
+The CinterForge communications pack is always installed separately.
+'''
+
+
+def _external_capabilities() -> dict[str, bool]:
+    """Get only launch-validated grants; never inspect credentials in CLI mode."""
+    try:
+        status = _api('/api/status')
+        return status.get('capabilities', {}) if isinstance(status.get('capabilities'), dict) else {}
+    except (RuntimeError, ValueError, OSError):
+        return {}  # Fail closed if the live owner is missing.
+
+
+def _assets_root_for_session() -> Path:
+    """One mutable root selected by the already-running Terminal owner."""
+    root = os.environ.get('CINTER_TERMINAL_STATE_ROOT', '')
+    if not root or not Path(root).is_absolute() or Path(root).is_symlink():
+        raise RuntimeError('assets requires an active trusted Terminal session')
+    from runtime import CinterForgeAssetViews
+    return CinterForgeAssetViews.root_for_state(Path(root))
+
 
 DISCORD_HELP = '''discord <user> <server> <channel>
   discord "<user>" "<server>" "<channel>"   Open a bot-connected Discord Session tab
@@ -575,20 +613,35 @@ def _games_download() -> int:
 
 def execute(args: list[str]) -> int:
     from runtime import CinterForgeDevTools as _CinterForgeDevTools
+    capabilities = _external_capabilities()
+    if args and args[0] in ('assets', 'packs', 'discord') and not capabilities.get(args[0]):
+        print('Unknown custom command. Type help.', file=sys.stderr)
+        return 2
     if not args or args[0] in ('help', '--help', '-h'):
         option = args[1:] if args else []
         if not option:
-            print(HELP)
+            additions = []
+            if capabilities.get('assets'):
+                additions.append('  assets                       Manage the Assets library. See assets help')
+            if capabilities.get('packs'):
+                additions.append('  packs                        Manage Minecraft behavior packs. See packs help')
+            if capabilities.get('discord'):
+                additions.append('  discord                      Open a bot-connected Session tab. See discord help')
+            print(HELP.replace('  setpass ', ('\n'.join(additions) + '\n' if additions else '') + '  setpass ', 1))
         elif len(option) == 1 and option[0] == 'infinite-mac':
             print('67 Macintosh games — https://infinitemac.org/ (experimental guest auto-open):')
             for slug, game in _cli_mac_catalog().items():
                 print(f"{slug:30} {game['title']}")
-        elif len(option) == 1 and option[0] in ('debugger', 'bedrock', 'devtools', 'code', 'discord', 'setpass'):
+        elif len(option) == 1 and (option[0] in ('debugger', 'bedrock', 'devtools', 'code', 'setpass')
+                                   or option[0] in ('assets', 'packs', 'discord') and capabilities.get(option[0])):
             print({'debugger': DEBUGGER_HELP, 'bedrock': BEDROCK_HELP,
                    'devtools': DEVTOOLS_HELP, 'code': CODE_HELP,
+                   'assets': ASSETS_HELP, 'packs': PACKS_HELP,
                    'discord': DISCORD_HELP, 'setpass': SETPASS_HELP}[option[0]])
         else:
-            print('Usage: help [debugger|bedrock|devtools|code|discord|setpass]', file=sys.stderr)
+            permitted = [name for name in ('assets', 'packs', 'discord') if capabilities.get(name)]
+            print('Usage: help [debugger|bedrock|devtools|code|setpass' +
+                  ''.join('|' + name for name in permitted) + ']', file=sys.stderr)
             return 2
         return 0
     if args[0] == 'devtools':
@@ -625,9 +678,11 @@ def execute(args: list[str]) -> int:
             return _CinterForgeDevTools.version_devtools()
         if operation == 'report' and len(args) == 2:
             return _CinterForgeDevTools.report_devtools()
+        if operation == 'list' and len(args) == 2:
+            return _CinterForgeDevTools.list_devtools()
         if operation == 'help' and len(args) in (1, 2):
             return _CinterForgeDevTools.devtools_help()
-        print('Usage: devtools install <path/to/source> | update | uninstall | version | help | report', file=sys.stderr)
+        print('Usage: devtools install <path/to/source> | update | uninstall | version | list | report | help', file=sys.stderr)
         return 2
     if args[0] == 'craftmaster':
         # A world name opens the native incremental conversion and its live
@@ -706,6 +761,41 @@ def execute(args: list[str]) -> int:
             print('Code-OSS workspace: ' + response['path'], flush=True)
         else:
             print('Opening Code-OSS workbench.', flush=True)
+        return 0
+    if args[0] == 'assets':
+        if len(args) == 1 or args[1:] == ['help']:
+            print(ASSETS_HELP)
+            return 0
+        session_id = os.environ.get('CINTER_TERMINAL_SESSION_ID', '')
+        if args[1:] == ['report']:
+            result = _api('/api/assets/report', body={})
+            print('[assets] Opened library report: ' + str(result.get('count', 0)) + ' assets', flush=True)
+            return 0
+        if len(args) == 3 and args[1] == 'view':
+            result = _api('/api/assets/view', body={'uci': args[2]})
+            print('[assets] Opened viewer for ' + result['uci'], flush=True)
+            return 0
+        if args[1:] == ['import']:
+            _api('/api/assets/picker', body={'session_id': session_id})
+            print('[assets] Choose a GLB or canonical asset ZIP in Terminal to import.', flush=True)
+            return 0
+        if len(args) == 3 and args[1] == 'import':
+            result = _api('/api/assets/import', body={'session_id': session_id, 'path': args[2]})
+            print('[assets] ' + ('Existing' if result['existing'] else 'Imported') + ' UCI: ' + result['uci'], flush=True)
+            return 0
+        if len(args) != 3 or args[1] not in ('setup', 'publish') or args[2] not in ('internal', 'beta', 'release'):
+            print(ASSETS_HELP, file=sys.stderr)
+            return 2
+        channel = args[2]
+        allowed = 'cloudflare_internal' if channel == 'internal' else 'cloudflare_public'
+        if not capabilities.get(allowed):
+            print('Unknown custom command. Type help.', file=sys.stderr)
+            return 2
+        from runtime import CinterForgeAssetCloudflare as cloudflare
+        root = _assets_root_for_session()
+        result = cloudflare.setup(channel, root) if args[1] == 'setup' else cloudflare.publish(channel, root)
+        if result.get('conflicts'):
+            print('[assets] Existing local changes were preserved; see reported conflicts.', flush=True)
         return 0
     if args[0] == 'discord':
         if args[1:] == ['help']:

@@ -353,7 +353,8 @@ def _authored_webapp_assets(repo: Path) -> tuple[str, ...]:
     return tuple(members)
 
 
-def _files_under(source: Path, prefix: str, *, require: bool = True) -> dict[str, Path]:
+def _files_under(source: Path, prefix: str, *, require: bool = True,
+                 exclude_top_level: frozenset[str] = frozenset()) -> dict[str, Path]:
     """Flatten only in-tree symlinks into regular release files.
 
     Managed toolchains may use aliases to internal *directories* (for example
@@ -361,6 +362,10 @@ def _files_under(source: Path, prefix: str, *, require: bool = True) -> dict[str
     those directories under the alias name, but reject escape paths, dangling
     links, special files, and directory cycles. Never follow the host's
     filesystem outside the single selected release component.
+
+    A caller can exclude known, disposable *top-level* provisioning caches
+    before traversing them. Never use this to hide a broken symlink within a
+    required SDK component.
     """
     if source.is_symlink() or not source.is_dir():
         if require:
@@ -379,6 +384,8 @@ def _files_under(source: Path, prefix: str, *, require: bool = True) -> dict[str
         for item in sorted(actual.iterdir()):
             member = relative / item.name
             if _python_cache_member(member):
+                continue
+            if not relative.parts and item.name in exclude_top_level:
                 continue
             if item.is_symlink():
                 try:
@@ -670,6 +677,12 @@ exec "$HERE/CinterForge Terminal" --builds "$BUILDS" --python "$BUILDS/Python/En
         assets[host_root + '/python/worker.py'] = repo / 'host/worker.py'
         for name in _authored_webapp_assets(repo):
             assets[host_root + '/webapp/' + name] = repo / 'webapp' / name
+        assets[host_root + '/webapp/data/cloudflare_r2_sync.py'] = (
+            repo / 'host/publishing/cloudflare_r2_sync.py')
+        # All three releases embed the Terminal-owned verified Asset Engine.
+        from host.lifecycle.assets_dependency import staged_terminal_assets
+        for relative, source in staged_terminal_assets(builds).items():
+            assets[host_root + '/webapp/data/asset_engine/' + relative] = source
     # CraftMaster owns its converter. Each Terminal release consumes the
     # platform-matched, verified Stage bytes through its explicit dependency
     # boundary. No source checkout or network operation is used in Build.
@@ -693,7 +706,14 @@ def _devtools_assets(builds: Path) -> dict[str, Path | bytes]:
     )
     assets: dict[str, Path | bytes] = {}
     for rel in required:
-        assets.update(_files_under(builds / rel, 'DevTools/Builds/' + rel))
+        # Micromamba uses this directory to download/unpack package archives.
+        # It is a disposable Setup cache, NOT part of the installed macOS SDK.
+        # Conda package archives can contain dangling symlinks in isolation;
+        # traversing them both breaks Build and greatly inflates DevTools.
+        # Keep env/, mamba/, qemu/, lima/, etc. and all real symlink checks.
+        omit = frozenset({'mamba-cache'}) if rel == 'Toolchains/mac' else frozenset()
+        assets.update(_files_under(builds / rel, 'DevTools/Builds/' + rel,
+                                   exclude_top_level=omit))
     # More than one historical OCI receipt can remain in developer Builds.
     # They all have valid hashes, but only the image for THIS authored Setup
     # recipe is the GUI/Win cross toolchain. Stage an explicit selection and

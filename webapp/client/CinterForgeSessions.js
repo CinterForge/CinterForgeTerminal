@@ -93,10 +93,10 @@ CinterForgeState.activateTab = async function activateTab(tab) {
     // Keep every CraftMaster map iframe alive while switching to Bedrock,
     // Code-OSS or a shell. Hidden maps continue refreshing their ZFY tiles.
     for (const openTab of CinterForgeState.tabs) {
-      if (openTab.kind === 'craftmaster-map' && openTab.mapFrame)
+      if ((openTab.kind === 'craftmaster-map' || openTab.kind === 'asset-view') && openTab.mapFrame)
         openTab.mapFrame.hidden = true;
     }
-    if (tab.kind === 'craftmaster-map') {
+    if (tab.kind === 'craftmaster-map' || tab.kind === 'asset-view') {
       if (CinterForgeState.terminalOverlay.dataset.codeWrapperHidden === 'true')
         CinterForgeState.setCodeWrapperHidden(false);
       CinterForgeState.$('terminal-screen').hidden = true;
@@ -107,8 +107,11 @@ CinterForgeState.activateTab = async function activateTab(tab) {
       CinterForgeState.frame.hidden = true;
       CinterForgeState.codeError.hidden = true;
       tab.mapFrame.hidden = false;
-      CinterForgeState.$('terminal-shell').textContent = tab.label + ' · live Zoomify map';
-      CinterForgeState.notice('CraftMaster map refreshes as the native converter writes tiles');
+      CinterForgeState.$('terminal-shell').textContent = tab.label +
+        (tab.kind === 'craftmaster-map' ? ' · live Zoomify map' : ' · canonical Assets Library');
+      CinterForgeState.notice(tab.kind === 'craftmaster-map'
+        ? 'CraftMaster map refreshes as the native converter writes tiles'
+        : 'Assets preview · saved models and animations from the canonical UCI library');
       CinterForgeState.renderTabs();
       CinterForgeState.saveTerminalLayout();
       return;
@@ -217,6 +220,7 @@ CinterForgeState.closeTab = async function closeTab(tab) {
         catch (e) { console.error('Code-OSS PTY cleanup:', e); }
       }
     }
+    if (tab.kind === 'asset-view') tab.mapFrame?.remove();
     if (tab.kind === 'craftmaster-map') {
       tab.mapFrame?.remove();
       if (tab.mapId) void CinterForgeState.api('/api/craftmaster/map/close', {

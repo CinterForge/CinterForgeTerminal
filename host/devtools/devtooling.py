@@ -1,9 +1,10 @@
-"""Version and installed-binary-size inventory for Terminal developer tools.
+"""Version and installed-tool-size inventory for Terminal developer tools.
 
-The report contains executed version probes, not versions inferred from installer
-names. A missing tool, failed version command, or unknown binary size fails Setup.
-Xcode is the sole size exception because its SDK installation footprint varies.
-All evidence and generated content live in the sibling Builds directory.
+Executable tools require real version probes. The macOS Conda Assimp package
+is a prebuilt SDK without an `assimp` CLI; its version and dylib size come
+from the verified installed package receipt, and Test executes a real C API
+OBJ import. A missing tool or unknown size fails Setup. Xcode is size-exempt.
+All evidence and generated content live in sibling Builds.
 """
 # CINTERFORGE SOURCE HEADER — host/devtools/devtooling.py
 # PURPOSE: Supervises the existing optional DevTools installation, local SDK, one managed t VM and real guest capability probes.
@@ -63,8 +64,12 @@ MAC_TOOLS = (
     ('Lima', 'limactl', ('--version',)),
     ('QEMU x86-64 system', 'qemu-system-x86_64', ('--version',)),
     ('QEMU disk image', 'qemu-img', ('--version',)),
+    ('FFmpeg', 'ffmpeg', ('-version',)),
+    ('FFprobe', 'ffprobe', ('-version',)),
+    ('ImageMagick', 'magick', ('-version',)),
 )
 LINUX_TOOLS = (
+    ('Assimp', 'assimp', ('version',)),
     ('Bash', 'bash', ('--version',)),
     ('GCC', 'gcc', ('--version',)),
     ('G++', 'g++', ('--version',)),
@@ -75,6 +80,9 @@ LINUX_TOOLS = (
     ('pkg-config', 'pkg-config', ('--version',)),
     ('WebKitGTK', 'pkg-config', ('--modversion', 'webkit2gtk-4.1')),
     ('Xvfb', 'Xvfb', ('-help',)),
+    ('FFmpeg', 'ffmpeg', ('-version',)),
+    ('FFprobe', 'ffprobe', ('-version',)),
+    ('ImageMagick', 'convert', ('-version',)),
 )
 CROSS_TOOLS = (
     ('MinGW GCC', 'x86_64-w64-mingw32-gcc', ('--version',)),
@@ -105,6 +113,10 @@ WINDOWS_TOOLS = (
     ('Python', 'ucrt64/bin/python.exe', ('--version',)),
     ('Node.js', 'ucrt64/bin/node.exe', ('--version',)),
     ('pkgconf', 'ucrt64/bin/pkgconf.exe', ('--version',)),
+    ('Assimp', 'ucrt64/bin/assimp.exe', ('version',)),
+    ('FFmpeg', 'ucrt64/bin/ffmpeg.exe', ('-version',)),
+    ('FFprobe', 'ucrt64/bin/ffprobe.exe', ('-version',)),
+    ('ImageMagick', 'ucrt64/bin/magick.exe', ('-version',)),
 )
 
 
@@ -182,6 +194,10 @@ WINDOWS_PACKAGE_OWNERS = {
     'ucrt64/bin/python.exe': 'mingw-w64-ucrt-x86_64-python',
     'ucrt64/bin/node.exe': 'mingw-w64-ucrt-x86_64-nodejs',
     'ucrt64/bin/pkgconf.exe': 'mingw-w64-ucrt-x86_64-pkgconf',
+    'ucrt64/bin/assimp.exe': 'mingw-w64-ucrt-x86_64-assimp',
+    'ucrt64/bin/ffmpeg.exe': 'mingw-w64-ucrt-x86_64-ffmpeg',
+    'ucrt64/bin/ffprobe.exe': 'mingw-w64-ucrt-x86_64-ffmpeg',
+    'ucrt64/bin/magick.exe': 'mingw-w64-ucrt-x86_64-imagemagick',
 }
 
 
@@ -318,7 +334,10 @@ def ensure(builds: Path) -> Path:
 
     host = platform.system()
     if host == 'Darwin':
+        from host.devtools.assimp_library import prebuilt_assimp
         prefix = builds / 'Toolchains/mac'
+        check('macOS arm64', 'Assimp library',
+              lambda: prebuilt_assimp(prefix / 'env'))
         binaries = prefix / 'env/bin'
         for name, executable, args in MAC_TOOLS:
             if name == 'Xcode':
@@ -422,3 +441,97 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
+
+def smoke_media_toolchain(builds: Path) -> dict[str, str]:
+    """Test-phase-only executable acceptance: tiny real OBJ and PNG conversions.
+
+    Uses the three native platform toolchains already provisioned by Setup.
+    No package acquisition, alternate containers, or prebuilt-file substitution.
+    """
+    import tempfile
+    builds = Path(builds).resolve()
+    test_root = builds / 'Intermediates/CinterForgeTerminal/MediaSmoke'
+    test_root.mkdir(parents=True, exist_ok=True)
+    def check(command, *, cwd=test_root, env=None, timeout=120):
+        print('[MEDIA TEST] ' + ' '.join(str(v) for v in command), flush=True)
+        result = subprocess.run([str(v) for v in command], cwd=cwd, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, timeout=timeout, check=False)
+        if result.returncode:
+            raise RuntimeError(f'Media smoke rc={result.returncode}: ' + result.stdout[-1700:])
+        return result
+
+    obj = test_root / 'triangle.obj'
+    obj.write_text('o Triangle\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n', encoding='utf-8')
+    mac_bin = builds / 'Toolchains/mac/env/bin'
+    from host.devtools.assimp_library import prebuilt_assimp
+    assimp = prebuilt_assimp(builds / 'Toolchains/mac/env')
+    for tool in ('ffmpeg', 'ffprobe', 'magick'):
+        if not (mac_bin / tool).is_file():
+            raise RuntimeError('Missing Setup-provisioned macOS DevTools binary: ' + str(mac_bin / tool))
+    # Compile a tiny C API client against the *prebuilt* Conda Assimp dylib.
+    # This is a Test-only action, not an upstream Assimp source build.
+    prefix = mac_bin.parent
+    smoke_source = Path(__file__).with_name('assimp_import_smoke.c')
+    smoke_binary = test_root / 'assimp-import-mac'
+    check(['xcrun', 'clang', '-std=c11', '-I' + str(prefix / 'include'),
+           smoke_source, str(assimp['path']), '-Wl,-rpath,' + str(prefix / 'lib'),
+           '-o', smoke_binary])
+    check([smoke_binary, obj])
+    mac_image = test_root / 'mac.png'
+    check([mac_bin / 'ffmpeg', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+           '-i', 'color=c=red:s=16x16:d=0.2', '-frames:v', '1', '-threads', '1', '-y', mac_image])
+    check([mac_bin / 'ffprobe', '-v', 'error', mac_image])
+    resized = test_root / 'mac-resized.png'
+    check([mac_bin / 'magick', mac_image, '-resize', '8x8!', resized])
+    if not resized.is_file() or resized.stat().st_size <= 0:
+        raise RuntimeError('ImageMagick did not produce resized PNG')
+    result = {'mac': 'PASS'}
+
+    from host.windows.windows_environment import WindowsCrossEnvironment
+    # Caller owns the managed t guest lifetime and Test-only locks.
+    cross = WindowsCrossEnvironment(builds).ensure()
+    if not cross.image or not cross.docker:
+        raise RuntimeError('Three-platform media acceptance needs Setup-owned amd64 guest image')
+    guest_obj = cross.path(obj)
+    for cmd in (["assimp", "info", guest_obj],
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                 "color=c=blue:s=16x16:d=0.2", "-frames:v", "1", "-threads", "1", "-y",
+                 cross.path(test_root / 'linux.png')],
+                ["ffprobe", "-v", "error", cross.path(test_root / 'linux.png')],
+                ["convert", cross.path(test_root / 'linux.png'), "-resize", "8x8!",
+                 cross.path(test_root / 'linux-resized.png')]):
+        rc = cross.execute(cmd, cwd=test_root, timeout=120)
+        if rc.returncode:
+            raise RuntimeError('Linux media smoke failed: ' + (rc.stdout or '')[-1400:])
+    if not (test_root / 'linux-resized.png').is_file():
+        raise RuntimeError('Linux ImageMagick output missing')
+    result['linux'] = 'PASS'
+
+    # Wine maps /builds to Z:\\builds, and the installed Windows UCRT64 tools
+    # require their original DLL closure in WINEPATH.
+    root = builds / 'Toolchains/Windows/MSYS2/ucrt64/bin'
+    for tool in ('assimp.exe', 'ffmpeg.exe', 'ffprobe.exe', 'magick.exe'):
+        file = root / tool
+        if file.is_symlink() or not file.is_file() or file.read_bytes()[:2] != b'MZ':
+            raise RuntimeError('Missing native Windows media executable: ' + str(file))
+    def wine_path(path):
+        return 'Z:' + cross.path(Path(path)).replace('/', chr(92))
+    prefix = 'WINEPATH=' + wine_path(root)
+    def win(exe, args):
+        cmd = ['env', prefix, 'wine', cross.path(root / exe), *args]
+        result = cross.execute(cmd, cwd=test_root, timeout=180)
+        if result.returncode:
+            raise RuntimeError('Windows Wine media smoke failed: ' + (result.stdout or '')[-1600:])
+    win('assimp.exe', ['info', wine_path(obj)])
+    image = test_root / 'win.png'
+    win('ffmpeg.exe', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i',
+                       'color=c=green:s=16x16:d=0.2', '-frames:v', '1', '-threads', '1', '-y', wine_path(image)])
+    win('ffprobe.exe', ['-v', 'error', wine_path(image)])
+    converted = test_root / 'win-resized.png'
+    win('magick.exe', [wine_path(image), '-resize', '8x8!', wine_path(converted)])
+    if not converted.is_file() or converted.stat().st_size <= 0:
+        raise RuntimeError('Windows native ImageMagick did not produce PNG under Wine')
+    result['win'] = 'PASS'
+    return result

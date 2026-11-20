@@ -26,8 +26,15 @@ CinterForgeState.sendLauncherState = function sendLauncherState(tab, data) {
 
   // Original source lines 1006–1009
 CinterForgeState.frame.addEventListener('load', () => {
-    if (CinterForgeState.activeTab?.kind === 'launcher' && CinterForgeState.activeTab.launcherResult)
-      CinterForgeState.sendLauncherState(CinterForgeState.activeTab, CinterForgeState.activeTab.launcherResult);
+    if (CinterForgeState.activeTab?.kind === 'launcher') {
+      if (CinterForgeState.activeTab.launcherResult)
+        CinterForgeState.sendLauncherState(CinterForgeState.activeTab, CinterForgeState.activeTab.launcherResult);
+      const platform = CinterForgeState.activeTab.backend;
+      void CinterForgeState.api('/api/status').then(result => {
+        CinterForgeState.frame.contentWindow?.postMessage({type: 'cinter-launcher-assets',
+          platform, available: result.capabilities?.assets === true}, location.origin);
+      }).catch(() => {});
+    }
   });
 
   // Original source lines 1010–1036

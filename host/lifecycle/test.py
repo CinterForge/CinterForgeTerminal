@@ -94,6 +94,39 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def verify_staged_asset_modules(app: Path, target: str, release: str) -> None:
+    """Verify this platform's installed Assets code against current authored source.
+
+    Called only during Test. A Mac-only Build/Stage cannot refresh Linux or
+    Windows, so cross-target source freshness belongs to each target's Test.
+    A full `Cinter test all` still verifies all three targets individually.
+    """
+    from host.lifecycle.universal_package import FOUR_ARCH
+
+    if target not in ('mac', 'linux', 'win'):
+        raise ValueError(f'Assets installed-source test has no target {target!r}')
+    embedded = (app / 'Contents/Resources/Builds' if target == 'mac'
+                else app / 'Builds')
+    service = embedded / 'Python/Host' / target / FOUR_ARCH[target] / release / 'webapp'
+    for relative in (
+        'runtime/CinterForgeAssetCloudflare.py',
+        'runtime/CinterForgeAssetViews.py',
+        'runtime/CinterForgeCommands.py',
+        'data/asset_engine/api/asset_gallery.py',
+    ):
+        source = REPO / 'webapp' / relative
+        installed = service / relative
+        if not source.is_file() or source.is_symlink():
+            raise RuntimeError('Authored Assets runtime missing or unsafe: ' + str(source))
+        if not installed.is_file() or installed.is_symlink():
+            raise RuntimeError(f'{target} Assets runtime missing from installed app: {installed}; '
+                               f'run ./Cinter build {target} and ./Cinter stage {target}')
+        if _sha256(installed) != _sha256(source):
+            raise RuntimeError(f'{target} Assets runtime in installed app is stale: {installed}; '
+                               f'run ./Cinter build {target} and ./Cinter stage {target}')
+    print(f'[TEST STAGE] PASS {target} installed Assets source matches authored runtime', flush=True)
+
+
 def _install_prepared_runtime(server: Path, guest: Path) -> dict:
     """Populate a disposable Bedrock test fixture using Setup's verified closure.
 
@@ -485,7 +518,12 @@ class RealStagedSystemSmoke(unittest.TestCase):
                     app = Path(stage['steam_root']) / APP_ROOTS[target]
                     binary = verify_embedded_craftmaster(app, target)
                     self.assertGreater(binary.stat().st_size, 1024)
+                    # `Cinter test mac` must not reject a previous Linux/
+                    # Windows Stage merely because only Mac was rebuilt.
+                    # Their source-integrity checks run in `Cinter test linux`
+                    # and `Cinter test win`, including during `test all`.
                     if target == 'mac':
+                        verify_staged_asset_modules(app, target, self.release)
                         # Executable functionality, not just a magic header or
                         # a copied receipt, is required on the native host.
                         subprocess.run([str(binary), 'self-test', '--data-dir',
@@ -584,6 +622,57 @@ class RealStagedSystemSmoke(unittest.TestCase):
                 self.assertTrue(root.is_file(), str(root))
                 with root.open('rb') as stream:
                     self.assertEqual(stream.read(len(magic)), magic)
+
+
+    def test_13_terminal_asset_engine_and_media_devtools(self):
+        """Verify shipped asset engine and real Assimp/FFmpeg/ImageMagick ops.
+
+        Linux runs inside the retained amd64 build image. Windows runs its
+        actual MSYS2 UCRT64 PEs under the Setup-owned patched Wine guest.
+        These are real executable probes, not mocked versions or test stubs.
+        """
+        from host.lifecycle.assets_dependency import staged_terminal_assets
+        parts = staged_terminal_assets(self.builds)
+        self.assertIn('blockify/CIFBlockifyBatch.js', parts)
+        self.assertIn('api/asset_packaging.py', parts)
+        self.assertIn('api/asset_minecraft.py', parts)
+        # Exercise the actual staged Minecraft writer on a tiny authored OBJ
+        # and verify its real resource/behavior archive members, not a mock.
+        import importlib.util
+        import io
+        import zipfile
+        writer_source = parts['api/asset_minecraft.py']
+        spec = importlib.util.spec_from_file_location('_cinterforge_test_minecraft', writer_source)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        writer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(writer)
+        destination = self.builds / 'Intermediates/CinterForgeTerminal/MediaSmoke'
+        destination.mkdir(parents=True, exist_ok=True)
+        source = destination / 'Tiny.obj'
+        source.write_text('o Tiny\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n', encoding='utf-8')
+        addon = destination / 'Tiny.mcaddon'
+        info = writer._write_blockify_mcaddon(
+            addon, source=source, source_sha256=_sha256(source),
+            width=1, height=1, depth=1,
+            voxels=[{'x': 0, 'y': 0, 'z': 0, 'r': 255, 'g': 51, 'b': 12, 'samples': 1}],
+            product_name='Tiny')
+        self.assertEqual(info['identifier'], 'cinter:tiny')
+        with zipfile.ZipFile(addon) as outer:
+            self.assertEqual(len(outer.namelist()), 2)
+            types = set()
+            for filename in outer.namelist():
+                with zipfile.ZipFile(io.BytesIO(outer.read(filename))) as inner:
+                    record = json.loads(inner.read('manifest.json'))
+                    types.update(module['type'] for module in record['modules'])
+            self.assertEqual(types, {'data', 'resources'})
+        from host.devtools.devtooling import smoke_media_toolchain
+        from host.lifecycle.amd64_backend import managed_amd64_backend
+        with managed_amd64_backend(self.builds, setup=False):
+            result = smoke_media_toolchain(self.builds)
+        self.assertEqual(result['mac'], 'PASS')
+        self.assertEqual(result['linux'], 'PASS')
+        self.assertEqual(result['win'], 'PASS')
 
 
 def load_tests(loader, tests, pattern):

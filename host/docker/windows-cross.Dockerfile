@@ -32,6 +32,7 @@ RUN set -eu; \
         binutils-mingw-w64-x86-64 libz-mingw-w64-dev \
         xvfb xauth openbox x11vnc websockify novnc feh x11-utils \
         procps p7zip-full cabextract msitools wixl fonts-dejavu-core fontconfig \
+        assimp-utils ffmpeg imagemagick \
         wine64; \
     apt-get remove -y wine64 libwine; \
     rm -rf /var/lib/apt/lists/*

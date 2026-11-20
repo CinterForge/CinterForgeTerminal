@@ -1,0 +1,14 @@
+{
+  "schema": "cinterforge.converter.browser.dependencies.v1",
+  "version": "9.26.1",
+  "assets": {
+    "babylon.js": {
+      "sha256": "2aa5ca3f8c6710f0a9e6db0eabf0772a1c950a431241a1197c5e7f68f33bc6d6",
+      "url": "https://cdn.jsdelivr.net/npm/babylonjs@9.26.1/babylon.js"
+    },
+    "babylonjs.loaders.min.js": {
+      "sha256": "0929277d5f8e92ea73a97ed9891d2e60b185a86a332769a9d04227ef251c5213",
+      "url": "https://cdn.jsdelivr.net/npm/babylonjs-loaders@9.26.1/babylonjs.loaders.min.js"
+    }
+  }
+}

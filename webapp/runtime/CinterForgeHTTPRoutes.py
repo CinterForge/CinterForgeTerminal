@@ -124,6 +124,7 @@ class CinterForgeHTTPRoutes:
     def do_GET(self) -> None:
         from runtime import CinterForgeAuthentication as _CinterForgeAuthentication
         from runtime import CinterForgeCraftMasterMap as _CinterForgeCraftMasterMap
+        from runtime import CinterForgeAssetViews as _CinterForgeAssetViews
         from runtime import CinterForgeDiscord as _CinterForgeDiscord
         from runtime import CinterForgeIF as _CinterForgeIF
         from runtime import CinterForgeSessions as _CinterForgeSessions
@@ -184,6 +185,18 @@ class CinterForgeHTTPRoutes:
             except (OSError, ValueError) as error:
                 self._json(400, {'error': str(error)})
             return
+        if path.startswith('/assets-library/'):
+            if not self.server.capabilities.get('assets'):
+                self._json(404, {'error': 'Not found'})
+                return
+            if _CinterForgeAssetViews.serve(self, path):
+                return
+        if path.startswith('/assets-library/'):
+            if not self.server.capabilities.get('assets'):
+                self._json(404, {'error': 'Not found'})
+                return
+            if _CinterForgeAssetViews.serve(self, path):
+                return
         if _CinterForgeCraftMasterMap.serve_map_asset(self, path):
             return
         if self._serve_artifact(path):
@@ -290,7 +303,8 @@ class CinterForgeHTTPRoutes:
                              'debug': True, 'devtools_installed':
                              _CinterForgeSessions._devtools_menu_ready(self.server.system),
                              'devtools_state': guests['state'], 'devtools_guests': guests['guests'],
-                             'devtools_vnc': guests['vnc']})
+                             'devtools_vnc': guests['vnc'],
+                             'capabilities': dict(self.server.capabilities)})
             return
         if path.startswith('/zmachine/'):
             # Exact scoped staged runtime, no arbitrary Builds path access.
@@ -463,6 +477,14 @@ class CinterForgeHTTPRoutes:
                 self._json(503, {'error': 'Bedrock requires a host Steam library: '
                                  + self.server.bedrock_error})
             return
+        if path == '/api/assets/next':
+            if not self._authorized() or not self.server.capabilities.get('assets'):
+                self._json(404, {'error': 'Not found'})
+                return
+            with self.server.asset_actions_lock:
+                action = self.server.asset_actions.popleft() if self.server.asset_actions else None
+            self._json(200, action or {'kind': None})
+            return
         if path == '/api/craftmaster/map/next':
             if not self._authorized():
                 self._json(403, {'error': 'not authorized'})
@@ -578,6 +600,7 @@ class CinterForgeHTTPRoutes:
     def do_POST(self) -> None:
         from runtime import CinterForgeAuthentication as _CinterForgeAuthentication
         from runtime import CinterForgeCraftMasterMap as _CinterForgeCraftMasterMap
+        from runtime import CinterForgeAssetViews as _CinterForgeAssetViews
         from runtime import CinterForgeDiscord as _CinterForgeDiscord
         from runtime import CinterForgeGuestShells as _CinterForgeGuestShells
         from runtime import CinterForgeIF as _CinterForgeIF
@@ -795,12 +818,46 @@ class CinterForgeHTTPRoutes:
         try:
             n = int(self.headers.get('Content-Length', '0'))
             route = self.path.split('?', 1)[0]
-            limit = 2 * 1024 * 1024 if route.startswith('/api/if/save/') else _CinterForgeSettings.MAX_BODY
+            limit = 2 * 1024 * 1024 if (route.startswith('/api/if/save/') or route == '/api/assets/upload/chunk') else _CinterForgeSettings.MAX_BODY
             if not (0 < n <= limit):
                 raise ValueError('Invalid request length')
             body = json.loads(self.rfile.read(n))
             if not isinstance(body, dict):
                 raise ValueError('Expected a JSON object')
+            if route.startswith('/api/assets/'):
+                if not self.server.capabilities.get('assets'):
+                    self._json(404, {'error': 'Not found'})
+                    return
+                # Only a native Terminal session may request arbitrary host
+                # file paths; browser-origin uploads use an opaque upload token.
+                if route in ('/api/assets/import', '/api/assets/picker'):
+                    sid = body.get('session_id')
+                    with self.server.sessions_lock:
+                        session_live = isinstance(sid, str) and sid in self.server.sessions
+                    if not session_live or self.client_address[0] not in ('127.0.0.1', '::1') or not self.headers.get('X-Cinter-CLI-Token') or not secrets.compare_digest(self.headers.get('X-Cinter-CLI-Token', ''), self.server.cli_token):
+                        self._json(403, {'error': 'Assets file commands require a native Terminal session'})
+                        return
+                if route == '/api/assets/import':
+                    result = _CinterForgeAssetViews.import_path(self.server, body.get('path'))
+                elif route == '/api/assets/picker':
+                    result = _CinterForgeAssetViews.queue_tab(self.server, 'picker')
+                elif route == '/api/assets/report':
+                    result = _CinterForgeAssetViews.queue_tab(self.server, 'report')
+                elif route == '/api/assets/view':
+                    result = _CinterForgeAssetViews.queue_tab(self.server, 'view', uci=body.get('uci'))
+                elif route == '/api/assets/upload/start':
+                    result = _CinterForgeAssetViews.upload_start(self.server, body.get('name'), body.get('size'))
+                elif route == '/api/assets/upload/chunk':
+                    result = _CinterForgeAssetViews.upload_chunk(self.server, body.get('id'), body.get('offset'), body.get('data'))
+                elif route == '/api/assets/upload/finish':
+                    result = _CinterForgeAssetViews.upload_finish(self.server, body.get('id'), body.get('sha256'))
+                elif route == '/api/assets/upload/cancel':
+                    result = _CinterForgeAssetViews.upload_cancel(self.server, body.get('id'))
+                else:
+                    self._json(404, {'error': 'Not found'})
+                    return
+                self._json(200, result)
+                return
             if route == '/api/launcher/start':
                 if self.server.system != 'mac':
                     raise ValueError('Cross-platform Launchers are only available on the Mac host')
@@ -840,6 +897,8 @@ class CinterForgeHTTPRoutes:
                 self._json(200, {'updated': True})
                 return
             if route == '/api/discord/open':
+                if not self.server.capabilities.get('discord'):
+                    raise ValueError('Unknown command')
                 name = str(body.get('username', '')).strip()
                 guild = str(body.get('guild', '')).strip()
                 channel = str(body.get('channel', '')).strip()
@@ -858,6 +917,8 @@ class CinterForgeHTTPRoutes:
                                  'guild': resolved['guild'], 'channel': resolved['channel']})
                 return
             if route == '/api/discord/next':
+                if not self.server.capabilities.get('discord'):
+                    raise ValueError('Unknown command')
                 active = body.get('session_ids', [])
                 if not isinstance(active, list) or len(active) > _CinterForgeSettings.MAX_SESSIONS:
                     raise ValueError('Invalid Discord session list')
@@ -869,6 +930,8 @@ class CinterForgeHTTPRoutes:
                 self._json(200, found or {})
                 return
             if route == '/api/discord/send':
+                if not self.server.capabilities.get('discord'):
+                    raise ValueError('Unknown command')
                 channel_id = str(body.get('channel_id', ''))
                 message = body.get('content', '')
                 if (channel_id not in self.server.discord_channels or
@@ -981,7 +1044,8 @@ class CinterForgeHTTPRoutes:
                                                url=self.server.origin, token=self.server.token,
                                                command=command,
                                                working_directory=Path(self.server.code_workspace.details()['cwd']),
-                                               internal_token=self.server.cli_token)
+                                               internal_token=self.server.cli_token,
+                                               capabilities=self.server.capabilities)
                     self.server.sessions[terminal.id] = terminal
                 self.server.log_event('terminal opened: id=' + terminal.id[:10] +
                     ' command=' + Path(terminal.shell[0]).name + ' output=' + str(terminal.output_log.name if terminal.output_log else 'none'))

@@ -1,0 +1,1086 @@
+#========= Copyright 2025+, CinterForge, Inc. All rights reserved. ============
+"""Terminal-owned canonical Minecraft Add-On writer.
+
+Original functions and their exact source bodies lifted from
+CinterForgeServer/cf/ifserver/assets/asset_blockify.py on 2026-11-19.
+This is the code that writes real per-asset behavior/resource .mcaddon
+archives, including source animation profiles and rigged entities. It does
+not manage UCI folders, HTTP endpoints, or Cloudflare credentials.
+"""
+from __future__ import annotations
+import base64
+import hashlib
+import io
+import json
+import os
+import re
+import tempfile
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+BLOCKIFY_ADDON_SCHEMA = "cinterforge.blockify-addon.single-placeable-v22"
+BLOCKIFY_ADDON_PACK_VERSION = [1, 16, 0]
+
+def _blockify_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9_]+", "_", str(value or "").casefold()).strip("_")
+    return slug[:48] or "blockified_asset"
+
+def _uuid_from_seed(seed: str) -> str:
+    raw = bytearray(hashlib.sha256(seed.encode("utf-8")).digest()[:16])
+    raw[6] = (raw[6] & 0x0F) | 0x50
+    raw[8] = (raw[8] & 0x3F) | 0x80
+    h = raw.hex()
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+
+def _png_rgba(width: int, height: int, pixels: bytes) -> bytes:
+    """Encode a small RGBA PNG without adding an image-library runtime dependency."""
+    import struct
+    import zlib
+
+    if width <= 0 or height <= 0 or len(pixels) != width * height * 4:
+        raise ValueError("Invalid PNG dimensions/pixel buffer")
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    scanlines = b"".join(b"\x00" + pixels[y * width * 4:(y + 1) * width * 4] for y in range(height))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(scanlines, 9))
+        + chunk(b"IEND", b"")
+    )
+
+def _blockify_front_icon_png(voxels: list[dict[str, int]], *, size: int = 64) -> bytes:
+    """Render a small transparent front-view icon from Blockify voxels.
+
+    This deliberately has no image-library dependency.  The icon is used by the
+    generated Statue item so inventory/hotbar/hand show the Blockified asset
+    rather than Minecraft's missing-item placeholder.
+    """
+    occupied = list(voxels or [])
+    if not occupied:
+        return _png_rgba(1, 1, bytes((0, 0, 0, 0)))
+
+    min_x = min(v["x"] for v in occupied); max_x = max(v["x"] for v in occupied)
+    min_y = min(v["y"] for v in occupied); max_y = max(v["y"] for v in occupied)
+    # Front-most voxel wins for each x/y cell.  This gives a deterministic,
+    # recognizable thumbnail while preserving the generated voxel colors.
+    front: dict[tuple[int, int], dict[str, int]] = {}
+    for voxel in occupied:
+        key = (voxel["x"], voxel["y"])
+        prior = front.get(key)
+        if prior is None or voxel["z"] < prior["z"]:
+            front[key] = voxel
+
+    src_w = max_x - min_x + 1
+    src_h = max_y - min_y + 1
+    pad = max(2, size // 16)
+    scale = max(1, min((size - 2 * pad) // max(1, src_w), (size - 2 * pad) // max(1, src_h)))
+    draw_w = src_w * scale
+    draw_h = src_h * scale
+    ox = (size - draw_w) // 2
+    oy = (size - draw_h) // 2
+    rgba = bytearray(size * size * 4)
+
+    for (x, y), voxel in front.items():
+        px0 = ox + (x - min_x) * scale
+        # Minecraft/geometry Y grows upward; PNG rows grow downward.
+        py0 = oy + (max_y - y) * scale
+        r, g, b = voxel["r"], voxel["g"], voxel["b"]
+        # Small highlight on the top/left edge helps the icon read as voxels.
+        hi = (min(255, r + 24), min(255, g + 24), min(255, b + 24), 255)
+        base = (r, g, b, 255)
+        for yy in range(py0, min(size, py0 + scale)):
+            for xx in range(px0, min(size, px0 + scale)):
+                color = hi if (xx == px0 or yy == py0) else base
+                off = (yy * size + xx) * 4
+                rgba[off:off + 4] = bytes(color)
+    return _png_rgba(size, size, bytes(rgba))
+
+def _blockify_fill_polygon(rgba: bytearray, size: int, points: list[tuple[float, float]], color: tuple[int, int, int, int]) -> None:
+    """Tiny dependency-free convex polygon rasterizer for generated Minecraft artwork."""
+    if len(points) < 3:
+        return
+    min_y = max(0, int(min(y for _, y in points)))
+    max_y = min(size - 1, int(max(y for _, y in points)) + 1)
+    for py in range(min_y, max_y + 1):
+        scan_y = py + 0.5
+        xs: list[float] = []
+        for i, (x1, y1) in enumerate(points):
+            x2, y2 = points[(i + 1) % len(points)]
+            if (y1 <= scan_y < y2) or (y2 <= scan_y < y1):
+                dy = y2 - y1
+                if abs(dy) > 1e-9:
+                    xs.append(x1 + (scan_y - y1) * (x2 - x1) / dy)
+        xs.sort()
+        for i in range(0, len(xs) - 1, 2):
+            start = max(0, int(xs[i]))
+            end = min(size - 1, int(xs[i + 1]) + 1)
+            for px in range(start, end + 1):
+                off = (py * size + px) * 4
+                rgba[off:off + 4] = bytes(color)
+
+def _blockify_hero_icon_png(voxels: list[dict[str, int]], *, size: int = 256, transparent: bool = False) -> bytes:
+    """Render a square three-quarter hero view from the frame-zero voxel geometry.
+
+    This deliberately mirrors the Minecraft preview's useful default framing:
+    the asset alone determines the shot; no ground/environment bounds participate.
+    """
+    occupied = list(voxels or [])
+    if not occupied:
+        return _png_rgba(1, 1, bytes((0, 0, 0, 0)))
+
+    bg = (0, 0, 0, 0) if transparent else (76, 127, 183, 255)
+    rgba = bytearray(bg * (size * size))
+    # Orthographic three-quarter projection.  These basis vectors give a view
+    # close to the hero orbit used by the Babylon Minecraft preview.
+    def project(x: float, y: float, z: float) -> tuple[float, float]:
+        return ((x - z) * 0.8660254, (x + z) * 0.38 - y * 1.08)
+
+    corners: list[tuple[float, float]] = []
+    for v in occupied:
+        x, y, z = float(v['x']), float(v['y']), float(v['z'])
+        for dx in (0.0, 1.0):
+            for dy in (0.0, 1.0):
+                for dz in (0.0, 1.0):
+                    corners.append(project(x + dx, y + dy, z + dz))
+    min_x=min(x for x,_ in corners); max_x=max(x for x,_ in corners)
+    min_y=min(y for _,y in corners); max_y=max(y for _,y in corners)
+    pad=max(4, size//14)
+    span_x=max(1e-6,max_x-min_x); span_y=max(1e-6,max_y-min_y)
+    scale=min((size-2*pad)/span_x,(size-2*pad)/span_y)
+    ox=(size-(min_x+max_x)*scale)/2.0
+    oy=(size-(min_y+max_y)*scale)/2.0
+    def screen(p: tuple[float,float]) -> tuple[float,float]:
+        return (ox+p[0]*scale, oy+p[1]*scale)
+
+    # Painter order: back/high-depth cubes first, then nearer cubes.
+    ordered=sorted(occupied,key=lambda v:(float(v['x'])+float(v['z'])+float(v['y'])*0.02))
+    for v in ordered:
+        x,y,z=float(v['x']),float(v['y']),float(v['z'])
+        r,g,b=int(v['r']),int(v['g']),int(v['b'])
+        top=(min(255,r+28),min(255,g+28),min(255,b+28),255)
+        left=(max(0,int(r*0.82)),max(0,int(g*0.82)),max(0,int(b*0.82)),255)
+        right=(max(0,int(r*0.66)),max(0,int(g*0.66)),max(0,int(b*0.66)),255)
+        p000=screen(project(x,y,z)); p100=screen(project(x+1,y,z)); p001=screen(project(x,y,z+1));
+        p101=screen(project(x+1,y,z+1)); p010=screen(project(x,y+1,z)); p110=screen(project(x+1,y+1,z));
+        p011=screen(project(x,y+1,z+1)); p111=screen(project(x+1,y+1,z+1))
+        _blockify_fill_polygon(rgba,size,[p010,p110,p111,p011],top)
+        _blockify_fill_polygon(rgba,size,[p000,p010,p011,p001],left)
+        _blockify_fill_polygon(rgba,size,[p000,p100,p110,p010],right)
+    return _png_rgba(size,size,bytes(rgba))
+
+def _blockify_egg_icon_png(voxels: list[dict[str, int]], *, size: int = 64) -> bytes:
+    """Generate a transparent inventory/hand image for an animated entity egg."""
+    # Use the same frame-zero hero render rather than a generic Minecraft egg so
+    # the item is visually tied to the actual asset in chest/hotbar/hand views.
+    return _blockify_hero_icon_png(voxels, size=size, transparent=True)
+
+def _animation_motion_kind(name: str) -> str:
+    text = re.sub(r"[^a-z0-9]+", " ", str(name or "").casefold()).strip()
+    if re.search(r"\b(run|running|sprint|sprinting|jog|jogging)\b", text):
+        return "run"
+    if re.search(r"\b(walk|walking)\b", text):
+        return "walk"
+    return "stationary"
+
+def _clean_behavior_profile(raw: Any, animations: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate the one behavior model shared by previews and Bedrock export."""
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(list(raw or [])):
+        if not isinstance(item, dict):
+            continue
+        clip = str(item.get("clip") or item.get("id") or "").strip()
+        if not clip or clip not in animations or clip in seen:
+            continue
+        seen.add(clip)
+        definition = animations.get(clip) if isinstance(animations.get(clip), dict) else {}
+        definition_label = str(definition.get("label") or "").strip()
+        profile_name = str(item.get("name") or "").strip()
+
+        # The currently captured animation identity is authoritative. Saved
+        # behavior profiles are allowed to tune a clip, but they must never
+        # reassign locomotion semantics after animations are reordered or
+        # replaced (for example, an old profile saying clip_2 is Walk while
+        # the current capture labels clip_3 as Walk). Generic clip_N labels
+        # carry no semantics, so only those may fall back to the saved name.
+        generic_definition_label = bool(re.fullmatch(r"(?:clip|animation)[ _-]*\d+", definition_label.casefold()))
+        name = (profile_name if generic_definition_label and profile_name else definition_label or profile_name or clip).strip() or clip
+        kind = _animation_motion_kind(name)
+        saved_kind = str(item.get("kind") or "").strip().casefold()
+        if kind == "stationary" and generic_definition_label and not profile_name and saved_kind in {"walk", "run", "stationary"}:
+            kind = saved_kind
+
+        try:
+            clip_length = max(0.033, float(definition.get("animation_length") or item.get("clip_length") or 1.0))
+        except Exception:
+            clip_length = 1.0
+
+        default_cycles = 2 if kind in {"walk", "run"} else 1
+        # Preserve saved tuning only when the saved semantic role still agrees
+        # with the current animation. A stale role must not drag its old cycle
+        # count or speed onto a newly assigned clip.
+        semantics_match = saved_kind == kind or not saved_kind
+        try:
+            cycles = max(1, min(8, int(item.get("cycles") if semantics_match and item.get("cycles") is not None else default_cycles)))
+        except Exception:
+            cycles = default_cycles
+
+        logical_speed = 1.65 if kind == "run" else (0.72 if kind == "walk" else 0.0)
+        if kind in {"walk", "run"} and semantics_match and item.get("speed") is not None:
+            try:
+                logical_speed = max(0.0, float(item.get("speed")))
+            except Exception:
+                pass
+        rows.append({
+            "clip": clip,
+            "name": name,
+            "kind": kind,
+            "clip_length": clip_length,
+            "cycles": cycles,
+            "hold_seconds": max(0.033, clip_length * cycles),
+            "speed": logical_speed,
+            "variant": len(rows) + 1,
+        })
+    return rows
+
+def _write_blockify_mcaddon(
+    destination: Path, *, source: Path, source_sha256: str, width: int, height: int, depth: int,
+    voxels: list[dict[str, Any]], character_voxels: list[dict[str, Any]] | None = None,
+    character_rig: dict[str, Any] | None = None, character_animations: dict[str, Any] | None = None,
+    behavior_profile: list[dict[str, Any]] | None = None, product_name: str = "",
+    blockbench_override: dict[str, Any] | None = None, item_icon_png: bytes | None = None,
+    command_name: str = "",
+) -> dict[str, Any]:
+    """Create the Bedrock package from the same animation/behavior data used by previews.
+
+    Static assets retain their existing placeable representation.
+    Rigged animated assets export exactly one placeable item/entity using the
+    asset name itself (for example ``cinter:defaultcharacter``). Character voxels
+    keep exact source-bone ownership and captured animation clips are emitted as
+    native Bedrock bone animations.
+    """
+    import math
+
+    display_name = str(product_name or "").strip() or source.stem.replace("_", " ").strip() or "3D Asset"
+    title_name = " ".join(word[:1].upper() + word[1:] for word in display_name.split())
+    slug = _blockify_slug(command_name or display_name)
+    rig = character_rig if isinstance(character_rig, dict) else {}
+    rig_bones = [b for b in list(rig.get("bones") or []) if isinstance(b, dict) and str(b.get("name") or "")]
+    rig_names = {str(b.get("name") or "") for b in rig_bones}
+    animated = bool(rig_bones and character_voxels)
+    # Stable, command-friendly identifiers. Animated assets intentionally expose
+    # one Minecraft object only: the placeable item and the live entity share the
+    # same identifier, e.g. ``cinter:defaultcharacter``. There is no separate
+    # statue for animated assets. Static assets keep their existing statue form.
+    # Every migrated asset has one command-stable public identifier.  Static and
+    # animated assets both use cinter:<Command Name>; implementation details such
+    # as "statue" must never leak into the player-facing /give command.
+    statue_entity_identifier = "" if animated else f"cinter:{slug}"
+    statue_item_identifier = statue_entity_identifier
+    entity_identifier = f"cinter:{slug}"
+    egg_item_identifier = entity_identifier if animated else ""
+    character_geometry_id = f"geometry.cinterforge.{slug}.character" if animated else f"geometry.cinterforge.{slug}"
+    statue_geometry_id = f"geometry.cinterforge.{slug}.statue" if animated else character_geometry_id
+    render_controller_id = f"controller.render.cinterforge_{slug}"
+    seed = f"{source_sha256}:{width}:{height}:{depth}:16:addon-assets-v3:{slug}"
+    rp_uuid = _uuid_from_seed(seed + ":rp")
+    rp_module_uuid = _uuid_from_seed(seed + ":rp-module")
+    bp_uuid = _uuid_from_seed(seed + ":bp")
+    bp_module_uuid = _uuid_from_seed(seed + ":bp-module")
+
+    statue_occupied = list(voxels or [])
+    character_occupied = list(character_voxels or statue_occupied)
+    if not statue_occupied:
+        raise ValueError("Cannot build a Minecraft Add-On from an empty Blockify result")
+    if animated and not character_occupied:
+        raise ValueError("Animated Blockify result has no character voxels")
+
+    def build_geometry(occupied: list[dict[str, Any]], geometry_id: str, *, articulated: bool):
+        if articulated:
+            # The browser-side voxelizer deliberately permits a small number of
+            # surface samples with no exact skin owner (<= 8%). Those samples
+            # remain in the static voxelization, but assigning them to an
+            # articulated Bedrock bone would invent ownership.
+            unresolved = [v for v in occupied if str(v.get("bone") or "") not in rig_names]
+            unresolved_ratio = len(unresolved) / len(occupied) if occupied else 1.0
+            if unresolved_ratio > 0.08:
+                raise ValueError(
+                    f"Animated Blockify character has {len(unresolved)} of {len(occupied)} voxels "
+                    f"without exact source-bone ownership ({unresolved_ratio * 100:.1f}%)"
+                )
+            occupied = [v for v in occupied if str(v.get("bone") or "") in rig_names]
+            if not occupied:
+                raise ValueError("Animated Blockify character has no voxels with exact source-bone ownership")
+        min_x = min(v["x"] for v in occupied); max_x = max(v["x"] for v in occupied)
+        min_y = min(v["y"] for v in occupied); max_y = max(v["y"] for v in occupied)
+        min_z = min(v["z"] for v in occupied); max_z = max(v["z"] for v in occupied)
+        # Voxel centers in the Babylon preview are centered around
+        # (min+max)/2.  Cube origins below account for their 1-voxel size
+        # separately; bone pivots must use this exact center or every Bedrock
+        # rotation is displaced by half a voxel in X/Z.
+        center_x = (min_x + max_x) / 2.0
+        center_z = (min_z + max_z) / 2.0
+        atlas_w = max(1, int(math.ceil(math.sqrt(len(occupied)))))
+        atlas_h = max(1, int(math.ceil(len(occupied) / atlas_w)))
+        rgba = bytearray(atlas_w * atlas_h * 4)
+        cubes_by_bone: dict[str, list[dict[str, Any]]]
+        if articulated:
+            cubes_by_bone = {name: [] for name in rig_names}
+        else:
+            cubes_by_bone = {"root": []}
+        for index, voxel in enumerate(occupied):
+            u, vv = index % atlas_w, index // atlas_w
+            off = (vv * atlas_w + u) * 4
+            rgba[off:off + 4] = bytes((voxel["r"], voxel["g"], voxel["b"], 255))
+            face = {"uv": [u, vv], "uv_size": [1, 1]}
+            # Match the recovered source-rig work: flip X/Z once into Bedrock's
+            # forward convention instead of rotating a root bone later.
+            # Cubes are specified by their minimum corner.  The intended
+            # center is -(voxel-center), matching RenderAnimatedBlockifiedBehavior.
+            ox = -(voxel["x"] - center_x) - 0.5
+            oy = voxel["y"] - min_y
+            oz = -(voxel["z"] - center_z) - 0.5
+            bone = str(voxel.get("bone") or "") if articulated else "root"
+            cubes_by_bone[bone].append({
+                "origin": [ox, oy, oz], "size": [1, 1, 1],
+                "uv": {name: dict(face) for name in ("north", "south", "east", "west", "up", "down")},
+            })
+        if articulated:
+            wrapper = "cinterforge_root"
+            bones: list[dict[str, Any]] = [{"name": wrapper, "pivot": [0, 0, 0]}]
+            for raw in rig_bones:
+                name = str(raw.get("name") or "")
+                parent = str(raw.get("parent") or "")
+                pivot_raw = raw.get("pivot") if isinstance(raw.get("pivot"), list) else None
+                if pivot_raw and len(pivot_raw) >= 3:
+                    px, py, pz = map(float, pivot_raw[:3])
+                    pivot = [-(px - center_x), py - min_y, -(pz - center_z)]
+                else:
+                    pivot = [0.0, 0.0, 0.0]
+                entry: dict[str, Any] = {"name": name, "parent": wrapper, "pivot": pivot}
+                if cubes_by_bone.get(name):
+                    entry["cubes"] = cubes_by_bone[name]
+                bones.append(entry)
+        else:
+            bones = [{"name": "root", "pivot": [0, 0, 0], "cubes": cubes_by_bone["root"]}]
+        geometry = {
+            "format_version": "1.12.0",
+            "minecraft:geometry": [{
+                "description": {
+                    "identifier": geometry_id, "texture_width": atlas_w, "texture_height": atlas_h,
+                    "visible_bounds_width": max(1.0, float(max(width, depth)) + 0.5),
+                    "visible_bounds_height": max(1.0, float(height) + 0.5),
+                    "visible_bounds_offset": [0, float(height) / 2.0, 0],
+                },
+                "bones": bones,
+            }],
+        }
+        return geometry, _png_rgba(atlas_w, atlas_h, bytes(rgba)), (min_x, max_x, min_y, max_y, min_z, max_z)
+
+    statue_geometry, statue_texture_png, statue_bounds = build_geometry(statue_occupied, statue_geometry_id, articulated=False)
+    if animated:
+        character_geometry, character_texture_png, character_bounds = build_geometry(character_occupied, character_geometry_id, articulated=True)
+    else:
+        character_geometry, character_texture_png, character_bounds = statue_geometry, statue_texture_png, statue_bounds
+
+    raw_animations = character_animations if isinstance(character_animations, dict) else {}
+    animations_out: dict[str, Any] = {}
+    clip_to_client_key: dict[str, str] = {}
+    # The in-app Block preview makes the persistent motion root the sole owner
+    # of global X/Z locomotion.  The saved flat world-space bake still contains
+    # the source clip's authored horizontal root travel in every bone position,
+    # so normalize that same shared X/Z component here before writing Bedrock.
+    # Keep Y untouched: jump/crouch/bob are pose animation, not entity motion.
+    # Candidate order matters.  Blockify rigs include a synthetic
+    # ``cinterforge_root`` wrapper before the authored skeleton.  That wrapper
+    # is not the Mixamo locomotion joint and usually has no captured animation
+    # position channel, so it must never shadow Hips/Pelvis simply because its
+    # terminal token is "root".
+    def _locomotion_token(value: Any) -> str:
+        token = str(value or "").strip().casefold().replace("\\", "/")
+        for separator in ("|", "/", ":"):
+            if separator in token:
+                token = token.rsplit(separator, 1)[-1]
+        if token.startswith("mixamorig"):
+            token = token[len("mixamorig"):].lstrip("_-. ")
+        return token
+
+    locomotion_candidates: list[str] = []
+    for preferred in ("hips", "pelvis", "root"):
+        for bone in rig_bones:
+            name = str(bone.get("name") or "")
+            if not name or name in locomotion_candidates:
+                continue
+            canonical = str(bone.get("canonical") or "").strip().casefold()
+            tokens = {_locomotion_token(name), _locomotion_token(bone.get("source_name"))}
+            if canonical == preferred or preferred in tokens:
+                locomotion_candidates.append(name)
+
+    def _position_at(channel: dict[str, Any], time_key: str) -> list[float]:
+        value = channel.get(str(time_key))
+        if isinstance(value, list) and len(value) >= 3:
+            return value
+        try:
+            target = float(time_key)
+        except Exception:
+            target = 0.0
+        candidates: list[tuple[float, list[float]]] = []
+        for key, row in channel.items():
+            if not isinstance(row, list) or len(row) < 3:
+                continue
+            try:
+                candidates.append((float(key), row))
+            except Exception:
+                continue
+        if not candidates:
+            return [0.0, 0.0, 0.0]
+        return min(candidates, key=lambda pair: abs(pair[0] - target))[1]
+
+    for clip_key, raw in raw_animations.items():
+        if not isinstance(raw, dict):
+            continue
+        src_bones = raw.get("bones") if isinstance(raw.get("bones"), dict) else {}
+        locomotion_position: dict[str, Any] = {}
+        # Choose the first preferred candidate that is actually animated in this
+        # clip.  This keeps locomotion selection data-driven and prevents a
+        # synthetic wrapper/root with no position keys from disabling X/Z
+        # normalization for the authored Hips channel.
+        for locomotion_bone_name in locomotion_candidates:
+            locomotion_channels = src_bones.get(locomotion_bone_name) if isinstance(src_bones.get(locomotion_bone_name), dict) else {}
+            candidate_position = locomotion_channels.get("position") if isinstance(locomotion_channels.get("position"), dict) else {}
+            if candidate_position:
+                locomotion_position = candidate_position
+                break
+        clean_bones: dict[str, Any] = {}
+        for bone_name, channels in src_bones.items():
+            if str(bone_name) not in rig_names or not isinstance(channels, dict):
+                continue
+            rotation = channels.get("rotation") if isinstance(channels.get("rotation"), dict) else None
+            position = channels.get("position") if isinstance(channels.get("position"), dict) else None
+            clean_channels: dict[str, Any] = {}
+            if rotation:
+                clean_rotation: dict[str, list[float]] = {}
+                for time_key, value in rotation.items():
+                    if not isinstance(value, list) or len(value) < 3:
+                        continue
+                    try:
+                        # CinterForge stores the flat-baked rotation in the Babylon/voxel
+                        # basis. Blockbench/Minecraft Bedrock animation JSON needs the
+                        # corresponding raw Bedrock Euler signs: X and Z are inverted,
+                        # Y is preserved. This is independent of the position channel.
+                        clean_rotation[str(time_key)] = [
+                            round(-float(value[0]), 4),
+                            round(float(value[1]), 4),
+                            round(-float(value[2]), 4),
+                        ]
+                    except Exception:
+                        continue
+                if clean_rotation:
+                    clean_channels["rotation"] = clean_rotation
+            if position:
+                clean_position: dict[str, list[float]] = {}
+                for time_key, value in position.items():
+                    if not isinstance(value, list) or len(value) < 3:
+                        continue
+                    try:
+                        root = _position_at(locomotion_position, str(time_key)) if locomotion_position else [0.0, 0.0, 0.0]
+                        desired = [
+                            float(value[0]) - float(root[0]),
+                            float(value[1]),
+                            float(value[2]) - float(root[2]),
+                        ]
+                        # Bedrock position is the bone's translation channel relative
+                        # to its bind pivot.  The flat bake already stores the desired
+                        # entity-space pivot displacement, so emit it directly.  Do not
+                        # rotate this vector by the animation rotation; doing so turns
+                        # raised near-90-degree arms into large downward displacements.
+                        clean_position[str(time_key)] = [round(float(axis), 4) for axis in desired]
+                    except Exception:
+                        continue
+                if clean_position:
+                    clean_channels["position"] = clean_position
+            if clean_channels:
+                clean_bones[str(bone_name)] = clean_channels
+        if not clean_bones:
+            continue
+        safe_key = _safe_token(str(clip_key), fallback=f"clip_{len(animations_out)+1}").casefold()
+        animation_id = f"animation.cinterforge.{slug}.{safe_key}"
+        try:
+            length = max(0.033, float(raw.get("animation_length") or 0.033))
+        except Exception:
+            length = 0.033
+        animations_out[str(clip_key)] = {
+            "id": animation_id,
+            "label": str(raw.get("label") or clip_key),
+            "animation_length": length,
+            "bones": clean_bones,
+        }
+        clip_to_client_key[str(clip_key)] = safe_key
+
+    behavior = _clean_behavior_profile(behavior_profile, animations_out)
+    # Any captured clip omitted from a supplied profile still participates using
+    # the same name-based locomotion classification used by the previews.
+    profiled = {row["clip"] for row in behavior}
+    for clip_key, definition in animations_out.items():
+        if clip_key in profiled:
+            continue
+        label = str(definition.get("label") or clip_key)
+        kind = _animation_motion_kind(label)
+        length = float(definition.get("animation_length") or 1.0)
+        behavior.append({
+            "clip": clip_key, "name": label, "kind": kind, "clip_length": length,
+            "cycles": 2 if kind in {"walk", "run"} else 1,
+            "hold_seconds": length * (2 if kind in {"walk", "run"} else 1),
+            "speed": 1.65 if kind == "run" else (0.72 if kind == "walk" else 0.0),
+            "variant": len(behavior) + 1,
+        })
+
+    character_texture_name = f"cinterforge_{slug}"
+    statue_texture_name = f"cinterforge_{slug}_statue"
+    character_texture_path = f"textures/entity/{character_texture_name}"
+    statue_texture_path = f"textures/entity/{statue_texture_name}"
+    icon_name = f"cinterforge_{slug}_statue"
+    egg_icon_name = f"cinterforge_{slug}" if animated else ""
+    pack_title = f"CinterForge {title_name} - {'Animated' if animated else '3D'}"
+
+    bedrock_animation_blend_seconds = 0.18
+    bedrock_animations: dict[str, Any] = {}
+    client_refs: dict[str, str] = {}
+    animate_rules: list[Any] = []
+    for row in behavior:
+        clip = animations_out.get(row["clip"])
+        if not clip:
+            continue
+        safe_key = clip_to_client_key[row["clip"]]
+        anim_id = str(clip["id"])
+        # CinterForge strips shared Hips X/Z root travel from every exported
+        # locomotion bone, so Walk/Run may safely repeat in place while Bedrock's
+        # entity movement/navigation owns world-space translation.  This is the
+        # key separation: the skeleton loops; the entity position never resets.
+        # Stationary clips hold their final pose until the next controller state
+        # arrives, avoiding a bind-pose flash during replication gaps.
+        loop = True if str(row.get("kind") or "") in {"walk", "run"} else "hold_on_last_frame"
+        bedrock_animations[anim_id] = {"loop": loop, "animation_length": clip["animation_length"], "bones": clip["bones"]}
+        client_refs[safe_key] = anim_id
+        animate_rules.append({safe_key: f"query.variant == {int(row['variant'])}"})
+
+    animation_controller_id = f"controller.animation.cinterforge_{slug}.cycle"
+    animation_controller: dict[str, Any] | None = None
+    if animated and behavior and client_refs:
+        states: dict[str, Any] = {}
+        valid_rows = [row for row in behavior if row.get("clip") in animations_out and clip_to_client_key.get(str(row.get("clip"))) in client_refs]
+
+        def _controller_state_name(row_index: int, row: dict[str, Any]) -> str:
+            return f"clip_{row_index}"
+
+        for index, row in enumerate(valid_rows):
+            safe_key = clip_to_client_key[str(row["clip"])]
+            state_name = _controller_state_name(index, row)
+            transitions = []
+            # Locomotion is intentionally one-shot in Bedrock.  Never transition
+            # back into the same Walk/Run clip to simulate looping: re-entering
+            # an animation state necessarily restarts that clip at frame zero.
+            # A different server-selected variant blends directly out of the
+            # current authored pose; if replication is late, hold_on_last_frame
+            # keeps the final pose visible instead of exposing a reset.
+            for other_index, other in enumerate(valid_rows):
+                if other_index == index:
+                    continue
+                transitions.append({
+                    _controller_state_name(other_index, other):
+                    f"query.variant == {int(other['variant'])}"
+                })
+            state: dict[str, Any] = {
+                "animations": [safe_key],
+                "blend_transition": bedrock_animation_blend_seconds,
+                "blend_via_shortest_path": True,
+            }
+            if transitions:
+                state["transitions"] = transitions
+            states[state_name] = state
+        if states:
+            first_state = _controller_state_name(0, valid_rows[0])
+            animation_controller = {
+                # query.state_time is available in animation controllers from
+                # Bedrock format 1.21.20 onward.
+                "format_version": "1.21.20",
+                "animation_controllers": {
+                    animation_controller_id: {
+                        "initial_state": first_state,
+                        "states": states,
+                    }
+                },
+            }
+
+    # Optional Blockbench round-trip edits override the generated Bedrock-facing
+    # geometry/texture/animation files only.  The canonical CinterForge voxel
+    # bake remains intact so Cancel/Reset can always return to generated data.
+    override = blockbench_override if isinstance(blockbench_override, dict) else {}
+    override_geometry = override.get("geometry") if isinstance(override.get("geometry"), dict) else None
+    if override_geometry:
+        override_geometry = json.loads(json.dumps(override_geometry))
+        try:
+            rows = override_geometry.get("minecraft:geometry") or []
+            if rows and isinstance(rows[0], dict):
+                description = rows[0].setdefault("description", {})
+                description["identifier"] = character_geometry_id if animated else statue_geometry_id
+            if animated:
+                character_geometry = override_geometry
+            else:
+                statue_geometry = override_geometry
+                character_geometry = override_geometry
+        except Exception:
+            pass
+    override_texture = str(override.get("texture_data_url") or "")
+    if override_texture.startswith("data:image/png;base64,"):
+        try:
+            edited_png = base64.b64decode(override_texture.split(",", 1)[1], validate=True)
+            if edited_png.startswith(b"\x89PNG\r\n\x1a\n"):
+                if animated:
+                    character_texture_png = edited_png
+                else:
+                    statue_texture_png = edited_png
+                    character_texture_png = edited_png
+        except Exception:
+            pass
+    override_animations = override.get("animations") if isinstance(override.get("animations"), dict) else None
+    if animated and override_animations and isinstance(override_animations.get("animations"), dict):
+        edited_animations = override_animations.get("animations") or {}
+        # Client/controller references are generated from the canonical clip IDs.
+        # Save validation guarantees these keys remain present; preserve any
+        # additional Blockbench-authored animations as well.  However, a saved
+        # Blockbench document may have been created by an older exporter and can
+        # therefore carry obsolete Bedrock playback semantics (for example
+        # ``loop: true`` plus baked Hips X/Z travel).  Blockbench owns authored
+        # keyframe edits, but CinterForge owns runtime transport semantics.  Reapply
+        # those semantics after accepting the edited animation table so a stale
+        # round-trip cannot silently reintroduce a frame-zero reset.
+        if all(str(defn.get("id") or "") in edited_animations for defn in animations_out.values()):
+            merged_animations = json.loads(json.dumps(edited_animations))
+            behavior_by_id: dict[str, dict[str, Any]] = {}
+            for row in behavior:
+                definition = animations_out.get(str(row.get("clip") or ""))
+                if isinstance(definition, dict) and definition.get("id"):
+                    behavior_by_id[str(definition["id"])] = row
+
+            for anim_id, canonical in bedrock_animations.items():
+                edited = merged_animations.get(anim_id)
+                if not isinstance(edited, dict):
+                    continue
+                # Loop/hold is a runtime contract, not an editable Blockbench
+                # property.  Always preserve the current exporter contract.
+                edited["loop"] = canonical.get("loop", "hold_on_last_frame")
+
+                row = behavior_by_id.get(anim_id) or {}
+                if str(row.get("kind") or "") not in {"walk", "run"}:
+                    continue
+                bones = edited.get("bones") if isinstance(edited.get("bones"), dict) else {}
+                locomotion_position: dict[str, Any] = {}
+                for locomotion_bone_name in locomotion_candidates:
+                    channels = bones.get(locomotion_bone_name) if isinstance(bones.get(locomotion_bone_name), dict) else {}
+                    candidate = channels.get("position") if isinstance(channels.get("position"), dict) else {}
+                    if candidate:
+                        locomotion_position = candidate
+                        break
+                if not locomotion_position:
+                    continue
+                for channels in bones.values():
+                    if not isinstance(channels, dict):
+                        continue
+                    position = channels.get("position") if isinstance(channels.get("position"), dict) else None
+                    if not position:
+                        continue
+                    normalized: dict[str, list[float]] = {}
+                    for time_key, value in position.items():
+                        if not isinstance(value, list) or len(value) < 3:
+                            continue
+                        try:
+                            root = _position_at(locomotion_position, str(time_key))
+                            normalized[str(time_key)] = [
+                                round(float(value[0]) - float(root[0]), 4),
+                                round(float(value[1]), 4),
+                                round(float(value[2]) - float(root[2]), 4),
+                            ]
+                        except Exception:
+                            continue
+                    if normalized:
+                        channels["position"] = normalized
+            bedrock_animations = merged_animations
+
+    def client_entity(identifier: str, *, spawn_egg: bool, animate: bool, geometry_id: str, texture_path: str) -> dict[str, Any]:
+        description: dict[str, Any] = {
+            "identifier": identifier,
+            "materials": {"default": "entity"}, "textures": {"default": texture_path},
+            "geometry": {"default": geometry_id}, "render_controllers": [render_controller_id],
+        }
+        if animate and client_refs:
+            refs = dict(client_refs)
+            if animation_controller is not None:
+                refs["cycle_controller"] = animation_controller_id
+                description["scripts"] = {"animate": ["cycle_controller"]}
+            else:
+                description["scripts"] = {"animate": animate_rules}
+            description["animations"] = refs
+        if spawn_egg:
+            avg_r = sum(v["r"] for v in character_occupied) // len(character_occupied)
+            avg_g = sum(v["g"] for v in character_occupied) // len(character_occupied)
+            avg_b = sum(v["b"] for v in character_occupied) // len(character_occupied)
+            description["spawn_egg"] = {
+                "base_color": f"#{avg_r:02X}{avg_g:02X}{avg_b:02X}",
+                "overlay_color": f"#{min(255, avg_r+64):02X}{min(255, avg_g+64):02X}{min(255, avg_b+64):02X}",
+            }
+        return {"format_version": "1.10.0", "minecraft:client_entity": {"description": description}}
+
+    animated_client = client_entity(entity_identifier, spawn_egg=False, animate=animated, geometry_id=character_geometry_id, texture_path=character_texture_path)
+    statue_client = None if animated else client_entity(statue_entity_identifier, spawn_egg=False, animate=False, geometry_id=statue_geometry_id, texture_path=statue_texture_path)
+    render_controller = {"format_version": "1.8.0", "render_controllers": {render_controller_id: {"geometry": "Geometry.default", "materials": [{"*": "Material.default"}], "textures": ["Texture.default"]}}}
+
+    min_x, max_x, min_y, max_y, min_z, max_z = character_bounds
+    collision_width = max(0.1, float(max(max_x-min_x+1, max_z-min_z+1)) / 16.0)
+    collision_height = max(0.1, float(max_y-min_y+1) / 16.0)
+    base_components: dict[str, Any] = {
+        "minecraft:physics": {}, "minecraft:collision_box": {"width": collision_width, "height": collision_height},
+        "minecraft:health": {"value": 20, "max": 20}, "minecraft:nameable": {},
+    }
+    component_groups: dict[str, Any] = {}
+    events: dict[str, Any] = {}
+    if animated and behavior:
+        # Keep the navigation brain alive across animation-state changes.  If
+        # random_stroll/navigation are removed and recreated with every clip,
+        # Bedrock discards the active destination/path and a later Walk/Run
+        # starts a new trip.  Persistent navigation plus per-state movement
+        # speed lets stationary clips pause in place and locomotion clips resume
+        # from the same world position toward the same destination.
+        base_components.update({
+            "minecraft:movement.basic": {},
+            "minecraft:navigation.walk": {"can_path_over_water": False, "avoid_water": True},
+            "minecraft:behavior.random_stroll": {"priority": 6, "speed_multiplier": 1.0, "interval": 20, "xz_dist": 10, "y_dist": 4},
+            "minecraft:jump.static": {},
+        })
+        group_names = [f"cinter:clip_{index}" for index, _ in enumerate(behavior)]
+        for index, row in enumerate(behavior):
+            group = group_names[index]
+            next_event = f"cinter:next_animation_{index}"
+            movement = 0.0
+            if row["kind"] in {"walk", "run"}:
+                # Logical walk/run classification and speed ratio come from the
+                # same saved behavior profile used by both Babylon previews.
+                # Bedrock's own entity examples use ~0.25 as an ordinary walking
+                # speed.  Use that as the Walk baseline, preserve the authored
+                # Walk/Run ratio, and cap Run conservatively so the navigation
+                # controller remains stable while the in-place gait supplies the
+                # visual cadence.
+                movement = max(0.10, min(0.45, 0.25 * (float(row["speed"]) / 0.72)))
+            # Locomotion may span multiple authored gait cycles.  The animation
+            # loops in place while persistent Bedrock navigation moves the entity
+            # through the world, so keep the logical state's full requested hold
+            # duration instead of forcing a transition after one stride.
+            timer_seconds = max(0.05, float(row["hold_seconds"]))
+            components: dict[str, Any] = {
+                "minecraft:variant": {"value": int(row["variant"])},
+                "minecraft:timer": {"time": timer_seconds, "looping": False, "time_down_event": {"event": next_event, "target": "self"}},
+                # Only speed changes with the clip.  Navigation/pathfinding stays
+                # resident in base_components so clip switches do not throw away
+                # the current destination.
+                "minecraft:movement": {"value": movement},
+            }
+            component_groups[group] = components
+
+        def randomize_event(exclude_index: int | None) -> dict[str, Any]:
+            candidates = [name for i, name in enumerate(group_names) if exclude_index is None or i != exclude_index]
+            if not candidates:
+                candidates = list(group_names)
+            return {
+                "sequence": [
+                    {"remove": {"component_groups": group_names}},
+                    {"randomize": [{"weight": 1, "add": {"component_groups": [name]}} for name in candidates]},
+                ]
+            }
+
+        # Startup may choose any clip. Thereafter each current clip transitions
+        # through its own event that excludes itself when another clip exists.
+        # This matches Babylon's auto-cycle rule and avoids visible immediate
+        # repeats while preserving entity position/orientation across clips.
+        base_components["minecraft:timer"] = {"time": 0.05, "looping": False, "time_down_event": {"event": "cinter:start_animation", "target": "self"}}
+        events["cinter:start_animation"] = randomize_event(None)
+        for index in range(len(group_names)):
+            events[f"cinter:next_animation_{index}"] = randomize_event(index)
+
+    animated_behavior_entity: dict[str, Any] = {
+        "description": {"identifier": entity_identifier, "is_spawnable": True, "is_summonable": True, "is_experimental": False},
+        "components": base_components,
+    }
+    if component_groups:
+        animated_behavior_entity["component_groups"] = component_groups
+    if events:
+        animated_behavior_entity["events"] = events
+    animated_behavior = {"format_version": "1.21.80", "minecraft:entity": animated_behavior_entity}
+    statue_behavior = {
+        "format_version": "1.21.80",
+        "minecraft:entity": {
+            "description": {"identifier": statue_entity_identifier, "is_spawnable": False, "is_summonable": True, "is_experimental": False},
+            "components": {"minecraft:physics": {}, "minecraft:collision_box": {"width": collision_width, "height": collision_height}, "minecraft:pushable": {"is_pushable": False, "is_pushable_by_piston": False}},
+        },
+    }
+    statue_item = {
+        "format_version": "1.21.80",
+        "minecraft:item": {
+            "description": {"identifier": statue_item_identifier, "menu_category": {"category": "construction"}},
+            "components": {
+                "minecraft:display_name": {"value": f"{title_name} Statue"},
+                "minecraft:icon": {"textures": {"default": icon_name}}, "minecraft:max_stack_size": 16,
+                "minecraft:entity_placer": {"entity": statue_entity_identifier},
+            },
+        },
+    }
+    egg_item: dict[str, Any] | None = None
+    if animated:
+        egg_item = {
+            "format_version": "1.21.80",
+            "minecraft:item": {
+                "description": {"identifier": egg_item_identifier, "menu_category": {"category": "items"}},
+                "components": {
+                    "minecraft:display_name": {"value": title_name},
+                    "minecraft:icon": {"textures": {"default": egg_icon_name}},
+                    "minecraft:max_stack_size": 16,
+                    "minecraft:hand_equipped": True,
+                    "minecraft:entity_placer": {"entity": entity_identifier},
+                },
+            },
+        }
+    if animated:
+        texture_data: dict[str, Any] = {egg_icon_name: {"textures": f"textures/items/{egg_icon_name}_chest"}}
+        lang_lines = [f"entity.{entity_identifier}.name={title_name}"]
+    else:
+        texture_data = {icon_name: {"textures": f"textures/items/{icon_name}_chest"}}
+        lang_lines = [f"entity.{statue_entity_identifier}.name={title_name} Statue"]
+    item_texture = {"resource_pack_name": pack_title, "texture_name": "atlas.items", "texture_data": texture_data}
+    lang = "\n".join(lang_lines + [""])
+    languages = ["en_US"]
+    # Both resource- and behavior-pack thumbnails are the same improved
+    # frame-zero hero view used to identify the generated asset.
+    pack_icon_png = _blockify_hero_icon_png(statue_occupied, size=256, transparent=False)
+    rendered_item_icon = bytes(item_icon_png or b"")
+    statue_chest_png = rendered_item_icon or _blockify_hero_icon_png(statue_occupied, size=64, transparent=True)
+    statue_hand_png = rendered_item_icon or _blockify_hero_icon_png(statue_occupied, size=128, transparent=True)
+    egg_chest_png = (rendered_item_icon or _blockify_egg_icon_png(statue_occupied, size=64)) if animated else b""
+    egg_hand_png = (rendered_item_icon or _blockify_egg_icon_png(statue_occupied, size=128)) if animated else b""
+
+    # Keep UUIDs stable so worlds retain the same logical pack, but increment
+    # the pack version whenever the generated Bedrock contract changes.  Using
+    # a permanent 1.0.0 caused Minecraft to retain an already-installed stale
+    # pack even after CinterForge exported corrected geometry/animations.
+    pack_version = list(BLOCKIFY_ADDON_PACK_VERSION)
+    rp_manifest = {"format_version": 2, "header": {"name": pack_title, "description": f"CinterForge Minecraft asset: {title_name}", "uuid": rp_uuid, "version": pack_version, "min_engine_version": [1,21,80]}, "modules": [{"type": "resources", "uuid": rp_module_uuid, "version": pack_version}]}
+    bp_manifest = {"format_version": 2, "header": {"name": pack_title, "description": f"CinterForge Minecraft asset: {title_name}", "uuid": bp_uuid, "version": pack_version, "min_engine_version": [1,21,80]}, "modules": [{"type": "data", "uuid": bp_module_uuid, "version": pack_version}], "dependencies": [{"uuid": rp_uuid, "version": pack_version}]}
+    def as_json(value: Any) -> bytes:
+        return json.dumps(value, indent=2, ensure_ascii=False).encode("utf-8")
+
+    # Generated-pack provenance is part of the artifact itself, not only the
+    # sidecar asset manifest.  Pack version alone is insufficient: two exporter
+    # revisions can accidentally share a version and leave an older .mcaddon on
+    # disk looking current.  Export validation reads this marker from BOTH
+    # nested packs before deciding an existing add-on can be reused.
+    export_marker = {
+        "schema": BLOCKIFY_ADDON_SCHEMA,
+        "pack_version": list(BLOCKIFY_ADDON_PACK_VERSION),
+        "source_sha256": source_sha256,
+    }
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="cinterforge-blockify-addon-") as td:
+        td_path = Path(td); rp_pack = td_path / f"{slug}_RP.mcpack"; bp_pack = td_path / f"{slug}_BP.mcpack"
+        with zipfile.ZipFile(rp_pack, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            zf.writestr("manifest.json", as_json(rp_manifest)); zf.writestr("pack_icon.png", pack_icon_png)
+            zf.writestr("cinterforge_export.json", as_json(export_marker))
+            if animated:
+                zf.writestr(f"models/entity/{slug}_character.geo.json", as_json(character_geometry))
+                zf.writestr(f"textures/entity/{character_texture_name}.png", character_texture_png)
+                zf.writestr(f"entity/{slug}.entity.json", as_json(animated_client))
+                if bedrock_animations:
+                    zf.writestr(f"animations/{slug}.animation.json", as_json({"format_version": "1.8.0", "animations": bedrock_animations}))
+                if animation_controller is not None:
+                    zf.writestr(f"animation_controllers/{slug}.animation_controllers.json", as_json(animation_controller))
+            else:
+                zf.writestr(f"models/entity/{slug}_statue.geo.json", as_json(statue_geometry))
+                zf.writestr(f"textures/entity/{statue_texture_name}.png", statue_texture_png)
+                zf.writestr(f"entity/{slug}_statue.entity.json", as_json(statue_client))
+            zf.writestr(f"render_controllers/{slug}.render_controllers.json", as_json(render_controller))
+            zf.writestr("textures/item_texture.json", as_json(item_texture))
+            if animated:
+                zf.writestr(f"textures/items/{egg_icon_name}_chest.png", egg_chest_png)
+                zf.writestr(f"textures/items/{egg_icon_name}_hand.png", egg_hand_png)
+            else:
+                zf.writestr(f"textures/items/{icon_name}_chest.png", statue_chest_png)
+                zf.writestr(f"textures/items/{icon_name}_hand.png", statue_hand_png)
+            zf.writestr("texts/en_US.lang", lang.encode("utf-8")); zf.writestr("texts/languages.json", as_json(languages))
+        with zipfile.ZipFile(bp_pack, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            zf.writestr("manifest.json", as_json(bp_manifest)); zf.writestr("pack_icon.png", pack_icon_png)
+            zf.writestr("cinterforge_export.json", as_json(export_marker))
+            if animated:
+                zf.writestr(f"entities/{slug}.json", as_json(animated_behavior))
+                if egg_item is not None:
+                    zf.writestr(f"items/{slug}.item.json", as_json(egg_item))
+            else:
+                zf.writestr(f"entities/{slug}_statue.json", as_json(statue_behavior))
+                zf.writestr(f"items/{slug}_statue.item.json", as_json(statue_item))
+        with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            zf.write(rp_pack, rp_pack.name); zf.write(bp_pack, bp_pack.name)
+    if animated:
+        commands = {
+            "give": f"/give @s {egg_item_identifier}",
+            "summon": f"/summon {entity_identifier}",
+        }
+    else:
+        commands = {
+            "statue": f"/give @s {statue_item_identifier}",
+            "summon_statue": f"/summon {statue_entity_identifier}",
+        }
+    return {
+        "file": destination.name, "identifier": egg_item_identifier or statue_item_identifier,
+        "entity_identifier": entity_identifier, "egg_item_identifier": egg_item_identifier,
+        "statue_entity_identifier": statue_entity_identifier, "statue_item_identifier": statue_item_identifier,
+        "commands": commands, "behavior_profile": behavior,
+        "addon_schema": BLOCKIFY_ADDON_SCHEMA, "pack_version": list(BLOCKIFY_ADDON_PACK_VERSION),
+    }
+
+def _png_dimensions(data: bytes) -> tuple[int, int]:
+    """Read PNG IHDR dimensions without adding an image-library runtime dependency."""
+    if len(data) < 24 or not data.startswith(b"\x89PNG\r\n\x1a\n") or data[12:16] != b"IHDR":
+        raise ValueError("Minecraft picture texture must be PNG")
+    width = int.from_bytes(data[16:20], "big")
+    height = int.from_bytes(data[20:24], "big")
+    if width < 1 or height < 1:
+        raise ValueError("Minecraft picture texture has invalid dimensions")
+    return width, height
+
+def _write_image_mcaddon(
+    destination: Path, *, source: Path, source_sha256: str, width: int, height: int,
+    colors: list[dict[str, Any]], statue_png: bytes, picture_png: bytes, product_name: str = "",
+) -> dict[str, Any]:
+    """Build one Bedrock add-on containing a textured block statue and wall picture."""
+    display_name = str(product_name or "").strip() or source.stem.replace("_", " ").strip() or "Image Asset"
+    title_name = " ".join(word[:1].upper() + word[1:] for word in display_name.split())
+    slug = _blockify_slug(display_name)
+    statue_entity = f"cinter:{slug}_statue"
+    statue_item = statue_entity
+    picture_entity = f"cinter:{slug}_picture"
+    picture_item = picture_entity
+    statue_geometry_id = f"geometry.cinterforge.{slug}.image_statue"
+    picture_geometry_id = f"geometry.cinterforge.{slug}.picture"
+    picture_frame_geometry_id = f"geometry.cinterforge.{slug}.picture_frame"
+    statue_texture_name = f"cinterforge_{slug}_image_statue"
+    picture_texture_name = f"cinterforge_{slug}_picture"
+    picture_frame_texture_name = f"cinterforge_{slug}_picture_frame"
+    render_statue = f"controller.render.cinterforge_{slug}_image_statue"
+    render_picture = f"controller.render.cinterforge_{slug}_picture"
+    render_picture_frame = f"controller.render.cinterforge_{slug}_picture_frame"
+    seed = f"{source_sha256}:{width}:{height}:image-addon-v1:{slug}"
+    rp_uuid, rpm_uuid = _uuid_from_seed(seed+":rp"), _uuid_from_seed(seed+":rpm")
+    bp_uuid, bpm_uuid = _uuid_from_seed(seed+":bp"), _uuid_from_seed(seed+":bpm")
+    pack_version = [1, 1, 0]
+    pack_title = f"CinterForge {title_name} - Image"
+
+    by_xy = {(int(v["x"]), int(v["y"])): v for v in colors}
+    statue_tex_w,statue_tex_h=_png_dimensions(statue_png)
+    expected_statue_size=(width*16,height*16)
+    if (statue_tex_w,statue_tex_h) != expected_statue_size:
+        raise ValueError(f"Minecraft statue texture must be {expected_statue_size[0]}x{expected_statue_size[1]} pixels")
+    cubes=[]
+    for y in range(height):
+        for x in range(width):
+            if (x,y) not in by_xy:
+                continue
+            # Geometry stays at one full Minecraft cube per block. Each face uses
+            # the corresponding 16x16 texel tile from the statue atlas, preserving
+            # Minecraft's native block-face texture resolution without micro-voxels.
+            u=x*16; vv=(height-1-y)*16
+            north={"uv":[u,vv],"uv_size":[16,16]}
+            south={"uv":[u+16,vv],"uv_size":[-16,16]}
+            tile={"uv":[u,vv],"uv_size":[16,16]}
+            cubes.append({
+                "origin":[(x-width/2.0)*16.0, y*16.0, -8.0], "size":[16,16,16],
+                "uv":{"north":north,"south":south,"east":dict(tile),"west":dict(tile),"up":dict(tile),"down":dict(tile)},
+            })
+    if not cubes:
+        raise ValueError("Image has no visible blocks for a Minecraft statue")
+    tex_w,tex_h=_png_dimensions(picture_png)
+    statue_geometry={"format_version":"1.12.0","minecraft:geometry":[{"description":{"identifier":statue_geometry_id,"texture_width":statue_tex_w,"texture_height":statue_tex_h,"visible_bounds_width":max(1.0,float(width)+1),"visible_bounds_height":max(1.0,float(height)+1),"visible_bounds_offset":[0,float(height)/2,0]},"bones":[{"name":"root","pivot":[0,0,0],"cubes":cubes}]}]}
+    # A very thin textured box gives the picture a front/back surface while keeping
+    # its authored physical size in Minecraft blocks.  Width/height use 16 model
+    # units per block; the picture itself is 1 model unit thick.
+    picture_faces={
+        "north":{"uv":[0,0],"uv_size":[tex_w,tex_h]},
+        "south":{"uv":[tex_w,0],"uv_size":[-tex_w,tex_h]},
+        "east":{"uv":[0,0],"uv_size":[1,tex_h]},"west":{"uv":[0,0],"uv_size":[1,tex_h]},
+        "up":{"uv":[0,0],"uv_size":[tex_w,1]},"down":{"uv":[0,0],"uv_size":[tex_w,1]},
+    }
+    picture_geometry={"format_version":"1.12.0","minecraft:geometry":[{"description":{"identifier":picture_geometry_id,"texture_width":tex_w,"texture_height":tex_h,"visible_bounds_width":max(1.0,float(width)+1),"visible_bounds_height":max(1.0,float(height)+1),"visible_bounds_offset":[0,float(height)/2,0]},"bones":[{"name":"picture","pivot":[0,0,0],"cubes":[{"origin":[-width*8.0,0,-0.5],"size":[width*16.0,height*16.0,1],"uv":picture_faces}]}]}]}
+    # Picture is deliberately NOT voxel/block geometry.  Render the continuous
+    # image as one thin canvas and surround it with a second geometry pass for a
+    # Minecraft-style frame.  Multiple render controllers let the same entity
+    # use the real image texture for the canvas and a tiny dedicated frame
+    # texture for the border.
+    # Keep the entire Picture, including its frame, exactly one Bedrock model
+    # pixel deep: 1 model unit = 1/16 of a Minecraft block.  The image canvas
+    # above is already 1 unit deep; the frame must not protrude to 2 units.
+    frame=1.0; picture_depth=1.0; picture_z=-picture_depth/2.0; full_w=width*16.0; full_h=height*16.0; frame_uv={name:{"uv":[0,0],"uv_size":[16,16]} for name in ("north","south","east","west","up","down")}
+    frame_cubes=[
+        {"origin":[-full_w/2-frame,-frame,picture_z],"size":[full_w+2*frame,frame,picture_depth],"uv":frame_uv},
+        {"origin":[-full_w/2-frame,full_h,picture_z],"size":[full_w+2*frame,frame,picture_depth],"uv":frame_uv},
+        {"origin":[-full_w/2-frame,0,picture_z],"size":[frame,full_h,picture_depth],"uv":frame_uv},
+        {"origin":[full_w/2,0,picture_z],"size":[frame,full_h,picture_depth],"uv":frame_uv},
+    ]
+    picture_frame_geometry={"format_version":"1.12.0","minecraft:geometry":[{"description":{"identifier":picture_frame_geometry_id,"texture_width":16,"texture_height":16,"visible_bounds_width":max(1.0,float(width)+1),"visible_bounds_height":max(1.0,float(height)+1),"visible_bounds_offset":[0,float(height)/2,0]},"bones":[{"name":"frame","pivot":[0,0,0],"cubes":frame_cubes}]}]}
+    # Simple warm wood-like frame swatch.  The image itself remains untouched.
+    frame_pixels=[]
+    for fy in range(16):
+        for fx in range(16):
+            band=((fx//4)+(fy//4))&1
+            frame_pixels.extend((110+18*band,72+12*band,38+8*band,255))
+    picture_frame_png=_png_rgba(16,16,bytes(frame_pixels))
+
+    def client(identifier, geometry, texture, controller):
+        return {"format_version":"1.10.0","minecraft:client_entity":{"description":{"identifier":identifier,"materials":{"default":"entity_alphatest"},"textures":{"default":f"textures/entity/{texture}"},"geometry":{"default":geometry},"render_controllers":[controller],"spawn_egg":{"base_color":"#6a6a6a","overlay_color":"#dddddd"}}}}
+    def picture_client():
+        return {"format_version":"1.10.0","minecraft:client_entity":{"description":{"identifier":picture_entity,"materials":{"default":"entity_alphatest","frame":"entity"},"textures":{"default":f"textures/entity/{picture_texture_name}","frame":f"textures/entity/{picture_frame_texture_name}"},"geometry":{"default":picture_geometry_id,"frame":picture_frame_geometry_id},"render_controllers":[render_picture,render_picture_frame],"spawn_egg":{"base_color":"#6a6a6a","overlay_color":"#dddddd"}}}}
+    def render(controller):
+        return {"format_version":"1.8.0","render_controllers":{controller:{"geometry":"Geometry.default","materials":[{"*":"Material.default"}],"textures":["Texture.default"]}}}
+    def behavior(identifier, collision_width, collision_height):
+        return {"format_version":"1.21.80","minecraft:entity":{"description":{"identifier":identifier,"is_spawnable":False,"is_summonable":True,"is_experimental":False},"components":{"minecraft:physics":{},"minecraft:collision_box":{"width":collision_width,"height":collision_height},"minecraft:pushable":{"is_pushable":False,"is_pushable_by_piston":False}}}}
+    def item(identifier, entity, label, icon):
+        return {"format_version":"1.21.80","minecraft:item":{"description":{"identifier":identifier,"menu_category":{"category":"construction"}},"components":{"minecraft:display_name":{"value":label},"minecraft:icon":{"textures":{"default":icon}},"minecraft:max_stack_size":16,"minecraft:entity_placer":{"entity":entity}}}}
+
+    statue_icon=f"cinterforge_{slug}_statue"; picture_icon=f"cinterforge_{slug}_picture"
+    item_texture={"resource_pack_name":pack_title,"texture_name":"atlas.items","texture_data":{statue_icon:{"textures":f"textures/items/{statue_icon}"},picture_icon:{"textures":f"textures/items/{picture_icon}"}}}
+    rp_manifest={"format_version":2,"header":{"name":pack_title,"description":f"CinterForge Minecraft image asset: {title_name}","uuid":rp_uuid,"version":pack_version,"min_engine_version":[1,21,80]},"modules":[{"type":"resources","uuid":rpm_uuid,"version":pack_version}]}
+    bp_manifest={"format_version":2,"header":{"name":pack_title,"description":f"CinterForge Minecraft image asset: {title_name}","uuid":bp_uuid,"version":pack_version,"min_engine_version":[1,21,80]},"modules":[{"type":"data","uuid":bpm_uuid,"version":pack_version}],"dependencies":[{"uuid":rp_uuid,"version":pack_version}]}
+    marker={"schema":"cinterforge.image-addon.v4","source_sha256":source_sha256,"width_blocks":width,"height_blocks":height,"pixels_per_block":16,"statue_texture_size":[statue_tex_w,statue_tex_h],"picture_texture_size":[tex_w,tex_h],"picture_representation":"continuous-framed-wall-picture","picture_thickness_model_units":1,"picture_thickness_blocks":0.0625}
+    as_json=lambda value: json.dumps(value,indent=2,ensure_ascii=False).encode("utf-8")
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="cinterforge-image-addon-") as td:
+        root=Path(td); rp=root/f"{slug}_RP.mcpack"; bp=root/f"{slug}_BP.mcpack"
+        with zipfile.ZipFile(rp,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=6) as zf:
+            zf.writestr("manifest.json",as_json(rp_manifest));zf.writestr("cinterforge_export.json",as_json(marker));zf.writestr("pack_icon.png",picture_png)
+            zf.writestr(f"models/entity/{slug}_statue.geo.json",as_json(statue_geometry));zf.writestr(f"models/entity/{slug}_picture.geo.json",as_json(picture_geometry));zf.writestr(f"models/entity/{slug}_picture_frame.geo.json",as_json(picture_frame_geometry))
+            zf.writestr(f"textures/entity/{statue_texture_name}.png",statue_png);zf.writestr(f"textures/entity/{picture_texture_name}.png",picture_png);zf.writestr(f"textures/entity/{picture_frame_texture_name}.png",picture_frame_png)
+            zf.writestr(f"entity/{slug}_statue.entity.json",as_json(client(statue_entity,statue_geometry_id,statue_texture_name,render_statue)))
+            zf.writestr(f"entity/{slug}_picture.entity.json",as_json(picture_client()))
+            rc=render(render_statue);rc["render_controllers"].update(render(render_picture)["render_controllers"]);rc["render_controllers"][render_picture_frame]={"geometry":"Geometry.frame","materials":[{"*":"Material.frame"}],"textures":["Texture.frame"]};zf.writestr(f"render_controllers/{slug}.render_controllers.json",as_json(rc))
+            zf.writestr("textures/item_texture.json",as_json(item_texture));zf.writestr(f"textures/items/{statue_icon}.png",statue_png);zf.writestr(f"textures/items/{picture_icon}.png",picture_png)
+            zf.writestr("texts/en_US.lang",f"entity.{statue_entity}.name={title_name} Statue\nentity.{picture_entity}.name={title_name} Picture\n".encode());zf.writestr("texts/languages.json",as_json(["en_US"]))
+        with zipfile.ZipFile(bp,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=6) as zf:
+            zf.writestr("manifest.json",as_json(bp_manifest));zf.writestr("cinterforge_export.json",as_json(marker));zf.writestr("pack_icon.png",picture_png)
+            zf.writestr(f"entities/{slug}_statue.json",as_json(behavior(statue_entity,max(0.25,float(width)),max(0.25,float(height)))))
+            zf.writestr(f"entities/{slug}_picture.json",as_json(behavior(picture_entity,max(0.05,float(width)),max(0.25,float(height)))))
+            zf.writestr(f"items/{slug}_statue.item.json",as_json(item(statue_item,statue_entity,f"{title_name} Statue",statue_icon)))
+            zf.writestr(f"items/{slug}_picture.item.json",as_json(item(picture_item,picture_entity,f"{title_name} Picture",picture_icon)))
+        with zipfile.ZipFile(destination,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=6) as zf:
+            zf.write(rp,rp.name);zf.write(bp,bp.name)
+    return {"file":destination.name,"statue_entity_identifier":statue_entity,"statue_item_identifier":statue_item,"picture_entity_identifier":picture_entity,"picture_item_identifier":picture_item,"commands":{"statue":f"/give @s {statue_item}","summon_statue":f"/summon {statue_entity}","picture":f"/give @s {picture_item}","summon_picture":f"/summon {picture_entity}"},"addon_schema":"cinterforge.image-addon.v4","pack_version":pack_version}
+

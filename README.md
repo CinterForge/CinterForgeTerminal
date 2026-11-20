@@ -102,6 +102,7 @@ This runs **Setup → Build → Stage → Test**. It does **not** publish. Setup
 - [User Manual](docs/User%20Manual.md) — product features, first steps and complete command workflows
 - [Games and Experiences](docs/Game%20Catalog.md) — all game commands, including 16 stories
 - [Architecture](docs/Architecture.md) — native Host, WebViews, Python, services and platform boundaries
+- [Assets Integration Handoff](docs/Assets%20Integration%20-%20Full%20Repository%20Handoff.md) — asset import/report/view, Cloudflare backups, shared Converter/Server modules and test steps
 - [Build and Release](docs/Build%20and%20Release.md) — lifecycle phases, four release archives and publication
 - [Developer Tooling](docs/Developer%20Tooling.md) — optional toolchain installation and real platform terminals
 - [Integrating the Host](docs/Integrating%20the%20Host.md) — reusable Host library, authenticated bridge and C API

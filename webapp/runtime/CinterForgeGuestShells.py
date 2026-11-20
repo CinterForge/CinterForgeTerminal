@@ -160,6 +160,7 @@ def _new_owned_guest_shell(server: _CinterForgeHTTP.CinterForgeHTTPServer, kind:
                             url=server.origin, token=server.token,
                             command=_runtime_guest_shell_command(sdk, kind, workspace),
                             working_directory=workspace, internal_token=server.cli_token,
+                            capabilities=server.capabilities,
                             child_env=_guest_docker_context(sdk), output_log=_CinterForgeSessions._runtime_logs_root(server.mutable_builds) /
                             ('Sessions/persistent-' + kind + '.log'))
     try:

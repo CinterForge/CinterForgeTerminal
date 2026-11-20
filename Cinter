@@ -387,7 +387,11 @@ def main(argv: list[str]) -> int:
         ensure_craftmaster_sources(BUILDS)
         from host.lifecycle.setup_dirty import is_current, invalidate, commit
         from host.lifecycle.craftmaster_dependency import setup_receipts_present
-        if is_current(REPO, BUILDS, 'win') and setup_receipts_present(BUILDS, ('win',)):
+        from host.lifecycle.assets_dependency import media_toolchains_ready
+        if (is_current(REPO, BUILDS, 'win') and
+                setup_receipts_present(BUILDS, ('win',)) and
+                media_toolchains_ready(BUILDS)):
+
             return 0
         invalidate(BUILDS, 'win')
         if platform.system() == 'Darwin':
@@ -430,8 +434,11 @@ def main(argv: list[str]) -> int:
         ensure_craftmaster_sources(BUILDS)
         from host.lifecycle.setup_dirty import is_current, invalidate, commit
         from host.lifecycle.craftmaster_dependency import setup_receipts_present
+        from host.lifecycle.assets_dependency import (asset_dependencies_ready,
+                                                      media_toolchains_ready)
         if (is_current(REPO, BUILDS, 'all') and
-                setup_receipts_present(BUILDS, craft_targets)):
+                setup_receipts_present(BUILDS, craft_targets) and
+                asset_dependencies_ready(BUILDS) and media_toolchains_ready(BUILDS)):
             from host.linux.bedrock_consent import require_bedrock_eula
             require_bedrock_eula(BUILDS, 'mac')
             return 0
@@ -453,6 +460,10 @@ def main(argv: list[str]) -> int:
             os.environ.update(managed_environment(BUILDS))
             if 'mac' in craft_targets:
                 setup_craftmaster(BUILDS, targets=('mac',))
+        # Asset technology is owned by Terminal; Setup downloads and verifies
+        # browser engines once. Converter/WebApp do not need to be built.
+        from host.lifecycle.assets_dependency import provision_asset_dependencies
+        provision_asset_dependencies(BUILDS)
         # LinuxKit Setup starts the canonical c Docker producer directly,
         # builds its ARM64 kernel and guest closure, then releases c before
         # actual Bedrock acceptance. No w cross-builder is started.
@@ -785,7 +796,12 @@ def main(argv: list[str]) -> int:
         # A release must carry its platform-matched native CraftMaster CLI
         # and exact data closure; Setup's downloaded receipt alone is not proof.
         from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
-        verify_embedded_craftmaster(root / APP_ROOTS[target], target)
+        app = root / APP_ROOTS[target]
+        verify_embedded_craftmaster(app, target)
+        # Source freshness is target-scoped: Mac Test checks Mac, while the
+        # Windows/Linux tests compare only their own installed HTTP modules.
+        from host.lifecycle.test import verify_staged_asset_modules
+        verify_staged_asset_modules(app, target, record['release'])
         if target == 'win':
             from host.windows.msi_installer import _check_tools, test as test_msi
             try:

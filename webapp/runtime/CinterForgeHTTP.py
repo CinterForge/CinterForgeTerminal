@@ -114,6 +114,11 @@ class CinterForgeHTTPServer(ThreadingHTTPServer):
         self.craftmaster_map_lock = threading.RLock()
         self.craftmaster_map_requests = deque()
         self.craftmaster_maps = {}
+        # UI-visible asset reports, viewers and native file selection requests.
+        self.asset_actions_lock = threading.RLock()
+        self.asset_actions = deque()
+        self.asset_upload_lock = threading.RLock()
+        self.asset_uploads = {}
         self.devtools_requested = False
         # One app-owned guest initialization, never one per opened terminal tab.
         self.guest_start_lock = threading.Lock()
@@ -171,6 +176,12 @@ class CinterForgeHTTPServer(ThreadingHTTPServer):
             except (OSError, RuntimeError, AttributeError) as error:
                 self.log_event('Bonjour unavailable (rebuild staged Host library): ' + str(error))
         self.origin = f'http://127.0.0.1:{self.server_port}'
+        # Validate external credentials once at launch. Never send secrets to JS
+        # or generate native shell bindings for unavailable commands.
+        from runtime import CinterForgeCapabilities as _CinterForgeCapabilities
+        self.capabilities = _CinterForgeCapabilities.detect()
+        self.log_event('external capabilities: assets=' + str(self.capabilities['assets'])
+                       + ' discord=' + str(self.capabilities['discord']))
         self.log_event('backend ready; platform=' + self.system + ' port=' + str(self.server_port))
         # One guest supervisor belongs to this server owner, not to each tab
         # or remote browser. It delegates to the already-existing runtime.

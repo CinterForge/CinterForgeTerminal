@@ -50,7 +50,7 @@ On Apple Silicon, these Code-OSS integrated guest terminals use the DevTools-bun
 
 | Command | Contract |
 |---|---|
-| `devtools list` | Enumerate the **individual tools** with version, target platform and installed/available state. Report missing or unusable items plainly. |
+| `devtools list` | Enumerate individual managed media tools by target platform and installed/staged state. Use `devtools report` and the Test smoke to validate executable versions and behavior. |
 | `devtools install <path/to/source>` | Select an existing Source folder, create its sibling `Builds/Toolchains` if needed, or reuse a verified Setup-produced toolchain; otherwise confirm and install the Cloudflare release with SHA-256 and tool version checks. |
 | `devtools update` | Check the published Cloudflare manifest for the saved Source directory; verify/reuse unchanged files and replace only changed toolchain members. |
 | `devtools version` | Print the installed release/package identity. |

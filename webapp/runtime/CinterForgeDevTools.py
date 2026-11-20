@@ -672,6 +672,46 @@ def version_devtools() -> int:
     return 0
 
 
+def _media_tool_inventory(builds: Path) -> list[tuple[str, str, str]]:
+    """Read-only inventory of staged developer tools, never launches a guest."""
+    tools = builds / 'Toolchains'
+    mac = tools / 'mac/env/bin'
+    windows = tools / 'Windows/MSYS2/ucrt64/bin'
+    entries = []
+    from host.devtools.assimp_library import prebuilt_assimp
+    try:
+        assimp = prebuilt_assimp(tools / 'mac/env')
+        assimp_location = str(assimp['path'])
+    except (OSError, RuntimeError):
+        assimp_location = 'MISSING'
+    entries.append(('macOS ARM64', 'Assimp SDK', assimp_location))
+    for label, filename in (('FFmpeg', 'ffmpeg'),
+                             ('FFprobe', 'ffprobe'), ('ImageMagick', 'magick')):
+        file = mac / filename
+        entries.append(('macOS ARM64', label, str(file) if file.is_file() and not file.is_symlink() else 'MISSING'))
+    for label, filename in (('Assimp', 'assimp.exe'), ('FFmpeg', 'ffmpeg.exe'),
+                             ('FFprobe', 'ffprobe.exe'), ('ImageMagick', 'magick.exe')):
+        file = windows / filename
+        entries.append(('Windows x64', label, str(file) if file.is_file() and not file.is_symlink() else 'MISSING'))
+    # The Linux tools live in the managed x86-64 Docker image; checking the
+    # recipe or a same-named file on the Mac would incorrectly claim readiness.
+    cross = tools / 'WindowsCross'
+    images = tuple(cross.glob('*.tar')) if cross.is_dir() and not cross.is_symlink() else ()
+    for label in ('Assimp', 'FFmpeg', 'FFprobe', 'ImageMagick'):
+        entries.append(('Linux x86-64', label,
+                        'staged image (use devtools report for executed probes)' if images else 'MISSING'))
+    return entries
+
+
+def list_devtools() -> int:
+    builds, _, record = _selected_devtools_receipt()
+    print('CinterForge DevTools — ' + str(record.get('release', 'unknown')))
+    for platform_name, label, status in _media_tool_inventory(builds):
+        print(f'  {platform_name:<14} {label:<12} {status}', flush=True)
+    print('Run devtools report for the complete toolchain inventory.', flush=True)
+    return 0
+
+
 def report_devtools() -> int:
     """Write the explicit selected toolchain inventory into Builds/Logs."""
     builds, _destination, record = _selected_devtools_receipt()
@@ -691,6 +731,9 @@ def report_devtools() -> int:
         path = tools / name
         present = path.exists() and not path.is_symlink()
         lines.append('| `' + name + '` | ' + ('yes' if present else 'MISSING') + ' |')
+    lines.extend(['', '| Platform | Media tool | Source |', '|---|---|---|'])
+    for platform_name, label, state in _media_tool_inventory(builds):
+        lines.append(f'| {platform_name} | {label} | `{state}` |')
     lines.append('')
     lines.append('Managed archive members: ' + str(len(record.get('files', {}))))
     location = builds / 'Logs/CinterForgeTerminal/DevToolsReport.md'
