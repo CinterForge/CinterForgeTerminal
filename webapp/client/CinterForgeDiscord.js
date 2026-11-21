@@ -120,15 +120,27 @@ CinterForgeState.openDiscordTab = async function openDiscordTab(action) {
     void CinterForgeState.pollDiscordTab(tab);
   };
 
-  // Original source lines 1178–1186
-setInterval(async () => {
-    if (document.visibilityState === 'hidden') return;
+  // The server probes credentials at launch and exposes only boolean grants
+  // through the existing authenticated /api/status route. Never poll a disabled
+  // Discord endpoint: it correctly replies "Unknown command", and repeatedly
+  // hitting it floods the HTTP log for every connected Terminal session.
+  let discordEnabled = false;
+  void CinterForgeState.api('/api/status').then(status => {
+    discordEnabled = status?.capabilities?.discord === true;
+  }).catch(() => { discordEnabled = false; });
+
+  setInterval(async () => {
+    if (!discordEnabled || document.visibilityState === 'hidden') return;
+    const ids = CinterForgeState.tabs.filter(tab => tab.session?.id && !tab.closed).map(tab => tab.session.id);
+    if (!ids.length) return;
     try {
-      const ids = CinterForgeState.tabs.filter(tab => tab.session?.id && !tab.closed).map(tab => tab.session.id);
-      if (!ids.length) return;
       const action = await CinterForgeState.api('/api/discord/next', { session_ids: ids });
       if (action.channel_id) await CinterForgeState.openDiscordTab(action);
-    } catch (error) {/* Discord is optional; keep normal shell and games available. */ }
+    } catch (error) {
+      // The only supported grant transition is a new app launch. If the
+      // server revokes Discord meanwhile, stop further traffic in this page.
+      if (/unknown command/i.test(String(error?.message || ''))) discordEnabled = false;
+    }
   }, 1100);
 
 })();

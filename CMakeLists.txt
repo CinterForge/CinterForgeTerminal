@@ -25,6 +25,10 @@ target_compile_definitions(CinterForgePythonHostShared PRIVATE CPH_BUILD_SHARED)
 target_compile_definitions(CinterForgePythonHost PUBLIC CPH_BUILD_STATIC)
 if(WIN32)
     set_target_properties(CinterForgePythonHost PROPERTIES OUTPUT_NAME CinterForgePythonHostStatic)
+    # Windows-GNU defaults SHARED_LIBRARY_PREFIX to "lib".  The ctypes loader,
+    # Windows cross-build and retail installer all require the native DLL to be
+    # named CinterForgePythonHost.dll (without changing its GNU import library).
+    set_target_properties(CinterForgePythonHostShared PROPERTIES PREFIX "")
 endif()
 
 # Network discovery is optional. No Bonjour SDK or Avahi dependency is needed:

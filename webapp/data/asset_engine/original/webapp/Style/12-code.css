@@ -1,0 +1,43 @@
+/* CinterForge Code - OSS stage. The workbench is served by the same IFPlayer
+   control origin so its CinterForge filesystem/compile/session bridge stays direct. */
+#if_root #code-browser {
+    display: block;
+    visibility: hidden;
+    pointer-events: none;
+    position: absolute;
+    inset: 0;
+    z-index: 14;
+    background: #181818;
+}
+#if_root #code-workbench {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: #181818;
+}
+#if_root #code-workbench[hidden] { display: none !important; }
+#if_root.if_code-mode #code-browser { visibility: visible; pointer-events: auto; }
+#if_root.if_code-mode #viewport > svg,
+#if_root.if_code-mode #map-canvas,
+#if_root.if_code-mode #map-controls,
+#if_root.if_code-mode #objaverse-browser,
+#if_root.if_code-mode #rpg-browser,
+#if_root.if_code-mode #input-browser,
+#if_root.if_code-mode #session-console,
+#if_root.if_code-mode #player-overlay { display: none !important; }
+
+/* Serverless Project shell. Code-OSS is an authoring-server product; when it is
+   unavailable, keep Project usable enough to open an already-built local World. */
+#if_root #code-offline { position:absolute; inset:0; background:#181818; color:#ccc; font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; z-index:2; }
+#if_root.if_code-mode #code-offline:not([hidden]) { display:block; }
+#if_root #code-offline-menubar { height:34px; display:flex; align-items:center; padding:0 8px; background:#181818; border-bottom:1px solid #2b2b2b; }
+#if_root #code-offline-menubar button, #if_root #code-offline-menu button { color:#ccc; background:transparent; border:0; font:inherit; text-align:left; }
+#if_root #code-offline-menubar button { padding:5px 10px; }
+#if_root #code-offline-menubar button:hover { background:#333; }
+#if_root #code-offline-menu { position:absolute; top:30px; left:8px; min-width:220px; padding:5px 0; background:#252526; border:1px solid #454545; box-shadow:0 4px 12px #0008; z-index:3; }
+#if_root #code-offline-menu button { width:100%; padding:7px 22px; }
+#if_root #code-offline-menu button:hover { background:#094771; color:#fff; }
+#if_root #code-offline-empty { position:absolute; inset:34px 0 0; overflow:auto; padding:22px; color:#aaa; font-size:13px; pointer-events:none; }
+#if_root .code-offline-project-title { color:#ddd; font-weight:600; margin-bottom:14px; }
+#if_root .code-offline-project-files { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; line-height:1.65; color:#8f9ba8; }

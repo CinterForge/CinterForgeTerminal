@@ -1,0 +1,485 @@
+/*
+ * CinterForge IFPlayer — 04-session.css
+ * ========================================================================
+ *
+ * Purpose
+ * -------
+ * Human-in-the-Loop Session console presentation. This file owns transcript layout, command-entry controls, session messages, and the visual switch from graph/map content to the live console.
+ *
+ * Ownership
+ * ---------
+ * This stylesheet is one ordered slice of the IFPlayer presentation cascade.
+ * It contains visual/layout rules only; solver, interpreter, world topology,
+ * and runtime authority remain outside CSS. Keep selectors in this file within
+ * the responsibility described above whenever practical.
+ *
+ * Cascade contract
+ * ----------------
+ * presentation/ifplayer.css imports these files in numeric order. That order is
+ * intentional and preserves the cascade of the former monolithic stylesheet.
+ * Later files may refine shared chrome established by earlier files.
+ */
+
+/* Human-in-the-Loop session console -------------------------------------------------
+   The center stage can switch from Graph/Map to a full-height transcript without
+   disturbing either renderer. Agatha keeps running; this is presentation only. */
+
+#if_root #session-console{
+    display: none;
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    background: var(--surface);
+    color: var(--ink);
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+}
+
+#if_root.if_session-mode #session-console{
+    display: flex;
+}
+
+#if_root.if_session-mode #viewport>svg, #if_root.if_session-mode #map-canvas, #if_root.if_session-mode #map-controls, #if_root.if_session-mode #player-overlay{
+    display: none !important;
+}
+
+#if_root #session-console-head{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    flex: 0 0 auto;
+}
+
+#if_root #session-console-head strong{
+    font-size: 15px;
+}
+
+#if_root #session-connection{
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 700;
+}
+
+#if_root #session-history{
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding: 12px 16px 20px;
+    font-family: Menlo,Consolas,monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    scrollbar-gutter: stable;
+}
+
+#if_root .session-event{
+    padding: 7px 0 8px;
+    border-bottom: 1px solid var(--panel-line);
+}
+
+#if_root .session-event-meta{
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    font-family: -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;
+}
+
+#if_root .session-event-meta span{
+    font-weight: 900;
+}
+
+#if_root .session-event-meta time{
+    font-size: 9px;
+    color: var(--muted);
+}
+
+#if_root .session-event-text{
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin-top: 2px;
+}
+
+#if_root .session-event-command{
+    margin-top: 3px;
+    color: var(--muted);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+#if_root .session-agatha .session-event-meta span{
+    color: var(--agent-accent);
+}
+
+#if_root .session-human .session-event-meta span{
+    color: var(--session-human);
+}
+
+#if_root .session-game .session-event-meta span{
+    color: var(--session-game);
+}
+
+#if_root .session-system .session-event-meta span{
+    color: var(--muted);
+}
+
+#if_root #session-questions{
+    flex: 0 0 auto;
+    max-height: 30%;
+    overflow: auto;
+    padding: 0 16px;
+}
+
+#if_root .session-question{
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 10px;
+    margin: 6px 0;
+    background: var(--panel);
+}
+
+#if_root .session-question-title{
+    font-size: 11px;
+    font-weight: 800;
+    margin-bottom: 7px;
+}
+
+#if_root .session-question-choices{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+#if_root .session-question-choices button{
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--ink);
+    border-radius: 6px;
+    padding: 6px 8px;
+    cursor: pointer;
+    font-size: 10px;
+    text-align: left;
+}
+
+#if_root .session-question-choices button:hover{
+    border-color: var(--blue);
+}
+
+#if_root .session-question-choices b{
+    color: var(--blue);
+    margin-right: 4px;
+}
+
+#if_root #session-form{
+    display: grid;
+    grid-template-columns: minmax(0,1fr) auto;
+    gap: 8px;
+    padding: 10px 14px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex: 0 0 auto;
+}
+
+#if_root #session-input{
+    width: 100%;
+    min-width: 0;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--ink);
+    border-radius: 7px;
+    padding: 9px 10px;
+    font: 12px Menlo,Consolas,monospace;
+    outline: none;
+}
+
+#if_root #session-input:focus{
+    border-color: var(--blue);
+}
+
+#if_root #session-send{
+    border: 0;
+    background: var(--blue);
+    color: white;
+    border-radius: 7px;
+    padding: 8px 14px;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+#if_root #session-send:disabled{
+    opacity: .55;
+    cursor: default;
+}
+
+#if_root #session-help{
+    flex: 0 0 auto;
+    padding: 2px 14px 7px;
+    background: var(--surface);
+    color: var(--muted);
+    font-size: 9px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+#if_root #session-help code{
+    font-family: Menlo,Consolas,monospace;
+}
+
+
+/* Session display profiles -------------------------------------------------
+   Adapted from the CinterForge Lobby retro-screen presentation.  These rules skin
+   the existing Session DOM only; they do not alter interpreter/session behavior. */
+#if_root #session-console{
+    --if-retro-fg: var(--ink);
+    --if-retro-bg: var(--surface);
+    --if-retro-accent: var(--blue);
+    --if-retro-font-scale: 1;
+    --if-retro-font-family: 'Courier New', monospace;
+}
+
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]){
+    color: var(--if-retro-fg);
+    background: var(--if-retro-bg);
+    font-family: var(--if-retro-font-family);
+    isolation: isolate;
+    overflow: hidden;
+    text-shadow: 0 0 .08em color-mix(in srgb, var(--if-retro-fg) 55%, transparent);
+}
+
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"])::before,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"])::after{
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    pointer-events: none;
+}
+
+/* Fine CRT scanlines and restrained glass reflection, copied from Lobby. */
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"])::before{
+    background:
+        linear-gradient(105deg, rgba(255,255,255,.09), transparent 22%, transparent 76%, rgba(255,255,255,.025)),
+        repeating-linear-gradient(to bottom, rgba(255,255,255,.035) 0, rgba(255,255,255,.035) 1px, transparent 1px, transparent 3px);
+    opacity: .72;
+    mix-blend-mode: screen;
+}
+
+/* Darkened tube edges create the monitor falloff without covering controls. */
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"])::after{
+    background: radial-gradient(ellipse at center, transparent 54%, rgba(0,0,0,.08) 72%, rgba(0,0,0,.52) 100%);
+    box-shadow: inset 0 0 3rem rgba(0,0,0,.28);
+    animation: ifplayer-crt-flicker 7s steps(1, end) infinite;
+}
+
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) > *{
+    position: relative;
+    z-index: 4;
+}
+
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #session-history,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #session-input{
+    color: var(--if-retro-fg);
+    font-family: var(--if-retro-font-family);
+    font-size: calc(12px * var(--if-retro-font-scale));
+}
+
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #session-history{
+    background: var(--if-retro-bg);
+}
+
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) .session-event{
+    border-bottom-color: color-mix(in srgb, var(--if-retro-fg) 18%, transparent);
+}
+
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) .session-event-meta,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) .session-event-meta time,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) .session-event-command,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #session-connection,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #session-help{
+    color: var(--if-retro-fg);
+    font-family: var(--if-retro-font-family);
+}
+
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #session-input{
+    border: 1px solid color-mix(in srgb, var(--if-retro-fg) 55%, transparent);
+    border-radius: .2rem;
+    background: color-mix(in srgb, var(--if-retro-bg) 88%, white 12%);
+}
+
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #session-input:focus-visible{
+    outline: 2px solid var(--if-retro-accent);
+    outline-offset: 2px;
+}
+
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #session-send{
+    color: var(--if-retro-bg);
+    background: var(--if-retro-accent);
+}
+
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #session-console-head,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #player-save-controls,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #session-agent-tabs,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #specialist-session-controls,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #session-form,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #session-help{
+    background: color-mix(in srgb, var(--if-retro-bg) 94%, white 6%);
+    border-color: color-mix(in srgb, var(--if-retro-fg) 25%, transparent);
+}
+
+/* Keep all Session-owned controls inside the selected display profile.  The
+   palette is deliberately scoped to #session-console so returning from Tab/game
+   mode cannot recolor the application/editor chrome outside the Session panel. */
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) button,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) select{
+    color: var(--if-retro-fg);
+    background: color-mix(in srgb, var(--if-retro-bg) 80%, white 20%);
+    border-color: color-mix(in srgb, var(--if-retro-fg) 45%, var(--if-retro-bg));
+}
+
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) button:hover:not(:disabled),
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) select:hover{
+    background: color-mix(in srgb, var(--if-retro-bg) 68%, white 32%);
+}
+
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) .session-agent-tab.active,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) .specialist-session-toggle.active,
+#if_root #session-console[data-display-profile]:not([data-display-profile="modern"]) #session-send{
+    color: var(--if-retro-accent);
+    background: color-mix(in srgb, var(--if-retro-bg) 62%, white 38%);
+    border-color: var(--if-retro-accent);
+}
+
+#if_root #session-console[data-display-profile="commodore-64"]{
+    border-color: #18134b;
+    box-shadow: inset 0 0 0 .2rem #5d55a5, inset 0 0 3rem rgba(0,0,0,.2);
+}
+
+#if_root #session-console[data-display-profile="trs-80"]{
+    border-color: #303030;
+    box-shadow: inset 0 0 0 .2rem #171717, inset 0 0 2rem rgba(255,255,255,.04);
+}
+
+#if_root .session-display-profile-label{
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+    font-size: 9px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+#if_root #session-display-profile{
+    max-width: 176px;
+    min-width: 0;
+    font: 10px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+}
+
+@keyframes ifplayer-crt-flicker{
+    0%,18%,20%,62%,64%,100% { opacity: 1; }
+    19%,63% { opacity: .965; }
+}
+
+@media (prefers-reduced-motion: reduce){
+    #if_root #session-console::after{ animation: none !important; }
+}
+
+
+/* No UI Session takeover ---------------------------------------------------------
+   When Tab hides the editor chrome, the selected Session display profile owns the
+   complete IFPlayer surface, including the retained status/application bar and any
+   otherwise exposed root background.  Returning to editor UI removes these rules
+   automatically because they are scoped to if_game-mode + if_session-mode. */
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]){
+    background: var(--if-retro-bg);
+    color: var(--if-retro-fg);
+}
+
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #viewport,
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #session-console,
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #session-history,
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #session-console-head,
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #player-save-controls,
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #session-agent-tabs,
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #specialist-session-controls,
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #session-form,
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #session-help{
+    background: var(--if-retro-bg);
+    color: var(--if-retro-fg);
+    border-color: color-mix(in srgb, var(--if-retro-fg) 25%, transparent);
+}
+
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #session-console button,
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #session-display-profile,
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #player-save-select{
+    color: var(--if-retro-fg);
+    background: var(--if-retro-bg);
+    border-color: color-mix(in srgb, var(--if-retro-fg) 42%, transparent);
+}
+
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #top-run-time-progress,
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) #session-send,
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) .session-agent-tab.active,
+#if_root.if_game-mode.if_session-mode[data-session-display-profile]:not([data-session-display-profile="modern"]) .specialist-session-toggle.active{
+    color: var(--if-retro-accent);
+}
+
+#if_root #session-lead-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+#if_root #session-lead-controls #run-mode-play {
+    min-width: 72px;
+}
+#if_root #session-lead-status {
+    font-size: 11px;
+    opacity: .78;
+    white-space: nowrap;
+}
+#if_root #session-console-head .session-display-profile-label {
+    margin-left: auto;
+    flex: 0 0 auto;
+}
+
+/* Play Session overlay ------------------------------------------------------
+   Shared by the standalone Player and Editor Play/Test.  It overlays the live
+   Babylon world; it does not change stageMode and therefore never parks the
+   3D engine. */
+#if_root.if_session-overlay #session-console{
+    display:flex !important;
+    position:absolute;
+    inset:8% 10%;
+    z-index:120;
+    border:1px solid var(--border);
+    box-shadow:0 18px 70px rgba(0,0,0,.55);
+}
+#if_root.if_session-overlay #map-canvas{display:block !important;}
+
+/* Shipped Player presentation.  Keep the runtime DOM contract available to
+   shared engine code while exposing only game-facing chrome. */
+#if_root.if_player-shell #stage-tabs,
+#if_root.if_player-shell #right-column,
+#if_root.if_player-shell #bottom-strip,
+#if_root.if_player-shell #map-controls,
+#if_root.if_player-shell #player-overlay,
+#if_root.if_player-shell #code-browser,
+#if_root.if_player-shell #objaverse-browser,
+#if_root.if_player-shell #input-browser,
+#if_root.if_player-shell .agatha-progress-row,
+#if_root.if_player-shell .top-editor-row,
+#if_root.if_player-shell #inventory-tabs .inventory-tab:not([data-inventory-character="Player"]){display:none !important;}
+#if_root.if_player-shell #left-column .column-title{font-size:0;}
+#if_root.if_player-shell #left-column .column-title::before{content:"Inventory";font-size:13px;}
+#if_root.if_player-shell #inventory-keyhint{display:none;}
+#if_root.if_player-shell #map-canvas{display:block;}
+
+#if_root.if_player-shell{--top:60px;--bottom:0px;--right:0px;}
+#if_root.if_player-shell #viewport{right:0;top:60px;bottom:0;}
+#if_root.if_player-shell #left-column{top:60px;bottom:0;}

@@ -1,0 +1,267 @@
+/*
+ * CinterForge IFPlayer presentation stylesheet entry point
+ * =========================================================
+ *
+ * Purpose
+ * -------
+ * This is the stable stylesheet loaded by ifplayer.html. The actual IFPlayer
+ * presentation rules are divided by responsibility under Style/.
+ * Keeping this file as an import-only entry point preserves a single HTML load
+ * contract while making the CSS maintainable and the cascade order explicit.
+ *
+ * IMPORTANT: import order is part of the UI contract. Do not alphabetize these
+ * files. Rules were extracted from the former monolithic stylesheet in exactly
+ * this order so existing specificity and late-override behavior are preserved.
+ */
+
+@import url("01-foundation.css");
+@import url("02-graph.css");
+@import url("03-cards-agents.css");
+@import url("04-session.css");
+@import url("05-vocabulary-learnings.css");
+@import url("06-agent-map-controls.css");
+@import url("07-runtime-world-controls.css");
+@import url("08-world-editor.css");
+
+@import url("09-objaverse.css");
+
+@import url("10-rpg.css");
+
+@import url("11-input.css");
+@import url("12-code.css");
+
+.asset-blockify-controls {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+    margin-top: 6px;
+}
+.asset-blockify-controls label {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+}
+.asset-blockify-dimension {
+    width: 44px;
+    min-width: 44px;
+}
+
+/* Keep Blockify compact when there is room, but let the assigned-asset
+   action row wrap instead of clipping controls in a narrow editor pane. */
+#if_root .assignment-current-card {
+    /* Card geometry belongs to 09-objaverse.css.  Keep this shared stylesheet
+       limited to wrapping the compact action controls; do not override rail
+       width/flex sizing here. */
+    grid-template-columns: 250px minmax(0, 1fr);
+}
+#if_root .assignment-current-card .asset-blockify-controls {
+    flex-wrap: wrap;
+    white-space: normal;
+}
+#if_root .assignment-current-card .asset-blockify-controls label {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+#if_root .assignment-current-card .objaverse-actions {
+    flex-wrap: wrap;
+    white-space: normal;
+}
+#if_root .assignment-current-card .objaverse-action {
+    white-space: nowrap;
+}
+#if_root .assignment-current-card .asset-blockify-dimension {
+    width: 40px;
+    min-width: 40px;
+}
+#if_root .objaverse-card.blockified-preview-active .objaverse-visual::after {
+    content: "BLOCKIFIED";
+    position: absolute;
+    left: 7px;
+    top: 7px;
+    z-index: 3;
+    padding: 3px 5px;
+    border-radius: 2px;
+    background: rgba(0,0,0,.72);
+    color: #fff;
+    font-size: 9px;
+    letter-spacing: .08em;
+    pointer-events: none;
+}
+
+#if_root .objaverse-card.image-minecraft-preview-active.blockified-preview-active .objaverse-visual::after { content: "MINECRAFT"; }
+/* Saved image Minecraft preview -------------------------------------------- */
+#if_root .saved-asset-card .image-minecraft-canvas{display:none;width:100%;height:100%;}
+#if_root .saved-asset-card.blockified-preview-active .saved-image-source{display:none;}
+#if_root .saved-asset-card.blockified-preview-active .image-minecraft-canvas{display:block;}
+#if_root .image-minecraft-size .image-minecraft-height{width:48px;min-width:48px;}
+#if_root .image-minecraft-derived-width{font-size:9px;color:var(--muted,#aeb3ba);align-self:center;white-space:nowrap;}
+
+
+/* Execution-shell reshuffle -------------------------------------------------
+   Re-parent existing Session/Input surfaces without redesigning their content. */
+#if_root.if_input-overlay #input-browser{
+    display:flex !important;
+    flex-direction:column;
+    z-index:180;
+}
+#if_root.if_input-overlay #input-browser{position:absolute;inset:0;}
+
+/* Player startup owns first paint. The underlying Player may initialize fully,
+   but none of its partial presentation is exposed before readiness. */
+#if_root #player-startup{display:none;}
+#if_root.if_player-starting #player-startup{
+    display:block;
+    position:fixed;
+    inset:0;
+    z-index:1000;
+    background:var(--surface);
+    color:var(--ink);
+}
+#if_root #player-startup-title{
+    position:absolute;
+    left:50%; top:8px;
+    transform:translateX(-50%);
+    width:46%; max-width:46%;
+    text-align:center;
+    display:flex; flex-direction:column;
+    white-space:nowrap; overflow:hidden;
+}
+#if_root #player-startup-title strong{font-size:17px;line-height:21px;overflow:hidden;text-overflow:ellipsis;}
+#if_root #player-startup-title span{color:var(--blue);font-size:13px;font-weight:700;line-height:18px;overflow:hidden;text-overflow:ellipsis;}
+#if_root #player-startup-action{position:absolute;right:12px;top:30px;}
+#if_root #player-start-button{
+    min-width:62px;
+    border:1px solid var(--tab-edge);
+    background:var(--tab-face);
+    color:var(--ink);
+    border-radius:0;
+    padding:4px 12px;
+    font:700 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+}
+#if_root #player-start-button:not(:disabled){cursor:pointer;background:var(--blue);color:#fff;border-color:var(--blue);box-shadow:none;}
+#if_root #player-start-button:disabled{opacity:.42;cursor:default;}
+#if_root #player-startup-center{
+    position:absolute;inset:60px 0 0;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;
+    border-top:1px solid var(--border);
+}
+#if_root #player-startup-heading{font-size:20px;}
+#if_root #player-startup-status{color:var(--muted);font-size:12px;}
+
+/* The shipped Player uses the existing top-right lifecycle button as Quit only
+   while execution is visible. */
+#if_root.if_player-shell.if_player-playing .top-editor-row{display:flex !important;}
+#if_root.if_player-shell.if_player-playing .top-editor-row > :not(#quit-ifplayer){display:none !important;}
+
+/* Compact flat editor command bar. Keep actions and text; remove pill chrome. */
+#if_root .top-editor-row{gap:2px;padding:1px 2px;background:var(--tab-strip);border:1px solid var(--tab-edge);}
+#if_root #traversal-pause,
+#if_root #generate-cards,
+#if_root #save-world,
+#if_root #asset-push-button, #if_root #asset-pull-button,
+#if_root #build-story,
+#if_root #play-built-player,
+#if_root #test-local,
+#if_root #prune-cloud,
+#if_root #test-cloud,
+#if_root #play-cloud,
+#if_root #undo-spatial,
+#if_root #quit-ifplayer,
+#if_root .run-mode-control{
+    border:0;
+    border-left:1px solid transparent;
+    border-right:1px solid transparent;
+    border-radius:0;
+    background:transparent;
+    padding:3px 7px;
+    box-shadow:none;
+}
+#if_root .top-editor-row button:hover:not(:disabled){background:var(--tab-hover);border-left-color:var(--tab-edge);border-right-color:var(--tab-edge);}
+#if_root:not(.if_player-shell) #play-built-player{display:inline-block !important;}
+#if_root #play-built-player{background:var(--tab-face);color:var(--ink);border-left-color:var(--tab-edge);border-right-color:var(--tab-edge);font-weight:700;}
+#if_root #play-built-player:disabled{opacity:.42;}
+#if_root #play-built-player::before{content:"▶ ";}
+#if_root #build-story::before{content:"◆ ";font-size:8px;vertical-align:1px;}
+#if_root #save-world::before{content:"▣ ";}
+
+/* Editor startup uses the same full-screen launch contract as Player. */
+#if_root #editor-startup{display:none;}
+#if_root.if_editor-starting #editor-startup{
+  display:block;position:absolute;inset:0;z-index:10000;background:var(--bg,#17191d);color:var(--fg,#f4f4f4);
+}
+#if_root #editor-startup-title{position:absolute;left:50%;top:28px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:2px;}
+#if_root #editor-startup-title strong{font-size:17px;line-height:21px;}
+#if_root #editor-startup-title span{color:var(--blue);font-size:13px;font-weight:700;}
+#if_root #editor-startup-center{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:10px;min-width:340px;max-width:640px;}
+#if_root #editor-startup-heading{font-size:20px;}
+#if_root #editor-startup-status{color:var(--muted);font-size:12px;}
+#if_root #editor-startup-offline{width:100%;margin-top:8px;text-align:center;}
+#if_root #editor-startup-pack-list{display:flex;flex-direction:column;gap:6px;margin:0 0 10px;}
+#if_root #editor-startup-actions{display:flex;justify-content:center;gap:8px;}
+#if_root .editor-pack-row{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:7px 9px;border:1px solid var(--line,#3a3d43);background:rgba(255,255,255,.025);}
+#if_root .editor-pack-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+#if_root .editor-pack-row button,#if_root #editor-choose-project{font:inherit;}
+
+/* CinterForge console-style Project/Game catalog -------------------------------- */
+#if_root .if-catalog{box-sizing:border-box;background:#071321 url('../Media/cinterforge-project-catalog-bg.png') center/cover no-repeat!important;color:#f7f0e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;overflow:hidden;}
+#if_root.if_player-starting #player-startup.if-catalog,#if_root.if_editor-starting #editor-startup.if-catalog{display:block;position:absolute;inset:0;z-index:10000;}
+#if_root .if-catalog::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(3,11,20,.05),rgba(3,9,15,.08) 48%,rgba(2,7,12,.42));pointer-events:none;}
+#if_root .if-catalog-brand,#if_root .if-catalog-mode,#if_root .if-catalog-prompt,#if_root .if-catalog-status,#if_root .if-project-grid,#if_root .if-catalog-assets,#if_root .if-catalog-footer{position:absolute;z-index:2;}
+#if_root .if-catalog-brand{left:4.2%;top:4.5%;display:flex;align-items:center;gap:12px;text-shadow:0 3px 10px #000}#if_root .if-catalog-brand img{width:clamp(48px,6.4vw,100px);height:auto}#if_root .if-catalog-brand div{display:flex;flex-direction:column}#if_root .if-catalog-brand strong{font:600 clamp(25px,3.2vw,54px) Georgia,serif;letter-spacing:.02em;color:#f7f0e5}#if_root .if-catalog-brand span{font:600 clamp(9px,1.05vw,17px) Georgia,serif;letter-spacing:.28em;color:#f7f0e5}
+#if_root .if-catalog-mode{left:11.7%;top:20.2%;font:600 clamp(13px,1.7vw,28px) Georgia,serif;letter-spacing:.22em;color:#ffb34a;text-shadow:0 2px 8px #000;}
+#if_root .if-catalog-prompt{left:9.6%;top:25.4%;font:600 clamp(10px,1.15vw,20px) Georgia,serif;letter-spacing:.18em;color:#ffbf5d;text-shadow:0 2px 8px #000;}
+#if_root .if-catalog-status{left:50%;top:29.5%;transform:translateX(-50%);font-size:11px;color:#d7dde5;text-shadow:0 1px 4px #000;opacity:.9;}
+#if_root .if-project-grid,#if_root #editor-startup-pack-list.if-project-grid{left:2.8%;right:2.8%;top:33.4%;height:44.4%;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));grid-template-rows:repeat(4,minmax(0,1fr));gap:1.35% .8%;overflow:hidden;}
+#if_root .if-project-card{position:relative;min-width:0;border:1px solid rgba(213,135,43,.72);background:rgba(3,10,17,.88);box-shadow:inset 0 0 0 1px rgba(0,0,0,.8);padding:0;overflow:hidden;color:#fff;cursor:pointer;text-align:center;transition:transform .08s ease,box-shadow .08s ease,border-color .08s ease;}
+#if_root .if-project-card:hover,#if_root .if-project-card[aria-selected="true"]{transform:translateY(-2px);border-color:#ffb43e;box-shadow:0 0 7px 2px #ff9d19,0 0 20px rgba(255,133,0,.75),inset 0 0 0 2px #ffe09b;outline:0;z-index:3;}
+#if_root .if-project-thumb{position:absolute;inset:0 0 27% 0;width:100%;height:73%;object-fit:cover;background:linear-gradient(135deg,#0b1c2b,#02070c);}
+#if_root .if-project-missing{position:absolute;inset:0 0 27% 0;display:flex;align-items:center;justify-content:center;padding:8px;color:#aeb6c0;background:rgba(3,8,13,.92);font:600 clamp(9px,.85vw,14px) Georgia,serif;}
+#if_root .if-project-name{position:absolute;left:4px;right:4px;bottom:5%;font:600 clamp(8px,.83vw,14px) -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;line-height:1.08;text-shadow:0 2px 3px #000;overflow-wrap:anywhere;}
+#if_root .if-catalog-assets[hidden]{display:none!important;}
+#if_root .if-catalog-assets{right:2.8%;bottom:5.3%;width:29%;height:6.2%;display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:9px;padding:5px 9px;box-sizing:border-box;background:rgba(4,13,22,.9);border:1px solid rgba(203,126,37,.72);box-shadow:inset 0 0 0 1px rgba(0,0,0,.65);}
+#if_root .if-catalog-assets>span{font-size:21px} #if_root .if-catalog-assets div{min-width:0;display:flex;flex-direction:column;gap:1px} #if_root .if-catalog-assets strong{font-size:11px} #if_root .if-catalog-assets small{font-size:8px;color:#9da9b6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#if_root .if-catalog-assets button{border:1px solid #3d4d5d;border-radius:3px;background:#172638;color:#f1f4f7;font-weight:700;font-size:9px;padding:5px 12px;cursor:pointer} #if_root .if-catalog-assets button:hover{border-color:#e19a38;background:#24364a}
+#if_root .if-catalog-footer{left:3%;right:3%;bottom:1.6%;height:4%;display:flex;align-items:center;gap:14px;text-shadow:0 2px 4px #000;}
+#if_root .if-catalog-footer strong{font:600 clamp(11px,1.3vw,21px) Georgia,serif;letter-spacing:.06em} #if_root .if-catalog-footer>span{font-size:8px;letter-spacing:.28em;color:#e29a3d} #if_root .if-catalog-footer em{position:absolute;left:50%;transform:translateX(-50%);font:normal clamp(8px,.9vw,14px) Georgia,serif;letter-spacing:.18em;color:#a9adb2;white-space:nowrap} #if_root .if-catalog-footer>div{margin-left:auto;font-size:10px} #if_root .if-catalog-footer b{display:inline-grid;place-items:center;width:18px;height:18px;border:1px solid #76e72d;border-radius:50%;color:#9cff54}
+#if_root .if-catalog #editor-startup-offline,#if_root .if-catalog #editor-startup-actions{position:static;width:auto;margin:0;padding:0;}
+#if_root .if-catalog #editor-cancel-project{position:absolute;right:1%;top:1%;z-index:4;background:#172638;color:#fff;border:1px solid #6f7881;padding:5px 10px;}
+@media(max-width:900px){#if_root .if-project-grid{grid-template-columns:repeat(4,minmax(0,1fr));grid-template-rows:repeat(4,minmax(0,1fr));height:46%;top:32%}#if_root .if-catalog-assets{width:42%}#if_root .if-catalog-footer em{display:none}}
+/* Catalog controls: keep hover glow inside the grid and provide an explicit app Quit. */
+#if_root .if-project-grid,#if_root #editor-startup-pack-list.if-project-grid{padding-top:4px;box-sizing:border-box;}
+#if_root .if-project-card:hover,#if_root .if-project-card[aria-selected="true"]{transform:none;}
+#if_root .if-project-new{position:absolute;inset:0 0 27% 0;display:flex;align-items:center;justify-content:center;font:600 clamp(36px,5vw,76px) Georgia,serif;color:#ffb34a;background:rgba(3,10,17,.72);text-shadow:0 2px 8px #000;}
+#if_root .if-catalog-quit{position:absolute;right:2.8%;top:4.5%;z-index:4;border:1px solid rgba(213,135,43,.72);background:rgba(3,10,17,.88);color:#f7f0e5;font-weight:700;padding:7px 16px;cursor:pointer;}
+#if_root .if-catalog-quit:hover{border-color:#ffb43e;box-shadow:0 0 7px rgba(255,157,25,.8);}
+
+/* Push/Pull are Project lifecycle controls, not Asset-card controls. Keep their
+   command-bar chrome stable while the Asset subsystem is refactored. */
+#if_root #asset-push-button,
+#if_root #asset-pull-button{
+    background:var(--tab-face);
+    color:var(--ink);
+    border-left-color:var(--tab-edge);
+    border-right-color:var(--tab-edge);
+    opacity:1;
+}
+#if_root #asset-push-button:disabled,
+#if_root #asset-pull-button:disabled{
+    opacity:.45;
+}
+
+/* Two-row Local/Cloud command surface. Keep deployment authority visible. */
+#if_root .run-time-progress-row{justify-content:flex-start;}
+#if_root #top-run-time-progress{min-width:0;text-align:left;font-size:10px;line-height:11px;color:var(--session-human);}
+#if_root #top-current-room{gap:1px;align-items:stretch;}
+#if_root .command-source-row{min-height:18px;gap:2px;padding:0 2px;justify-content:flex-start;}
+#if_root .command-source-label{box-sizing:border-box;flex:0 0 42px;width:42px;padding:3px 5px 3px 3px;color:var(--muted);font:700 9px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;text-align:right;text-transform:uppercase;letter-spacing:.35px;}
+#if_root .command-source-row button{padding:2px 6px;}
+#if_root #test-local,
+#if_root #prune-cloud,
+#if_root #test-cloud,
+#if_root #play-cloud{background:var(--tab-face);color:var(--ink);border-left-color:var(--tab-edge);border-right-color:var(--tab-edge);font-weight:700;}
+#if_root .cloud-command-row button:disabled{opacity:.42;cursor:default;}
+#if_root #test-local::before,#if_root #test-cloud::before{content:"▷ ";}
+#if_root #play-cloud::before{content:"▶ ";}

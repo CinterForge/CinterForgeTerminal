@@ -1,0 +1,5 @@
+/* Compatibility entry point.
+ * Keep current_state.html visually identical to canonical ifplayer.html.
+ * Do not duplicate presentation rules here.
+ */
+@import url("ifplayer.css");

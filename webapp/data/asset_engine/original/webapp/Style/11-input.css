@@ -1,0 +1,30 @@
+/* CinterForge IFPlayer F6 input configuration and shared navigation-mode chrome. */
+#if_root #input-browser{ display:none; position:absolute; inset:0; z-index:13; overflow:auto; background:var(--panel-bg,#17191d); color:inherit; }
+#if_root.if_input-mode #input-browser{ display:flex; flex-direction:column; }
+#if_root.if_input-mode #objaverse-browser, #if_root.if_input-mode #session-console, #if_root.if_input-mode #graph-placeholder, #if_root.if_input-mode #map-canvas, #if_root.if_input-mode #map-controls, #if_root.if_input-mode #rpg-browser, #if_root.if_input-mode #player-overlay{ display:none !important; }
+#if_root #input-head{ min-height:44px; display:flex; align-items:center; justify-content:space-between; gap:16px; padding:7px 12px; border-bottom:1px solid var(--line,#444); background:var(--panel-bg,#202226); }
+#if_root #input-head>div{ display:flex; align-items:baseline; gap:12px; }
+#if_root #input-subtitle{ opacity:.68; font-size:12px; }
+#if_root #input-reset-all, #if_root .input-reset-mode{ border:1px solid var(--tab-edge,#555); background:var(--tab-face,#2b2d32); color:inherit; padding:5px 10px; cursor:pointer; }
+#if_root #input-profile-panels{ display:grid; grid-template-columns:repeat(3,minmax(320px,1fr)); gap:10px; padding:10px; align-items:start; }
+#if_root .input-profile{ border:1px solid var(--line,#444); background:var(--soft-surface,#202226); min-width:0; }
+#if_root .input-profile-head{ min-height:40px; display:grid; grid-template-columns:auto 1fr auto; align-items:center; gap:10px; padding:6px 8px; border-bottom:1px solid var(--line,#444); background:var(--tab-strip,#25272b); }
+#if_root .input-profile-head span{ min-width:0; opacity:.65; font-size:11px; }
+#if_root .input-binding-table{ width:100%; border-collapse:collapse; table-layout:fixed; font-size:12px; }
+#if_root .input-binding-table th, #if_root .input-binding-table td{ border-bottom:1px solid rgba(127,127,127,.22); padding:5px 6px; text-align:left; vertical-align:middle; overflow:hidden; text-overflow:ellipsis; }
+#if_root .input-binding-table th:nth-child(1){ width:34%; }
+#if_root .input-binding-table th:nth-child(2){ width:22%; }
+#if_root .input-binding-table th:nth-child(3){ width:24%; }
+#if_root .input-binding-table th:nth-child(4){ width:20%; }
+#if_root .input-binding-key, #if_root .input-binding-mouse{ width:100%; min-height:27px; border:1px solid var(--tab-edge,#555); background:var(--tab-face,#2b2d32); color:inherit; }
+#if_root .input-binding-key{ cursor:pointer; }
+#if_root .input-binding-key.capturing{ outline:1px solid currentColor; }
+#if_root .input-rpg-command{ opacity:.72; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; }
+#if_root .input-mode-strip{ display:flex; align-items:center; gap:1px; white-space:nowrap; }
+#if_root .input-mode-label{ opacity:.62; font-size:11px; padding:0 5px; }
+#if_root .input-mode-button{ min-width:58px; height:27px; padding:0 10px; border:1px solid var(--tab-edge,#555); background:var(--tab-face,#2b2d32); color:inherit; cursor:pointer; }
+#if_root .input-mode-button:hover{ background:var(--tab-hover,rgba(255,255,255,.08)); }
+#if_root .input-mode-button.active{ background:var(--tab-active,rgba(255,255,255,.14)); box-shadow:inset 0 -2px currentColor; }
+#if_root #map-input-modes{ justify-content:center; min-height:29px; padding:3px 5px; border-bottom:1px solid var(--tab-edge,#555); background:var(--tab-strip,#25272b); }
+#if_root #rpg-input-modes{ margin-left:4px; }
+@media (max-width:1250px) { #if_root #input-profile-panels{ grid-template-columns:1fr; } }

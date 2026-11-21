@@ -133,18 +133,25 @@ def build(builds: Path) -> dict:
                   '-DCPH_WEBVIEW_SOURCE_DIR=' + cross.path(webview),
                   '-DCPH_BUILDS_ROOT=' + cross.path(builds)], repo, transcript, cross)
             _run(['cmake', '--build', cross.path(out), '--target',
-                  'cinter-bootstrap-sample', 'cinter-terminal', '--parallel', '4'],
+                  'cinter-bootstrap-sample', 'cinter-terminal',
+                  'CinterForgePythonHostShared', '--parallel', '4'],
                  repo, transcript, cross)
             sample = out / 'CinterBootstrapSample.exe'
             exe = out / 'CinterForgeTerminal.exe'
-            for binary in (sample, exe):
+            shared = out / 'CinterForgePythonHost.dll'
+            for binary in (sample, exe, shared):
                 if not binary.is_file() or binary.read_bytes()[:2] != b'MZ':
                     raise RuntimeError(f'Windows CMake build did not produce the PE target: {binary}')
-            report.update(sample=str(sample), output=str(exe))
+            from host.windows.windows_runtime_dlls import _sha
+            report.update(sample=str(sample), output=str(exe),
+                          shared_host_dll=str(shared), shared_host_sha256=_sha(shared))
             # The PE import table—not compiler success—determines which
             # MinGW runtime DLLs Windows and Wine need alongside the binaries.
             from host.windows.windows_runtime_dlls import stage_cross
-            report['runtime_dlls'] = stage_cross(builds, cross, out, (sample, exe))
+            # Python's ctypes loader uses the shared Host DLL, which may
+            # import a different MinGW closure from the GUI launcher. Inspect
+            # and stage all three PE targets using the existing DLL resolver.
+            report['runtime_dlls'] = stage_cross(builds, cross, out, (sample, exe, shared))
             work = builds / 'Run/CinterForgeTerminal/WindowsCross/Acceptance'
             work.mkdir(parents=True, exist_ok=True)
             marker = work / 'windows-wine-acceptance-marker.txt'

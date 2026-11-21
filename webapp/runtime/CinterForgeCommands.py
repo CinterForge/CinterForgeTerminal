@@ -119,16 +119,18 @@ WKWebView Inspector and enables inspection through Safari > Develop as the
 supported fallback if direct opening is unavailable.
 '''
 
-ASSETS_HELP = '''assets [report|import|view|setup|publish]
+ASSETS_HELP = '''assets [report|import|view|blockify|setup|publish]
   assets report                    Open/refresh the local Assets gallery tab
   assets import [absolute path]   Import a GLB/GLTF or canonical UCI folder/ZIP
-  assets view <uci>               Open/refresh one UCI asset viewer tab
+  assets view <uci>               Open/refresh the original UCI Asset Browser
+  assets delete <uci>             Delete the canonical asset and all versions
+  assets blockify <CSV path>      Run original CSV/Blockify/ContentPack authoring in a tab
   assets setup <channel>          Download verified individual Assets files without overwriting edits
   assets publish <channel>        Upload individual Assets web files and commit their index
   channels: internal | beta | release
 
 Native file picker: assets import with no path offers the OS file selection dialog
-in Terminal. Blockify batch generation is not yet connected to these commands.
+in Terminal. Blockify runs in the original Babylon browser and Server exporter.
 '''
 
 PACKS_HELP = '''packs
@@ -771,17 +773,82 @@ def execute(args: list[str]) -> int:
             result = _api('/api/assets/report', body={})
             print('[assets] Opened library report: ' + str(result.get('count', 0)) + ' assets', flush=True)
             return 0
+        if len(args) == 3 and args[1] == 'delete':
+            deleted = _api('/api/assets/delete', body={'session_id': session_id, 'uci': args[2]})
+            print('[assets] Deleted asset ' + deleted['deleted'], flush=True)
+            return 0
         if len(args) == 3 and args[1] == 'view':
             result = _api('/api/assets/view', body={'uci': args[2]})
             print('[assets] Opened viewer for ' + result['uci'], flush=True)
             return 0
+        if len(args) == 3 and args[1] == 'blockify':
+            job = _api('/api/assets/blockify/start', body={'session_id': session_id, 'path': args[2]})
+            print('[assets] Blockify source CSV: ' + job['csv'], flush=True)
+            print('[assets] Original WebApp Blockify started for ' + str(job['count']) + ' assets; opening its authoring tab.', flush=True)
+            completed = -1
+            recent = ''
+            started_at = time.monotonic()
+            last_heartbeat = started_at
+            while True:
+                time.sleep(2)
+                progress = _api('/api/assets/blockify/job/' + job['job'] + '?summary=1')
+                current = int(progress['completed']) + int(progress['failed'])
+                latest = (progress.get('messages') or [''])[-1]
+                if current != completed or latest != recent:
+                    print(f"[assets] {current}/{progress['total']} · {progress['completed']} complete · {progress['failed']} failed" + (' · ' + latest if latest else ''), flush=True)
+                    completed, recent = current, latest
+                now = time.monotonic()
+                if progress['state'] == 'queued' and now - started_at > 90:
+                    print('[assets] Blockify browser did not start; no conversions were reported. Check the Asset tab and Server log.', file=sys.stderr, flush=True)
+                    return 1
+                if now - last_heartbeat >= 30:
+                    print('[assets] Blockify ' + str(progress['state']) + ' · ' + str(current) + '/' + str(progress['total']) + ' rows processed', flush=True)
+                    last_heartbeat = now
+                if progress['state'] == 'error':
+                    print('[assets] Blockify could not start: ' + str(progress.get('error') or latest), file=sys.stderr, flush=True)
+                    return 1
+                if progress['state'] == 'finished':
+                    return 0 if not progress['failed'] else 1
         if args[1:] == ['import']:
             _api('/api/assets/picker', body={'session_id': session_id})
             print('[assets] Choose a GLB or canonical asset ZIP in Terminal to import.', flush=True)
             return 0
         if len(args) == 3 and args[1] == 'import':
             result = _api('/api/assets/import', body={'session_id': session_id, 'path': args[2]})
-            print('[assets] ' + ('Existing' if result['existing'] else 'Imported') + ' UCI: ' + result['uci'], flush=True)
+            print('[assets] ' + ('Existing' if result['existing'] else 'Saved') + ' UCI: ' + result['uci'], flush=True)
+            print('[assets] Verified in: ' + result['saved_path'], flush=True)
+            if result.get('conversion_job'):
+                job_id = result['conversion_job']
+                print('[assets] Original migration queued: ' + job_id, flush=True)
+                started_at = time.monotonic()
+                last_progress = None
+                last_heartbeat = started_at
+                while True:
+                    time.sleep(2)
+                    progress = _api('/api/assets/blockify/job/' + job_id + '?summary=1')
+                    processed = int(progress['completed']) + int(progress['failed'])
+                    message = (progress.get('messages') or [''])[-1]
+                    current = (progress['state'], processed, message)
+                    if current != last_progress:
+                        print('[assets] Migration ' + progress['state'] + ' '
+                              + str(processed) + '/' + str(progress['total'])
+                              + (' · ' + message if message else ''), flush=True)
+                        last_progress = current
+                    if progress['state'] == 'finished':
+                        print('[assets] Imported ' + result['uci'] + ': original Solid/Block migration complete', flush=True)
+                        return 0
+                    if progress['state'] == 'error':
+                        print('[assets] Source preserved; original migration failed: '
+                              + str(progress.get('error') or message), file=sys.stderr, flush=True)
+                        return 1
+                    if progress['state'] == 'queued' and time.monotonic() - started_at > 90:
+                        print('[assets] Source preserved; migration never started in the Asset tab',
+                              file=sys.stderr, flush=True)
+                        return 1
+                    if time.monotonic() - last_heartbeat >= 30:
+                        print('[assets] Migration running; ' + str(processed) + '/' + str(progress['total'])
+                              + ' processed', flush=True)
+                        last_heartbeat = time.monotonic()
             return 0
         if len(args) != 3 or args[1] not in ('setup', 'publish') or args[2] not in ('internal', 'beta', 'release'):
             print(ASSETS_HELP, file=sys.stderr)

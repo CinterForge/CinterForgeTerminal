@@ -182,8 +182,59 @@ def _fetch_index(r2, cfg: dict, prefix: str, objects: dict[str, dict]) -> dict |
     return doc
 
 
+# The established pack/gallery outputs are part of the published website,
+# even though they are not individual UCI asset folders. These names are
+# already owned by the existing CinterForge Asset/ContentPack workflow.
+PUBLISHED_ASSET_FILES = frozenset(('AssetGallery.html', 'ContentPacks.csv', 'index.html'))
+PUBLISHED_ASSET_DIRS = frozenset(('ContentPacks', 'MCAddons', '_viewer'))
+PUBLISHED_UCI_CATEGORIES = frozenset(('Images', 'Objects', 'Animated', 'Animations'))
+
+
+def _uci_relative_file(relative: str) -> tuple[str, tuple[str, ...]] | None:
+    """Identify a UCI and its within-folder path; never accept raw provider files."""
+    parts = Path(relative).parts
+    if not parts or parts[0] not in PUBLISHED_UCI_CATEGORIES:
+        return None
+    for index in (1, 2):
+        if index < len(parts) - 1 and parts[index].startswith('CINTERASST'):
+            return parts[index], parts[index + 1:]
+    return None
+
+
+def _published_relative_file(relative: str) -> bool:
+    parts = Path(relative).parts
+    return bool(parts and (relative in PUBLISHED_ASSET_FILES or
+                         parts[0] in PUBLISHED_ASSET_DIRS or
+                         _uci_relative_file(relative) is not None))
+
+
+def _canonical_inventory(root: Path) -> dict:
+    # Reuse the original Server's UCI discovery and manifest identity check.
+    # The shared Assets root also contains historical downloads from Mixamo,
+    # Objaverse, and other providers. They are not UCI-owned saved assets.
+    from runtime import CinterForgeAssetOriginal as original
+    owned = set()
+    identities = set()
+    for folder, manifest in original._server_module()._uci_asset_folders(root):
+        identity = str(manifest['uci'])
+        if identity in identities:
+            raise RuntimeError('Duplicate canonical UCI in Assets library: ' + identity)
+        identities.add(identity)
+        owned.add(folder.relative_to(root).parts)
+
+    def include(relative: Path) -> bool:
+        parts = relative.parts
+        if relative.as_posix() in PUBLISHED_ASSET_FILES:
+            return True
+        if parts and parts[0] in PUBLISHED_ASSET_DIRS:
+            return True
+        return any(parts[:len(folder)] == folder for folder in owned)
+
+    return inventory(root, include=include)
+
+
 def _source_file_list(root: Path) -> tuple[dict, list[tuple[str, Path]]]:
-    doc = inventory(root)
+    doc = _canonical_inventory(root)
     files = doc.get('files') or {}
     if len(files) > MAX_FILES:
         raise ValueError('Too many Assets files')
@@ -234,16 +285,19 @@ def publish(channel: str, assets_root: Path, *, transport=None) -> dict:
         raise RuntimeError('Assets library is empty; refusing to publish')
     remote = r2._list_remote(cfg, prefix)
     old = _fetch_index(r2, cfg, prefix, remote)
-    if old and old.get('schema') == INDEX_SCHEMA:
-        missing = set(old['files']) - set(doc['files'])
+    if old and isinstance(old.get('files'), dict) and old['files']:
+        # An old direct index may include unmanaged provider downloads. Drop
+        # those entries from the NEW index, but do not delete their R2 objects.
+        # For previously published UCI files, preserve their relative names
+        # within that UCI even if the category path or bytes have changed.
+        selected = {_uci_relative_file(rel) for rel in doc['files']
+                    if _uci_relative_file(rel) is not None}
+        missing = [rel for rel in old['files']
+                   if _uci_relative_file(rel) is not None and
+                   _uci_relative_file(rel) not in selected]
         if missing:
-            raise RuntimeError(f'Local Assets is missing {len(missing)} previously published files; '
-                               'refusing to commit a partial index')
-    elif old and isinstance(old.get('files'), dict) and old['files']:
-        missing = set(old['files']) - set(doc['files'])
-        if missing:
-            raise RuntimeError(f'Local Assets is missing {len(missing)} previously published files; '
-                               'refusing to replace the old index with a partial library')
+            raise RuntimeError(f'Local Assets is missing {len(missing)} previously '
+                               'published UCI-owned files; refusing a partial index: ' + missing[0])
     legacy_zips = _old_generated_zips(remote, old)
     collision = legacy_zips.intersection(doc['files'])
     if collision:
@@ -291,7 +345,7 @@ def publish(channel: str, assets_root: Path, *, transport=None) -> dict:
                       f'verified_bytes={verified_bytes}/{total}', flush=True)
         # Only commit an inventory that still describes the complete original
         # tree. Do not create a ZIP intermediate or write inside Assets itself.
-        if inventory(root)['files'] != doc['files']:
+        if _canonical_inventory(root)['files'] != doc['files']:
             raise RuntimeError('Local Assets changed during upload; index not committed')
         index = {'schema': INDEX_SCHEMA,
                  'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
@@ -393,7 +447,13 @@ def setup(channel: str, assets_root: Path, *, transport=None) -> dict:
     root = Path(assets_root).absolute()
     if root.is_symlink() or (root.exists() and not root.is_dir()):
         raise RuntimeError('Unsafe existing Assets root')
-    files = index['files']
+    # Existing historical direct indexes may contain non-UCI raw downloads.
+    # They are not saved library records and must never be restored by Setup.
+    files = {rel: record for rel, record in index['files'].items()
+             if _published_relative_file(rel)}
+    skipped = len(index['files']) - len(files)
+    if skipped:
+        print(f'[assets setup] Ignoring {skipped} old non-UCI files from remote index', flush=True)
     for rel, entry in files.items():
         if rel not in remote:
             raise FileNotFoundError('Assets index references missing direct object: ' + rel)

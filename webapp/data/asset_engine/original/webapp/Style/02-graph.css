@@ -1,0 +1,264 @@
+/*
+ * CinterForge IFPlayer — 02-graph.css
+ * ========================================================================
+ *
+ * Purpose
+ * -------
+ * Graph and structural-map presentation. This file owns Graphviz node/edge overrides, graph-state coloring, specialist map markers, and compact graph-adjacent diagnostic styling.
+ *
+ * Ownership
+ * ---------
+ * This stylesheet is one ordered slice of the IFPlayer presentation cascade.
+ * It contains visual/layout rules only; solver, interpreter, world topology,
+ * and runtime authority remain outside CSS. Keep selectors in this file within
+ * the responsibility described above whenever practical.
+ *
+ * Cascade contract
+ * ----------------
+ * presentation/ifplayer.css imports these files in numeric order. That order is
+ * intentional and preserves the cascade of the former monolithic stylesheet.
+ * Later files may refine shared chrome established by earlier files.
+ */
+
+/* Graph connectors must scale with the graph. Keeping them in SVG space prevents
+   distant zoom levels from turning every connection into a dominant screen-space
+   cable while still leaving them readable when the user zooms in. */
+
+#if_root #viewport>svg g.edge path, #if_root #viewport>svg g.edge polyline{
+    stroke-width: 1.15px !important;
+}
+
+#if_root #viewport>svg g.edge polygon{
+    stroke-width: .95px !important;
+}
+
+/* Graphviz may carry presentation attributes/styles on its primitive shapes.
+   The traversal renderer stamps authoritative data-map-state/data-room-* flags
+   on every room group, so enforce the legend contract here as a final browser
+   presentation guard.  This makes the overview visibly color-coded even if a
+   Graphviz fill declaration would otherwise win over the generated SVG attrs. */
+
+#if_root #viewport>svg g.node[data-map-state="unvisited"]>ellipse, #if_root #viewport>svg g.node[data-map-state="unvisited"]>polygon, #if_root #viewport>svg g.node[data-map-state="unvisited"]>path{
+    fill: #94a3b8 !important;
+}
+
+#if_root #viewport>svg g.node[data-map-state="visited"]>ellipse, #if_root #viewport>svg g.node[data-map-state="visited"]>polygon, #if_root #viewport>svg g.node[data-map-state="visited"]>path{
+    fill: #7e22ce !important;
+}
+
+#if_root #viewport>svg g.node[data-map-state="edge"]>ellipse, #if_root #viewport>svg g.node[data-map-state="edge"]>polygon, #if_root #viewport>svg g.node[data-map-state="edge"]>path{
+    fill: #be185d !important;
+}
+
+#if_root #viewport>svg g.node[data-map-state="frontier"]>ellipse, #if_root #viewport>svg g.node[data-map-state="frontier"]>polygon, #if_root #viewport>svg g.node[data-map-state="frontier"]>path{
+    fill: #2563eb !important;
+}
+
+#if_root #viewport>svg g.node[data-map-state="completed"]>ellipse, #if_root #viewport>svg g.node[data-map-state="completed"]>polygon, #if_root #viewport>svg g.node[data-map-state="completed"]>path{
+    fill: #16a34a !important;
+}
+
+#if_root #viewport>svg g.node[data-room-portal="true"]>ellipse, #if_root #viewport>svg g.node[data-room-portal="true"]>polygon, #if_root #viewport>svg g.node[data-room-portal="true"]>path{
+    fill: #16a34a !important;
+}
+
+#if_root #viewport>svg g.node[data-room-maze="true"]>ellipse, #if_root #viewport>svg g.node[data-room-maze="true"]>polygon, #if_root #viewport>svg g.node[data-room-maze="true"]>path{
+    fill: #d97706 !important;
+}
+
+#if_root #viewport>svg g.node[data-room-orphaned="true"]>ellipse, #if_root #viewport>svg g.node[data-room-orphaned="true"]>polygon, #if_root #viewport>svg g.node[data-room-orphaned="true"]>path{
+    fill: #64748b !important;
+}
+
+/* Compact diagnostic columns: keep Properties and Inventory information-dense
+   without changing legend footprint, tab geometry, or graph layout. */
+
+#if_root #property-panel, #if_root #inventory-panel{
+    padding: 8px 12px 12px;
+    line-height: 1.22;
+}
+
+#if_root #property-panel .panel-heading, #if_root #inventory-panel .panel-heading{
+    margin-bottom: 6px;
+    padding-bottom: 4px;
+}
+
+#if_root #property-panel .panel-section-heading, #if_root #inventory-panel .panel-section-heading{
+    margin: 7px 0 3px;
+}
+
+#if_root #property-panel .panel-kv, #if_root #inventory-panel .panel-kv{
+    gap: 2px 10px;
+}
+
+#if_root #property-panel .panel-list li, #if_root #inventory-panel .panel-list li{
+    padding: 3px 0;
+}
+
+#if_root #property-panel .panel-row-secondary, #if_root #property-panel .panel-row-state, #if_root #inventory-panel .panel-row-secondary, #if_root #inventory-panel .panel-row-state{
+    margin-top: 1px;
+}
+
+#if_root #property-panel .panel-bullet-list, #if_root #inventory-panel .panel-bullet-list{
+    line-height: 1.18;
+}
+
+#if_root #property-panel .panel-bullet-list li, #if_root #inventory-panel .panel-bullet-list li{
+    margin: 1px 0;
+}
+
+#if_root #inventory-panel .inventory-role{
+    margin-top: 6px;
+}
+
+#if_root #inventory-panel .inventory-role:first-child{
+    margin-top: 0;
+}
+
+#if_root #inventory-panel .inventory-role-title{
+    line-height: 1.15;
+}
+
+#if_root #inventory-panel .inventory-item{
+    gap: 6px;
+    padding: 2px 0;
+    line-height: 1.15;
+}
+
+/* Speculative specialist markers; authoritative Agatha marker is unchanged. */
+
+#if_root #specialist-overlay{
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 22;
+}
+
+#if_root .specialist-marker{
+    position: absolute;
+    transform: translate(-50%,-50%);
+    pointer-events: none;
+}
+
+#if_root .specialist-marker.waiting{
+    opacity: 1;
+}
+
+#if_root .specialist-marker-dot{
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--specialist-color, var(--agent-color));
+    border: 2px solid #fff;
+    box-shadow: 0 1px 5px rgba(0,0,0,.45);
+}
+
+#if_root .specialist-marker-label{
+    position: absolute;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    font: 800 12px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+    letter-spacing: .01em;
+    color: #0f172a !important;
+    background: rgba(255,255,255,.97) !important;
+    border: 2px solid var(--specialist-color, var(--agent-color));
+    border-radius: 5px;
+    padding: 3px 7px;
+    text-shadow: none;
+    box-shadow: 0 2px 7px rgba(15,23,42,.30);
+}
+
+#if_root .specialist-marker.syncing .specialist-marker-label{
+    border-style: dashed;
+}
+
+#if_root .specialist-marker.syncing .specialist-marker-dot{
+    box-shadow: 0 0 0 4px rgba(255,255,255,.90), 0 1px 6px rgba(15,23,42,.45);
+}
+
+#if_root .dark-ui .specialist-marker-label{
+    text-shadow: none;
+}
+
+#if_root #viewport svg .character-label-background{
+    fill: var(--surface);
+    fill-opacity: .94;
+    stroke: #e11d48;
+    stroke-opacity: .7;
+    stroke-width: 1.2;
+}
+
+#if_root .inventory-empty{
+    padding-top: 3px;
+}
+
+#if_root .inventory-change-value{
+    max-width: 150px;
+    white-space: normal;
+}
+
+#if_root .inventory-list{
+    margin-bottom: 1px;
+}
+
+#if_root .inventory-list .panel-row-state{
+    font-size: 9px;
+}
+
+#if_root .specialist-inventory-brief{
+    font: 600 9px/1.1 sans-serif;
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: .82;
+    margin-top: 1px;
+}
+
+
+/* Embedded CinterForge must render the exact same graph primitives as standalone.
+   Host dark-mode rules have historically applied filter/vector-effect styling to
+   nested SVG content; neutralize only those host-level effects without changing
+   the authored standalone stroke widths or marker palette. */
+#if_root #viewport > svg,
+#if_root #viewport > svg * {
+    filter: none !important;
+    mix-blend-mode: normal !important;
+}
+#if_root #viewport > svg g.edge path,
+#if_root #viewport > svg g.edge polyline {
+    /* Keep connectors legible at overview zoom instead of shrinking to subpixel hairlines. */
+    vector-effect: non-scaling-stroke !important;
+    stroke-width: 1.6px !important;
+}
+#if_root #viewport > svg g.edge polygon {
+    filter: none !important;
+}
+#if_root #player-marker,
+#if_root #specialist-overlay,
+#if_root #player-marker *,
+#if_root #specialist-overlay * {
+    filter: none !important;
+    mix-blend-mode: normal !important;
+}
+
+/* The authoritative marker uses the same light label/dot treatment as the
+   specialist markers.  This avoids host/theme inversion while still allowing
+   the currently displayed primary actor to supply its own color. */
+#if_root #player-marker { --agent-color: var(--player); }
+#if_root #player-marker-dot {
+    background: var(--agent-color) !important;
+    border: 2px solid #fff !important;
+}
+#if_root #player-marker-label {
+    color: #0f172a !important;
+    background: rgba(255,255,255,.97) !important;
+    border: 2px solid var(--agent-color) !important;
+    border-radius: 5px;
+    padding: 3px 7px;
+    font-weight: 800;
+    text-shadow: none !important;
+    box-shadow: 0 2px 7px rgba(15,23,42,.30);
+}

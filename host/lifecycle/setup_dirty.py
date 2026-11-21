@@ -63,6 +63,7 @@ ALL_OUTPUTS = (
     'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-linux.zip',
     'Python/Environments/mac/arm64/cinterterminalenv',
     'InteractiveFiction/CodeOSS/Web',
+    'CinterForgeTerminal/Dependencies/Voxel/Web',
     'Applications/CinterForgeCode/Emulators/Quadra650/Lagomorph',
     'Lagomorph',
     'CinterForgeCraftMaster/Setup',
@@ -77,6 +78,7 @@ WIN_OUTPUTS = (
     'Intermediates/CinterForgeTerminal/WebView2',
     'Run/CinterForgeTerminal/WindowsCross/WineVolume.json',
     'CinterForgeCraftMaster/Setup',
+    'CinterForgeTerminal/Dependencies/Voxel/Web',
 )
 # Runtime/test activity is allowed to write ephemeral caches; those bytes are
 # not part of the Setup closure.  Everything else remains a dirty input.

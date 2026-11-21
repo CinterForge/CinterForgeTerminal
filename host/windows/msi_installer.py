@@ -50,7 +50,7 @@ GUID_NAMESPACE = uuid.UUID('e67096da-e7c1-4c25-9a96-68b6eea50ff1')
 NS = 'http://schemas.microsoft.com/wix/2006/wi'
 SCHEMA = 'cinterforge.terminal.windows-msi-preflight.v6'
 # Increment when authored MSI structure or compiler invocation changes.
-PUBLISH_RECIPE = 'cinterforge.terminal.windows-msi-publish.v5-notepad-type50'
+PUBLISH_RECIPE = 'cinterforge.terminal.windows-msi-publish.v6-verified-discovery-dll'
 
 
 def _builds(builds: Path) -> Path:
@@ -857,6 +857,14 @@ def publish(builds: Path, *, release: str, entries: dict[str, dict]) -> dict:
             sources[name[len(prefix):]] = _source(builds, name, detail, 'win', verify=True)
         if any(item not in sources for item in ('Terminal.cmd', 'CinterForge Terminal.exe')):
             raise RuntimeError('Windows Build receipt lacks launchers required for MSI')
+        from host.lifecycle.universal_package import _windows_discovery_member
+        discovery = _windows_discovery_member(release).removeprefix(prefix)
+        if discovery not in sources:
+            raise RuntimeError('Windows MSI Build inputs lack the native Bonjour-compatible Host DLL: ' +
+                               discovery)
+        with sources[discovery].open('rb') as dll_stream:
+            if dll_stream.read(2) != b'MZ':
+                raise RuntimeError('Windows MSI Build input is not a PE DLL: ' + discovery)
         if any(name.startswith('DevTools/') for name in sources):
             raise RuntimeError('Windows MSI accidentally includes the optional DevTools bundle')
         readme = work / 'README.md'
@@ -901,6 +909,17 @@ def _publish_with_backend(builds: Path, *, release: str,
         built = _compile(builds, cross, work=candidate_dir, sources=sources,
                          release=release, smoke=False, native_scratch=True)
         evidence = _verify_msi(cross, built, cwd=candidate_dir)
+        # Verify the compiled MSI File table, not just the authored WiX XML.
+        # The File Id encodes the entire expected installed path.
+        from host.lifecycle.universal_package import _windows_discovery_member, APP_ROOTS
+        discovery = _windows_discovery_member(release).removeprefix(APP_ROOTS['win'] + '/')
+        file_id = 'F' + hashlib.sha1(discovery.lower().encode()).hexdigest()[:28]
+        matches = [row for row in _msi_table(cross, built, cwd=candidate_dir, name='File')
+                   if row.get('File') == file_id and
+                   row.get('FileName', '').split('|')[-1] == 'CinterForgePythonHost.dll' and
+                   row.get('FileSize') == str(sources[discovery].stat().st_size)]
+        if len(matches) != 1:
+            raise RuntimeError('Compiled Windows MSI is missing the runtime Bonjour-compatible Host DLL')
         destination = builds / 'CinterForgeTerminal/Distribution/CinterForgeTerminal-win.msi'
         destination.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(prefix='CinterForgeTerminal-win-',

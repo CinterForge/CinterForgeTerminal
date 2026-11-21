@@ -1,0 +1,943 @@
+/*
+ * CinterForge IFPlayer — 01-foundation.css
+ * ========================================================================
+ *
+ * Purpose
+ * -------
+ * Foundation, theme, global layout, Photoshop-style chrome, shared panels, footer, and responsive sizing. This file establishes the CSS variables and global geometry that every later IFPlayer stylesheet builds on.
+ *
+ * Ownership
+ * ---------
+ * This stylesheet is one ordered slice of the IFPlayer presentation cascade.
+ * It contains visual/layout rules only; solver, interpreter, world topology,
+ * and runtime authority remain outside CSS. Keep selectors in this file within
+ * the responsibility described above whenever practical.
+ *
+ * Cascade contract
+ * ----------------
+ * presentation/ifplayer.css imports these files in numeric order. That order is
+ * intentional and preserves the cascade of the former monolithic stylesheet.
+ * Later files may refine shared chrome established by earlier files.
+ */
+
+/*
+ * CinterForge Interactive Fiction presentation theme
+ * ==================================================
+ *
+ * This stylesheet owns presentation only: Photoshop-inspired panel chrome,
+ * responsive layout, semantic light/dark colors, map controls, Session styling,
+ * and CR80 card geometry. Solver state and story semantics do not belong here.
+ *
+ * CR80 cards must always preserve the exact 85.60 / 53.98 aspect ratio and
+ * scale uniformly. Theme changes may alter colors, never card geometry.
+ */
+
+#if_root{
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    /*
+     * Total fixed header height.  The first 60px belong to the IFPlayer status/
+     * application-control bar; the 32px stage-tab strip begins immediately
+     * below it.  Keep this value equal to those two stacked bands so the left
+     * column, right column, and viewport all begin below the complete header.
+     */
+    --top: 120px;
+    --top-status-height: 88px;
+    --stage-tabs-height: 32px;
+    --bottom: 72px;
+    --left: 300px;
+    --right: 410px;
+    --blue: #2675c9;
+    --surface: #e9e9e9;
+    --ink: #202020;
+    --soft-surface: #f4f4f4;
+    --muted: #5e5e5e;
+    --border: #a9a9a9;
+    --panel-line: #c9c9c9;
+    --panel: #f7f7f7;
+    --tab-strip: #d6d6d6;
+    --tab-face: #c7c7c7;
+    --tab-active: #f2f2f2;
+    --tab-hover: #dddddd;
+    --tab-edge: #9b9b9b;
+    --map-control-surface: rgba(214,214,214,.96);
+    --map-button-surface: #c7c7c7;
+    --room-accent: #7e22ce;
+    --room-accent-readable: #6b21a8;
+    --agent-accent: #2563eb;
+    --object-accent: #d97706;
+    --session-human: #15803d;
+    --session-game: #b45309;
+    --session-perot: #6d28d9;
+    --session-holmes: #be185d;
+    --session-watson: #0f766e;
+    --card-title-on-accent: #111827;
+    --success: #15803d;
+    --danger: #b91c1c;
+    --danger-soft: #fca5a5;
+    --player: #1677ff;
+    --footer-text: #334155;
+    --footer-response: #475569;
+    --fixed-light-ink: #334155;
+    --fixed-light-surface: #f8fafc;
+    --fixed-on-art: #fff;
+}
+
+
+/* When IFPlayer is mounted directly into CinterForge, its viewport is the
+   IFPlayer mount rather than the outer WebView.  Keep standalone mode fixed to
+   the browser window, but make the embedded root container-relative so bottom
+   docks and fixed chrome cannot extend beneath/clipped outside the host mount. */
+#if_root.if_embedded{
+    position: absolute;
+    /* Keep IFPlayer's status and editor controls below the Forge chrome. */
+    top: 54px;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: auto;
+    transform: translateZ(0);
+}
+
+#if_root.if_dark-ui{
+    --surface: #323232;
+    --ink: #f0f0f0;
+    --soft-surface: #3a3a3a;
+    --muted: #cbd5e1;
+    --border: #1f1f1f;
+    --panel-line: #4c4c4c;
+    --panel: #3f3f3f;
+    --tab-strip: #252525;
+    --tab-face: #383838;
+    --tab-active: #535353;
+    --tab-hover: #454545;
+    --tab-edge: #1d1d1d;
+    --map-control-surface: rgba(37,37,37,.96);
+    --map-button-surface: #383838;
+    --room-accent: #c084fc;
+    --room-accent-readable: #d8b4fe;
+    --agent-accent: #60a5fa;
+    --object-accent: #fbbf24;
+    --session-human: #4ade80;
+    --session-game: #fbbf24;
+    --session-perot: #c4b5fd;
+    --session-holmes: #f9a8d4;
+    --session-watson: #5eead4;
+    --card-title-on-accent: #0b0f14;
+    --success: #4ade80;
+    --danger: #fca5a5;
+    --danger-soft: #fecaca;
+    --player: #60a5fa;
+    --footer-text: #cbd5e1;
+    --footer-response: #e2e8f0;
+    --fixed-light-ink: #334155;
+    --fixed-light-surface: #f8fafc;
+    --fixed-on-art: #fff;
+}
+
+#if_root, #if_root *{
+    box-sizing: border-box;
+}
+
+#if_root, #if_root{
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: var(--surface);
+    color: var(--ink);
+    font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+}
+
+/* Photoshop-inspired panel tabs: compact square-edged chrome with a clearly
+   raised active tab. These are visual conventions only; no docking behavior. */
+
+#if_root #stage-tabs, #if_root #properties-tabs, #if_root #inventory-tabs, #if_root #property-subtabs, #if_root #session-agent-tabs, #if_root .learning-source-tabs{
+    background: var(--tab-strip);
+}
+
+#if_root #stage-tabs{
+    position: fixed;
+    z-index: 60;
+    left: 0;
+    right: 0;
+    top: var(--top-status-height);
+    height: var(--stage-tabs-height);
+    border-bottom: 1px solid var(--tab-edge);
+    display: flex;
+    justify-content: center;
+    gap: 1px;
+    padding: 4px 4px 0;
+}
+
+#if_root .stage-tab, #if_root .property-tab, #if_root .inventory-tab, #if_root .subtype-tab, #if_root .session-agent-tab, #if_root .learning-source-tab, #if_root .map-control{
+    border: 1px solid var(--tab-edge);
+    border-bottom-color: #777;
+    background: var(--tab-face);
+    color: var(--muted);
+    border-radius: 0;
+    padding: 4px 9px;
+    font: 600 11px/1.15 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+    cursor: pointer;
+    white-space: nowrap;
+    text-align: center;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.14);
+}
+
+#if_root .stage-tab:hover, #if_root .property-tab:hover, #if_root .inventory-tab:hover, #if_root .subtype-tab:hover, #if_root .session-agent-tab:hover, #if_root .learning-source-tab:hover, #if_root .map-control:hover{
+    background: var(--tab-hover);
+    color: var(--ink);
+}
+
+#if_root .stage-tab.active, #if_root .property-tab.active, #if_root .inventory-tab.active, #if_root .subtype-tab.active, #if_root .session-agent-tab.active, #if_root .learning-source-tab.active, #if_root .map-control.active{
+    background: var(--tab-active);
+    color: var(--ink);
+    border-bottom-color: var(--tab-active);
+    box-shadow: inset 0 2px 0 var(--blue);
+    text-decoration: none;
+}
+
+#if_root .stage-tab{
+    min-width: 92px;
+    padding: 4px 18px;
+}
+
+#if_root .stage-tab.active{
+    color: var(--ink);
+}
+
+#if_root #top-status-bar{
+    position: fixed;
+    z-index: 50;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: var(--top-status-height);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 1px 3px rgba(0,0,0,.18);
+    color: var(--blue);
+    font: 600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+}
+
+#if_root #top-progress-status{
+    position: absolute;
+    left: 12px;
+    top: 40px;
+    transform: translateY(-50%);
+    font-weight: 700;
+}
+
+#if_root #top-objects-progress{
+    color: var(--session-human);
+}
+
+#if_root #top-rooms-progress{
+    color: var(--room-accent-readable);
+}
+
+#if_root #story-title{
+    position: absolute;
+    left: 50%;
+    top: 13px;
+    transform: translateX(-50%);
+    color: var(--ink);
+    width: 46%;
+    max-width: 46%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+#if_root #application-title, #if_root #playing-story-title{
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#if_root #application-title{
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 21px;
+}
+
+#if_root #playing-story-title{
+    color: var(--blue);
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 18px;
+}
+
+
+#if_root #if-project-loading-status{
+    color: var(--blue);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 17px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#if_root #if-project-loading-status[data-state="error"]{
+    color: #d9534f;
+}
+
+#if_root #if-project-loading-status[data-state="ready"]{
+    color: #40a778;
+}
+
+#if_root #top-current-room{
+    position: absolute;
+    right: 12px;
+    top: 10px;
+    font-weight: 700;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+}
+#if_root .top-control-row, #if_root .top-editor-row{ display:flex; align-items:center; justify-content:flex-end; gap:9px; }
+#if_root .top-editor-row{ min-height:20px; }
+
+#if_root #traversal-pause, #if_root #generate-cards, #if_root #save-world, #if_root #asset-push-button, #if_root #asset-pull-button, #if_root #build-story, #if_root #undo-spatial, #if_root #quit-ifplayer, #if_root .run-mode-control{
+    border: 1px solid var(--tab-edge);
+    background: var(--tab-face);
+    color: var(--ink);
+    border-radius: 2px;
+    padding: 3px 10px;
+    font: 700 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+    cursor: pointer;
+}
+
+#if_root #generate-cards:disabled, #if_root #save-world:disabled, #if_root #asset-push-button:disabled, #if_root #asset-pull-button:disabled, #if_root #build-story:disabled, #if_root #undo-spatial:disabled, #if_root #quit-ifplayer:disabled, #if_root #traversal-pause:disabled, #if_root .run-mode-control:disabled{
+    opacity: .45;
+    cursor: default;
+}
+
+
+#if_root .run-mode-control.active{
+ outline: 1px solid currentColor;
+ outline-offset: -2px;
+}
+#if_root #traversal-pause[data-paused="true"]{
+    box-shadow: inset 0 2px 0 #3aa655;
+}
+
+#if_root #top-run-time-progress{
+    color: var(--session-human);
+    min-width: 72px;
+    text-align: left;
+    white-space: nowrap;
+}
+
+#if_root #left-column, #if_root #right-column{
+    position: fixed;
+    z-index: 40;
+    top: var(--top);
+    bottom: var(--bottom);
+    background: var(--surface);
+    overflow: hidden;
+}
+
+#if_root #left-column{
+    left: 0;
+    width: var(--left);
+    border-right: 1px solid var(--border);
+}
+
+#if_root #right-column{
+    right: 0;
+    width: var(--right);
+    border-left: 1px solid var(--border);
+}
+
+/* World Browser chrome must always paint above its scrolling property frame.
+   The frame is absolute and follows these rows in DOM order, so without an
+   explicit stacking order a transient WebKit layout can visually cover the
+   still-present World title/tabs. */
+#if_root #right-column > .column-title,
+#if_root #properties-tabs,
+#if_root #property-subtabs{
+    position: relative;
+    z-index: 2;
+    background: var(--surface);
+}
+#if_root #right-column > .column-title{ background: var(--soft-surface); }
+#if_root #property-frame{ z-index: 1; }
+
+#if_root .column-title{
+    height: 52px;
+    padding: 7px 10px 5px;
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 700;
+    border-bottom: 1px solid var(--tab-edge);
+    background: var(--soft-surface);
+}
+
+#if_root .column-keyhint{
+    margin-top: 3px;
+    color: var(--muted);
+    font: 600 9px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+    white-space: nowrap;
+}
+
+#if_root .world-title-row{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:8px;
+}
+#if_root .world-title-actions{
+    margin-left:auto;
+    display:flex;
+    gap:4px;
+    white-space:nowrap;
+}
+#if_root .world-title-actions button{
+    appearance:none;
+    border:1px solid var(--tab-edge);
+    background:var(--surface);
+    color:var(--ink);
+    padding:2px 7px;
+    font:600 9px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+    cursor:pointer;
+}
+#if_root .world-title-actions button:hover{background:var(--soft-surface);}
+
+#if_root #properties-tabs, #if_root #inventory-tabs{
+    padding: 4px 5px 0;
+    display: flex;
+    gap: 1px;
+    align-items: flex-end;
+    border-bottom: 1px solid var(--tab-edge);
+}
+
+#if_root #properties-tabs{
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    align-items:stretch;
+    gap:2px;
+}
+
+#if_root .property-tab, #if_root .inventory-tab{
+    flex: 1 1 auto;
+    min-height: 24px;
+    padding: 4px 5px;
+}
+
+#if_root .inventory-tab span{
+    font-size: 9px;
+    font-weight: 700;
+    color: inherit;
+    opacity: .72;
+}
+
+#if_root #properties-tabs .property-tab{
+    width:100%;
+    min-width:0;
+    padding:5px 3px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+}
+
+#if_root #property-subtabs{
+    display: none;
+    padding: 3px 5px 0;
+    flex-wrap: wrap;
+    gap: 1px;
+    align-items: flex-end;
+    border-bottom: 1px solid var(--tab-edge);
+}
+
+#if_root .subtype-tab{
+    padding: 3px 7px;
+    font-size: 10px;
+}
+
+#if_root #map-section-buttons{
+    display: flex;
+    gap: 1px;
+    align-items: flex-end;
+    justify-content: center;
+    flex-wrap: wrap;
+    min-width: 0;
+    max-width: 100%;
+    white-space: nowrap;
+}
+
+#if_root .map-control-group{
+    display: flex;
+    align-items: flex-end;
+    gap: 1px;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+#if_root .map-control-group-label{
+    font: 700 var(--map-control-font-size,10px) -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+    color: var(--muted);
+    padding: 0 5px 4px 1px;
+    letter-spacing: .01em;
+}
+
+#if_root #viewport{
+    position: fixed;
+    z-index: 10;
+    left: var(--left);
+    right: var(--right);
+    top: var(--top);
+    bottom: var(--bottom);
+    overflow: hidden;
+    cursor: grab;
+    user-select: none;
+    background: var(--surface);
+}
+
+#if_root #viewport.dragging{
+    cursor: grabbing;
+}
+
+#if_root #viewport>svg{
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+#if_root #map-canvas{
+    display: none;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    outline: none;
+}
+
+#if_root #map-controls{
+    display: none;
+    position: absolute;
+    z-index: 35;
+    left: 8px;
+    right: 8px;
+    top: 8px;
+    max-width: calc(100% - 16px);
+    box-sizing: border-box;
+    flex-direction: column;
+    gap: 3px;
+    align-items: stretch;
+    justify-content: center;
+    padding: 4px;
+    border: 1px solid var(--tab-edge);
+    border-radius: 2px;
+    background: var(--map-control-surface);
+    box-shadow: 0 2px 8px rgba(0,0,0,.22);
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+#if_root .map-control-row{
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 1px;
+    min-width: 0;
+}
+
+#if_root .map-control-row-floors{
+    padding-bottom: 2px;
+    border-bottom: 1px solid var(--tab-edge);
+}
+
+#if_root .map-control{
+    font-size: var(--map-control-font-size,10px);
+    padding: var(--map-control-pad-y,4px) var(--map-control-pad-x,8px);
+    min-width: max-content;
+}
+
+#if_root .map-section-control{
+    padding-left: var(--map-section-pad-x,7px);
+    padding-right: var(--map-section-pad-x,7px);
+}
+
+#if_root .map-section-control.agent-section{
+    border-top-color: var(--section-agent-color) !important;
+    box-shadow: inset 0 2px 0 var(--section-agent-color);
+}
+
+#if_root .map-section-control.agent-section::before{
+    content: "● ";
+    color: var(--section-agent-color);
+}
+
+#if_root .map-section-control.player-section{
+    font-weight: 700;
+}
+
+#if_root .map-control.connection-off{
+    color: var(--danger);
+    box-shadow: inset 0 2px 0 var(--danger);
+}
+
+#if_root.if_map-mode #viewport{
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+}
+
+#if_root.if_map-mode #map-controls{
+    display: flex;
+    position: relative;
+    z-index: 35;
+    left: auto;
+    right: auto;
+    top: auto;
+    width: 100%;
+    max-width: none;
+    flex: 0 0 auto;
+    margin: 0;
+    box-shadow: none;
+}
+
+#if_root.if_map-mode #viewport>svg, #if_root.if_map-mode #player-overlay{
+    display: none;
+}
+
+#if_root.if_map-mode #map-canvas{
+    display: block;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    height: auto;
+    cursor: default;
+}
+
+#if_root #player-overlay{
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    pointer-events: none;
+}
+
+#if_root #player-marker{
+    position: absolute;
+    display: none;
+    z-index: 30;
+    transform: translate(-50%,-50%);
+}
+
+#if_root #player-marker-dot{
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--player);
+    border: 3px solid var(--surface);
+    box-shadow: 0 1px 5px rgba(0,0,0,.45);
+}
+
+#if_root #player-marker-label{
+    position: absolute;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    color: var(--player);
+    background: var(--surface);
+    border: 1px solid color-mix(in srgb,var(--player) 35%,transparent);
+    border-radius: 2px;
+    padding: 2px 5px;
+    font: 700 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+}
+
+#if_root .column-legend-shell{
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 6;
+    background: var(--surface);
+    padding: 4px 8px 6px;
+    border-top: 1px solid var(--border);
+}
+
+#if_root .column-legend-shell:empty{
+    display: none;
+}
+
+#if_root .panel-frame{
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: var(--surface);
+    overflow: auto;
+}
+
+#if_root .html-panel{
+    padding: 12px 14px 18px;
+    color: var(--ink);
+    font-size: 12px;
+    line-height: 1.35;
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+#if_root .panel-main{
+    min-width: 0;
+}
+
+#if_root .column-legend{
+    margin-top: auto;
+    padding-top: 5px;
+    border-top: 2px solid var(--panel-line);
+    flex: 0 0 auto;
+}
+
+#if_root .column-legend-title{
+    color: var(--blue);
+    font-size: 9px;
+    font-weight: 900;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+}
+
+#if_root .column-legend-rows{
+    display: grid;
+    grid-template-columns: repeat(2,minmax(0,1fr));
+    gap: 2px 7px;
+}
+
+#if_root .column-legend-row{
+    display: grid;
+    grid-template-columns: 9px minmax(0,1fr);
+    gap: 4px;
+    align-items: center;
+    font-size: 8px;
+    line-height: 1.05;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+#if_root .column-legend-swatch{
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    display: block;
+}
+
+#if_root .panel-heading{
+    font-size: 17px;
+    font-weight: 800;
+    margin: 0 0 10px;
+    border-bottom: 1px solid var(--panel-line);
+    padding-bottom: 7px;
+}
+
+#if_root .panel-section-heading{
+    margin: 12px 0 6px;
+    color: var(--blue);
+    font-size: 11px;
+    font-weight: 900;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+}
+
+#if_root .panel-kv{
+    display: grid;
+    grid-template-columns: minmax(0,1fr) auto;
+    gap: 5px 12px;
+    align-items: start;
+}
+
+#if_root .panel-key{
+    color: var(--muted);
+    font-weight: 700;
+}
+
+#if_root .panel-value{
+    color: var(--ink);
+    font-weight: 700;
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+
+#if_root .panel-list{
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+#if_root .panel-list li{
+    padding: 5px 0;
+    border-bottom: 1px solid var(--panel-line);
+}
+
+#if_root .panel-row-primary{
+    font-weight: 700;
+    overflow-wrap: anywhere;
+}
+
+#if_root .panel-row-secondary, #if_root .panel-row-state{
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.35;
+    margin-top: 3px;
+    overflow-wrap: anywhere;
+}
+
+#if_root .panel-row-state{
+    text-transform: uppercase;
+    letter-spacing: .03em;
+}
+
+#if_root .panel-bullet-list{
+    margin: 0;
+    padding-left: 17px;
+}
+
+#if_root .panel-bullet-list li{
+    margin: 3px 0;
+}
+
+#if_root .panel-command{
+    font-family: Menlo,Consolas,monospace;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+#if_root .inventory-role{
+    margin-top: 11px;
+}
+
+#if_root .inventory-role-title{
+    font-size: 12px;
+    font-weight: 900;
+}
+
+#if_root .inventory-item{
+    display: grid;
+    grid-template-columns: 13px minmax(0,1fr) auto;
+    gap: 7px;
+    align-items: center;
+    padding: 4px 0;
+}
+
+#if_root .inventory-dot{
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    border: 2px solid currentColor;
+}
+
+#if_root .inventory-item.current .inventory-dot{
+    background: currentColor;
+}
+
+#if_root .inventory-state{
+    font-size: 9px;
+    color: var(--muted);
+    text-transform: uppercase;
+}
+
+#if_root #inventory-frame{
+    top: 0;
+}
+
+#if_root #bottom-strip{
+    position: fixed;
+    z-index: 50;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: var(--bottom);
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -1px 4px rgba(0,0,0,.08);
+    padding: 7px 12px;
+    color: var(--footer-text);
+    font-size: 11px;
+    overflow: hidden;
+}
+
+#if_root #bottom-row{
+    display: flex;
+    gap: 16px;
+    white-space: nowrap;
+}
+
+#if_root #live-indicator{
+    color: var(--blue);
+    font-weight: 700;
+}
+
+#if_root #bottom-explorer-status{
+    color: var(--success);
+    font-weight: 800;
+}
+
+#if_root #hint{
+    margin-left: auto;
+    color: var(--muted);
+}
+
+#if_root #bottom-response{
+    margin-top: 5px;
+    white-space: normal;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    color: var(--footer-response);
+}
+
+@media (max-width:1100px) {
+    #if_root{
+        --left: 200px;
+        --right: 347px;
+    }
+
+    #if_root .property-tab{
+        font-size: 10px;
+    }
+
+}
+
+
+#if_root .room-browser-room.current-selection{
+    box-shadow: inset 3px 0 0 rgba(255,0,0,.8);
+}
+#if_root .current-selection-group{
+    border: 1px solid rgba(255,0,0,.45);
+    background: rgba(255,0,0,.045);
+}
+
+/* CodeOSS is one Terminal Sessions view; the other entries display Kevin's
+   existing historical terminal session without restarting the loaded game. */
+#if_root #stage-tabs .code-session-view-label {
+  display: inline-flex;
+  gap: .5em;
+  align-items: center;
+  margin-left: auto;
+  padding: 0 .7em;
+  white-space: nowrap;
+  color: var(--ink);
+  font-size: .85rem;
+}
+#if_root #code-session-view {
+  min-width: 11em;
+  max-width: min(38vw, 22em);
+  border: 1px solid var(--line, #777);
+  border-radius: .35em;
+  padding: .3em .5em;
+  background: var(--surface, #222);
+  color: var(--ink, #fff);
+}
+#if_root.if_player-shell #stage-tabs .code-session-view-label {
+  display: none;
+}

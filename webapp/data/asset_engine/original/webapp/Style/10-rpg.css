@@ -1,0 +1,178 @@
+/* CinterForge IFPlayer RPG host. */
+#if_root #rpg-browser{display:none;position:absolute;inset:0;background:#000;z-index:12}
+#if_root.if_rpg-mode #rpg-browser{display:flex;flex-direction:column;width:auto;height:auto;min-width:0;min-height:0}
+#if_root.if_rpg-mode #objaverse-browser,#if_root.if_rpg-mode #session-console,#if_root.if_rpg-mode #graph-placeholder,#if_root.if_rpg-mode #map-controls,#if_root.if_rpg-mode #player-overlay{display:none!important}
+/* Session is a presentation overlay over the live Test runtime.  This rule
+   intentionally follows the normal RPG hide rule so the overlay can be reopened
+   repeatedly without changing stageMode or rebuilding Babylon. */
+#if_root.if_rpg-mode.if_session-overlay #session-console{display:flex!important}
+#if_root #rpg-runtime{position:absolute;inset:0;width:auto;height:auto;min-width:0;min-height:0;overflow:hidden;background:#000}
+/* IFPlayer owns RPG visibility at the #rpg-browser level.  Do not reuse the
+   standalone OWB fade-in gate here: Safari can keep a WebGL canvas composited
+   at opacity 0 while Babylon continues rendering normally, which produces a
+   live scene/log with only the IFPlayer workspace background visible. */
+#if_root #rpg-runtime #ifplayer-rpg-canvas{width:100%;height:100%;display:block;touch-action:none;outline:none;background:#000;opacity:1;visibility:visible;filter:none;transition:none}
+
+/* Seven floating content-editor buttons. F7 hides/shows the complete strip.
+   First three are character/story tools; last four are combat tools. */
+#if_root #rpg-tool-palette{position:absolute;left:18px;top:18px;right:18px;z-index:42;display:block;pointer-events:auto;overflow:visible;box-sizing:border-box}
+/* The editor palette is one toolbar, never a card grid. The source artwork is
+   cropped directly from the original editor-button sheet; do not impose a 2:1
+   frame or inner padding on it. The seven source images share the available
+   width uniformly and keep their native aspect ratios. */
+#if_root #rpg-editor-tools{display:grid;grid-template-columns:repeat(7,minmax(0,190px));justify-content:center;align-items:start;gap:6px;width:100%;min-width:0;padding:4px;box-sizing:border-box;pointer-events:auto;overflow:visible}
+#if_root .rpg-editor-tool{position:relative;min-width:0;width:100%;height:auto;aspect-ratio:1.8/1;padding:0;border:0;border-radius:0;background:transparent;color:rgba(255,255,255,.92);box-shadow:none;cursor:pointer;overflow:visible;transition:transform .12s ease,filter .12s ease}
+#if_root .rpg-editor-tool img{display:block;width:100%;height:100%;object-fit:contain;filter:none;opacity:1;pointer-events:none}
+#if_root .rpg-editor-tool:hover,#if_root .rpg-editor-tool:focus-visible{transform:translateY(-2px);filter:drop-shadow(0 8px 10px rgba(0,0,0,.46));outline:2px solid rgba(255,226,153,.72);outline-offset:1px}
+#if_root .rpg-editor-tool::after{content:attr(data-tooltip);position:absolute;left:50%;top:calc(100% + 6px);transform:translateX(-50%) translateY(-3px);padding:5px 8px;border-radius:5px;background:rgba(5,7,10,.94);border:1px solid rgba(255,255,255,.16);color:#fff;font:11px/1.2 system-ui;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease,transform .12s ease}
+#if_root .rpg-editor-tool:hover::after,#if_root .rpg-editor-tool:focus-visible::after{opacity:1;transform:translateX(-50%) translateY(0)}
+#if_root .rpg-editor-combat-start{margin-left:0}
+#if_root #rpg-browser:not(.rpg-tools-visible) #rpg-tool-palette{display:none}
+#if_root #rpg-status{position:absolute;right:14px;top:14px;z-index:41;max-width:min(55vw,620px);padding:6px 9px;border-radius:6px;background:rgba(6,8,11,.58);color:rgba(255,255,255,.78);font:11px/1.25 system-ui;pointer-events:none;opacity:.9}
+
+#if_root #rpg-crosshair{ display:none; position:absolute; left:50%; top:calc(50% + 19px); width:11px; height:11px; transform:translate(-50%,-50%); pointer-events:none; z-index:20; opacity:.72; }
+#if_root.if_rpg-mode #rpg-browser[data-rpg-scene-mode="build"] #rpg-crosshair, #if_root.if_rpg-mode #rpg-browser[data-rpg-scene-mode="combat"] #rpg-crosshair{ display:block; }
+#if_root #rpg-crosshair::before, #if_root #rpg-crosshair::after{ content:""; position:absolute; background:rgba(255,255,255,.92); box-shadow:0 0 1px rgba(0,0,0,.9); }
+#if_root #rpg-crosshair::before{ left:5px; top:0; width:1px; height:11px; }
+#if_root #rpg-crosshair::after{ left:0; top:5px; width:11px; height:1px; }
+
+/* RPG Runtime Baseline: F1 hides IFPlayer's RPG chrome while leaving the
+   dedicated canvas live. This is deliberately scoped to the RPG browser. */
+#rpg-browser.rpg-hud-hidden #rpg-tool-palette,
+#rpg-browser.rpg-hud-hidden #rpg-status,
+#rpg-browser.rpg-hud-hidden #rpg-crosshair {
+    visibility: hidden;
+}
+
+/* Checked-in RPG hotbar/target UI. Gameplay input is owned by CIFPlayerInput. */
+#if_root #rpg-hotbar{position:absolute;left:50%;bottom:12px;top:auto;transform:translateX(-50%);z-index:31;display:flex;gap:3px;pointer-events:none}
+#if_root .rpg-hotbar-slot{position:relative;width:52px;height:52px;border:2px solid rgba(255,255,255,.45);background:rgba(18,18,18,.76);box-shadow:inset 0 0 0 1px rgba(0,0,0,.8);display:flex;align-items:center;justify-content:center;color:#fff;font:11px/1 system-ui}
+#if_root .rpg-hotbar-slot.selected{border-color:#fff;box-shadow:0 0 0 2px rgba(0,0,0,.9),0 0 0 4px rgba(255,255,255,.88)}
+#if_root .rpg-hotbar-key{position:absolute;left:3px;top:3px;font-size:9px;opacity:.72}
+#if_root .rpg-hotbar-item{font-weight:700;text-align:center;text-shadow:0 1px 2px #000}
+#if_root #rpg-target-label{position:absolute;left:50%;top:calc(50% + 34px);transform:translateX(-50%);z-index:30;color:white;background:rgba(0,0,0,.56);padding:3px 7px;border-radius:3px;font:11px/1.2 system-ui;pointer-events:none;opacity:.9}
+#if_root #rpg-browser.rpg-hud-hidden #rpg-hotbar,#if_root #rpg-browser.rpg-hud-hidden #rpg-target-label{display:none}
+
+
+/* Hotbar modes + source-controlled spell builder. */
+#if_root #rpg-hotbar-mode{position:absolute;left:0;bottom:calc(100% + 7px);padding:3px 7px;border:1px solid rgba(255,255,255,.3);border-radius:3px;background:rgba(8,10,14,.78);color:#ddd;font:700 10px/1 system-ui;letter-spacing:.08em}
+#if_root #rpg-hotbar[data-hotbar-mode="combat"] .rpg-hotbar-slot{background:rgba(34,19,17,.84)}
+#if_root #rpg-hotbar[data-hotbar-mode="combat"] .rpg-hotbar-slot.spell{border-color:rgba(115,170,255,.64)}
+#if_root #rpg-hotbar[data-hotbar-mode="combat"] .rpg-hotbar-slot.weapon{border-color:rgba(220,220,220,.72)}
+#if_root #rpg-spell-builder{position:absolute;z-index:60;left:50%;top:50%;transform:translate(-50%,-50%);width:min(440px,calc(100% - 40px));padding:14px;border:1px solid rgba(255,255,255,.28);border-radius:6px;background:rgba(24,27,33,.97);box-shadow:0 18px 70px rgba(0,0,0,.55);color:#eee;font:12px/1.3 system-ui}
+#if_root #rpg-spell-builder header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;font-size:15px}
+#if_root #rpg-spell-builder header button{font-size:22px;line-height:1;background:transparent;border:0;color:#ddd;cursor:pointer}
+#if_root #rpg-spell-builder label{display:grid;grid-template-columns:90px 1fr;align-items:center;gap:8px;margin:8px 0}
+#if_root #rpg-spell-builder input{min-width:0;padding:6px 8px;background:#11151b;border:1px solid #555;color:#fff;border-radius:3px}
+#if_root #rpg-spell-builder>[data-save]{margin-top:10px;padding:7px 11px;background:#394c72;border:1px solid #7188b4;color:#fff;border-radius:3px;cursor:pointer}
+#if_root .rpg-spell-builder-note{opacity:.68;margin:8px 0}
+#if_root .rpg-spell-list{margin-top:12px;max-height:170px;overflow:auto;border-top:1px solid rgba(255,255,255,.14)}
+#if_root .rpg-spell-list>div{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.1)}
+#if_root .rpg-spell-list small{opacity:.65}
+#if_root .rpg-spell-list button{background:#3a2525;border:1px solid #6e4545;color:#eee;border-radius:3px;cursor:pointer}
+
+/* Minecraft-shaped RPG chat/session overlay. CIFPlayerInput owns all keyboard
+   routing; this surface only provides text presentation and focus. */
+#if_root #rpg-chat-overlay{position:absolute;left:14px;right:38%;bottom:76px;z-index:70;pointer-events:none;font:14px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#fff;text-shadow:0 1px 2px #000}
+#if_root #rpg-chat-history{display:none;max-height:38vh;overflow:hidden;padding:4px 6px;flex-direction:column;justify-content:flex-end;gap:2px;background:linear-gradient(to top,rgba(0,0,0,.34),rgba(0,0,0,0))}
+#if_root #rpg-chat-overlay.open #rpg-chat-history{display:flex}
+#if_root #rpg-chat-overlay.open #rpg-chat-history{overflow-y:auto;background:rgba(0,0,0,.46);pointer-events:auto}
+#if_root .rpg-chat-line{padding:1px 2px;white-space:normal;word-break:break-word}
+#if_root .rpg-chat-line.command,#if_root .rpg-chat-line.if-command{color:#ddd}
+#if_root .rpg-chat-line.response,#if_root .rpg-chat-line.if-response{color:#fff}
+#if_root .rpg-chat-line.chat{color:#fff}
+#if_root .rpg-chat-line.engine-command{color:#ddd}
+#if_root .rpg-chat-line.system{color:#ddd}
+#if_root .rpg-chat-tag{font-size:.78em;opacity:.72;margin-right:4px}
+#if_root #rpg-chat-entry{display:none;margin-top:5px;align-items:center;gap:6px;padding:5px 7px;background:rgba(0,0,0,.72);border:1px solid rgba(255,255,255,.25);pointer-events:auto}
+#if_root #rpg-chat-overlay.open #rpg-chat-entry{display:flex}
+#if_root #rpg-chat-prompt{font-weight:700}
+#if_root #rpg-chat-input{flex:1;min-width:0;border:0;outline:0;background:transparent;color:#fff;font:inherit;text-shadow:inherit;padding:0}
+
+/* Local skill list: source data from the OWB skill definitions, no external
+   website/iframe and no independent keyboard listener. */
+#if_root #rpg-skill-tree{position:absolute;z-index:72;left:50%;top:50%;transform:translate(-50%,-50%);width:min(760px,calc(100% - 48px));max-height:72%;overflow:auto;background:rgba(20,22,27,.97);border:1px solid rgba(255,255,255,.28);border-radius:6px;box-shadow:0 18px 70px rgba(0,0,0,.6);color:#eee;font:13px/1.35 system-ui;padding:14px}
+#if_root #rpg-skill-tree header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;font-size:17px}
+#if_root #rpg-skill-tree header button{border:0;background:transparent;color:#ddd;font-size:24px;cursor:pointer}
+#if_root .rpg-skill-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+#if_root .rpg-skill-card{display:flex;flex-direction:column;gap:5px;padding:10px;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.12);border-radius:4px}
+#if_root .rpg-skill-card span{opacity:.86}
+#if_root .rpg-skill-card small{opacity:.62}
+
+/* Actual inventory/offhand surface. Keyboard ownership remains CIFPlayerInput. */
+#if_root #rpg-inventory-panel{position:absolute;z-index:71;left:50%;top:50%;transform:translate(-50%,-50%);width:min(620px,calc(100% - 48px));padding:14px;background:rgba(20,22,27,.96);border:1px solid rgba(255,255,255,.26);border-radius:6px;color:#eee;font:12px/1.3 system-ui;box-shadow:0 18px 60px rgba(0,0,0,.55)}
+#if_root #rpg-inventory-panel header{display:flex;justify-content:space-between;gap:12px;margin-bottom:12px}
+#if_root .rpg-inventory-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+#if_root .rpg-inventory-cell{min-height:54px;padding:6px;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.28);display:flex;flex-direction:column;gap:6px}
+#if_root .rpg-inventory-cell.selected{border-color:#fff;box-shadow:0 0 0 1px #fff inset}
+#if_root .rpg-inventory-cell span{opacity:.58;font-size:10px}
+
+/* Same-document specialized RPG editors. */
+#if_root .rpg-editor-overlay{position:absolute;left:18px;right:18px;top:var(--rpg-editor-overlay-top,154px);bottom:72px;z-index:78;overflow:auto;border:1px solid rgba(255,255,255,.24);border-radius:10px;background:rgba(15,18,24,.96);box-shadow:0 18px 70px rgba(0,0,0,.58);pointer-events:auto;color:#eee}
+#if_root #effect-editor-container{min-height:100%;padding:14px;box-sizing:border-box}
+#if_root #effect-editor{display:grid;grid-template-columns:minmax(260px,420px) 1fr;min-height:100%;font:12px/1.35 system-ui}
+#if_root #effect-editor #controls{padding:14px;max-width:420px}
+#if_root #effect-editor .preset-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+#if_root #effect-editor button{padding:6px 9px;border:1px solid rgba(255,255,255,.22);border-radius:5px;background:#252b36;color:#fff;cursor:pointer}
+#if_root #effect-editor button.selected{border-color:#b8d4ff;background:#34455f}
+#if_root #effect-editor .search-box,#if_root #effect-editor input[type="range"]{width:100%;box-sizing:border-box}
+#if_root #effect-editor .search-box{padding:7px 8px;border:1px solid #555;border-radius:4px;background:#11151b;color:#fff}
+#if_root #effect-editor .parameter-controls{display:grid;gap:7px;margin-top:12px}
+
+#if_root .rpg-document-editor-overlay{display:flex;flex-direction:column;overflow:hidden;padding:0}
+#if_root .rpg-document-editor-header{height:38px;flex:0 0 38px;display:flex;align-items:center;justify-content:space-between;padding:0 10px;border-bottom:1px solid rgba(255,255,255,.14);background:#171b22}
+#if_root .rpg-document-editor-header button{width:30px;height:30px;border:0;background:transparent;color:#fff;font-size:22px;cursor:pointer}
+#if_root .rpg-document-editor-object{display:block;flex:1 1 auto;width:100%;min-height:0;border:0;background:#111}
+
+/* Combat is a play/debug state, not an editor state. Keep authoring controls out
+   of the player's view while combat is active. */
+#if_root #rpg-browser[data-rpg-interaction-mode="combat"] #rpg-tool-palette{display:none}
+
+/* Combat HUD: player health is isolated at upper-left; the current wave is a
+   vertical stack at upper-right. It deliberately avoids the inventory/hotbar. */
+#ifplayer-combat-hud{position:absolute;inset:0;z-index:2147483000;pointer-events:none;color:#f5f7fa;font:12px/1.25 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-shadow:0 1px 2px #000}
+#ifplayer-combat-hud .ifplayer-combat-player{position:absolute;left:18px;top:18px;width:220px}
+#ifplayer-combat-hud .ifplayer-combat-mobs{position:absolute;right:18px;top:18px;width:220px;display:flex;flex-direction:column;gap:8px}
+#ifplayer-combat-hud .ifplayer-health-name{font-weight:700;margin:0 0 3px 2px}
+#ifplayer-combat-hud .ifplayer-health-track{position:relative;height:18px;border:1px solid rgba(255,255,255,.62);background:rgba(0,0,0,.58);overflow:hidden;box-shadow:0 2px 7px rgba(0,0,0,.3)}
+#ifplayer-combat-hud .ifplayer-health-fill{position:absolute;inset:0 auto 0 0;background:rgba(175,175,175,.72);transition:width .14s linear}
+#ifplayer-combat-hud .ifplayer-health-track span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800}
+#ifplayer-combat-hud .ifplayer-combat-result{position:absolute;left:50%;top:18px;transform:translateX(-50%);padding:5px 10px;border-radius:4px;background:rgba(0,0,0,.45);font-weight:700}
+
+/* Shared inventory presentation: Build (Creative) uses the same slot vocabulary
+   as Play, but owns an independent persisted state and an unlimited block picker. */
+#if_root #build-hotbar{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);z-index:45;display:flex;gap:3px;pointer-events:auto}
+#if_root .build-slot{position:relative;width:48px;height:48px;border:2px solid rgba(255,255,255,.46);background:rgba(18,18,18,.82);box-shadow:inset 0 0 0 1px #000;display:flex;align-items:center;justify-content:center;color:#fff}
+#if_root .build-slot.selected{border-color:#fff;box-shadow:0 0 0 2px #111,0 0 0 4px rgba(255,255,255,.9)}
+#if_root .build-item-chip{display:block;width:32px;height:32px;border:1px solid rgba(255,255,255,.35);font:10px/32px system-ui;text-align:center;overflow:hidden}
+#if_root #build-inventory-panel,#if_root #build-block-picker{position:absolute;z-index:60;left:50%;bottom:78px;transform:translateX(-50%);padding:10px;background:rgba(20,22,27,.96);border:1px solid rgba(255,255,255,.28);border-radius:5px;box-shadow:0 12px 45px rgba(0,0,0,.55);color:#eee}
+#if_root #build-inventory-panel header,#if_root #build-block-picker header{display:flex;justify-content:space-between;gap:28px;margin-bottom:8px;font:12px system-ui}
+#if_root .build-inventory-grid{display:grid;grid-template-columns:repeat(9,48px);gap:3px}
+#if_root .build-picker-grid{display:grid;grid-template-columns:repeat(9,42px);gap:4px}
+#if_root .build-block-swatch{width:42px;height:42px;border:2px solid rgba(255,255,255,.4);box-shadow:inset 0 0 0 1px rgba(0,0,0,.65);cursor:grab}
+#if_root .rpg-editor-tool-text{display:flex;flex-direction:column;align-items:center;justify-content:center;width:100%;height:100%;box-sizing:border-box;border:3px ridge #b78335;border-radius:10px;background:linear-gradient(#51301a,#1f120b);color:#fff2ce;font:700 17px/1.05 Georgia,serif;text-shadow:0 2px 2px #000;pointer-events:none}
+#if_root .rpg-editor-tool-text small{font-size:12px;font-weight:500}
+#if_root .rpg-editor-tool-text kbd{margin-top:4px;padding:2px 6px;border:1px solid #a58a62;border-radius:4px;background:#171717;color:white;font:700 11px system-ui}
+#if_root #rpg-hotbar[data-hotbar-mode="creative"] .rpg-hotbar-slot{background:rgba(22,26,22,.86)}
+#if_root #rpg-hotbar[data-hotbar-mode="creative"] .rpg-hotbar-slot.creative-block .rpg-hotbar-item{display:block;width:32px;height:32px;border:1px solid rgba(255,255,255,.38);box-shadow:inset 0 0 0 1px rgba(0,0,0,.55)}
+
+/* Map and Test share one Babylon canvas/engine/scene. During Test the existing
+   map canvas is reparented into the RPG runtime; the retired RPG canvas remains
+   only as a compatibility DOM target and never owns WebGL. */
+#if_root.if_rpg-mode #rpg-runtime #map-canvas{display:block!important;width:100%;height:100%;touch-action:none;outline:none;background:#000;}
+#if_root.if_rpg-mode #rpg-runtime #ifplayer-rpg-canvas{display:none!important;}
+
+/* Presentation-layer contract: Test UI is never part of CIFWorld. Map suppresses
+   all Test overlays while preserving their internal state; Test re-exposes them.
+   Individual overlays still own their normal open/closed rules. */
+#if_root:not(.if-test-overlays-enabled) #rpg-hotbar,
+#if_root:not(.if-test-overlays-enabled) #rpg-hotbar-mode,
+#if_root:not(.if-test-overlays-enabled) #rpg-tool-palette,
+#if_root:not(.if-test-overlays-enabled) #rpg-chat-overlay,
+#if_root:not(.if-test-overlays-enabled) #rpg-skill-tree,
+#if_root:not(.if-test-overlays-enabled) #build-inventory-panel,
+#if_root:not(.if-test-overlays-enabled) #build-block-picker,
+#if_root:not(.if-test-overlays-enabled) #rpg-creative-asset-selection,
+#if_root:not(.if-test-overlays-enabled) #rpg-combat-hud {
+    display: none !important;
+}

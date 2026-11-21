@@ -124,7 +124,45 @@ def verify_staged_asset_modules(app: Path, target: str, release: str) -> None:
         if _sha256(installed) != _sha256(source):
             raise RuntimeError(f'{target} Assets runtime in installed app is stale: {installed}; '
                                f'run ./Cinter build {target} and ./Cinter stage {target}')
-    print(f'[TEST STAGE] PASS {target} installed Assets source matches authored runtime', flush=True)
+    # Voxel is a mandatory real browser payload, not a button-only feature.
+    # Verify the actual installed web runtime, bridge and service worker at
+    # the exact path served by /blockbench/ in the installed Python host.
+    voxel = service / 'data/asset_engine/voxel'
+    for relative in ('index.html', 'dist/bundle.js',
+                     'cinterforge/cinterforge_bridge.js', 'service_worker.js'):
+        packaged = voxel / relative
+        if packaged.is_symlink() or not packaged.is_file() or packaged.stat().st_size == 0:
+            raise RuntimeError(f'{target} CinterForge Voxel editor missing from installed app: '
+                               f'{packaged}; run ./Cinter setup all, build {target}, stage {target}')
+    index = (voxel / 'index.html').read_text(encoding='utf-8')
+    if 'cinterforge/cinterforge_bridge.js' not in index:
+        raise RuntimeError(f'{target} CinterForge Voxel has no installed Save Back bridge')
+    print(f'[TEST STAGE] PASS {target} installed Assets and CinterForge Voxel are staged', flush=True)
+
+
+def verify_staged_zeroconf_library(app: Path, target: str, release: str) -> None:
+    """Verify the retail ctypes dependency at its exact installed lookup path.
+
+    Build's inventory and Stage's receipt already verify its SHA-256; this
+    additional Test gate catches a packaging omission before retail launch.
+    """
+    if target not in ('linux', 'win'):
+        raise ValueError('Retail Zeroconf check requires Linux or Windows')
+    arch = 'x64'
+    filename = ('CinterForgePythonHost.dll' if target == 'win'
+                else 'libCinterForgePythonHost.so')
+    component = 'bin' if target == 'win' else 'lib'
+    required = (app / 'Builds/Python/Host' / target / arch / release /
+                component / filename)
+    if required.is_symlink() or not required.is_file():
+        raise RuntimeError(f'{target} retail Zeroconf library missing: {required}; '
+                           f'run ./Cinter build {target} and ./Cinter stage {target}')
+    magic = b'MZ' if target == 'win' else b'\x7fELF'
+    with required.open('rb') as stream:
+        if stream.read(len(magic)) != magic:
+            raise RuntimeError(f'{target} retail Zeroconf library is not a native {target} binary: '
+                               + str(required))
+    print(f'[TEST STAGE] PASS {target} retail Zeroconf native library: {required}', flush=True)
 
 
 def _install_prepared_runtime(server: Path, guest: Path) -> dict:
@@ -516,6 +554,8 @@ class RealStagedSystemSmoke(unittest.TestCase):
                     from host.lifecycle.universal_package import APP_ROOTS
                     from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
                     app = Path(stage['steam_root']) / APP_ROOTS[target]
+                    if target in ('win', 'linux'):
+                        verify_staged_zeroconf_library(app, target, self.release)
                     binary = verify_embedded_craftmaster(app, target)
                     self.assertGreater(binary.stat().st_size, 1024)
                     # `Cinter test mac` must not reject a previous Linux/

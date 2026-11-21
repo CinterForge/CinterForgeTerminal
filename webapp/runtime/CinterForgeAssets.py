@@ -149,8 +149,13 @@ def inspect_asset(root: Path) -> dict:
             'representations': tuple(sorted(representations)), 'files_verified': len(set(checked))}
 
 
-def inventory(assets_root: Path) -> dict:
-    """Non-destructive inventory of actual Assets files for backup receipts."""
+def inventory(assets_root: Path, *, include=None) -> dict:
+    """Non-destructive inventory of Assets files for backup receipts.
+
+    An optional selection predicate limits hashing to the authoritative files
+    a caller is allowed to publish. The unfiltered inventory remains available
+    to existing lifecycle/debug callers without changing its behavior.
+    """
     files = {}
     if assets_root.is_symlink() or not assets_root.is_dir():
         raise FileNotFoundError(f'Assets directory missing: {assets_root}')
@@ -158,6 +163,8 @@ def inventory(assets_root: Path) -> dict:
         rel = path.relative_to(assets_root)
         if any(part.startswith('.') for part in rel.parts):
             continue  # Only authored and generated library files are backed up.
+        if include is not None and not include(rel):
+            continue
         if path.is_symlink():
             raise ValueError(f'Symlinks are forbidden in the asset backup: {rel}')
         if path.is_dir():

@@ -185,11 +185,33 @@ class CinterForgeHTTPRoutes:
             except (OSError, ValueError) as error:
                 self._json(400, {'error': str(error)})
             return
-        if path.startswith('/assets-library/'):
+        if path == '/runtime-identity':
+            if not self.server.capabilities.get('assets'):
+                self._json(404, {'error': 'Assets unavailable'})
+            else:
+                self._json(200, {'ok': True, 'service': 'cinterforge-ifplayer'})
+            return
+        if path.startswith('/api/assets/blockify/job/'):
+            # Original IFPlayer's saved Asset Browser makes normal same-origin
+            # fetches; it does not possess Terminal's privileged native API token.
+            # The job READ endpoint is restricted to that same-origin viewer or
+            # to a genuinely token-authorized native client.
+            browser_origin = (self._code_authorized() and
+                              self.headers.get('Sec-Fetch-Site') == 'same-origin')
+            if not self.server.capabilities.get('assets') or not (browser_origin or self._authorized()):
+                self._json(403, {'error': 'not authorized'})
+                return
+            from runtime import CinterForgeAssetOriginal as original
+            try:
+                self._json(200, original.blockify_job(self.server, unquote(path.split('/')[-1]), include_rows=parse_qs(urlsplit(self.path).query).get('summary') != ['1']))
+            except (ValueError, FileNotFoundError) as exc:
+                self._json(404, {'error': str(exc)})
+            return
+        if path.startswith('/blockbench/'):
             if not self.server.capabilities.get('assets'):
                 self._json(404, {'error': 'Not found'})
                 return
-            if _CinterForgeAssetViews.serve(self, path):
+            if _CinterForgeAssetViews.serve_voxel(self, path):
                 return
         if path.startswith('/assets-library/'):
             if not self.server.capabilities.get('assets'):
@@ -812,25 +834,51 @@ class CinterForgeHTTPRoutes:
             self.send_header('Content-Length', '0')
             self.end_headers()
             return
-        if not self._authorized():
+        # Reuse original IFPlayer's same-origin JSON command transport without
+        # publishing the privileged CPH token into WebView JavaScript. Only the
+        # Assets command plane and its job progress receiver accept this browser
+        # route; import-from-host, CLI, and every other Terminal API retain their
+        # existing native token requirement. An exact Origin and fetch-site are
+        # mandatory for browser writes (no permissive missing-Origin fallback).
+        route = self.path.split('?', 1)[0]
+        browser_asset_write = (route in ('/assets/command', '/api/assets/blockify/progress')
+                               and self.server.capabilities.get('assets')
+                               and self._code_authorized()
+                               and self.headers.get('Sec-Fetch-Site') == 'same-origin'
+                               and self.headers.get('Origin') == 'http://' + self.headers.get('Host', ''))
+        if not browser_asset_write and not self._authorized():
             self._json(403, {'error': 'not authorized'})
             return
         try:
             n = int(self.headers.get('Content-Length', '0'))
-            route = self.path.split('?', 1)[0]
-            limit = 2 * 1024 * 1024 if (route.startswith('/api/if/save/') or route == '/api/assets/upload/chunk') else _CinterForgeSettings.MAX_BODY
+            # The ORIGINAL IFPlayer asset-migration-save command transmits
+            # complete Babylon GLTF exports (model JSON, buffers and textures)
+            # as base64 JSON. The general 64 KiB Terminal control limit rejects
+            # practically every 3D asset before original Server sees it.
+            # This larger bound is limited to the one asset-authoring endpoint.
+            limit = (256 * 1024 * 1024 if route == '/assets/command' else
+                     2 * 1024 * 1024 if (route.startswith('/api/if/save/') or route == '/api/assets/upload/chunk')
+                     else _CinterForgeSettings.MAX_BODY)
             if not (0 < n <= limit):
                 raise ValueError('Invalid request length')
             body = json.loads(self.rfile.read(n))
             if not isinstance(body, dict):
                 raise ValueError('Expected a JSON object')
+            if route == '/assets/command':
+                if not self.server.capabilities.get('assets') or not self._local() or not self._lan_logged_in():
+                    self._json(403, {'ok': False, 'error': 'not authorized'})
+                    return
+                from runtime import CinterForgeAssetOriginal as original
+                result = original.authoring_command(self.server, body)
+                self._json(200, result)
+                return
             if route.startswith('/api/assets/'):
                 if not self.server.capabilities.get('assets'):
                     self._json(404, {'error': 'Not found'})
                     return
                 # Only a native Terminal session may request arbitrary host
                 # file paths; browser-origin uploads use an opaque upload token.
-                if route in ('/api/assets/import', '/api/assets/picker'):
+                if route in ('/api/assets/import', '/api/assets/picker', '/api/assets/blockify/start', '/api/assets/delete'):
                     sid = body.get('session_id')
                     with self.server.sessions_lock:
                         session_live = isinstance(sid, str) and sid in self.server.sessions
@@ -839,12 +887,21 @@ class CinterForgeHTTPRoutes:
                         return
                 if route == '/api/assets/import':
                     result = _CinterForgeAssetViews.import_path(self.server, body.get('path'))
+                elif route == '/api/assets/delete':
+                    from runtime import CinterForgeAssetOriginal as original
+                    result = original.delete_uci(self.server, str(body.get('uci') or ''))
                 elif route == '/api/assets/picker':
                     result = _CinterForgeAssetViews.queue_tab(self.server, 'picker')
                 elif route == '/api/assets/report':
                     result = _CinterForgeAssetViews.queue_tab(self.server, 'report')
                 elif route == '/api/assets/view':
                     result = _CinterForgeAssetViews.queue_tab(self.server, 'view', uci=body.get('uci'))
+                elif route == '/api/assets/blockify/start':
+                    from runtime import CinterForgeAssetOriginal as original
+                    result = original.start_blockify(self.server, body.get('path'))
+                elif route == '/api/assets/blockify/progress':
+                    from runtime import CinterForgeAssetOriginal as original
+                    result = original.blockify_progress(self.server, body)
                 elif route == '/api/assets/upload/start':
                     result = _CinterForgeAssetViews.upload_start(self.server, body.get('name'), body.get('size'))
                 elif route == '/api/assets/upload/chunk':

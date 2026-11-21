@@ -1,0 +1,441 @@
+/*
+ * CinterForge IFPlayer — 03-cards-agents.css
+ * ========================================================================
+ *
+ * Purpose
+ * -------
+ * Shared CR80 card geometry, full-window game mode, Agent panel/card presentation, room/object cards, and command-activity indicators. CR80 geometry must remain uniformly scaled and undistorted.
+ *
+ * Ownership
+ * ---------
+ * This stylesheet is one ordered slice of the IFPlayer presentation cascade.
+ * It contains visual/layout rules only; solver, interpreter, world topology,
+ * and runtime authority remain outside CSS. Keep selectors in this file within
+ * the responsibility described above whenever practical.
+ *
+ * Cascade contract
+ * ----------------
+ * presentation/ifplayer.css imports these files in numeric order. That order is
+ * intentional and preserves the cascade of the former monolithic stylesheet.
+ * Later files may refine shared chrome established by earlier files.
+ */
+
+/* v429 Inventory deliberately mirrors Properties: neutral content, link tabs, dense rows. */
+
+#if_root #inventory-panel .panel-row-primary, #if_root #inventory-panel .panel-value{
+    color: var(--ink);
+}
+
+#if_root #inventory-panel .panel-row-state, #if_root #inventory-panel .panel-key{
+    color: var(--muted);
+}
+
+/* No UI game mode. Tab toggles this body class in the generated viewer.
+   Editor chrome disappears, but the top title/status/application-control bar
+   remains available above the expanded gameplay viewport. */
+
+#if_root.if_game-mode #left-column, #if_root.if_game-mode #right-column, #if_root.if_game-mode #bottom-strip, #if_root.if_game-mode #map-controls, #if_root.if_game-mode #player-overlay{
+    display: none !important;
+}
+
+#if_root.if_game-mode #top-status-bar{
+    display: block !important;
+    height: var(--top-status-height) !important;
+}
+
+#if_root.if_game-mode #viewport{
+    left: 0 !important;
+    right: 0 !important;
+    top: calc(var(--top-status-height) + var(--stage-tabs-height)) !important;
+    bottom: 0 !important;
+    /* Size to the IFPlayer root, not the browser/WebView viewport.  In the
+       embedded CinterForge mount, 100vh extends beneath the mount and clips
+       the normal Session command row.  The four edge anchors above are the
+       complete sizing contract in both standalone and embedded modes. */
+    width: auto !important;
+    height: auto !important;
+    z-index: 100 !important;
+}
+
+/* Agent panel: three landscape CR80 cards with square image wells.  Agent
+   and Room are pinned above the elastic Inventory scroll region; Current
+   Object is pinned at the bottom. */
+
+#if_root #inventory-frame{
+    overflow: hidden;
+}
+
+#if_root #inventory-panel{
+    height: 100%;
+    min-height: 0;
+    padding: 4px 6px !important;
+    overflow: hidden !important;
+}
+
+#if_root #inventory-panel>.agent-panel-shell{
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+#if_root .agent-card-pair{
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    flex: 0 0 auto;
+}
+
+/* One shared CR80 component for Agent, Room, and Current Object.
+   The OUTER CARD stays exact CR80 landscape (85.60 x 53.98 mm).  Card stock
+   follows the UI theme.  Artwork is flush on the left with no frame of its own;
+   the copy area carries the category accent as a three-sided stroke plus title bar. */
+
+#if_root .portrait-cr80-card{
+    --card-bg: #050505;
+    --card-fg: #fff;
+    --card-muted: #d1d5db;
+    --card-accent: var(--agent-accent);
+    --card-title-fg: var(--card-title-on-accent);
+    width: 100%;
+    aspect-ratio: 85.60/53.98;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: var(--card-bg);
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    gap: 0;
+    overflow: hidden;
+    box-sizing: border-box;
+    color: var(--card-fg);
+}
+
+#if_root.if_dark-ui .portrait-cr80-card{
+    --card-bg: #050505;
+    --card-fg: #fff;
+    --card-muted: #e5e7eb;
+    --card-title-fg: var(--card-title-on-accent);
+}
+
+#if_root .agent-portrait-card{
+    --card-accent: var(--agent-accent);
+}
+
+#if_root .room-portrait-card{
+    --card-accent: var(--room-accent);
+}
+
+#if_root .current-object-portrait-card{
+    --card-accent: var(--object-accent);
+}
+
+#if_root .portrait-card-image{
+    width: 29%;
+    height: 100%;
+    min-width: 0;
+    flex: 0 0 29%;
+    overflow: hidden;
+    border: 0;
+    border-radius: 0;
+    background: var(--card-bg);
+    display: flex;
+    align-items: stretch;
+    justify-content: stretch;
+}
+
+#if_root .portrait-card-image img{
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    object-position: center;
+    display: block;
+    background: transparent;
+}
+
+#if_root .portrait-card-copy{
+    position: relative;
+    min-width: 0;
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-rows: 30px repeat(3,minmax(0,1fr));
+    align-items: stretch;
+    gap: 0;
+    overflow: hidden;
+    padding: 0;
+    background: var(--card-bg);
+    border-top: 3px solid var(--card-accent);
+    border-right: 3px solid var(--card-accent);
+    border-bottom: 3px solid var(--card-accent);
+    border-left: 0;
+}
+
+#if_root .portrait-card-name{
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    height: 30px;
+    margin: 0;
+    padding: 2px 7px;
+    background: var(--card-accent);
+    color: var(--card-title-fg);
+    font-size: 14px;
+    font-weight: 900;
+    line-height: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: clip;
+    overflow-wrap: normal;
+}
+
+#if_root .portrait-card-detail{
+    display: grid;
+    grid-template-columns: 50px minmax(0,1fr);
+    gap: 5px;
+    align-items: center;
+    min-width: 0;
+    padding: 1px 7px;
+    font-size: 10.5px;
+    line-height: 1.08;
+    border-top: 1px solid color-mix(in srgb,var(--card-accent) 25%,transparent);
+}
+
+#if_root .portrait-card-detail b{
+    color: var(--card-accent);
+    font-size: 9.25px;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: .025em;
+    white-space: nowrap;
+}
+
+#if_root .portrait-card-detail span{
+    color: var(--card-fg);
+    font-size: 10.5px;
+    font-weight: 800;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: clip;
+    white-space: nowrap;
+    text-align: right;
+}
+
+#if_root .room-card-image-empty{
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font: 900 16px/1 sans-serif;
+    color: var(--fixed-light-ink);
+    background: var(--fixed-light-surface);
+}
+
+#if_root .agent-inventory-middle{
+    min-height: 96px;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    border-top: 1px solid var(--panel-line);
+    border-bottom: 1px solid var(--panel-line);
+    overflow: hidden;
+}
+
+#if_root .agent-inventory-bar{
+    height: 19px;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 1px 1px;
+    font-size: 9px;
+    color: var(--ink);
+}
+
+#if_root .agent-inventory-bar strong{
+    font-size: 11px;
+}
+
+#if_root .agent-inventory-bar span{
+    color: var(--muted);
+    font-size: 8px;
+    font-weight: 700;
+}
+
+#if_root .agent-inventory-scroll{
+    min-height: 0;
+    flex: 1 1 auto;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 2px;
+}
+
+#if_root .inventory-select-item{
+    width: 100%;
+    display: grid;
+    grid-template-columns: 14px minmax(0,1fr) auto;
+    gap: 4px;
+    align-items: center;
+    border: 0;
+    border-bottom: 1px solid var(--panel-line);
+    background: transparent;
+    color: var(--ink);
+    padding: 3px 2px;
+    font: 700 9px/1.08 sans-serif;
+    text-align: left;
+    cursor: pointer;
+}
+
+#if_root .inventory-select-item:hover, #if_root .inventory-select-item.active{
+    background: rgba(22,119,255,.10);
+}
+
+#if_root .inventory-select-item.active{
+    box-shadow: inset 2px 0 0 var(--blue);
+}
+
+#if_root .inventory-select-index{
+    color: var(--muted);
+    text-align: center;
+}
+
+#if_root .inventory-select-name{
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#if_root .inventory-select-role{
+    color: var(--muted);
+    font-size: 7px;
+    text-transform: uppercase;
+    max-width: 58px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#if_root .inventory-empty{
+    color: var(--muted);
+    font-size: 9px;
+    padding: 7px 2px;
+}
+
+#if_root .current-object-zone{
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    min-height: 0;
+}
+
+#if_root .current-object-title{
+    align-self: stretch;
+    color: var(--ink);
+    font-size: 9px;
+    font-weight: 900;
+    line-height: 1;
+    border-bottom: 1px solid var(--panel-line);
+    padding-bottom: 1px;
+}
+
+#if_root .current-object-portrait-card{
+    width: 100%;
+    flex: 0 0 auto;
+}
+
+#if_root .current-object-portrait-card.empty{
+    opacity: .7;
+}
+
+#if_root .object-card-art{
+    width: 100%;
+    height: 100%;
+    background: var(--object-art-fill,#475569);
+    display: flex;
+    align-items: flex-start;
+    padding: 6px;
+    color: var(--fixed-on-art);
+    font: 900 10px/1.05 sans-serif;
+    overflow: hidden;
+    box-sizing: border-box;
+}
+
+#if_root .object-card-art span{
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-shadow: 0 1px 2px rgba(0,0,0,.65);
+}
+
+@keyframes cinter-command-pulse {
+    0%,100% {
+        opacity: .28;
+        transform: scale(.75);
+    }
+
+    50% {
+        opacity: 1;
+        transform: scale(1.15);
+    }
+
+}
+
+#if_root #bottom-explorer-status.command-active::after{
+    content: " ●";
+    display: inline-block;
+    margin-left: 4px;
+    color: var(--blue);
+    animation: cinter-command-pulse .8s ease-in-out infinite;
+    transform-origin: center;
+}
+
+#if_root .command-activity-live{
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+#if_root .command-activity-live::before{
+    content: "●";
+    color: var(--blue);
+    animation: cinter-command-pulse .8s ease-in-out infinite;
+    transform-origin: center;
+}
+
+
+/* Build game/full-window mode ---------------------------------------------------
+   Tab hides the surrounding editor chrome, but Build keeps its authoring toolbar.
+   The toolbar participates in viewport layout instead of overlaying the Babylon
+   canvas: title/status bar -> toolbar -> remaining canvas. */
+#if_root.if_game-mode.if_map-mode #viewport{
+    display:flex !important;
+    flex-direction:column !important;
+    align-items:stretch !important;
+}
+#if_root.if_game-mode.if_map-mode #map-controls{
+    display:flex !important;
+    position:relative !important;
+    z-index:35 !important;
+    left:auto !important;
+    right:auto !important;
+    top:auto !important;
+    width:100% !important;
+    max-width:none !important;
+    flex:0 0 auto !important;
+    margin:0 !important;
+    box-shadow:none !important;
+}
+#if_root.if_game-mode.if_map-mode #map-canvas{
+    display:block !important;
+    flex:1 1 auto !important;
+    min-height:0 !important;
+    width:100% !important;
+    height:auto !important;
+}

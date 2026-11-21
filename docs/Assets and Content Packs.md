@@ -1,6 +1,6 @@
 # CinterForge Terminal — Assets and Content Packs
 
-## Current architecture (2026-11-19)
+## Current architecture and integration evidence (2026-11-20)
 
 **Terminal owns the shared asset technology.** No Terminal command, lifecycle
 step, viewer, or stage may require `./CC build web` or a checked-out
@@ -42,11 +42,44 @@ Terminal as consumers, but building/running Terminal never requires them.
 
 The original Server's asset-management and export *orchestration* remain
 Server-specific. The actual static/animated per-asset Minecraft Add-On
-writer is now Terminal-owned and Server calls it through a verified adapter. Terminal already has UCI ZIP import,
-reports, view tabs, and Cloudflare backup, but complete local GLB-to-Blockify
-execution, CSV batch conversion, selected user-pack installation, and Converter
-queue/UI adaptation remain follow-on integration work. Do not advertise
-unfinished commands. The existing Bedrock Comms behavior pack remains installed
+writer is now Terminal-owned and Server calls it through a verified adapter. Terminal now bridges the installed native HTTP service to the **original**
+CinterForgeServer saved-asset and migration commands and the CinterForgeWebApp
+IFPlayer Asset Browser/Blockify batch scripts. The retained source closure is
+under `webapp/data/asset_engine/original` and is staged with the pinned asset
+engine receipt. This is an explicit build/stage source snapshot, not a runtime
+checkout traversal, new UCI format, or new voxel algorithm. Server path-provider
+and original saved-version UCI compatibility adaptors are recorded in that
+snapshot. The shell adapter is `webapp/runtime/CinterForgeAssetOriginal.py`.
+
+- `assets import <path>` uses the original Server saved-version writer and
+  the original Plugins UCI algorithm for an imported GLB/glTF; preserves the
+  imported bytes and existing versions; opens that UCI in the original Asset
+  Viewer without silently changing it. The original `CIFBlockifyBatch` batch
+  conversion runs only through the separate `assets blockify <CSV>` command.
+  Canonical UCI folder/ZIP imports
+  copy existing user data unchanged; ZIPs here are user-supplied import archives,
+  **not** Cloudflare publication containers.
+- `assets report` generates the existing Converter `AssetGallery.html` under
+  the selected `Builds/Assets` root. `assets view <uci>` opens only that UCI in
+  the original WebApp IFPlayer Babylon Asset Viewer, using original Server saved
+  listings, metadata, animation and Blockbench operations. These are separate
+  interfaces; neither opens the IFPlayer provider-search page as a report.
+- `assets blockify <absolute CSV>` validates the existing ContentPacks columns,
+  persists the CSV under `Builds/Assets/ContentPacks.csv` without replacing a
+  different authored file, queues the exact WebApp `CIFBlockifyBatch` authoring
+  implementation, streams progress, and delegates pack assembly to the original
+  Server migration implementation. No new voxelizer or pack generator exists.
+
+**Evidence limits:** Python import/UCI/lookup and source-versus-stage SHA checks
+passed on a temporary Assets library. A real Chromium DOM check rendered the
+original saved-asset card and action controls. This container's Chromium could
+not initialize WebGL and the native Mac/Linux/Windows application was not run;
+animated GLB playback, full voxelization, and installed-app acceptance therefore
+remain unverified. An original Mixamo animation search index is required by
+some original authoring paths. The Server's standalone Minecraft test-server
+controls are not yet wired into Terminal's existing Bedrock lifecycle. Selected
+user-pack installation and Converter queue/UI adaptation remain separate work.
+Do not advertise unverified capabilities as accepted. The existing Bedrock Comms behavior pack remains installed
 alongside the one user-selected behavior pack (two in total) once selection is
 implemented. Neither this patch nor the offline tests is evidence of a live
 Cloudflare publish or native Mac/Linux/Windows toolchain success.
@@ -76,9 +109,10 @@ Terminal retains its Steam state root, but Assets report/import/view and
 Assets setup/publish use the ONE explicitly selected DevTools Builds root when
 configured. `CINTERFORGE_ASSETS_ROOT` is an optional explicit absolute-path
 override. No automatic search of `~/Source`, no new Builds on app launch, and
-no alternate asset libraries invented by the Host. Without an explicitly
-selected library, Terminal falls back to the installed writable state root; a
-missing library error includes the exact directory it checked.
+no alternate asset libraries invented by the Host. Without an explicitly selected shared library, import, view and report
+refuse to create another independent Assets tree under Steam and report the
+selection error. The installed app's mutable Steam state remains for its own
+runtime state only.
 
 Cloudflare uses the **existing Host R2 provider, bucket mapping and provider
 object-prefix**; Assets is a folder inside those buckets, not a bucket or a
@@ -136,3 +170,37 @@ There is no `.cinterforge-asset-backup.json` marker and no new bucket.
   the user's actual R2 inventory, three native stages and remote CDN URLs have
   not been verified in this environment. Run Test after Stage, and verify
   actual remote inventory before publishing any library.
+
+## Complete CSV Blockify output and authoring gate
+
+The original `CIFBlockifyBatch.MigrateCatalogAsset` creates resolution-zero
+Solid/animation resources without fabricating visible thumbnails. Nonzero
+resolutions produce Solid GLTF/resources + thumbnail, Block GLTF/resources +
+thumbnail, resolution-specific `edits.json`, original voxel/rig/animation
+metadata, and an authored per-asset `.mcaddon`. The original Server saves the
+UCI manifest, preserves original saved versions and Blockify edits, and stages
+per-asset `MCAddons/<pack>/<command>/` resources with `asset.json`, previews,
+artifacts and textures. Terminal then calls the original `asset-migration-build-packs`
+operation, producing `MCAddons/<pack>/<pack>.mcaddon`; the Terminal Server
+adapter distributes only the finished original pack to
+`ContentPacks/<pack>/<pack>.mcaddon` without writing another Minecraft pack.
+The original `asset-migration-pack-galleries` adds root/per-pack `index.html`,
+viewer runtime, authored banner/thumbnail artwork and animated previews. The
+existing Converter AssetGallery generates `Assets/AssetGallery.html`.
+
+The original same-origin WebApp authoring requests and progress use a narrowly
+authorized browser HTTP route with exact Origin and Fetch-Site checks; every
+other privileged native API retains its existing token checks. The normal
+Terminal 64 KiB control-message limit remains unchanged for other APIs. The
+original JSON GLTF authoring command has a 256 MiB per-request safety cap.
+Missing artwork, incomplete staged UCIs, assembly errors, or failed gallery
+creation fail the batch and leave source and staged files for reconciliation;
+no destructive pack reset or invented placeholder UCI is performed.
+
+**Verification:** Source-level integration tests exercised a real complete
+`DefaultCharacter` asset ZIP through original Server stage-existing, themed
+pack `.mcaddon` assembly, and the Converter AssetGallery in temporary Builds.
+The original Pack gallery generator was observed refusing absent pinned
+Babylon in the source-only test; staged Babylon and all required pack artwork
+were not supplied for a complete Pack-gallery acceptance. WebGL voxelization
+and signed native macOS/Windows/Linux acceptance remain unverified.

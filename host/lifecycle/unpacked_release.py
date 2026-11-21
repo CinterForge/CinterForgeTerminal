@@ -209,6 +209,8 @@ def build_four(builds: Path, *, release: str | None = None,
     for target in selected:
         print(f'[TERMINAL BUILD] Gathering unpacked {target} inputs...', flush=True)
         assets = up._devtools_assets(builds) if target == 'devtools' else up._app_assets(builds, target, release)
+        if target == 'win':
+            up._require_windows_discovery(assets, release)
         identity = _fingerprint(_input_identity(assets, target))
         old = previous.get('targets', {}).get(target, {})
         if old.get('input_identity') == identity and old.get('files'):
@@ -441,10 +443,25 @@ def stage_four(builds: Path, *, release: str | None = None,
             previous = json.loads(receipt_path.read_text('utf-8'))
         except (OSError, ValueError, TypeError):
             previous = {}
+        # The Windows Host DLL must be recorded by Build, and must be
+        # present at the exact path the retail Python discovery runtime loads.
+        # This also checks cached, unchanged Stages before allowing a skip.
+        discovery_member = None
+        if target == 'win':
+            up._require_windows_discovery(files, release)
+            discovery_member = up._windows_discovery_member(release)
         # Fast and complete stat-only clean check; Stage never hashes or
         # transfers the multi-GB SDK again when its installed files are intact.
-        if (previous.get('build_fingerprint') == info['fingerprint'] and
-                previous.get('installed_state') == _installed_state(root, files)):
+        unchanged = (previous.get('build_fingerprint') == info['fingerprint'] and
+                     previous.get('installed_state') == _installed_state(root, files))
+        if unchanged and discovery_member is not None:
+            staged = root / discovery_member
+            unchanged = (staged.is_file() and not staged.is_symlink() and
+                         _sha(staged) == files[discovery_member]['sha256'])
+        if unchanged:
+            if discovery_member is not None:
+                print('[TERMINAL STAGE] PASS Windows retail Bonjour-compatible Host DLL: ' +
+                      str(root / discovery_member), flush=True)
             print(f'[TERMINAL STAGE] {target} unchanged; no copy or ZIP', flush=True)
             continue
         for name, detail in files.items():
@@ -480,6 +497,13 @@ def stage_four(builds: Path, *, release: str | None = None,
         state = _installed_state(root, files)
         if state is None:
             raise RuntimeError('Incomplete unpacked Stage: ' + target)
+        if discovery_member is not None:
+            staged = root / discovery_member
+            if (staged.is_symlink() or not staged.is_file() or
+                    _sha(staged) != files[discovery_member]['sha256']):
+                raise RuntimeError('Windows Stage missing or altered its bundled mDNS DLL: ' + str(staged))
+            print('[TERMINAL STAGE] PASS Windows retail Bonjour-compatible Host DLL: ' +
+                  str(staged), flush=True)
         _atomic_json(receipt_path, {'schema': BUILT_SCHEMA, 'release': release,
                                      'target': target, 'build_fingerprint': info['fingerprint'],
                                      'installed_state': state})
@@ -637,7 +661,7 @@ def prepare_publish_packages(builds: Path, *, release: str | None = None,
             # Invalidate any earlier MSI-only archive, while retaining the
             # canonical ZIP of the staged Windows product folder.
             package_fingerprint = hashlib.sha256(
-                (info['fingerprint'] + '|windows-product-zip-v2').encode()).hexdigest()
+                (info['fingerprint'] + '|windows-product-zip-v3-bundled-discovery').encode()).hexdigest()
         name = up.artifact_filename(target)
         old = previous.get('artifacts', {}).get(target, {})
         path = root / name

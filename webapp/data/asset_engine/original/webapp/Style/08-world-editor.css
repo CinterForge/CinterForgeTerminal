@@ -1,0 +1,269 @@
+/*
+ * CinterForge IFPlayer — 08-world-editor.css
+ * ========================================================================
+ *
+ * Purpose
+ * -------
+ * World editor and semantic browser presentation. This file owns the unified room/group browser, spatial coordinate editor, floor-spacing controls, taxonomy editing, object browser hierarchy, Game Saves rows, and related inspector layout.
+ *
+ * Ownership
+ * ---------
+ * This stylesheet is one ordered slice of the IFPlayer presentation cascade.
+ * It contains visual/layout rules only; solver, interpreter, world topology,
+ * and runtime authority remain outside CSS. Keep selectors in this file within
+ * the responsibility described above whenever practical.
+ *
+ * Cascade contract
+ * ----------------
+ * presentation/ifplayer.css imports these files in numeric order. That order is
+ * intentional and preserves the cascade of the former monolithic stylesheet.
+ * Later files may refine shared chrome established by earlier files.
+ */
+
+/* Human-readable Solution panel: compact chain cards with ordered executable steps. */
+#if_root .solution-chain-list{ display:flex; flex-direction:column; gap:8px; }
+#if_root .solution-chain{ border-bottom:1px solid var(--panel-line, rgba(127,127,127,.28)); padding:6px 2px 10px; }
+#if_root .solution-steps{ margin:6px 0 0 20px; padding:0; }
+#if_root .solution-steps li{ margin:0 0 7px 0; line-height:1.3; }
+#if_root .solution-steps .panel-command{ display:inline; }
+
+/* IFPlayer unified spatial Room Browser. */
+#if_root .room-browser-select{ width:100%; margin:6px 0 10px; }
+#if_root .room-browser-card{ aspect-ratio:85.60/53.98; max-width:210px; width:70%; margin:8px auto 12px; padding:12px; box-sizing:border-box; border:1px solid currentColor; overflow:auto; }
+#if_root .room-browser-card-title{ font-weight:700; margin-bottom:8px; }
+#if_root .spatial-grid{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; margin:8px 0; }
+#if_root .spatial-grid label{ display:grid; grid-template-columns:auto 1fr; gap:4px; align-items:center; }
+#if_root .spatial-coordinate{ width:100%; min-width:0; box-sizing:border-box; }
+#if_root .spatial-group{ margin-top:10px; padding-top:8px; border-top:1px solid currentColor; }
+
+/* IFPlayer unified Room Browser: persistent list + editable spatial detail. */
+#if_root .room-browser-heading{ display:flex; align-items:center; justify-content:space-between; gap:8px; }
+#if_root .room-browser-add-group{ font:inherit; padding:3px 8px; border:1px solid currentColor; border-radius:3px; background:transparent; color:inherit; cursor:pointer; }
+#if_root .spatial-create-group-dialog{ width:min(420px,calc(100vw - 32px)); padding:0; border:1px solid var(--tab-edge); background:var(--panel); color:var(--ink); box-shadow:0 10px 30px rgba(0,0,0,.45); }
+#if_root .spatial-create-group-dialog::backdrop{ background:rgba(0,0,0,.58); }
+#if_root .spatial-create-group-dialog form{ display:grid; gap:12px; padding:16px; }
+#if_root .spatial-create-group-title{ font-size:15px; font-weight:800; }
+#if_root .spatial-create-group-name{ display:grid; gap:5px; font-weight:700; }
+#if_root .spatial-create-group-name input{ width:100%; box-sizing:border-box; padding:6px 7px; border:1px solid var(--tab-edge); background:var(--soft-surface); color:var(--ink); font:inherit; }
+#if_root .spatial-create-group-selection{ color:var(--muted); font-size:12px; }
+#if_root .spatial-create-group-actions{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:5px; }
+#if_root .spatial-create-group-actions button{ min-width:0; padding:6px 4px; border:1px solid var(--tab-edge); background:var(--tab-face); color:var(--ink); font:700 11px/1.15 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; cursor:pointer; }
+#if_root .spatial-create-group-actions button:hover:not(:disabled){ background:var(--tab-hover); }
+#if_root .spatial-create-group-actions button:disabled{ opacity:.4; cursor:default; }
+#if_root .spatial-create-group-actions .spatial-create-group-primary{ background:var(--tab-active); box-shadow:inset 0 2px 0 var(--blue); }
+#if_root .room-browser-layout{ display:grid; grid-template-columns:minmax(215px, 55%) minmax(155px, 1fr); gap:10px; min-height:0; }
+#if_root .room-browser-list{ max-height:62vh; overflow:auto; border-right:1px solid color-mix(in srgb, currentColor 22%, transparent); padding-right:6px; }
+#if_root .room-browser-game{ margin:0 0 5px; }
+#if_root .room-browser-game > summary{ cursor:pointer; font-weight:700; position:sticky; top:0; z-index:1; padding:4px 5px; background:var(--room-browser-game-color,#9aa7b8); color:#101216; border:1px solid var(--room-browser-game-color,#9aa7b8); border-radius:2px; text-shadow:none; }
+#if_root .room-browser-game-list{ display:flex; flex-direction:column; gap:2px; padding:3px 0 6px; }
+#if_root .room-browser-room{ width:100%; text-align:left; border:0; background:transparent; color:inherit; font:inherit; padding:3px 5px; border-radius:3px; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#if_root .room-browser-room:hover, #if_root .room-browser-room.active{ background:color-mix(in srgb, currentColor 12%, transparent); }
+#if_root .room-browser-detail{ min-width:0; overflow:visible; }
+#if_root .room-browser-card{ aspect-ratio:85.60/53.98; max-width:260px; width:100%; margin:4px 0 10px; padding:10px; box-sizing:border-box; border:1px solid currentColor; overflow:auto; }
+#if_root .spatial-group-membership{ display:flex; align-items:center; gap:4px; font-weight:600; }
+@media (max-width:720px) { #if_root .room-browser-layout{ grid-template-columns:1fr; } #if_root .room-browser-list{ max-height:28vh; border-right:0; border-bottom:1px solid color-mix(in srgb, currentColor 22%, transparent); padding-right:0; padding-bottom:6px; } }
+
+#if_root .spatial-editor-mode{ display:flex; gap:5px; margin:6px 0; }
+#if_root .spatial-editor-mode button{ flex:1; font:inherit; border:1px solid currentColor; border-radius:3px; background:transparent; color:inherit; padding:3px 5px; cursor:pointer; }
+#if_root .spatial-editor-mode button.active{ background:color-mix(in srgb, currentColor 16%, transparent); font-weight:700; }
+#if_root .spatial-room-reset-row{ display:flex; gap:5px; margin:7px 0 4px; }
+#if_root .spatial-room-reset-row button{ flex:1; font:inherit; border:1px solid currentColor; border-radius:3px; background:transparent; color:inherit; padding:4px 5px; cursor:pointer; }
+#if_root .spatial-room-reset-row button:disabled{ opacity:.4; cursor:default; }
+#if_root .spatial-problem{ margin:6px 0; padding:6px 7px; border:1px solid #ffb020; color:#ffcc66; background:rgba(255,176,32,.08); font-weight:700; line-height:1.25; }
+#if_root .spatial-save-state{ font-size:10px; opacity:.8; margin-top:4px; }
+#if_root .room-browser-room.spatial-collision{ outline:1px solid #ffb020; outline-offset:-1px; }
+
+/* Unified editor gets a second top action row without colliding with stage tabs. */
+#if_root.if_all-mode{ --top: 88px; }
+#if_root.if_all-mode #stage-tabs{ top:56px; }
+#if_root.if_all-mode #top-current-room{ top:4px; }
+
+/* Room/editor usability: stable Photoshop-style tab grids, never squeezed flex pills. */
+#if_root #property-subtabs:not(:empty){ display:grid !important; grid-template-columns:repeat(4,minmax(0,1fr)); gap:2px; align-items:stretch; }
+#if_root #property-subtabs .subtype-tab{ min-width:0; width:100%; overflow:hidden; text-overflow:ellipsis; padding:5px 3px; }
+
+/* Spatial editor movement pad. Grid mode is intentionally tactile; direct numeric entry remains below it. */
+#if_root .spatial-grid-mover{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); grid-template-rows:auto auto auto; gap:4px; margin:8px 0; align-items:stretch; }
+#if_root .spatial-grid-mover button{ min-height:30px; border:1px solid var(--tab-edge); background:var(--tab-face); color:var(--ink); font:700 11px/1.1 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; cursor:pointer; }
+#if_root .spatial-grid-mover button:hover:not(:disabled){ background:var(--tab-hover); }
+#if_root .spatial-grid-mover button:disabled{ opacity:.35; cursor:default; }
+#if_root .spatial-grid-position{ min-height:38px; border:1px solid color-mix(in srgb,currentColor 35%,transparent); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; font-size:10px; }
+#if_root .spatial-grid-position span{ font:700 12px ui-monospace,SFMono-Regular,Menlo,monospace; }
+#if_root .move-floor-up{ grid-column:1; grid-row:1; }
+#if_root .move-z-plus{ grid-column:2; grid-row:1; }
+#if_root .move-x-plus{ grid-column:1; grid-row:2; }
+#if_root .move-center{ grid-column:2; grid-row:2; }
+#if_root .move-x-minus{ grid-column:3; grid-row:2; }
+#if_root .move-z-minus{ grid-column:2; grid-row:3; }
+#if_root .move-floor-down{ grid-column:3; grid-row:3; }
+
+#if_root .spatial-groups-section{ margin-top:9px; border-top:1px solid color-mix(in srgb,currentColor 35%,transparent); }
+#if_root .spatial-groups-section > summary{ cursor:pointer; font-weight:700; padding:7px 2px 5px; user-select:none; }
+#if_root .spatial-groups-body{ padding:0 0 4px 8px; }
+#if_root .spatial-groups-actions{ display:flex; justify-content:flex-end; padding:2px 0 4px; }
+#if_root .spatial-groups-body .spatial-group{ margin-top:5px; padding-top:7px; }
+
+/* r27 World Editor: coordinate-first inspector and uncluttered spatial actions. */
+#if_root .spatial-coordinate-editor{ margin:2px 0 6px; }
+#if_root .spatial-editor-title{ font-weight:800; font-size:11px; margin-bottom:4px; }
+#if_root .spatial-grid-xyz{ margin:0; gap:5px; }
+#if_root .spatial-grid-xyz label{ grid-template-columns:auto minmax(0,1fr); font-weight:700; }
+#if_root .spatial-room-action-row{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:4px; margin:5px 0 8px; }
+#if_root .spatial-room-action-row button{ min-width:0; padding:4px 2px; border:1px solid var(--tab-edge); background:var(--tab-face); color:var(--ink); font:700 10px/1.1 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; cursor:pointer; }
+#if_root .spatial-room-action-row button.active{ background:var(--tab-active); box-shadow:inset 0 2px 0 var(--blue); }
+#if_root .spatial-room-action-row button:disabled{ opacity:.4; cursor:default; }
+#if_root .room-browser-info{ aspect-ratio:auto !important; max-width:none !important; width:100%; max-height:250px; margin:0 0 7px !important; }
+#if_root .room-browser-description{ white-space:pre-wrap; margin:8px 0; padding-top:7px; border-top:1px solid color-mix(in srgb,currentColor 24%,transparent); font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace; }
+#if_root .spatial-coordinate-info{ margin-top:5px; font-weight:700; }
+
+/* Property tabs must remain readable in the narrow right inspector. */
+#if_root #properties-tabs .property-tab, #if_root #property-subtabs .subtype-tab{ white-space:normal; text-overflow:clip; line-height:1.05; min-height:28px; }
+#if_root #property-subtabs:not(:empty){ grid-auto-rows:minmax(28px,auto); }
+
+/* IF World Editor hierarchical room/group browser */
+#if_root .room-browser-subgroup{ margin: 4px 0 6px 8px; border-left: 1px solid rgba(255,255,255,.12); padding-left: 7px; }
+#if_root .room-browser-subgroup > summary, #if_root .room-browser-floor > summary, #if_root .room-browser-group-index > summary{ cursor: pointer; font-size: 12px; font-weight: 650; line-height: 1.5; }
+#if_root .room-browser-floor, #if_root .room-browser-group-index{ margin: 3px 0; }
+#if_root .room-browser-subgroup-list{ display: grid; gap: 2px; margin: 3px 0 5px 8px; }
+#if_root .room-browser-group-select{ width: calc(100% - 4px); text-align: left; border: 0; background: transparent; color: inherit; font: inherit; padding: 1px 3px; cursor: pointer; border-radius: 3px; }
+#if_root .room-browser-group-select:hover{ background: rgba(255,255,255,.08); }
+#if_root .room-browser-group-select.active{ background: rgba(120,170,255,.22); outline: 1px solid rgba(120,170,255,.55); }
+
+/* Selected Room/Group identity belongs above the spatial controls.  Room prose is
+   intentionally free-flowing rather than forced into the compact metadata card. */
+#if_root .room-browser-room-header{ margin:0 0 8px; min-width:0; }
+#if_root .room-browser-selected-name{ font-size:14px; line-height:1.25; font-weight:700; margin:0 0 5px; overflow-wrap:anywhere; }
+#if_root .room-browser-description-top{ margin:0 0 8px; padding:0; border-top:0; max-height:none; overflow:visible; overflow-wrap:anywhere; font:12px/1.42 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; white-space:pre-wrap; }
+
+#if_root .room-browser-group-row{ display:grid; grid-template-columns:18px minmax(0,1fr); align-items:start; gap:3px; }
+#if_root .room-browser-group-disclosure{ width:18px; height:18px; min-width:18px; padding:0; border:0; background:transparent; color:inherit; font:700 13px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; cursor:pointer; text-align:center; }
+#if_root .room-browser-group-disclosure:hover{ background:rgba(255,255,255,.08); }
+#if_root .room-browser-group-members.collapsed{ display:none; }
+
+#if_root .room-browser-all-group{ margin:0 0 7px; padding-bottom:6px; border-bottom:1px solid rgba(255,255,255,.14); }
+#if_root .spatial-delete-group{ width:100%; margin:5px 0 8px; border:1px solid currentColor; border-radius:3px; background:transparent; color:inherit; font:inherit; font-weight:700; padding:4px 6px; cursor:pointer; }
+
+
+/* IFPlayer Room Browser layer-style tree and room inspector */
+#if_root .room-browser-layout{ grid-template-columns:minmax(215px, 55%) minmax(155px, 1fr); gap:10px; }
+#if_root .room-browser-game > summary{ display:flex; align-items:center; gap:5px; }
+#if_root .room-browser-eye{ width:18px; min-width:18px; height:18px; padding:0; border:0; background:transparent; color:inherit; font:700 13px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; cursor:pointer; text-align:center; opacity:.95; }
+#if_root .room-browser-eye.hidden-item{ opacity:.38; }
+#if_root .room-browser-tree-row{ display:grid; grid-template-columns:18px minmax(0,1fr); align-items:center; gap:3px; }
+#if_root .room-browser-group-row{ grid-template-columns:18px 18px 18px minmax(0,1fr); }
+#if_root .room-browser-selection-target{ width:18px; min-width:18px; height:18px; padding:0; border:0; border-radius:2px; background:transparent; color:inherit; font:800 15px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; cursor:pointer; text-align:center; opacity:.9; }
+#if_root .room-browser-selection-target:hover{ background:rgba(255,255,255,.10); opacity:1; }
+#if_root .room-browser-floor > summary{ display:flex; align-items:center; gap:4px; list-style:none; }
+#if_root .room-browser-floor > summary::-webkit-details-marker{ display:none; }
+#if_root .room-browser-inline-disclosure{ width:18px; min-width:18px; height:18px; display:inline-block; text-align:center; font:700 13px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+#if_root .room-browser-inline-disclosure::before{ content:'▸'; }
+#if_root .room-browser-floor[open] > summary .room-browser-inline-disclosure::before{ content:'▾'; }
+#if_root .room-browser-room-header{ display:grid; grid-template-rowa:minmax(auto,1fr) 120px; gap:10px; align-items:start; margin:0 0 10px; }
+#if_root .room-browser-room-text{ min-width:0; height:auto; overflow:visible; }
+#if_root .room-browser-selected-name{ font-size:18px; line-height:1.15; font-weight:800; margin:0 0 6px; }
+#if_root .room-browser-description-top{ margin:0; padding:0; border:0; max-height:none !important; height:auto !important; overflow:visible !important; white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.42 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+#if_root .room-browser-room-thumbnail{ width:100%; height:auto; object-fit:cover; border:1px solid color-mix(in srgb,currentColor 28%,transparent); border-radius:2px; background:#111; }
+@media (max-width:720px) { #if_root .room-browser-room-header{ grid-template-rows:minmax(0,1fr) 60px; } #if_root .room-browser-room-thumbnail{ width:100%; height:auto; } }
+
+#if_root .room-browser-eye{ position:relative; }
+#if_root .room-browser-eye::before{ content:""; position:absolute; left:2px; top:5px; width:12px; height:7px; border:1.5px solid currentColor; border-radius:55% 55%; box-sizing:border-box; }
+#if_root .room-browser-eye::after{ content:""; position:absolute; left:7px; top:7px; width:3px; height:3px; border-radius:50%; background:currentColor; }
+#if_root .room-browser-eye.hidden-item::after{ display:none; }
+
+/* 3D floor-spacing control: compact Photoshop-style presentation setting. */
+#if_root .map-spacing-control{
+    display:inline-flex; align-items:center; gap:6px; min-width:190px;
+    padding:2px 7px; border:1px solid var(--panel-border); background:var(--map-control-surface);
+    font:700 var(--map-control-font-size,10px) -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+    color:var(--text); white-space:nowrap; box-sizing:border-box;
+}
+#if_root .map-spacing-control input[type="range"]{ width:96px; min-width:72px; margin:0; }
+#if_root .map-spacing-control input[type="number"]{ width:56px; min-width:56px; margin:0; font-variant-numeric:tabular-nums; }
+
+/* File-backed world taxonomy editing. */
+#if_root .world-category-editor{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+#if_root .world-category-select{
+  min-width: 0;
+  max-width: 100%;
+  background: var(--panel-bg, #2f2f2f);
+  color: var(--ink, #e5e7eb);
+  border: 1px solid var(--panel-border, #666);
+  border-radius: 2px;
+  padding: 2px 4px;
+}
+#if_root .world-category-slot{
+  margin-top: 4px;
+}
+#if_root .vocabulary-world-editor{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 8px;
+}
+#if_root .vocabulary-world-item{
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+
+/* Objects browser: categories live in the panel instead of a subtype-tab row. */
+#if_root .object-browser{ min-height:0; }
+#if_root .object-browser-category{ margin:0 0 5px; border-bottom:1px solid color-mix(in srgb,currentColor 14%,transparent); }
+#if_root .object-browser-category > summary{ cursor:pointer; font-size:13px; font-weight:750; line-height:1.55; padding:4px 6px; background:color-mix(in srgb,currentColor 6%,transparent); }
+#if_root .object-browser-rows{ display:grid; gap:2px; padding:3px 3px 7px 12px; }
+#if_root .object-browser-row{ display:grid; grid-template-columns:42px minmax(0,1fr); gap:7px; align-items:start; padding:4px; border-radius:3px; }
+#if_root .object-browser-row:hover{ background:color-mix(in srgb,currentColor 7%,transparent); }
+#if_root .object-browser-thumb{ width:42px; height:42px; object-fit:cover; border:1px solid color-mix(in srgb,currentColor 25%,transparent); background:#111; border-radius:2px; }
+#if_root .object-browser-thumb-empty{ display:flex; align-items:center; justify-content:center; opacity:.45; }
+#if_root .object-browser-copy{ min-width:0; }
+#if_root .object-browser-name{ font-weight:700; overflow-wrap:anywhere; }
+#if_root .object-browser-row .world-category-select{ width:100%; margin-top:3px; }
+
+/* r42: world-scoped semantic browsers and compact Game Saves rows. */
+#if_root .world-data-game > summary{ display:flex; align-items:center; gap:5px; }
+#if_root .world-data-rows{ padding-left:12px; }
+#if_root .world-data-row{ padding:4px 6px; border-radius:3px; }
+#if_root .world-data-row:hover{ background:color-mix(in srgb,currentColor 7%,transparent); }
+#if_root .world-data-row .world-category-select{ width:100%; margin-top:3px; }
+#if_root .game-save-list{ display:grid; gap:3px; padding:4px 3px 8px 12px; }
+#if_root .game-save-row{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:start; padding:5px 6px; border-bottom:1px solid color-mix(in srgb,currentColor 14%,transparent); }
+#if_root .game-save-copy{ min-width:0; }
+#if_root .game-save-delete{ white-space:nowrap; align-self:center; }
+
+/* Spatial editing belongs to the 3D Map surface. Rooms/Groups remain browsable
+   everywhere, but raw/grid coordinates and movement/reset controls are hidden on
+   Session, Graph, Assets, RPG, and Input views. */
+#if_root:not(.if_map-mode) .spatial-coordinate-editor,
+#if_root:not(.if_map-mode) .spatial-grid-mover,
+#if_root:not(.if_map-mode) .spatial-room-action-row,
+#if_root:not(.if_map-mode) .spatial-coordinate-info,
+#if_root:not(.if_map-mode) .spatial-problem {
+    display: none !important;
+}
+
+/* Spatial Rooms drag/drop -------------------------------------------------- */
+#if_root .spatial-drag-source{ cursor:grab; }
+#if_root .spatial-drag-source.spatial-dragging{ opacity:.55; cursor:grabbing; }
+#if_root .spatial-drop-target{ outline-offset:-2px; }
+#if_root .spatial-drop-target.spatial-drag-over{ outline:2px solid rgba(120,190,255,.9); background:rgba(120,190,255,.14); }
+
+/* Floor rows have eye + disclosure + a real flexible label column.  The generic
+   group row reserves an extra 18px selection-affordance column, which crushed
+   floor names into a one-character-wide stack. */
+#if_root .room-browser-floor > .room-browser-group-row{ grid-template-columns:18px 18px minmax(0,1fr); }
+#if_root .room-browser-floor .room-browser-group-select{ min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+/* Floor authoring needs room to be edited, not a compressed XYZ strip. */
+#if_root .spatial-coordinate-editor .spatial-grid-xyz{ display:grid; grid-template-columns:1fr; gap:6px; }
+#if_root .spatial-coordinate-editor .spatial-grid-xyz label{ display:grid; grid-template-columns:minmax(78px,auto) minmax(72px,1fr); align-items:center; gap:8px; white-space:nowrap; }
+#if_root .spatial-coordinate-editor .spatial-grid-xyz input{ width:100%; min-width:72px; box-sizing:border-box; }

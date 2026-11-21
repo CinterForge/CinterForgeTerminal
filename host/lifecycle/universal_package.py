@@ -298,6 +298,38 @@ WINDOWS_SHELL_PREFIX = 'CinterForge Terminal/Builds/CinterForgeTerminal/Runtime/
 WINDOWS_SHELL_REQUIRED = ('bash.exe', 'cygpath.exe', 'msys-2.0.dll')
 
 
+def _windows_discovery_member(release: str) -> str:
+    # CinterForgeDiscovery.py loads the Windows DNS-SD API from this exact
+    # installed Host/bin path (not from the optional DevTools SDK).
+    return (f'{APP_ROOTS["win"]}/Builds/Python/Host/win/{FOUR_ARCH["win"]}/{release}/bin/'
+            'CinterForgePythonHost.dll')
+
+
+def _require_windows_discovery(files: dict, release: str, *,
+                               zip_archive: zipfile.ZipFile | None = None) -> None:
+    """Fail closed if the Windows retail bundle lacks its native mDNS DLL."""
+    member = _windows_discovery_member(release)
+    if member not in files:
+        raise RuntimeError('Windows release missing bundled Bonjour-compatible Host DLL: ' + member)
+    if zip_archive is not None:
+        with zip_archive.open(member) as stream:
+            magic = stream.read(2)
+    else:
+        value = files[member]
+        if isinstance(value, bytes):
+            magic = value[:2]
+        else:
+            # Build inventories store the verified source path; retail assets
+            # use Path objects. Reject a symlink before opening either one.
+            source = value if isinstance(value, Path) else Path(value['source'])
+            if source.is_symlink() or not source.is_file():
+                raise FileNotFoundError('Missing or unsafe Windows Zeroconf DLL source: ' + str(source))
+            with source.open('rb') as stream:
+                magic = stream.read(2)
+    if magic != b'MZ':
+        raise RuntimeError('Windows bundled Zeroconf library is not a PE DLL: ' + member)
+
+
 def _require_windows_shell(files: dict[str, Path | bytes] | dict[str, dict], *,
                            zip_archive: zipfile.ZipFile | None = None) -> None:
     """Reject a Windows release without its actual packaged Bash closure."""
@@ -546,6 +578,58 @@ def _verify_mac_if_runtime(app: Path) -> None:
                            '\n'.join(errors[:40]))
 
 
+def _retail_zeroconf_assets(builds: Path, target: str, host_root: str) -> dict[str, Path]:
+    """Stage the platform-matched native DNS-SD library into the retail Host.
+
+    The service's CinterForgeDiscovery loads this exact Host/bin or Host/lib
+    location through ctypes. Neither the optional DevTools package nor an
+    installed source checkout can supply a missing production DLL/SO.
+    """
+    if target == 'win':
+        output = builds / 'Intermediates/CinterForgeTerminal/WindowsCross/x64/cmake'
+        library = output / 'CinterForgePythonHost.dll'
+        location = host_root + '/bin/'
+        magic = b'MZ'
+    elif target == 'linux':
+        output = builds / 'Intermediates/CinterForgeTerminal/LinuxNative/x64/cmake'
+        library = output / 'libCinterForgePythonHost.so'
+        location = host_root + '/lib/'
+        magic = b'\x7fELF'
+    else:
+        raise ValueError('Retail Zeroconf asset target must be Windows or Linux')
+    if not library.is_file() or library.is_symlink():
+        raise FileNotFoundError(f'{target} shared Zeroconf library missing from Build: '
+                                + str(library) + f'; run ./Cinter build {target}')
+    with library.open('rb') as src:
+        if src.read(len(magic)) != magic:
+            raise RuntimeError(f'{target} shared Zeroconf library has invalid native header: {library}')
+    result = {location + library.name: library}
+    if target == 'win':
+        # Cross Build inspected the import tables of the DLL as well as the
+        # native launcher and resolved its full non-system DLL dependency set.
+        # Stage that same verified closure beside the ctypes-loaded DLL.
+        receipt = builds / 'Logs/CinterForgeTerminal/windows-cross-build.json'
+        if not receipt.is_file():
+            raise FileNotFoundError('Windows cross-build receipt missing: ' + str(receipt))
+        record = json.loads(receipt.read_text(encoding='utf-8'))
+        if (record.get('status') != 'passed' or
+                record.get('shared_host_sha256') != _hash(library) or
+                record.get('shared_host_dll') != str(library)):
+            raise RuntimeError('Windows Host DLL does not match verified cross-build receipt; rebuild Windows')
+        dependencies = record.get('runtime_dlls')
+        if not isinstance(dependencies, dict):
+            raise RuntimeError('Windows shared Host DLL has no verified PE dependency closure')
+        for name, digest in dependencies.items():
+            if not re.fullmatch(r'[A-Za-z0-9_.+-]+\.dll', name, re.IGNORECASE):
+                raise RuntimeError('Unsafe Windows DLL dependency in Build receipt: ' + repr(name))
+            dependency = output / name
+            if (not dependency.is_file() or dependency.is_symlink() or
+                    _hash(dependency) != digest):
+                raise RuntimeError('Windows Zeroconf DLL dependency missing or changed: ' + str(dependency))
+            result[location + name] = dependency
+    return result
+
+
 def _app_assets(builds: Path, target: str, release: str) -> dict[str, Path | bytes]:
     """One relocatable app per OS. No SDK or server binary before consent."""
     arch = FOUR_ARCH[target]
@@ -683,6 +767,11 @@ exec "$HERE/CinterForge Terminal" --builds "$BUILDS" --python "$BUILDS/Python/En
         from host.lifecycle.assets_dependency import staged_terminal_assets
         for relative, source in staged_terminal_assets(builds).items():
             assets[host_root + '/webapp/data/asset_engine/' + relative] = source
+        # Build owns native Host libraries, Stage copies them from this receipt.
+        # Discovery resolves this path under Python/Host/<platform>/<arch>/<release>.
+        assets.update(_retail_zeroconf_assets(builds, target, host_root))
+        if target == 'win':
+            _require_windows_discovery(assets, release)
     # CraftMaster owns its converter. Each Terminal release consumes the
     # platform-matched, verified Stage bytes through its explicit dependency
     # boundary. No source checkout or network operation is used in Build.
@@ -955,6 +1044,7 @@ def _verify_release_zip(path: Path, *, target: str, release: str,
             raise RuntimeError('Release ZIP contains generated Python bytecode/cache')
         if target == 'win':
             _require_windows_shell(files, zip_archive=archive)
+            _require_windows_discovery(files, release, zip_archive=archive)
         if any(not name.startswith(root + '/') or '\\' in name or '..' in Path(name).parts or
                '/Servers/Bedrock/' in name or name.endswith(('/bedrock_server', '/bedrock_server.exe'))
                for name in files):

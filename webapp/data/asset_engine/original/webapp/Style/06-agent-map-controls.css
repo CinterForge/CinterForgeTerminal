@@ -1,0 +1,293 @@
+/*
+ * CinterForge IFPlayer — 06-agent-map-controls.css
+ * ========================================================================
+ *
+ * Purpose
+ * -------
+ * Agent transcript selection, Photoshop-style agent toolbox controls, and Map category/context tab chrome. These controls are presentation-only selectors around persistent runtime agents and map views.
+ *
+ * Ownership
+ * ---------
+ * This stylesheet is one ordered slice of the IFPlayer presentation cascade.
+ * It contains visual/layout rules only; solver, interpreter, world topology,
+ * and runtime authority remain outside CSS. Keep selectors in this file within
+ * the responsibility described above whenever practical.
+ *
+ * Cascade contract
+ * ----------------
+ * presentation/ifplayer.css imports these files in numeric order. That order is
+ * intentional and preserves the cascade of the former monolithic stylesheet.
+ * Later files may refine shared chrome established by earlier files.
+ */
+
+/* Agent transcript selector is another Photoshop-style panel tab strip. */
+
+#if_root #session-agent-tabs{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1px;
+    padding: 4px 8px 0;
+    border-bottom: 1px solid var(--tab-edge);
+    flex: 0 0 auto;
+    background: var(--tab-strip);
+}
+
+#if_root .session-agent-tab{
+    min-width: 72px;
+}
+
+#if_root .session-perot .session-event-meta span{
+    color: var(--session-perot);
+}
+
+#if_root .session-holmes .session-event-meta span{
+    color: var(--session-holmes);
+}
+
+#if_root .session-watson .session-event-meta span{
+    color: var(--session-watson);
+}
+
+/* Photoshop-style agent toolbox --------------------------------------------------
+   The rail behaves like a tool palette: one selected agent drives the one visible
+   Agent panel. The card itself remains exact CR80; extra width becomes breathing
+   room rather than distortion. */
+
+#if_root{
+    --left: 300px;
+}
+
+@media (max-width:1100px) {
+    #if_root{
+        --left: 270px;
+        --right: 330px;
+    }
+
+}
+
+#if_root #left-column{
+    padding-left: 46px;
+}
+
+#if_root #left-column>.column-title{
+    margin-left: -46px;
+    padding-left: 56px;
+}
+
+#if_root #inventory-tabs.agent-tool-rail{
+    position: absolute;
+    z-index: 12;
+    left: 0;
+    top: 52px;
+    bottom: 0;
+    width: 46px;
+    margin: 0;
+    padding: 5px 4px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    background: var(--tab-strip);
+    border-right: 1px solid var(--tab-edge);
+    border-bottom: 0;
+}
+
+#if_root #inventory-tabs .agent-tool{
+    position: relative;
+    flex: 0 0 38px;
+    width: 38px;
+    height: 38px;
+    min-height: 38px;
+    padding: 2px;
+    border: 1px solid var(--tab-edge);
+    border-radius: 0;
+    background: var(--tab-face);
+    overflow: hidden;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.14);
+}
+
+#if_root #inventory-tabs .agent-tool:hover{
+    background: var(--tab-hover);
+}
+
+#if_root #inventory-tabs .agent-tool.active{
+    background: var(--tab-active);
+    box-shadow: inset 3px 0 0 var(--blue);
+}
+
+#if_root #inventory-tabs .agent-tool img{
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center;
+}
+
+#if_root #inventory-tabs .agent-tool span{
+    position: absolute;
+    right: 1px;
+    bottom: 1px;
+    min-width: 12px;
+    padding: 1px 2px;
+    background: rgba(0,0,0,.72);
+    color: white;
+    font: 800 8px/1 sans-serif;
+    text-align: center;
+}
+
+#if_root #inventory-frame{
+    left: 46px !important;
+    right: 0 !important;
+}
+
+#if_root #inventory-legend{
+    left: 46px;
+}
+
+/* Map category/context tabs ------------------------------------------------------
+   Row one selects the conceptual map palette. Row two contains only controls that
+   belong to that palette, mirroring Photoshop's tool/options relationship. */
+
+#if_root #map-controls{
+    gap: 0;
+    padding: 0;
+    border-radius: 0;
+    background: var(--tab-strip);
+    overflow: visible;
+}
+
+#if_root .map-tab-strip{
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 1px;
+    min-height: 29px;
+    padding: 4px 5px 0;
+    border-bottom: 1px solid var(--tab-edge);
+    background: var(--tab-strip);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+}
+
+#if_root #map-context-tabs{
+    min-height: 31px;
+    padding-top: 3px;
+    background: var(--soft-surface);
+}
+
+#if_root .map-category-tab{
+    border: 1px solid var(--tab-edge);
+    border-bottom-color: #777;
+    background: var(--tab-face);
+    color: var(--muted);
+    border-radius: 0;
+    padding: 4px 14px;
+    font: 700 11px/1.15 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+    cursor: pointer;
+    white-space: nowrap;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.14);
+}
+
+#if_root .map-category-tab:hover{
+    background: var(--tab-hover);
+    color: var(--ink);
+}
+
+#if_root .map-category-tab.active{
+    background: var(--tab-active);
+    color: var(--ink);
+    border-bottom-color: var(--tab-active);
+    box-shadow: inset 0 2px 0 var(--blue);
+}
+
+#if_root #map-context-tabs>.map-control, #if_root #map-section-buttons>.map-control{
+    font-size: 10px;
+    padding: 4px 9px;
+}
+
+#if_root #map-section-buttons{
+    display: flex;
+    gap: 1px;
+    align-items: flex-end;
+    justify-content: center;
+    flex-wrap: nowrap;
+    min-width: max-content;
+    white-space: nowrap;
+}
+
+
+
+/* Map authoring controls may grow as tools such as shell/dollhouse editing are added.
+   Never clip controls: wrap the context row into compact rows inside the toolbar. */
+#if_root #map-controls{ overflow:visible; }
+#if_root #map-context-tabs{
+    flex-wrap:wrap;
+    align-content:center;
+    overflow-x:visible;
+    overflow-y:visible;
+    height:auto;
+    max-height:none;
+    padding-bottom:3px;
+}
+#if_root #map-context-tabs[data-category="3d"] .map-spacing-control{ min-width:0; }
+#if_root #map-context-tabs[data-category="3d"] .map-spacing-control input[type="range"]{ width:78px; min-width:60px; }
+
+
+/* Compact Map authoring toolbar: exactly category + context rows. */
+#if_root.if_map-mode #map-input-modes{display:none!important}
+#if_root #map-context-tabs{flex-wrap:nowrap;justify-content:flex-start;min-height:31px;height:31px;max-height:31px;overflow-x:auto;overflow-y:hidden;padding:3px 5px 0;scrollbar-width:thin}
+#if_root #map-context-tabs>*{flex:0 0 auto}
+#if_root #map-context-tabs .input-mode-button{min-width:58px;height:24px;padding:3px 9px;border:1px solid var(--tab-edge);background:var(--tab-face);color:var(--ink);font:700 10px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
+#if_root #map-context-tabs .input-mode-button.active{box-shadow:inset 0 2px 0 var(--blue);background:var(--tab-active)}
+#if_root #map-context-tabs[data-category="3d"] .map-spacing-control input[type="range"]{width:64px;min-width:54px}
+#if_root #map-context-tabs[data-category="3d"] #map-floor-spacing-control #map-floor-spacing-label{display:none}
+#if_root #map-context-tabs[data-category="3d"] #map-floor-spacing{width:48px}
+
+/* Map authoring simplification: one Orbit controller, always Chess. The second row
+   now contains only the selected authoring controls and must fit without truncation. */
+#if_root #map-context-tabs{justify-content:center;overflow-x:hidden;gap:2px;padding-left:4px;padding-right:4px}
+#if_root #map-context-tabs[data-category="3d"] .map-spacing-control{gap:4px}
+#if_root #map-context-tabs[data-category="3d"] #map-floor-spacing-control #map-floor-spacing-label{display:inline}
+#if_root #map-context-tabs[data-category="3d"] .map-spacing-control input[type="range"]{width:110px;min-width:80px}
+#if_root #map-context-tabs[data-category="3d"] #map-floor-spacing{width:46px}
+
+/* Compact Build toolbar ---------------------------------------------------------
+   The center viewport can become narrow when both side inspectors are open.
+   Controls must wrap and shrink instead of being clipped beyond the viewport. */
+#if_root #map-context-tabs {
+    justify-content:center;
+    align-items:center;
+    row-gap:3px;
+    column-gap:2px;
+}
+#if_root #map-context-tabs > * { max-width:100%; box-sizing:border-box; }
+#if_root #map-context-tabs .map-spacing-control {
+    flex:0 1 auto;
+    white-space:nowrap;
+}
+#if_root #map-context-tabs .map-spacing-control input[type="range"] {
+    flex:1 1 60px;
+    width:min(78px, 18vw);
+}
+#if_root #map-context-tabs input[type="number"] { width:58px; min-width:48px; }
+#if_root #map-context-tabs input[type="text"] { width:110px; min-width:64px; }
+@media (max-width: 1180px) {
+    #if_root .map-category-tab { padding-left:8px; padding-right:8px; }
+    #if_root #map-context-tabs>.map-control,
+    #if_root #map-section-buttons>.map-control { padding-left:6px; padding-right:6px; }
+    #if_root #map-context-tabs .map-spacing-control { font-size:9px; }
+}
+@media (max-width: 900px) {
+    #if_root #map-context-tabs { justify-content:flex-start; }
+    #if_root #map-context-tabs .map-spacing-control input[type="range"] { width:62px; }
+}
+
+/* Three-row Build authoring toolbar.  The third row is a real toolbar row, not an
+   overlay, so narrow center panes never clip floor or Terrain controls. */
+#if_root #map-terrain-tabs{min-height:31px;height:31px;max-height:31px;padding:3px 5px 0;justify-content:center;overflow-x:auto;overflow-y:hidden;background:var(--soft-surface);scrollbar-width:thin}
+#if_root #map-terrain-tabs[hidden]{display:none!important}
+#if_root #map-terrain-tabs>*{flex:0 0 auto}
+#if_root #map-terrain-tabs #map-transform-coordinates{position:static!important;right:auto!important;top:auto!important;z-index:auto!important;padding:2px 5px!important;background:transparent!important;border:0!important;display:flex;gap:5px;align-items:center}
+#if_root #map-terrain-tabs #map-transform-coordinates[hidden]{display:none!important}
+#if_root #map-terrain-tabs .map-spacing-control input[type="range"]{width:110px;min-width:80px}

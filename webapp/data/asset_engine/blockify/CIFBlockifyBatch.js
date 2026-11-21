@@ -3,7 +3,7 @@
 // Batch Blockify and migration/proof authority.
 class CIFBlockifyBatch extends CIFBlockifyPreview {
     static async MigrationExportGltf(scene,name){
-        await this.EnsureBabylonSerializer();
+        await CIFAssetBrowser.EnsureBabylonSerializer();
         const exported=await BABYLON.GLTF2Export.GLTFAsync(scene,name,{shouldExportNode:node=>node&&node.isEnabled&&node.isEnabled()});
         const rows=[];
         for(const [filename,value] of Object.entries(exported.glTFFiles||{})){
@@ -184,7 +184,7 @@ class CIFBlockifyBatch extends CIFBlockifyPreview {
         write(`Asset: ${target.name} · ${target.source_path}${resolution>0?` · block_${resolution}`:' · solid only'}`);
         try{
             await ensureBabylon();
-            await this.EnsureBabylonSerializer();
+            await CIFAssetBrowser.EnsureBabylonSerializer();
             if(!this.migrationEngine||!this.migrationCanvas){
                 this.migrationCanvas=document.createElement('canvas');
                 this.migrationCanvas.width=512;
@@ -202,7 +202,7 @@ class CIFBlockifyBatch extends CIFBlockifyPreview {
             const loaded=await BABYLON.SceneLoader.ImportMeshAsync('','',url,scene,undefined,target.source_format==='gltf'?'.gltf':'.glb');
             await scene.whenReadyAsync?.();
             const nodes=scene.getNodes().filter(node=>!before.has(node));
-            this.NormalizeStaticPreviewUp(scene,nodes);
+            CIFAssetBrowser.NormalizeStaticPreviewUp(scene,nodes);
             const camera=new BABYLON.ArcRotateCamera('migration-camera',Math.PI/2,Math.PI/2.5,4,BABYLON.Vector3.Zero(),scene);
             camera.attachControl(canvas,false);
             scene.activeCamera=camera;
@@ -307,7 +307,7 @@ class CIFBlockifyBatch extends CIFBlockifyPreview {
                     // continue as an unanimated Block asset rather than inventing motion.
                     write(`Fixed asset has no embedded animation · ${target.name} · preserving rigged rest representation.`);
                 }
-                if(!fixedAnimatedAsset&&!Object.keys(animations).length&&character.rig?.bones?.length&&presentationHumanoid){
+                if(!fixedAnimatedAsset&&!target.local_import&&!Object.keys(animations).length&&character.rig?.bones?.length&&presentationHumanoid){
                     let catalog=(this.allMixamoAnimations?.length?this.allMixamoAnimations:this.mixamoAnimations)||[];
                     if(!catalog.length){
                         const payload=await CIFRuntime.assetCommand({operation:'search',provider:'library',kind:'animation',q:'',limit:10000});

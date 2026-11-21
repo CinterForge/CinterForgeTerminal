@@ -1,0 +1,165 @@
+/*
+ * CinterForge IFPlayer — 07-runtime-world-controls.css
+ * ========================================================================
+ *
+ * Purpose
+ * -------
+ * Player/Agatha perspective controls, specialist run controls, save-role tabs, World subtype strips, and human-authored puzzle rescue hints. This file styles runtime/editor controls without owning game-state semantics.
+ *
+ * Ownership
+ * ---------
+ * This stylesheet is one ordered slice of the IFPlayer presentation cascade.
+ * It contains visual/layout rules only; solver, interpreter, world topology,
+ * and runtime authority remain outside CSS. Keep selectors in this file within
+ * the responsibility described above whenever practical.
+ *
+ * Cascade contract
+ * ----------------
+ * presentation/ifplayer.css imports these files in numeric order. That order is
+ * intentional and preserves the cascade of the former monolithic stylesheet.
+ * Later files may refine shared chrome established by earlier files.
+ */
+
+/* ==========================================================================
+   PLAYER / AGATHA DUAL-GAME PRESENTATION
+   Player owns an independent interpreter; these controls keep perspectives
+   explicit instead of silently mixing human and solver state.
+   ========================================================================== */
+#if_root #top-progress-status{ display:flex; flex-direction:column; align-items:flex-start; gap:1px; line-height:1.05; }
+#if_root .progress-owner-row{ display:flex; align-items:center; gap:8px; white-space:nowrap; }
+#if_root .progress-owner-label{ min-width:42px; font-weight:800; color:var(--text-primary); }
+#if_root .player-progress-row{ font-size:12px; }
+#if_root .agatha-progress-row{ font-size:10px; opacity:.78; }
+#if_root #world-owner-tabs{ display:grid; grid-template-columns:1fr 1fr; gap:2px; padding:4px 5px 3px; border-bottom:1px solid var(--border-muted); }
+#if_root .world-owner-tab{ min-height:24px; border:1px solid var(--border-muted); background:var(--surface-raised); color:var(--text-secondary); font-weight:800; cursor:pointer; }
+#if_root .world-owner-tab.active{ color:var(--text-primary); border-color:#1d8cff; box-shadow:inset 0 -2px 0 #1d8cff; }
+
+/* Persistent agent Session selectors share the existing Photoshop-inspired tab chrome. */
+#if_root #specialist-session-controls{
+    display: flex;
+    gap: 1px;
+    padding: 3px 5px;
+    border-bottom: 1px solid var(--tab-edge);
+    background: var(--soft-surface);
+}
+#if_root .specialist-session-toggle{
+    flex: 1 1 0;
+    min-width: 0;
+    border: 1px solid var(--tab-edge);
+    border-radius: 1px;
+    background: var(--tab-face);
+    color: var(--muted);
+    padding: 3px 5px;
+    font: 700 9px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+#if_root .specialist-session-toggle.active{
+    color: var(--ink);
+    box-shadow: inset 0 2px 0 #1d8cff;
+}
+#if_root .specialist-session-toggle{ cursor: pointer; }
+/* Save-role subtabs remain a fixed compact strip rather than stretching or clipping rows. */
+#if_root #property-subtabs .subtype-tab{
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#if_root #player-save-controls{
+    display: flex;
+    gap: 2px;
+    padding: 3px 5px;
+    border-bottom: 1px solid var(--tab-edge);
+    background: var(--soft-surface);
+}
+#if_root #player-save-controls select{
+    flex: 1 1 auto;
+    min-width: 0;
+    background: var(--surface);
+    color: var(--ink);
+    border: 1px solid var(--tab-edge);
+    font: 600 10px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+}
+#if_root #player-save-controls button{
+    border: 1px solid var(--tab-edge);
+    border-radius: 1px;
+    background: var(--tab-face);
+    color: var(--ink);
+    padding: 3px 7px;
+    font: 700 9px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+}
+#if_root #player-save-controls button:disabled{ opacity: .45; }
+/* World subtype strip is a single fixed-height Photoshop-style row.  In
+   particular, the longer Game Saves label must shrink with its siblings rather
+   than wrapping into an unmeasured second row and drawing over panel content. */
+#if_root #property-subtabs{
+    flex-wrap: nowrap;
+    overflow: hidden;
+}
+#if_root #property-subtabs .subtype-tab{
+    flex: 1 1 0;
+}
+
+/* Human-authored rescue hints live directly on unsolved puzzle/frontier rows. */
+#if_root .puzzle-hint-title{
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+#if_root .puzzle-hint-title .panel-row-primary{
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+#if_root .puzzle-hint-toggle, #if_root .puzzle-hint-save, #if_root .puzzle-hint-delete{
+    flex: 0 0 auto;
+    border: 1px solid var(--panel-line);
+    background: var(--panel-bg);
+    color: var(--ink);
+    border-radius: 3px;
+    font: inherit;
+    font-size: 11px;
+    padding: 2px 7px;
+    cursor: pointer;
+}
+
+#if_root .puzzle-hint-toggle:hover, #if_root .puzzle-hint-save:hover, #if_root .puzzle-hint-delete:hover:not(:disabled){
+    border-color: var(--muted);
+}
+
+#if_root .puzzle-hint-editor{
+    margin-top: 7px;
+    padding: 7px;
+    border: 1px solid var(--panel-line);
+    background: var(--panel-soft, rgba(127,127,127,.06));
+}
+
+#if_root .puzzle-hint-input{
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    border: 1px solid var(--panel-line);
+    background: var(--panel-bg);
+    color: var(--ink);
+    font: inherit;
+    font-size: 12px;
+    padding: 5px 7px;
+}
+
+#if_root .puzzle-hint-repeat-label{
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin: 6px 8px 0 0;
+    color: var(--muted);
+    font-size: 11px;
+}
+
+#if_root .puzzle-hint-delete:disabled{ opacity: .45; cursor: default; }
+

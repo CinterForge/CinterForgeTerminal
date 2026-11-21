@@ -140,7 +140,8 @@ def build_terminal(builds: Path, *, docker: str, logfile: Path) -> Path:
     from host.lifecycle.amd64_backend import docker_bind_source
     logfile.parent.mkdir(parents=True, exist_ok=True)
     for command in (args, ['cmake', '--build', '/builds/Intermediates/CinterForgeTerminal/LinuxNative/x64/cmake',
-                            '--target', 'cinter-terminal', '--parallel', '4']):
+                            '--target', 'cinter-terminal', 'CinterForgePythonHostShared',
+                            '--parallel', '4']):
         print('[LINUX NATIVE] $ ' + ' '.join(command), flush=True)
         docker_command = [docker, 'run', '--rm', '--platform', 'linux/amd64', '--network', 'none',
                           '--mount', f'type=bind,src={docker_bind_source(repo)},dst=/source,readonly',
@@ -189,6 +190,12 @@ def build_terminal(builds: Path, *, docker: str, logfile: Path) -> Path:
             raise RuntimeError('Linux native Terminal build failed (' + str(rc) +
                                '); see ' + str(logfile))
         print('[LINUX NATIVE] command completed', flush=True)
+    shared = out / 'libCinterForgePythonHost.so'
+    if not shared.is_file():
+        raise FileNotFoundError('Linux shared Zeroconf Host library was not built: ' + str(shared))
+    with shared.open('rb') as binary:
+        if binary.read(4) != b'\x7fELF':
+            raise RuntimeError('Linux shared Zeroconf Host library is not ELF: ' + str(shared))
     executable = out / 'CinterForgeTerminal'
     if not executable.is_file():
         raise RuntimeError('Linux builder did not emit real ELF: ' + str(executable))

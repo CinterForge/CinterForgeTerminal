@@ -1,15 +1,8 @@
-"""Terminal bridge for the authoritative UCI library and Terminal asset gallery.
-
-Terminal owns the HTTP/tab/native-session glue, canonical asset gallery and
-Babylon preview. Converter uses Terminal-built artifacts, not the reverse.
-Import copies an existing canonical UCI asset or saves an original solid model;
-voxel conversion remains owned by the separately packaged Blockify engine.
-"""
+"""Terminal HTTP/tab bridge for original Server, Plugins and WebApp asset code."""
 from __future__ import annotations
 
 import base64
 import hashlib
-import importlib.util
 import json
 import mimetypes
 import os
@@ -28,7 +21,7 @@ from runtime.CinterForgeAssets import inspect_asset, safe_relative
 
 ASSET_DIR = re.compile(r'^CINTERASST[A-Za-z0-9#_-]{5,90}$')
 MODELS = frozenset(('.glb', '.gltf'))
-VIEW_EXTENSIONS = frozenset(('.html', '.js', '.css', '.gltf', '.glb', '.bin', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.json', '.ktx2', '.dds'))
+VIEW_EXTENSIONS = frozenset(('.html', '.js', '.css', '.gltf', '.glb', '.bin', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.json', '.ktx2', '.dds', '.mcaddon'))
 MAX_IMPORT_BYTES = 2 * 1024**3
 MAX_ZIP_MEMBERS = 25000
 MAX_UNPACK_BYTES = 3 * 1024**3
@@ -50,11 +43,11 @@ def root_for_state(state_root: Path) -> Path:
         from runtime import CinterForgeDevTools
         try:
             builds = CinterForgeDevTools._devtools_builds_root()
-        except RuntimeError:
-            if os.environ.get('CINTER_BUILDS_ROOT', '').strip():
-                raise  # An explicit but invalid selection must not be ignored.
-            builds = None  # No selected DevTools source; installed-app state only.
-        root = (builds if builds is not None else Path(state_root)) / 'Assets'
+        except RuntimeError as error:
+            # The installed app's mutable Steam state is NOT the canonical
+            # shared Assets library. Never silently import a second copy there.
+            raise RuntimeError('No selected shared Builds/Assets library: ' + str(error)) from error
+        root = builds / 'Assets'
     if root.is_symlink() or (root.exists() and not root.is_dir()):
         raise RuntimeError('Assets library root is not a normal directory: ' + str(root))
     return root
@@ -64,87 +57,116 @@ def root_for(server) -> Path:
     return root_for_state(server.mutable_builds)
 
 
-def _gallery_module():
-    """Load the Terminal-owned asset gallery from this runtime's resource tree.
-
-    No Converter checkout, Converter Build, or network fallback is permitted.
-    """
-    from runtime import CinterForgeSettings
-    source = CinterForgeSettings.ASSETS / 'data/asset_engine/api/asset_gallery.py'
-    if source.is_symlink() or not source.is_file():
-        raise RuntimeError('Terminal asset engine not staged; run ./Cinter setup, build, stage')
-    spec = importlib.util.spec_from_file_location('_cinterforge_terminal_asset_gallery', source)
-    if spec is None or spec.loader is None:
-        raise RuntimeError('Cannot load staged Terminal asset gallery')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _viewer_available(gallery, builds: Path) -> None:
-    """The existing renderer needs locally pinned Babylon, not a CDN fallback."""
-    pins = json.loads((gallery.REPO / 'build/browser-dependencies.json').read_text(encoding='utf-8'))
-    choices = (builds / 'Dependencies/Babylon' / pins['version'], gallery.REPO / 'web/vendor',
-               gallery.REPO / 'frontend/vendor', gallery.REPO / 'vendor')
-    if not any(all((folder / name).is_file() for name in gallery.VIEWER_FILES) for folder in choices):
-        raise RuntimeError('Pinned Babylon viewer unavailable. Run ./Cinter setup, build, stage.')
-
-
 def report(server) -> dict:
-    gallery = _gallery_module()
+    """Regenerate the established Converter AssetGallery.html, not IFPlayer search."""
+    from runtime import CinterForgeAssetOriginal as original
     root = root_for(server)
     if not root.is_dir():
-        raise FileNotFoundError('Assets library not found at ' + str(root) + '; select the existing DevTools Builds source or run assets setup.')
-    _viewer_available(gallery, root.parent)
-    result = gallery.generate(root.parent)
-    if result.get('viewer') != 'pinned-local':
-        raise RuntimeError('Terminal gallery did not use verified local Babylon files')
-    return {'url': '/assets-library/AssetGallery.html', 'count': result['assets']}
-
-
-def _find_uci(root: Path, uci: str) -> Path:
-    if not ASSET_DIR.fullmatch(uci):
-        raise ValueError('Invalid UCI')
-    matches = []
-    if root.is_dir():
-        for asset in root.rglob(uci):
-            if (asset.is_dir() and not asset.is_symlink() and
-                    not any(parent.is_symlink() for parent in asset.parents if
-                            parent == root or root in parent.parents)):
-                matches.append(asset)
-    if len(matches) != 1:
-        raise FileNotFoundError('Asset UCI not found or ambiguous: ' + uci)
-    folder = matches[0]
-    manifest = json.loads((folder / 'manifest.json').read_text(encoding='utf-8'))
-    if not isinstance(manifest, dict):
-        raise ValueError('Invalid asset manifest')
-    if isinstance(manifest.get('representations'), dict):
-        inspect_asset(folder)  # New canonical UCI representation format.
-    elif isinstance(manifest.get('versions'), list):
-        # Existing IFEditor UCI version format. Never mutate its manifest.
-        for version in manifest['versions']:
-            if not isinstance(version, dict) or not isinstance(version.get('file'), str):
-                raise ValueError('Invalid legacy UCI asset version')
-            source = folder / safe_relative(version['file'])
-            if not source.is_file() or not source.resolve().is_relative_to(folder.resolve()):
-                raise ValueError('Legacy UCI asset dependency is missing or unsafe')
-    else:
-        raise ValueError('Unsupported UCI asset manifest')
-    return folder
+        raise FileNotFoundError('Shared Assets library does not exist: ' + str(root))
+    # This is the already-staged Converter AssetGallery generator; there is no
+    # second gallery implementation or a browser search API involved.
+    import importlib.util
+    source = original.source_root().parent / 'api/asset_gallery.py'
+    if not source.is_file():
+        raise FileNotFoundError('Staged original AssetGallery generator missing: ' + str(source))
+    spec = importlib.util.spec_from_file_location('cinterforge_original_asset_gallery', source)
+    if spec is None or spec.loader is None:
+        raise RuntimeError('Cannot load original AssetGallery generator')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    result = module.generate(root.parent)
+    generated = Path(result['path']).resolve()
+    if generated != (root / 'AssetGallery.html').resolve() or not generated.is_file():
+        raise RuntimeError('Original AssetGallery did not write the selected Assets report')
+    # Original Server is authoritative for UCI discovery; the gallery must not
+    # silently omit UCI records (including nested Animated/Mixamo assets).
+    groups = original.saved_list(server)['groups']
+    expected = sum(len(rows) for group in groups.values()
+                   for rows in (group.values() if isinstance(group, dict) else (group,)))
+    if result['assets'] != expected:
+        raise RuntimeError(f'AssetGallery includes {result["assets"]} assets, original Server finds {expected}; refusing incomplete report at {generated}')
+    return {'url': '/assets-library/SVG/Assets/AssetGallery.html', 'count': expected,
+            'path': str(generated), 'root': str(root)}
 
 
 def view(server, uci: str) -> dict:
-    folder = _find_uci(root_for(server), uci)
-    _viewer_available(_gallery_module(), root_for(server).parent)
-    return {'url': '/assets-library/view/' + quote(uci, safe=''), 'uci': uci,
-            'name': json.loads((folder / 'manifest.json').read_text(encoding='utf-8')).get('name') or uci}
+    from runtime import CinterForgeAssetOriginal as original
+    result = original.existing_uci(server, uci)
+    return {'url': '/assets-library/workspace?uci=' + quote(uci, safe=''),
+            'uci': uci, 'name': result['name'], 'root': str(root_for(server)),
+            'path': str(root_for(server) / result['folder'])}
+
+
+
+def _resume_incomplete_local_import(server, uci: str) -> dict | None:
+    """Resume the original migration for a previously saved local model.
+
+    A previous import may have committed the original GLB and blockify.json
+    before the browser conversion failed. Opening that UCI must not mistake
+    a source-only folder for a completed import or create a new asset identity.
+    Use the same import_path -> original migration job as a repeat import;
+    never generate representations or rewrite authored Blockify edits here.
+    """
+    from runtime import CinterForgeAssetOriginal as original
+    with original.library(server) as api:
+        resolved = api.resolve_uci_asset(uci)
+        manifest = resolved['manifest']
+        # This recovery is only for Terminal's own imported version records.
+        # Migrated legacy assets and authored non-Local representations do not
+        # silently acquire new migration jobs when opened for editing.
+        versions = [version for version in manifest.get('versions') or []
+                    if str(version.get('provider') or '').casefold() == 'local'
+                    and str(version.get('kind') or '').casefold() == '3d'
+                    and Path(str(version.get('file') or '')).suffix.lower() in MODELS]
+        if not versions:
+            return None
+        owned = api.assets_root().resolve() / safe_relative(resolved['folder'])
+        from cf.ifserver.assets.asset_migration_commands import _asset_migration_destination_status
+        if _asset_migration_destination_status(owned, 16)['current']:
+            return None
+        version = versions[-1]
+        model = owned / safe_relative(str(version['file']))
+        if model.is_symlink() or not model.is_file() or not model.resolve().is_relative_to(owned.resolve()):
+            raise FileNotFoundError('Saved source model for incomplete import is missing: ' + uci)
+    # The existing original import implementation deduplicates by source SHA,
+    # validates the same UCI, checks migration completeness, and queues the
+    # original CIFBlockifyBatch.MigrateCatalogAsset job if still incomplete.
+    # Serialize recovery requests across simultaneous gallery/CLI opens. The
+    # Terminal owns an RLock here; import_path and its original queue adapter
+    # intentionally use the same lock while committing the one migration job.
+    with server.asset_actions_lock:
+        result = import_path(server, str(model))
+    if result['uci'] != uci:
+        raise RuntimeError('Incomplete import recovery changed canonical UCI: ' + uci)
+    if not result.get('conversion_job'):
+        raise RuntimeError('Incomplete import recovery did not queue original migration: ' + uci)
+    print('[ASSETS MIGRATION] RESUME existing UCI=' + uci
+          + ' job=' + str(result['conversion_job']), flush=True)
+    return result
 
 
 def queue_tab(server, kind: str, **args) -> dict:
     if kind == 'report':
         request = {'kind': 'report', **report(server)}
     elif kind == 'view':
+        # On an older, interrupted local import the source GLB already exists
+        # but Solid/Block migration never finished. A normal view request must
+        # resume the same original migration; otherwise every rebuild simply
+        # reopens the broken UCI forever. The nested job-bearing queue_tab from
+        # import_path is authoritative, and this branch returns that request.
+        if not args.get('job'):
+            resumed = _resume_incomplete_local_import(server, args['uci'])
+            if resumed:
+                job = resumed['conversion_job']
+                return {'kind': 'view', **view(server, args['uci']), 'job': job,
+                        'url': '/assets-library/workspace?uci=' + quote(args['uci'], safe='')
+                               + '&job=' + quote(job, safe='')}
         request = {'kind': 'view', **view(server, args['uci'])}
+        if args.get('job'):
+            request['job'] = args['job']
+            request['url'] += '&job=' + quote(args['job'], safe='')
+    elif kind == 'blockify':
+        request = {'kind': 'blockify', 'url': '/assets-library/workspace?job=' + quote(args['job'], safe=''), 'job': args['job']}
     elif kind == 'picker':
         request = {'kind': 'picker'}
     else:
@@ -181,38 +203,48 @@ def _files_equal(first: Path, second: Path) -> bool:
 
 
 def _commit_canonical(staged: Path, assets_root: Path) -> dict:
-    info = inspect_asset(staged)
-    # Canonical assets may contain ancillary animation files not individually
-    # named in manifest.json. Never follow a symlink from those assets.
+    """Copy an existing UCI folder unchanged; never synthesize asset metadata."""
+    if not ASSET_DIR.fullmatch(staged.name):
+        raise ValueError('Asset directory is not a CinterForge UCI')
     for member in staged.rglob('*'):
         if member.is_symlink() or not (member.is_file() or member.is_dir()):
             raise ValueError('Canonical asset contains unsafe member: ' + str(member))
-    category = _manifest_category(json.loads((staged / 'manifest.json').read_text(encoding='utf-8')))
-    # UCI identity is global across all categories, not scoped by folder.
-    # Never create two different assets with the same UCI just because their
-    # legacy category labels differ.
-    if assets_root.is_dir():
-        for previous_category in assets_root.iterdir():
-            if not previous_category.is_dir() or previous_category.is_symlink():
-                continue
-            old = previous_category / staged.name
-            if old.exists() or old.is_symlink():
-                if _files_equal(old, staged):
-                    return {'uci': staged.name, 'category': previous_category.name, 'existing': True}
-                raise FileExistsError('UCI already exists with different data: ' + staged.name)
-    dest = assets_root / category / staged.name
+    manifest = json.loads((staged / 'manifest.json').read_text(encoding='utf-8'))
+    if not isinstance(manifest, dict) or manifest.get('uci') != staged.name:
+        raise ValueError('Manifest UCI and asset folder must agree')
+    if isinstance(manifest.get('versions'), list):
+        # Validate the exact original Server version/dependency paths.
+        for version in manifest['versions']:
+            if not isinstance(version, dict) or not isinstance(version.get('file'), str):
+                raise ValueError('Invalid original saved version')
+            source = staged / safe_relative(version['file'])
+            if not source.is_file() or source.is_symlink() or not source.resolve().is_relative_to(staged.resolve()):
+                raise ValueError('Missing original saved version: ' + version['file'])
+    elif isinstance(manifest.get('representations'), dict):
+        inspect_asset(staged)
+    else:
+        raise ValueError('Unknown canonical UCI format; refusing rewrite')
+    category = _manifest_category(manifest)
+    subgroup = str(manifest.get('subgroup') or '').strip()
+    if subgroup not in ('Mixamo', 'Fixed', ''):
+        subgroup = ''
+    dest = assets_root / category / subgroup / staged.name
+    # A UCI is global, including nested original animated categories.
+    for old in assets_root.rglob(staged.name) if assets_root.is_dir() else ():
+        if old.is_dir() and not old.is_symlink():
+            if _files_equal(old, staged):
+                return {'uci': staged.name, 'category': category, 'existing': True}
+            raise FileExistsError('UCI already exists with different bytes: ' + staged.name)
     if dest.exists() or dest.is_symlink():
-        raise FileExistsError('Asset destination is already occupied: ' + staged.name)
+        raise FileExistsError('Asset UCI destination already occupied')
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.parent.is_symlink() or assets_root.is_symlink():
-        raise RuntimeError('Unsafe destination Assets category')
+        raise RuntimeError('Unsafe destination Assets directory')
     shutil.copytree(staged, dest, symlinks=False)
-    try:
-        inspect_asset(dest)
-    except Exception:
+    if not _files_equal(dest, staged):
         shutil.rmtree(dest)
-        raise
-    return {'uci': info['uci'], 'category': category, 'existing': False}
+        raise RuntimeError('Original asset changed while copying')
+    return {'uci': staged.name, 'category': category, 'existing': False}
 
 
 def _import_canonical_directory(folder: Path, assets_root: Path) -> dict:
@@ -259,74 +291,6 @@ def _import_archive(source: Path, assets_root: Path) -> dict:
         return _commit_canonical(scratch / next(iter(folders)), assets_root)
 
 
-def _gltf_dependencies(source: Path) -> list[Path]:
-    if source.suffix.lower() != '.gltf':
-        if source.open('rb').read(4) != b'glTF':
-            raise ValueError('GLB header not recognized')
-        return []
-    doc = json.loads(source.read_text(encoding='utf-8'))
-    if not isinstance(doc, dict) or not isinstance(doc.get('asset'), dict):
-        raise ValueError('Invalid glTF file')
-    dependencies = []
-    for key in ('buffers', 'images'):
-        for row in doc.get(key, []):
-            uri = row.get('uri') if isinstance(row, dict) else None
-            if not isinstance(uri, str) or not uri or uri.startswith('data:'):
-                continue
-            # GLTF dependencies must already be local siblings. HTTP URLs,
-            # nested path tricks, and outside-directory references are unsafe.
-            rel = safe_relative(uri)
-            dep = source.parent / rel
-            if dep.is_symlink() or not dep.is_file() or not dep.resolve().is_relative_to(source.parent.resolve()):
-                raise FileNotFoundError('GLTF dependency missing or unsafe: ' + uri)
-            dependencies.append(dep)
-    return list(dict.fromkeys(dependencies))
-
-
-def _import_model(source: Path, assets_root: Path) -> dict:
-    dependencies = _gltf_dependencies(source)
-    stem = re.sub(r'[^A-Za-z0-9]+', '', source.stem.upper())[:8] or 'ASSET'
-    category = 'Objects'
-    assets_root.mkdir(parents=True, exist_ok=True)
-    category_root = assets_root / category
-    category_root.mkdir(parents=True, exist_ok=True)
-    if category_root.is_symlink():
-        raise ValueError('Unsafe destination category')
-    with tempfile.TemporaryDirectory(prefix='cinter-import-', dir=category_root) as temporary:
-        staged = Path(temporary)
-        solid = staged / 'solid'
-        solid.mkdir()
-        # Keep source basenames, and their dependency-relative URI references,
-        # intact. This is a solid-only import, NOT a fabricated Blockify result.
-        shutil.copy2(source, solid / source.name)
-        files = []
-        for file in dependencies:
-            relative = file.relative_to(source.parent)
-            target = solid / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.resolve() == (solid / source.name).resolve():
-                continue
-            shutil.copy2(file, target)
-            files.append((Path('solid') / relative).as_posix())
-        stamp = datetime.now(timezone.utc).replace(microsecond=0)
-        from datetime import timedelta
-        while True:
-            uci = f'CINTERASST{stamp:%Y%m%d%H%M%S}#{stem}en'
-            final = category_root / uci
-            if not final.exists():
-                break
-            stamp += timedelta(seconds=1)
-        manifest = {
-            'uci': uci, 'name': source.stem, 'version': 1, 'category': category,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'source_format': source.suffix.lower().lstrip('.'),
-            'representations': {'solid': {'model': 'solid/' + source.name, 'files': files}},
-        }
-        (staged / 'manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n', encoding='utf-8')
-        staged.rename(final)
-    inspect_asset(final)
-    return {'uci': uci, 'category': category, 'existing': False}
-
 
 def import_path(server, raw: str) -> dict:
     if not isinstance(raw, str) or not raw or '\x00' in raw:
@@ -343,24 +307,109 @@ def import_path(server, raw: str) -> dict:
         if source.suffix.lower() == '.zip':
             result = _import_archive(source, assets_root)
         elif source.suffix.lower() in MODELS:
-            result = _import_model(source, assets_root)
+            from runtime import CinterForgeAssetOriginal as original
+            result = original.import_model(server, source)
         else:
             raise ValueError('Supported imports: UCI asset folder/ZIP, .glb, .gltf')
     else:
         raise ValueError('Unsupported import source')
-    # Do not mark an import complete unless a usable preview can open.
-    try:
-        queue_tab(server, 'view', uci=result['uci'])
-    except (OSError, RuntimeError):
-        # The imported bytes remain canonical even if the optional viewer is
-        # unavailable. The caller sees the actual viewer failure.
-        raise
+    # Read back the committed bytes and canonical UCI through the existing
+    # Server API BEFORE reporting any import success or opening a new tab.
+    from runtime import CinterForgeAssetOriginal as original
+    with original.library(server) as api:
+        resolved = api.resolve_uci_asset(result['uci'])
+        listed = api.list_saved()['groups']
+        folders = [*(listed.get('Images') or []), *(listed.get('Objects') or []),
+                   *(listed.get('Animated', {}).get('Mixamo') or []),
+                   *(listed.get('Animated', {}).get('Fixed') or []),
+                   *(listed.get('Animations') or [])]
+        if not any(item.get('uci') == result['uci'] for item in folders):
+            raise RuntimeError('Imported UCI was not discoverable by original Server: ' + result['uci'])
+        owned = api.assets_root().resolve() / resolved['folder']
+        manifest = owned / 'manifest.json'
+        if not manifest.is_file() or not manifest.resolve().is_relative_to(api.assets_root().resolve()):
+            raise RuntimeError('Imported UCI manifest is not readable under selected Assets root')
+        if source.is_file() and source.suffix.lower() in MODELS:
+            # An original GLTF save may rewrite portable dependency paths.
+            # Check source byte identity for self-contained GLB; for GLTF the
+            # Server's recorded digest is authoritative after copying assets.
+            matched = False
+            source_sha = hashlib.sha256(source.read_bytes()).hexdigest() if source.suffix.lower() == '.glb' else None
+            for version in resolved['manifest'].get('versions') or []:
+                candidate = owned / safe_relative(str(version.get('file') or ''))
+                if candidate.is_file() and candidate.suffix.lower() == source.suffix.lower():
+                    if version.get('sha256') == hashlib.sha256(candidate.read_bytes()).hexdigest():
+                        if source_sha is None or hashlib.sha256(candidate.read_bytes()).hexdigest() == source_sha:
+                            matched = True
+            if not matched:
+                raise RuntimeError('Imported model bytes or recorded SHA-256 did not verify: ' + str(owned))
+        result['saved_path'] = str(owned)
+        result['assets_root'] = str(api.assets_root().resolve())
+    # Every import format commits ONE canonical UCI folder first. An imported
+    # UCI directory/ZIP needs the same original migration as a newly saved GLB;
+    # copying its manifest alone does not repair missing Solid/Block artifacts.
+    # This is deliberately independent of `assets blockify` and ContentPacks.csv.
+    with original.library(server):
+        from cf.ifserver.assets.asset_migration_commands import _asset_migration_destination_status
+        migration = _asset_migration_destination_status(owned, 16)
+    result['migration'] = migration['reason']
+    if not migration['current']:
+        manifest_data = resolved['manifest']
+        versions = manifest_data.get('versions') or []
+        candidates = [safe_relative(str(v['file'])) for v in versions
+                      if isinstance(v, dict) and isinstance(v.get('file'), str)
+                      and Path(v['file']).suffix.lower() in MODELS]
+        # Older canonical UCI folders may predate the saved-version schema.
+        # Inspect only this UCI's root-level source models, never legacy or CSV
+        # folders and never generated Solid/Block representations.
+        if not candidates:
+            candidates = [Path(p.name) for p in sorted(owned.iterdir())
+                          if p.is_file() and not p.is_symlink() and p.suffix.lower() in MODELS
+                          and not p.name.endswith('.preview.glb')]
+        if not candidates:
+            raise FileNotFoundError('Incomplete imported UCI has no original GLB/glTF source: '
+                                    + result['uci'] + ' (' + migration['reason'] + ')')
+        file = candidates[0]
+        model = owned / file
+        if (model.is_symlink() or not model.is_file()
+                or not model.resolve().is_relative_to(owned.resolve())):
+            raise FileNotFoundError('Imported UCI source model missing or unsafe: ' + str(file))
+        command_name = result['uci'].partition('#')[2].removesuffix('en').lower()
+        if not command_name:
+            raise RuntimeError('Canonical UCI has no original asset command identifier')
+        row = {
+            'uci': result['uci'], 'name': str(manifest_data.get('name') or model.stem),
+            'minecraft_name': str(manifest_data.get('minecraft_name') or manifest_data.get('name') or model.stem),
+            'command_name': command_name,
+            'pack_name': '', 'top_level': Path(resolved['folder']).parent.as_posix(),
+            'source_path': (Path(resolved['folder']) / file).as_posix(),
+            'source_format': file.suffix.lower().lstrip('.'),
+            'blockify_resolution': 16, 'mixamo': False, 'local_import': True,
+            'reuse_completed': False,
+        }
+        # The browser runs the ORIGINAL migration for precisely this one UCI,
+        # writing into its existing folder. No CSV rows or pack assembly.
+        with server.asset_actions_lock:
+            active_job = next((job for job, record in
+                getattr(server, 'asset_blockify_jobs', {}).items()
+                if record.get('state') in ('queued', 'running') and any(
+                    item.get('uci') == result['uci'] for item in record.get('rows') or [])), None)
+        if active_job:
+            queue_tab(server, 'view', uci=result['uci'], job=active_job)
+            result['conversion_job'] = active_job
+        else:
+            queued = original._queue_blockify_rows(server, [row],
+                assemble_packs=False, view_uci=result['uci'])
+            result['conversion_job'] = queued['job']
+        return result
+    queue_tab(server, 'view', uci=result['uci'])
     return result
 
 
 def _html_response(handler, page: bytes) -> None:
-    # Converter escapes user-provided metadata and owns all inline JavaScript.
-    # Only that exact generated script digest is permitted, never unsafe-inline.
+    # The existing Converter AssetGallery and Server Pack galleries embed
+    # generated scripts. Hash-allow only those exact bytes instead of turning
+    # on unsafe-inline for arbitrary Assets content.
     import re as _re
     scripts = _re.findall(rb'<script>(.*?)</script>', page, _re.S)
     script_hashes = ' '.join("'sha256-" + base64.b64encode(hashlib.sha256(s).digest()).decode('ascii') + "'" for s in scripts)
@@ -371,60 +420,112 @@ def _html_response(handler, page: bytes) -> None:
     handler.send_header('X-Content-Type-Options', 'nosniff')
     handler.send_header('X-Frame-Options', 'SAMEORIGIN')
     handler.send_header('Content-Security-Policy', "default-src 'none'; script-src 'self' " + script_hashes +
-        "; style-src 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; " +
-        "frame-ancestors 'self'; base-uri 'self'; object-src 'none'")
+        "; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob:; worker-src 'self' blob:; " +
+        "frame-src 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'")
     handler.end_headers()
     handler.wfile.write(page)
 
 
+def serve_voxel(handler, url_path: str) -> bool:
+    """Serve the verified staged CinterForgeVoxel browser editor, never source."""
+    if not url_path.startswith('/blockbench/'):
+        return False
+    if not handler._local() or not handler._lan_logged_in():
+        handler._json(403, {'error': 'not authorized'})
+        return True
+    from runtime import CinterForgeSettings
+    from pathlib import Path
+    try:
+        root = CinterForgeSettings.ASSETS / 'data/asset_engine/voxel'
+        relative = safe_relative(unquote(url_path[len('/blockbench/'):]))
+        file = root / relative
+        if (not root.is_dir() or root.is_symlink() or file.is_symlink() or
+                not file.is_file() or not file.resolve().is_relative_to(root.resolve()) or
+                any(p.is_symlink() for p in file.parents if p == root or root in p.parents)):
+            raise FileNotFoundError('CinterForgeVoxel browser file missing: ' + relative.as_posix())
+        # The Server builder has already selected the browser-only runtime
+        # members, including the original CinterForge bridge. Never serve
+        # source, Python, metadata secrets or native executables.
+        if file.suffix.lower() not in ('.html', '.js', '.css', '.json', '.webmanifest',
+                    '.png', '.svg', '.jpg', '.jpeg', '.webp', '.gif', '.ico', '.woff',
+                    '.woff2', '.ttf', '.otf', '.wasm', '.bin', '.glb', '.mp3', '.ogg'):
+            raise FileNotFoundError('Unsupported Voxel browser resource')
+        data = file.read_bytes()
+        mime = mimetypes.guess_type(file.name)[0] or 'application/octet-stream'
+        if file.suffix.lower() == '.js':
+            mime = 'text/javascript'
+        if file.suffix.lower() == '.html':
+            handler.send_response(200)
+            handler.send_header('Content-Type', 'text/html; charset=utf-8')
+            handler.send_header('Content-Length', str(len(data)))
+            handler.send_header('Cache-Control', 'no-store')
+            handler.send_header('X-Content-Type-Options', 'nosniff')
+            handler.send_header('X-Frame-Options', 'SAMEORIGIN')
+            handler.send_header('Content-Security-Policy',
+                "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; "
+                "worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' https:; "
+                "img-src 'self' data: blob:; font-src 'self' data:; "
+                "frame-src 'self' blob:; frame-ancestors 'self'; object-src 'none'")
+            handler.end_headers()
+            handler.wfile.write(data)
+        else:
+            handler._send(200, data, mime, same_origin_frame=True)
+    except (OSError, ValueError) as exc:
+        handler._json(404, {'error': str(exc)})
+    return True
+
+
 def serve(handler, url_path: str) -> bool:
-    """Serve only user-owned library assets through authenticated same-origin HTTP."""
+    """Authenticated, same-origin host for ORIGINAL IFPlayer Asset Browser."""
     if not url_path.startswith('/assets-library/'):
         return False
     if not handler._local() or not handler._lan_logged_in():
         handler._json(403, {'error': 'not authorized'})
         return True
-    root = root_for(handler.server)
-    relative_raw = unquote(url_path[len('/assets-library/'):])
-    if relative_raw.startswith('view/'):
-        uci = relative_raw[len('view/'):]
-        try:
-            folder = _find_uci(root, uci)
-            gallery = _gallery_module()
-            _viewer_available(gallery, root.parent)
-            pins = gallery._viewer_scripts(root.parent, root)
-            if any(str(part).startswith('https:') for part in pins):
-                raise RuntimeError('Unverified external viewer dependency')
-            manifest = json.loads((folder / 'manifest.json').read_text(encoding='utf-8'))
-            card = gallery._card(manifest, folder, root)
-            page = (gallery.HTML.replace('__BABYLON__', pins[0]).replace('__LOADERS__', pins[1])
-                    .replace('__COUNT__', '1').replace('__CARDS__', card))
-            page = page.replace('<head>', '<head><base href="/assets-library/">', 1)
-            _html_response(handler, page.encode('utf-8'))
-        except (OSError, ValueError, RuntimeError, KeyError) as error:
-            handler._json(404, {'error': str(error)})
-        return True
+    from runtime import CinterForgeAssetOriginal as original
     try:
-        rel = safe_relative(relative_raw)
-        if not root.is_dir() or root.is_symlink():
-            raise FileNotFoundError('Assets library unavailable')
-        file = root / rel
-        if (file.suffix.lower() not in VIEW_EXTENSIONS or file.is_symlink() or not file.is_file()
-                or not file.resolve().is_relative_to(root.resolve())
-                or any(p.is_symlink() for p in file.parents if p == root or root in p.parents)):
-            raise FileNotFoundError('Unknown Assets library file')
+        base = original.source_root()
+        relative = unquote(url_path[len('/assets-library/'):])
+        if relative == 'workspace':
+            _html_response(handler, (base / 'workspace.html').read_bytes())
+            return True
+        if relative.startswith('SVG/Assets/'):
+            root = root_for(handler.server)
+            rel = safe_relative(relative[len('SVG/Assets/'):])
+            file = root / rel
+            authority = root
+        elif relative.startswith('original/webapp/'):
+            rel = safe_relative(relative[len('original/webapp/'):])
+            file = base / 'webapp' / rel
+            authority = base / 'webapp'
+        elif relative.startswith('vendor/'):
+            rel = safe_relative(relative[len('vendor/'):])
+            if rel.as_posix() not in ('babylon.js', 'babylonjs.loaders.min.js'):
+                raise FileNotFoundError('Unknown pinned Babylon file')
+            file = base.parent / 'vendor' / rel
+            authority = base.parent / 'vendor'
+        else:
+            raise FileNotFoundError('Unrecognized Asset Browser resource')
+        if (file.suffix.lower() not in VIEW_EXTENSIONS or file.is_symlink() or
+                not file.is_file() or not file.resolve().is_relative_to(authority.resolve()) or
+                any(part.is_symlink() for part in file.parents if part == authority or authority in part.parents)):
+            raise FileNotFoundError('Asset Browser resource unavailable: ' + relative)
+        # Never expose Python, authoring manifests or unrelated source modules.
+        if not relative.startswith('SVG/') and file.suffix.lower() not in ('.html', '.js', '.css'):
+            raise FileNotFoundError('Not a browser resource')
         if file.stat().st_size > 512 * 1024 * 1024:
-            raise ValueError('Asset browser file too large')
-        data = file.read_bytes()
+            raise ValueError('Asset resource exceeds HTTP limit')
         mime = mimetypes.guess_type(file.name)[0] or 'application/octet-stream'
         if file.suffix.lower() in ('.glb', '.bin'):
             mime = 'application/octet-stream'
-        if file.name == 'AssetGallery.html':
-            _html_response(handler, data)
+        if relative.startswith('SVG/Assets/') and file.suffix.lower() == '.html':
+            # These are the actual original Converter/Server generated viewers;
+            # their existing inline scripts require a per-response hash CSP.
+            _html_response(handler, file.read_bytes())
         else:
-            handler._send(200, data, mime)
-    except (OSError, ValueError) as error:
-        handler._json(404, {'error': str(error)})
+            handler._send(200, file.read_bytes(), mime)
+    except (OSError, ValueError, RuntimeError) as exc:
+        handler._json(404, {'error': str(exc)})
     return True
 
 
@@ -472,12 +573,19 @@ def upload_finish(server, token: str, digest: str) -> dict:
         if (session['received'] != session['size'] or
                 not isinstance(digest, str) or digest != session['hasher'].hexdigest()):
             raise ValueError('Incomplete asset upload or SHA-256 mismatch')
-        temporary = session['path'].with_suffix(Path(session['name']).suffix.lower())
-        session['path'].rename(temporary)
+        # A browser upload is stored under an opaque transfer token, but the
+        # IFEditor authoring writer MUST see the selected original filename.
+        # Give every upload a unique temporary directory so simultaneous
+        # Hope.glb picks cannot collide or overwrite one another.
+        temporary_dir = session['path'].with_name(session['path'].name + '-selected')
+        temporary_dir.mkdir(exist_ok=False)
+        temporary = temporary_dir / session['name']
         try:
+            session['path'].rename(temporary)
             return import_path(server, str(temporary))
         finally:
             temporary.unlink(missing_ok=True)
+            temporary_dir.rmdir()
     finally:
         session['path'].unlink(missing_ok=True)
 
