@@ -971,6 +971,48 @@ class CIFAssetBrowser extends CIFAssetEditor {
         return await window.CIFAssetMixamo.EditMixamoCharacter.apply(this, arguments);
     }
 
+    static ConfirmSavedAssetRemoval(folder) {
+        return new Promise(resolve => {
+            const overlay = document.createElement('div');
+            overlay.setAttribute('role', 'presentation');
+            overlay.style.cssText = 'position:fixed;inset:0;z-index:30000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.8);padding:20px;box-sizing:border-box';
+            const dialog = document.createElement('section');
+            dialog.setAttribute('role', 'dialog');
+            dialog.setAttribute('aria-modal', 'true');
+            dialog.setAttribute('aria-label', 'Confirm asset removal');
+            dialog.style.cssText = 'background:#20252c;border:1px solid #77808c;border-radius:10px;padding:20px;max-width:460px;color:#f5f5f5;font:14px/1.5 system-ui;box-shadow:0 12px 40px #0008';
+            const title = document.createElement('h2');
+            title.style.cssText = 'margin:0 0 10px;font-size:19px';
+            title.textContent = 'Remove asset?';
+            const warning = document.createElement('p');
+            warning.textContent = `Remove “${String(folder?.name || folder?.uci || 'this asset')}” and all its files from local disk now? On your next assets publish, this asset will also be removed from Cloudflare. This cannot be undone.`;
+            const controls = document.createElement('div');
+            controls.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;margin-top:16px';
+            const cancel = document.createElement('button');
+            cancel.type = 'button'; cancel.textContent = 'Cancel';
+            const confirm = document.createElement('button');
+            confirm.type = 'button'; confirm.textContent = 'Remove asset';
+            confirm.style.cssText = 'background:#a72d34;color:white;border:1px solid #d75e65;border-radius:5px;padding:7px 12px';
+            cancel.style.cssText = 'padding:7px 12px';
+            controls.append(cancel, confirm);
+            dialog.append(title, warning, controls);
+            overlay.append(dialog);
+            document.body.append(overlay);
+            const finish = accepted => {
+                document.removeEventListener('keydown', onKey, true);
+                overlay.remove();
+                resolve(accepted);
+            };
+            const onKey = event => {
+                if (event.key === 'Escape') { event.preventDefault(); finish(false); }
+            };
+            document.addEventListener('keydown', onKey, true);
+            cancel.addEventListener('click', () => finish(false), {once:true});
+            confirm.addEventListener('click', () => finish(true), {once:true});
+            cancel.focus();
+        });
+    }
+
     static async HandleResultClick(event) {
         const button = event.target && event.target.closest ? event.target.closest('button[data-action]') : null;
         if (!button) {
@@ -1067,10 +1109,20 @@ class CIFAssetBrowser extends CIFAssetEditor {
                 }
                 else card.classList.toggle('assignment-image-preview-open');
             }
-            else if (action === 'saved-delete') { const folder=this.SavedFolderForCard(card);
-                if(folder?.uci&&window.confirm('Delete this entire CinterForge asset and its versions?')){await CIFRuntime.assetCommand({operation:'saved-delete-asset',uci:folder.uci});
-                await this.LoadSaved();
-                } }
+            else if (action === 'saved-delete') {
+                const folder = this.SavedFolderForCard(card);
+                if (!folder?.uci) throw new Error('Cannot remove an asset without a canonical UCI.');
+                if (await this.ConfirmSavedAssetRemoval(folder)) {
+                    await CIFRuntime.assetCommand({operation:'saved-delete-asset',uci:folder.uci});
+                    if (new URLSearchParams(window.location.search).get('uci') === folder.uci) {
+                        // Removed UCI no longer has a viewer. Reopen the canonical
+                        // report tab; never fall through to a source/category UI.
+                        if(window.parent!==window)
+                            window.parent.postMessage({type:'cinterforge-assets-open-report'},window.location.origin);
+                        else window.location.replace('/assets-library/SVG/Assets/AssetGallery.html');
+                    } else await this.LoadSaved();
+                }
+            }
             else if (action === 'saved-promote') { await this.TestFixedMixamo(card);
              }
         } catch (error) {
@@ -1755,6 +1807,15 @@ class CIFAssetBrowser extends CIFAssetEditor {
         return root;
     }
 
+    static PlayImportedAnimations(card,scene,result,key){
+        const groups=(result?.animationGroups||[]).filter(group=>group?.targetedAnimations?.length);
+        if (!groups.length) return;
+        const meshSet=new Set(result.meshes||[]);
+        const roots=(result.meshes||[]).filter(mesh=>mesh&&!meshSet.has(mesh.parent));
+        const entries=groups.map(group=>this.AnimationBehaviorEntry(group,group.name));
+        this.SetupAnimationBehaviorCycle(card,scene,roots,entries,key);
+    }
+
     static async LoadCloudflareAssignmentPreview(card){
         const rel=String(card?.dataset.directCloudflarePath||'').replace(/^\/+/, '');
         if (!rel) {
@@ -1789,11 +1850,12 @@ class CIFAssetBrowser extends CIFAssetEditor {
                 camera.attachControl(canvas,true);
             new BABYLON.HemisphericLight('light',new BABYLON.Vector3(.4,1,.2),scene);
             const before=new Set(scene.getNodes());
-                await BABYLON.SceneLoader.ImportMeshAsync('','',CIFRuntime.requestAsset(rel),scene);
+                const result=await BABYLON.SceneLoader.ImportMeshAsync('','',CIFRuntime.requestAsset(rel),scene);
                 await scene.whenReadyAsync?.();
                 const imported=scene.getNodes().filter(n=>!before.has(n));
                 this.NormalizeStaticPreviewUp(scene,imported);
                 this.FrameScene(scene,camera);
+                this.PlayImportedAnimations(card,scene,result,key);
             this.engines.set(key,engine);
             this.scenes.set(key,scene);
         }
@@ -1829,11 +1891,12 @@ class CIFAssetBrowser extends CIFAssetEditor {
             new BABYLON.HemisphericLight('light',new BABYLON.Vector3(.4,1,.2),scene);
             const before=new Set(scene.getNodes());
                 const url=await CIFRuntime.stagedAssetUrl('saved-file',{path:rel});
-                await BABYLON.SceneLoader.ImportMeshAsync('','',url,scene);
+                const result=await BABYLON.SceneLoader.ImportMeshAsync('','',url,scene);
                 await scene.whenReadyAsync?.();
                 const imported=scene.getNodes().filter(n=>!before.has(n));
                 this.NormalizeStaticPreviewUp(scene,imported);
                 this.FrameScene(scene,camera);
+                this.PlayImportedAnimations(card,scene,result,key);
             this.engines.set(key,engine);
             this.scenes.set(key,scene);
         }
@@ -1870,7 +1933,7 @@ class CIFAssetBrowser extends CIFAssetEditor {
         card.classList.remove('blockified-preview-active');
             card.classList.add('viewer-active');
             await new Promise(resolve=>requestAnimationFrame(resolve));
-        const versions=folder.versions||[],index=Number(card.dataset.versionIndex||0),version=versions[index]||{},rel=String(representationPath||`${folder.folder}/${version.file||''}`).replace(/^\/+/, '');
+        const versions=folder.versions||[],index=Number(card.dataset.versionIndex||0),version=versions[index]||{},rel=String(representationPath||(folder.import_animation?.id&&folder.solid_model?folder.solid_model:`${folder.folder}/${version.file||''}`)).replace(/^\/+/, '');
         const signature=this.BlockifyBehaviorSignature(folder,version),key=`saved:${rel}:${signature}`;
             let engine=this.engines.get(key),scene=this.scenes.get(key);
         if(engine&&engine.getRenderingCanvas?.()!==canvas){this.DisposePreviewKey(key);
@@ -1916,10 +1979,7 @@ class CIFAssetBrowser extends CIFAssetEditor {
                     this.NormalizeStaticPreviewUp(scene,characterNodes);
                     this.FrameScene(scene,camera);
                 const meshSet=new Set(character.meshes||[]),roots=(character.meshes||[]).filter(mesh=>mesh&&!meshSet.has(mesh.parent));
-                if(folder.folder?.startsWith('Animated/Fixed/')&&(character.animationGroups||[]).length){
-                    const entries=(character.animationGroups||[]).filter(group=>group?.targetedAnimations?.length).map(group=>this.AnimationBehaviorEntry(group,group.name));
-                        this.SetupAnimationBehaviorCycle(card,scene,roots,entries,key,version.blockify?.behavior_profile||[]);
-                }else if(folder.folder?.startsWith('Animated/Mixamo/')){
+                if(folder.folder?.startsWith('Animated/Mixamo/')){
                     const refs=Array.isArray(folder.assigned_animations)?folder.assigned_animations.filter(row=>row?.folder&&row?.file):[];
                     if(!refs.length&&folder.default_animation?.folder&&folder.default_animation?.file)refs.push({...folder.default_animation,name:'Idle'});
                     const entries=[];
@@ -1935,7 +1995,14 @@ class CIFAssetBrowser extends CIFAssetEditor {
                     }
                     if (entries.length) {
                         this.SetupAnimationBehaviorCycle(card,scene,roots,entries,key,version.blockify?.behavior_profile||[]);
+                    } else if ((character.animationGroups||[]).length) {
+                        const embedded=(character.animationGroups||[]).filter(group=>group?.targetedAnimations?.length).map(group=>this.AnimationBehaviorEntry(group,group.name));
+                        this.SetupAnimationBehaviorCycle(card,scene,roots,embedded,key,version.blockify?.behavior_profile||[]);
                     }
+                } else if ((character.animationGroups||[]).length) {
+                    // Animated assets can be categorized as Objects after migration.
+                    const embedded=(character.animationGroups||[]).filter(group=>group?.targetedAnimations?.length).map(group=>this.AnimationBehaviorEntry(group,group.name));
+                    this.SetupAnimationBehaviorCycle(card,scene,roots,embedded,key,version.blockify?.behavior_profile||[]);
                 }
                 this.engines.set(key,engine);
                 this.scenes.set(key,scene);

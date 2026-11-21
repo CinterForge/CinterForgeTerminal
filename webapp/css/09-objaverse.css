@@ -9,53 +9,17 @@
 }
 #if_root.if_objaverse-mode #objaverse-browser{ display: flex; flex-direction: column; }
 #if_root.if_objaverse-mode #viewport>svg, #if_root.if_objaverse-mode #map-canvas, #if_root.if_objaverse-mode #map-controls, #if_root.if_objaverse-mode #player-overlay, #if_root.if_objaverse-mode #session-console{ display: none !important; }
-#if_root #objaverse-head{
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  padding: 0;
-  border-bottom: 1px solid var(--line, #3a3a3a);
-  background: var(--panel, #202226);
+/* Legacy provider/category toolbar removed. Asset View retains only card actions. */
+#if_root .objaverse-action{
+  border:1px solid var(--line,#3b4048);
+  background:var(--button-bg,#292d33);
+  color:var(--ink,#f1f1f1);
+  border-radius:3px;
+  font:inherit;
+  padding:6px 9px;
+  cursor:pointer;
 }
-#if_root #asset-head-row-primary, #if_root #asset-head-row-search, #if_root .asset-head-tab-row{
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-width: 0;
-  padding: 8px 12px;
-}
-#if_root #asset-head-row-primary{ justify-content: space-between; border-bottom: 1px solid var(--line, #30343a); }
-#if_root .asset-head-tab-row{ justify-content:flex-start; padding-top:5px; padding-bottom:5px; border-bottom:1px solid var(--line,#30343a); }
-#if_root .asset-head-tab-row[hidden], #if_root #asset-head-row-search[hidden]{ display:none !important; }
-#if_root #asset-head-row-search{ justify-content: flex-start; }
-#if_root #asset-head-title{ display: flex; align-items: baseline; gap: 10px; min-width: 0; }
-#if_root #asset-head-actions{ display:flex; align-items:center; justify-content:flex-end; gap:6px; margin-left:auto; }
-#if_root #asset-world-picker, #if_root #asset-pack-picker, #if_root #asset-server-button, #if_root #asset-blockify-button{
-  border:1px solid var(--line,#3b4048); background:var(--button-bg,#292d33); color:var(--ink,#f1f1f1);
-  border-radius:3px; font:inherit; font-size:11px; padding:3px 6px; min-height:24px; white-space:nowrap;
-}
-#if_root #asset-world-picker{ max-width:190px; }
-#if_root #asset-pack-picker{ max-width:170px; }
-#if_root #asset-server-button, #if_root #asset-blockify-button{ cursor:pointer; }
-#if_root #asset-server-button:disabled, #if_root #asset-blockify-button:disabled{ opacity:.5; cursor:default; }
-#if_root #objaverse-head strong{ font-size: 13px; text-transform: uppercase; letter-spacing: .05em; }
-#if_root #objaverse-status{ color: var(--muted, #aeb3ba); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#if_root #objaverse-search-form{ display: flex; gap: 6px; width: min(620px, 62%); }
-#if_root #objaverse-search-input{ flex: 1 1 auto; min-width: 0; }
-#if_root #objaverse-search-input, #if_root #objaverse-search-button, #if_root #asset-character-picker, #if_root #asset-animation-picker, #if_root #asset-animation-category-picker, #if_root .objaverse-action{
-  border: 1px solid var(--line, #3b4048);
-  background: var(--button-bg, #292d33);
-  color: var(--ink, #f1f1f1);
-  border-radius: 3px;
-  font: inherit;
-}
-#if_root #objaverse-search-input{ padding: 6px 8px; background: var(--field-bg, #15171a); }
-#if_root #objaverse-search-button, #if_root .objaverse-action{ padding: 6px 9px; cursor: pointer; }
-#if_root #objaverse-search-button:disabled, #if_root .objaverse-action:disabled{ opacity: .5; cursor: default; }
-#if_root #asset-character-picker-wrap, #if_root #asset-animation-picker-wrap, #if_root #asset-animation-category-picker-wrap{ display:flex; align-items:center; gap:7px; min-width:0; font-size:10px; color:var(--muted,#aeb3ba); }
-#if_root #asset-character-picker-wrap[hidden], #if_root #asset-animation-picker-wrap[hidden], #if_root #asset-animation-category-picker-wrap[hidden]{ display:none !important; }
-#if_root #asset-character-picker, #if_root #asset-animation-picker, #if_root #asset-animation-category-picker{ min-width:160px; max-width:280px; padding:6px 26px 6px 8px; background:var(--field-bg,#15171a); }
+#if_root .objaverse-action:disabled{opacity:.5;cursor:default;}
 #if_root #objaverse-results{
   flex: 1 1 auto;
   min-height: 0;
@@ -85,17 +49,6 @@
 #if_root .objaverse-actions{ display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
 #if_root .objaverse-action{ font-size: 10px; text-decoration: none; }
 #if_root .objaverse-progress{ min-height: 1.35em; margin-top: 6px; overflow-wrap: anywhere; }
-@media (max-width: 850px) {
-  #if_root #asset-head-row-primary, #if_root #asset-head-row-search, #if_root .asset-head-tab-row{ align-items: stretch; flex-direction: column; gap:8px; }
-  #if_root #objaverse-search-form{ width: 100%; }
-  #if_root #asset-character-picker-wrap{ width:100%; }
-  #if_root #asset-character-picker{ flex:1 1 auto; max-width:none; }
-}
-
-/* Map/F4 CinterForge asset-library provider tabs. */
-#if_root #asset-search-tabs{ display:flex; gap:2px; align-items:center; }
-#if_root .asset-search-tab{ border:1px solid var(--line,#353a42); background:var(--panel,#202226); color:inherit; padding:5px 9px; font-size:10px; cursor:pointer; }
-#if_root .asset-search-tab.active{ background:var(--field-bg,#15171a); border-bottom-color:var(--accent,#4d9cff); }
 #if_root .asset-image-card .objaverse-visual{ height:170px; }
 #if_root .asset-animation-card .objaverse-visual{ height:184px; display:flex; align-items:center; justify-content:center; }
 #if_root .asset-animation-glyph{ font-size:38px; opacity:.7; }
@@ -144,8 +97,6 @@
 #if_root .asset-animation-card.asset-fullview .objaverse-actions{ justify-self: end; }
 
 /* Managed Saved Assets ------------------------------------------------------ */
-#if_root #saved-assets-tabs, #if_root #saved-animated-tabs, #if_root #mixamo-search-tabs, #if_root #mixamo-animation-categories{ display:flex; gap:4px; align-items:center; flex-wrap:wrap; }
-#if_root #saved-assets-tabs[hidden], #if_root #saved-animated-tabs[hidden], #if_root #mixamo-search-tabs[hidden], #if_root #mixamo-animation-categories[hidden]{ display:none !important; }
 #if_root .asset-saved-tab{ border:1px solid var(--line,#353a42); background:var(--panel,#202226); color:inherit; padding:5px 9px; font-size:10px; cursor:pointer; border-radius:3px; }
 #if_root .asset-saved-tab.active{ background:var(--field-bg,#15171a); border-color:var(--accent,#4d9cff); }
 #if_root .saved-asset-card .objaverse-visual{ height:190px; display:flex; align-items:center; justify-content:center; }

@@ -280,24 +280,24 @@ def publish(channel: str, assets_root: Path, *, transport=None) -> dict:
         raise RuntimeError('Cloudflare publishing disabled during Setup/Test')
     r2, cfg, prefix = _credential_config(channel, transport)
     root = Path(assets_root).resolve()
+    # A previously generated gallery must match the currently present UCI
+    # folders before it is included in the published file inventory. Otherwise
+    # a deleted asset's stale report card would be republished on Cloudflare.
+    if (root / 'AssetGallery.html').is_file():
+        from runtime.assets import asset_gallery
+        asset_gallery.generate(root.parent)
     doc, files = _source_file_list(root)
     if not files:
         raise RuntimeError('Assets library is empty; refusing to publish')
     remote = r2._list_remote(cfg, prefix)
     old = _fetch_index(r2, cfg, prefix, remote)
-    if old and isinstance(old.get('files'), dict) and old['files']:
-        # An old direct index may include unmanaged provider downloads. Drop
-        # those entries from the NEW index, but do not delete their R2 objects.
-        # For previously published UCI files, preserve their relative names
-        # within that UCI even if the category path or bytes have changed.
-        selected = {_uci_relative_file(rel) for rel in doc['files']
-                    if _uci_relative_file(rel) is not None}
-        missing = [rel for rel in old['files']
-                   if _uci_relative_file(rel) is not None and
-                   _uci_relative_file(rel) not in selected]
-        if missing:
-            raise RuntimeError(f'Local Assets is missing {len(missing)} previously '
-                               'published UCI-owned files; refusing a partial index: ' + missing[0])
+    # Remove only previously indexed canonical UCI files that are no longer
+    # present locally. Unindexed provider data and authored unrelated content
+    # on Cloudflare must not be deleted by publishing Assets.
+    deleted_uci_files = sorted(rel for rel in ((old or {}).get('files') or {})
+                               if old and old.get('schema') == INDEX_SCHEMA
+                               and _uci_relative_file(rel) is not None
+                               and rel not in doc['files'])
     legacy_zips = _old_generated_zips(remote, old)
     collision = legacy_zips.intersection(doc['files'])
     if collision:
@@ -347,6 +347,18 @@ def publish(channel: str, assets_root: Path, *, transport=None) -> dict:
         # tree. Do not create a ZIP intermediate or write inside Assets itself.
         if _canonical_inventory(root)['files'] != doc['files']:
             raise RuntimeError('Local Assets changed during upload; index not committed')
+        # Delete owned UCI objects before committing the new index. If an R2
+        # DELETE fails, the previous index is retained and the next publish
+        # can retry. Never delete unrelated remote paths or local files here.
+        for number, rel in enumerate(deleted_uci_files, 1):
+            if rel in remote:
+                r2._delete(cfg, remote[rel]['key'])
+            print(f'[assets publish] Removed deleted UCI file {number}/{len(deleted_uci_files)}: {rel}', flush=True)
+        if deleted_uci_files:
+            remaining = r2._list_remote(cfg, prefix)
+            stale = [rel for rel in deleted_uci_files if rel in remaining]
+            if stale:
+                raise RuntimeError('Deleted UCI files remain on Cloudflare: ' + stale[0])
         index = {'schema': INDEX_SCHEMA,
                  'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                  'file_count': len(files),
@@ -374,10 +386,12 @@ def publish(channel: str, assets_root: Path, *, transport=None) -> dict:
         if any(name in remaining for name in legacy_zips):
             raise RuntimeError('Direct Assets published but old generated ZIPs remain in R2')
     print(f'[assets publish] PASS direct_files={len(files)} uploaded={new_files} '
-          f'reused={reused_files} deleted_old_zips={len(legacy_zips)} '
+          f'reused={reused_files} deleted_uci_files={len(deleted_uci_files)} '
+          f'deleted_old_zips={len(legacy_zips)} '
           f'bucket={cfg["bucket"]}/{prefix}', flush=True)
     return {'channel': channel, 'files': len(files), 'published': True,
             'uploaded': new_files, 'reused': reused_files,
+            'deleted_uci_files': len(deleted_uci_files),
             'deleted_old_zips': len(legacy_zips),
             'destination': cfg['bucket'] + '/' + prefix}
 

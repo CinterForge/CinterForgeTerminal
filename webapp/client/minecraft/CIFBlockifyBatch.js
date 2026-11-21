@@ -21,7 +21,7 @@ class CIFBlockifyBatch extends CIFBlockifyPreview {
     // Embedded presentation belongs to the batch migration path. Keep this
     // helper with its caller so Runtime Session cannot load a newer batch class
     // that depends on a method from a stale base-class script.
-    static BlockifyApplyEmbeddedPresentationPose(scene, character, label) {
+    static BlockifyApplyEmbeddedPresentationPose(scene, character, label, poseFraction = 0.42) {
         const groups = (character?.animationGroups || []).filter(group =>
             group && Array.isArray(group.targetedAnimations) && group.targetedAnimations.length > 0
         );
@@ -56,7 +56,6 @@ class CIFBlockifyBatch extends CIFBlockifyPreview {
             }
         }
 
-        const poseFraction = 0.42;
         group.start(false, 1, from, to, false);
         group.goToFrame(from + ((to - from) * poseFraction));
         group.pause();
@@ -256,7 +255,7 @@ class CIFBlockifyBatch extends CIFBlockifyPreview {
             // in its rest pose. Mixamo presentation thumbnails are captured later,
             // after T-pose voxelization and animation capture have completed.
             let solidThumbnail=target.mixamo&&resolution>0?'':this.MigrationThumbnail(canvas);
-            const solidFiles=await this.MigrationExportGltf(scene,'model');
+            let solidFiles=await this.MigrationExportGltf(scene,'model');
 
             if(resolution===0){
                 const saved=await CIFRuntime.assetCommand({operation:'asset-migration-save',...target,solid_files:solidFiles,solid_thumbnail:solidThumbnail});
@@ -265,9 +264,11 @@ class CIFBlockifyBatch extends CIFBlockifyPreview {
             }
 
             let character={voxels:[],rig:null},animations={};
+            let importedAnimation=null,importedAnimationGroup=null;
             let presentationHumanoid=false;
             const fixedAnimatedAsset=String(target.source_path||'').startsWith('Animated/Fixed/');
-            const animated=(loaded.animationGroups||[]).length>0||Boolean(this.BlockifyRigSource(scene));
+            const embeddedGroups=(loaded.animationGroups||[]).filter(group=>group?.targetedAnimations?.length);
+            const animated=embeddedGroups.length>0||Boolean(this.BlockifyRigSource(scene));
             const animationAssets=assets.filter(row=>Number(row.blockify_resolution||0)===0&&String(row.source_path||'').toLowerCase().endsWith('.glb'));
 
             // The voxel identity is always authored from the character's bind/rest
@@ -307,21 +308,43 @@ class CIFBlockifyBatch extends CIFBlockifyPreview {
                     // continue as an unanimated Block asset rather than inventing motion.
                     write(`Fixed asset has no embedded animation · ${target.name} · preserving rigged rest representation.`);
                 }
-                if(!fixedAnimatedAsset&&!target.local_import&&!Object.keys(animations).length&&character.rig?.bones?.length&&presentationHumanoid){
-                    let catalog=(this.allMixamoAnimations?.length?this.allMixamoAnimations:this.mixamoAnimations)||[];
-                    if(!catalog.length){
-                        const payload=await CIFRuntime.assetCommand({operation:'search',provider:'library',kind:'animation',q:'',limit:10000});
-                        catalog=Array.isArray(payload?.results)?payload.results:[];
-                        this.allMixamoAnimations=catalog.slice();
+                // Existing embedded animation is authoritative on any rig.
+                // Only a clipless, positively identified Mixamo-compatible
+                // local import may borrow a random saved animation. Its original
+                // source bytes are never changed; the motion is exported into
+                // the generated Solid GLTF and Blockify representation.
+                if(!fixedAnimatedAsset&&!embeddedGroups.length&&!Object.keys(animations).length&&
+                   character.rig?.bones?.length&&presentationHumanoid&&
+                   (!target.local_import||target.mixamo_compatible_rig===true)){
+                    // Choose from actual saved Assets, never the optional
+                    // MixamoSearch SQLite index. The server only lists existing
+                    // animation-bearing GLB/glTF representations.
+                    const available = await CIFRuntime.assetCommand({
+                        operation: 'saved-animation-candidates'
+                    });
+                    const catalog = (Array.isArray(available?.results) ? available.results : [])
+                        .filter(row => row?.folder && row?.file && row?.id);
+                    if (!catalog.length && target.local_import && target.mixamo_compatible_rig === true) {
+                        throw new Error(`No playable saved animation is available for ${target.name} in the local Assets library; the source model is preserved.`);
                     }
-                    catalog=catalog.filter(row=>String(row?.id||'').trim());
-                    if(catalog.length){
-                        let hash=2166136261;
-                        for(const characterCode of String(target.uci||target.source_path||target.name||'')){hash^=characterCode.charCodeAt(0);hash=Math.imul(hash,16777619);}
-                        const animationAsset=catalog[(hash>>>0)%catalog.length];
-                        const ref={id:String(animationAsset.id),name:String(animationAsset.title||animationAsset.name||animationAsset.file||animationAsset.id)};
-
-                        // External Mixamo capture is already a presentation/animation
+                    if (catalog.length) {
+                        let hash = 2166136261;
+                        for (const characterCode of String(target.uci || target.source_path || target.name || '')) {
+                            hash ^= characterCode.charCodeAt(0);
+                            hash = Math.imul(hash, 16777619);
+                        }
+                        // Local imports pick randomly; normal migrations retain
+                        // their existing stable choice for repeatable output.
+                        const selectedIndex = target.local_import
+                            ? Math.floor(Math.random() * catalog.length)
+                            : (hash >>> 0) % catalog.length;
+                        const animationAsset = catalog[selectedIndex];
+                        const ref = {
+                            folder: String(animationAsset.folder),
+                            file: String(animationAsset.file),
+                            name: String(animationAsset.name || animationAsset.file)
+                        };
+                        // Saved motion capture is a presentation/animation
                         // phase. Release the frame-zero sampler before retargeting or
                         // its paused group can overwrite the retargeted bone values
                         // while BlockifyCaptureMixamoClip samples the animation.
@@ -332,11 +355,40 @@ class CIFBlockifyBatch extends CIFBlockifyPreview {
                             try{skeleton.returnToRest();}catch(_){}
                             try{skeleton.prepare();}catch(_){}
                         }
-                        const clip=await this.BlockifyCaptureMixamoClip(scene,loaded,nodes,character.rig,ref,ref.name);
-                        if(!clip)throw new Error(`Mixamo ${ref.name} produced no voxel-rig animation clip.`);
-                        animations[`clip_${++index}`]=clip;
-                        write(`Animation captured · ${target.name} · ${ref.name}`);
+                        const captured=await this.BlockifyCaptureMixamoClip(scene,loaded,nodes,character.rig,ref,ref.name,{returnGroup:Boolean(target.local_import)});
+                        if(!(target.local_import?captured?.clip:captured)){
+                            throw new Error(`Mixamo ${ref.name} produced no voxel-rig animation clip for ${target.name}.`);
+                        }
+                        const clip=target.local_import?captured?.clip:captured;
+                        if(clip){
+                            animations[`clip_${++index}`]=clip;
+                            if(target.local_import){
+                                importedAnimation={id:String(animationAsset.id),name:ref.name};
+                                importedAnimationGroup=captured.playing;
+                            }
+                            write(`Animation captured · ${target.name} · ${ref.name}`);
+                        }
                     }
+                }
+                if(target.local_import&&!embeddedGroups.length&&!importedAnimation){
+                    if(target.mixamo_compatible_rig===true){
+                        throw new Error(`Mixamo-compatible rig ${target.name} did not receive an animation; the migration cannot be marked complete.`);
+                    }
+                    write(`No embedded animation on non-Mixamo rig · ${target.name} · importing as Objects.`);
+                }
+                if(importedAnimationGroup){
+                    // The original GLB remains byte-identical. Re-export the
+                    // imported rig together with the newly retargeted animation.
+                    // Imported source motion nodes are disabled by RetargetAnimation;
+                    // MigrationExportGltf excludes disabled nodes.
+                    solidFiles=await this.MigrationExportGltf(scene,'model');
+                    const gltf=solidFiles.find(row=>String(row.name||'').toLowerCase().endsWith('.gltf')&&row.encoding==='text');
+                    if(!gltf)throw new Error(`Imported Solid animation export is missing GLTF: ${target.name}`);
+                    const document=JSON.parse(String(gltf.data||'{}'));
+                    const joints=new Set((document.skins||[]).flatMap(skin=>skin.joints||[]));
+                    const attached=(document.animations||[]).some(animation=>(animation.channels||[]).some(channel=>joints.has(channel.target?.node)));
+                    if(!attached)throw new Error(`Imported Solid GLTF contains no animation targeting the character's exported skin joints: ${target.name}`);
+                    write(`Solid GLTF animation verified · ${target.name} · ${importedAnimation.name}`);
                 }
             }
             write(`Voxelized ${target.name} · ${statue.voxels.length} statue voxels${character.voxels.length?` · ${character.voxels.length} rigged voxels`:''} · ${Object.keys(animations).length} animations · humanoid ${presentationHumanoid?'yes':'no'}.`);
@@ -381,11 +433,12 @@ class CIFBlockifyBatch extends CIFBlockifyPreview {
                 // Only assets without a usable embedded animation need the external
                 // deterministic Mixamo presentation path used by characters such as
                 // DefaultCharacter.
-                let pose=this.BlockifyApplyEmbeddedPresentationPose(
-                    scene,
-                    loaded,
-                    target.name,
-                );
+                let pose=importedAnimationGroup?
+                    this.BlockifyApplyEmbeddedPresentationPose(
+                        scene,{animationGroups:[importedAnimationGroup],skeletons:loaded.skeletons},
+                        target.name,0,
+                    ):
+                    this.BlockifyApplyEmbeddedPresentationPose(scene,loaded,target.name,target.local_import?0:0.42);
                 if(fixedAnimatedAsset&&!pose){
                     throw new Error(`Fixed Animated asset has no usable embedded presentation animation: ${target.name}`);
                 }
@@ -511,7 +564,7 @@ class CIFBlockifyBatch extends CIFBlockifyPreview {
                 blockAnimation.start(false,1,blockAnimation.from,blockAnimation.to,false);
                 blockScene.render();
                 await new Promise(resolve=>requestAnimationFrame(resolve));
-                const poseFrame=blockAnimation.from+((blockAnimation.to-blockAnimation.from)*.42);
+                const poseFrame=blockAnimation.from+((blockAnimation.to-blockAnimation.from)*(target.local_import?0:.42));
                 blockAnimation.goToFrame(poseFrame);
                 blockScene.render();
                 await new Promise(resolve=>requestAnimationFrame(resolve));
@@ -525,7 +578,7 @@ class CIFBlockifyBatch extends CIFBlockifyPreview {
                 const blockThumbBytes=await CIFRuntime.assetCommand({operation:'asset-migration-block-thumbnail',voxels:statue.voxels});
                 blockThumbnail=blockThumbBytes.data_url;
             }
-            const saved=await CIFRuntime.assetCommand({operation:'asset-migration-save',...target,solid_files:solidFiles,block_files:blockFiles,solid_thumbnail:solidThumbnail,block_thumbnail:blockThumbnail,voxels:statue.voxels,character_voxels:character.voxels||[],character_rig:character.rig||{},character_animations:animations,behavior_profile:this.BlockifyBehaviorProfile(animations)});
+            const saved=await CIFRuntime.assetCommand({operation:'asset-migration-save',...target,solid_files:solidFiles,block_files:blockFiles,solid_thumbnail:solidThumbnail,block_thumbnail:blockThumbnail,voxels:statue.voxels,character_voxels:character.voxels||[],character_rig:character.rig||{},character_animations:animations,behavior_profile:this.BlockifyBehaviorProfile(animations),import_animation:importedAnimation});
             const addon=`${String(saved.destination||'').replace(/\/$/,'')}/block_${resolution}/${target.name}.mcaddon`;
             write(`Complete · ${saved.destination}`);
             return {saved,addon};

@@ -688,9 +688,23 @@ def inspect_model(path: Path) -> dict[str, Any]:
     doc = _glb_json(path)
     nodes = doc.get("nodes") if isinstance(doc.get("nodes"), list) else []
     skins = doc.get("skins") if isinstance(doc.get("skins"), list) else []
-    animations = doc.get("animations") if isinstance(doc.get("animations"), list) else []
+    authored = doc.get("animations") if isinstance(doc.get("animations"), list) else []
+    # An empty glTF animation record is not a playable clip. Embedded motion
+    # does not require a Mixamo or even a skinned rig: node animation counts.
+    animations = [animation for animation in authored if isinstance(animation, dict)
+                  and any(isinstance(channel, dict) and isinstance(channel.get("target"), dict)
+                          and channel.get("target") for channel in animation.get("channels") or [])]
     raw_names = [str(n.get("name") or "") for n in nodes if isinstance(n, dict)]
-    names = {re.sub(r"[^a-z0-9]", "", raw.lower().replace("mixamorig", "")) for raw in raw_names}
+    # Mirror CIFAssetBrowser.NormalizeRigName: FBX2glTF can retain hierarchy
+    # and namespace prefixes (e.g. Armature|mixamorig:Hips). The Babylon
+    # retargeter recognizes the terminal bone name, so inspection must too.
+    def normalized_bone_name(raw: str) -> str:
+        terminal = re.split(r"[|/\\]", raw.strip())[-1]
+        terminal = terminal.split(":")[-1]
+        terminal = re.sub(r"^mixamorig[_-]?", "", terminal, flags=re.IGNORECASE)
+        return re.sub(r"[^a-z0-9]", "", terminal.casefold())
+
+    names = {normalized_bone_name(raw) for raw in raw_names}
     markers = {
         "hips", "spine", "spine1", "spine2", "neck", "head",
         "leftshoulder", "rightshoulder", "leftarm", "rightarm",
@@ -730,8 +744,12 @@ def category_for(provider: str, kind: str, metadata: dict[str, Any], source_path
         decision = ("Animated", "Mixamo")
     elif provider_key == "objaverse":
         detected = inspect_model(source_path) if source_path and source_path.is_file() else {}
-        animation_count = int(metadata.get("animation_count") or 0)
-        if animation_count > 0 or detected.get("has_embedded_animations") or detected.get("has_skin"):
+        # A Mixamo-compatible rig is eligible for animation assignment during
+        # import even if its source GLB has no embedded clips. Keep it in the
+        # Animated library while the migration attaches a catalog animation.
+        # Embedded clips qualify regardless of rig; an otherwise unanimated,
+        # non-Mixamo model belongs in Objects.
+        if detected.get("has_embedded_animations") or detected.get("mixamo_compatible_rig"):
             decision = ("Animated", "Mixamo" if detected.get("mixamo_compatible_rig") else "Fixed")
         else:
             decision = ("Objects", "")
@@ -888,10 +906,10 @@ def save_version(*, source_path: Path, query: str, provider: str, kind: str, ass
     if uci and not re.fullmatch(r"CINTERASST[A-Za-z0-9#_-]{5,90}", uci):
         raise ValueError("Invalid original CinterForge Asset UCI")
     category, subgroup = category_for("objaverse" if uci and provider.casefold() == "local" else provider, kind, metadata, source_path)
-    # Local file imports are not Mixamo-provider acquisitions. Preserve the
-    # original rig/animation classification, but store newly imported animated
-    # UCI models directly under Assets/Animated/<UCI>. Existing Mixamo and
-    # Objaverse provider downloads retain their original category layout.
+    # Local file imports keep a direct UCI-owned folder, not a provider
+    # subgroup. A clipless Mixamo-compatible rig remains animatable while the
+    # conversion job attaches its first clip; non-Mixamo rigs with no clips
+    # remain Objects. Provider acquisitions keep their established layout.
     if uci and provider.casefold() == "local" and category == "Animated":
         subgroup = ""
     folder = _folder_for(category, subgroup, uci or name)
@@ -1099,7 +1117,12 @@ def list_local_uci_assets() -> dict[str, Any]:
             "thumbnail_file": thumbnail_file,
             "blockify": {"model": resolved["block_model"], "resolution": resolved["block_resolution"]} if resolved["block_model"] else {},
         }
-        versions = [dict(v) for v in manifest.get("versions") or [version]]
+        raw_versions = manifest.get("versions")
+        versions = [dict(v) for v in raw_versions if isinstance(v, dict)] if isinstance(raw_versions, list) else []
+        if isinstance(raw_versions, list) and len(versions) != len(raw_versions):
+            log(f"uci-inventory-skipped-invalid-version uci={uci} count={len(raw_versions) - len(versions)}")
+        if not versions:
+            versions = [version]
         # A migrated model and the original Terrain voxel JSON are both
         # canonical UCI-owned artifacts; neither should be fabricated from the
         # other. The existing browser accepts an owned file as its Blockify marker.
@@ -1125,6 +1148,10 @@ def list_local_uci_assets() -> dict[str, Any]:
             "default_version": manifest.get("default_version"),
             "default_animation": manifest.get("default_animation"),
             "assigned_animations": list(manifest.get("assigned_animations") or []),
+            # A locally imported rig can be animated in its generated Solid
+            # representation while preserving the user's original GLB bytes.
+            "import_animation": manifest.get("import_animation"),
+            "solid_model": resolved["solid_model"],
         }
         key = category.casefold()
         if key == "images": groups["Images"].append(entry)
@@ -1159,7 +1186,7 @@ def resolve_saved(relative_path: str) -> Path:
         raise FileNotFoundError(candidate)
     return candidate
 
-def ensure_saved_thumbnail(relative_model_path: str) -> Path | None:
+def ensure_saved_thumbnail(relative_model_path: str, *, required_recipe: str = '') -> Path | None:
     """Return/create the persisted thumbnail for a saved asset version.
 
     Provider thumbnails are authoritative when available. This is intentionally
@@ -1169,17 +1196,17 @@ def ensure_saved_thumbnail(relative_model_path: str) -> Path | None:
     model = resolve_saved(relative_model_path)
     root = assets_root().resolve()
     folder = model.parent
-    # The filesystem is authoritative for local authoring assets. A newly
-    # acquired asset may not have a manifest entry yet, but its derivative
-    # thumbnail is still valid local state. Check the deterministic sibling
-    # thumbnail first and use manifest metadata only when it exists.
+    manifest = _load_manifest(folder)
+    version = next((v for v in manifest.get("versions") or [] if str(v.get("file") or "") == model.name), None)
+    if required_recipe and (not isinstance(version, dict) or str(version.get('thumbnail_recipe') or '') != required_recipe):
+        # Old provider/T-pose thumbnails are not valid frame-zero captures.
+        # Let the browser generate and persist the correct first animation frame.
+        return None
+    # Keep the established thumbnail cache for unanimated source models.
     for suffix in (".jpg", ".jpeg", ".png", ".webp"):
         candidate = folder / f"{model.stem}.thumb{suffix}"
         if candidate.is_file() and candidate.stat().st_size > 0:
             return candidate
-
-    manifest = _load_manifest(folder)
-    version = next((v for v in manifest.get("versions") or [] if str(v.get("file") or "") == model.name), None)
     if not isinstance(version, dict):
         return None
 
@@ -1221,13 +1248,15 @@ def ensure_saved_thumbnail(relative_model_path: str) -> Path | None:
     return destination
 
 
-def save_generated_thumbnail(relative_model_path: str, data_url: str) -> Path:
+def save_generated_thumbnail(relative_model_path: str, data_url: str, *, recipe: str = '') -> Path:
     """Persist a generated thumbnail for one saved asset version.
 
     This is the final fallback after a saved thumbnail is missing and the
     original provider cannot supply one. The local source file is authoritative;
     manifest metadata is updated only when a matching version already exists.
     """
+    if recipe and recipe != 'animation-frame-zero-v1':
+        raise ValueError('Unsupported saved thumbnail recipe')
     model = resolve_saved(relative_model_path)
     root = assets_root().resolve()
     folder = model.parent
@@ -1254,6 +1283,10 @@ def save_generated_thumbnail(relative_model_path: str, data_url: str) -> Path:
     temp.replace(destination)
     if isinstance(version, dict):
         version["thumbnail_file"] = destination.name
+        if recipe:
+            version['thumbnail_recipe'] = recipe
+        else:
+            version.pop('thumbnail_recipe', None)
         _write_manifest(folder, manifest)
     # Save owns local authored state. Generated thumbnails are local derivatives
     # until an explicit Push or Build publishes the Assets tree.
@@ -1357,18 +1390,15 @@ def delete_uci_asset(uci: str) -> dict[str, Any]:
     if manifest.get('uci') != uci or folder.name != uci or folder.is_symlink():
         raise ValueError('Canonical asset identity does not match deletion target')
     versions = list(manifest.get('versions') or [])
-    for version in versions:
-        filename = str(version.get('file') or '')
-        if not filename:
-            raise ValueError('Cannot delete an asset with an invalid saved version')
-        delete_version(folder_rel, filename)
-    if not versions:
-        # The Server-owned migration format stores its representations directly
-        # under the verified canonical UCI folder, with no version entries.
-        shutil.rmtree(folder)
-        log(f'asset-deleted-uci folder={folder_rel} migration_only=True')
+    # Delete the complete verified canonical UCI folder as one operation. Migrated
+    # representations can outlive saved version files: delete_version() refuses a
+    # missing source file and previously left such assets impossible to remove.
+    # The folder is already validated against its exact UCI above; never unlink
+    # an arbitrary supplied path or traverse to a neighboring asset.
+    shutil.rmtree(folder)
     if folder.exists():
         raise RuntimeError('Original Server did not remove UCI: ' + uci)
+    log(f'asset-deleted-uci folder={folder_rel} versions={len(versions)}')
     return {'deleted': uci, 'versions': len(versions)}
 
 
@@ -1629,6 +1659,110 @@ def _animation_dependency_index(root: Path) -> list[dict[str, Any]]:
                 "name": str((version.get("metadata") or {}).get("title") if isinstance(version.get("metadata"), dict) else "") or str(manifest.get("name") or source.stem),
             })
     return rows
+
+
+
+def local_animation_candidates() -> list[dict[str, str]]:
+    """List playable Mixamo-compatible motion already saved in Builds/Assets.
+
+    This is an authoring inventory, not the external Mixamo search index. A
+    candidate must have a real local Babylon-loadable representation with
+    animation tracks. No missing files are downloaded or provisioned.
+    """
+    root = assets_root().resolve()
+    candidates: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(folder: Path, filename: str, name: str, identity: str,
+            *, expected_mixamo: bool = False) -> None:
+        if not filename or not identity:
+            return
+        candidate = folder / filename
+        if candidate.is_symlink():
+            return
+        source = candidate.resolve()
+        try:
+            relative = source.relative_to(root)
+        except ValueError:
+            return
+        if source.is_symlink() or not source.is_file() or source.suffix.casefold() not in {".glb", ".gltf"}:
+            return
+        portable_path = relative.as_posix()
+        if portable_path in seen:
+            return
+        inspection = inspect_model(source)
+        if not inspection.get("has_embedded_animations"):
+            return
+        # Animation-only Mixamo GLBs may have no skin: they carry keyframes on
+        # named humanoid transforms for retargeting to a separate character.
+        # Match the existing Mixamo rig-name inspector rather than excluding
+        # valid saved animation resources solely because they have no skin.
+        markers = set(inspection.get("mixamo_bone_markers") or [])
+        humanoid_motion_source = {"hips", "head", "leftarm", "rightarm", "leftupleg", "rightupleg"}.issubset(markers)
+        if not expected_mixamo and not (inspection.get("mixamo_compatible_rig") or humanoid_motion_source):
+            return
+        seen.add(portable_path)
+        candidates.append({
+            "folder": relative.parent.as_posix(),
+            "file": relative.name,
+            "name": name or source.stem,
+            "id": identity,
+            "source": "local-assets",
+        })
+
+    # Saved animation versions can already be playable GLB/glTF, not only
+    # Mixamo FBX with a .preview.glb derivative. Never require the retired
+    # search database, and never run a converter inside the import request.
+    for row in _animation_dependency_index(root):
+        filename = str(row.get("file") or "")
+        folder = root / str(row.get("folder") or "")
+        extension = Path(filename).suffix.casefold()
+        identity = str(row.get("asset_id") or row.get("sha256") or "")
+        mixamo_source = str(row.get("provider") or "").casefold() == "mixamo"
+        if extension in {".glb", ".gltf"}:
+            add(folder, filename, str(row.get("name") or ""), identity,
+                expected_mixamo=mixamo_source)
+        elif extension == ".fbx" and mixamo_source:
+            add(folder, Path(filename).with_suffix(".preview.glb").name,
+                str(row.get("name") or ""), identity, expected_mixamo=True)
+
+    # Legacy downloaded animation assets can have their portable .preview.glb
+    # on disk without an accompanying manifest. Use the existing real files;
+    # source FBX alone cannot be loaded by Babylon without conversion.
+    animations_dir = root / "Animations"
+    if animations_dir.is_dir():
+        for source in sorted(animations_dir.rglob("*")):
+            if source.suffix.casefold() not in {".glb", ".gltf"} or not source.is_file():
+                continue
+            add(source.parent, source.name, source.stem,
+                source.relative_to(root).as_posix())
+
+    # A saved character with embedded Mixamo-compatible animation is also a
+    # valid motion source. Preserve its UCI and use its existing GLB/glTF;
+    # never materialize an alternate copy of the asset.
+    for folder, manifest in _uci_asset_folders(root):
+        if str(manifest.get("category") or "").casefold() != "animated":
+            continue
+        identity = str(manifest.get("uci") or "")
+        name = str(manifest.get("name") or folder.name)
+        versions = manifest.get("versions")
+        for version in versions if isinstance(versions, list) else []:
+            if not isinstance(version, dict):
+                continue
+            filename = str(version.get("file") or "")
+            if Path(filename).suffix.casefold() not in {".glb", ".gltf"}:
+                continue
+            add(folder, filename, name, identity)
+
+        representations = manifest.get("representations")
+        solid = representations.get("solid") if isinstance(representations, dict) else None
+        if isinstance(solid, dict):
+            filename = str(solid.get("model") or "")
+            if Path(filename).suffix.casefold() in {".glb", ".gltf"}:
+                add(folder, filename, name, identity)
+
+    log(f"local-animation-candidates root={root} count={len(candidates)}")
+    return candidates
 
 
 def _repair_animation_dependencies(root: Path) -> int:

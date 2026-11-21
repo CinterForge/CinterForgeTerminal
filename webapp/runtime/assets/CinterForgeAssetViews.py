@@ -15,7 +15,7 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit, parse_qs
 
 from runtime.assets.CinterForgeAssets import inspect_asset, safe_relative
 
@@ -92,7 +92,7 @@ def report(server) -> dict:
 def view(server, uci: str) -> dict:
     from runtime.assets import CinterForgeAssetOriginal as original
     result = original.existing_uci(server, uci)
-    return {'url': '/assets-library/workspace?uci=' + quote(uci, safe=''),
+    return {'url': '/assets-library/asset?uci=' + quote(uci, safe=''),
             'uci': uci, 'name': result['name'], 'root': str(root_for(server)),
             'path': str(root_for(server) / result['folder'])}
 
@@ -115,7 +115,8 @@ def _resume_incomplete_local_import(server, uci: str) -> dict | None:
         # Migrated legacy assets and authored non-Local representations do not
         # silently acquire new migration jobs when opened for editing.
         versions = [version for version in manifest.get('versions') or []
-                    if str(version.get('provider') or '').casefold() == 'local'
+                    if isinstance(version, dict)
+                    and str(version.get('provider') or '').casefold() == 'local'
                     and str(version.get('kind') or '').casefold() == '3d'
                     and Path(str(version.get('file') or '')).suffix.lower() in MODELS]
         if not versions:
@@ -159,14 +160,14 @@ def queue_tab(server, kind: str, **args) -> dict:
             if resumed:
                 job = resumed['conversion_job']
                 return {'kind': 'view', **view(server, args['uci']), 'job': job,
-                        'url': '/assets-library/workspace?uci=' + quote(args['uci'], safe='')
+                        'url': '/assets-library/asset?uci=' + quote(args['uci'], safe='')
                                + '&job=' + quote(job, safe='')}
         request = {'kind': 'view', **view(server, args['uci'])}
         if args.get('job'):
             request['job'] = args['job']
             request['url'] += '&job=' + quote(args['job'], safe='')
     elif kind == 'blockify':
-        request = {'kind': 'blockify', 'url': '/assets-library/workspace?job=' + quote(args['job'], safe=''), 'job': args['job']}
+        request = {'kind': 'blockify', 'url': '/assets-library/asset?job=' + quote(args['job'], safe=''), 'job': args['job']}
     elif kind == 'picker':
         request = {'kind': 'picker'}
     else:
@@ -336,6 +337,8 @@ def import_path(server, raw: str) -> dict:
             matched = False
             source_sha = hashlib.sha256(source.read_bytes()).hexdigest() if source.suffix.lower() == '.glb' else None
             for version in resolved['manifest'].get('versions') or []:
+                if not isinstance(version, dict):
+                    continue
                 candidate = owned / safe_relative(str(version.get('file') or ''))
                 if candidate.is_file() and candidate.suffix.lower() == source.suffix.lower():
                     if version.get('sha256') == hashlib.sha256(candidate.read_bytes()).hexdigest():
@@ -352,6 +355,29 @@ def import_path(server, raw: str) -> dict:
     with original.library(server):
         from runtime.assets.asset_migration_commands import _asset_migration_destination_status
         migration = _asset_migration_destination_status(owned, 16)
+    # Explicit re-import of an existing local UCI may upgrade a completed
+    # clipless Mixamo rig, or correct a category written by an old importer.
+    # Simply opening its Asset View never mutates the asset or initiates a job.
+    if migration['current'] and result.get('existing'):
+        original_manifest = resolved['manifest']
+        original_version = next((v for v in original_manifest.get('versions') or []
+                                 if isinstance(v, dict) and str(v.get('provider') or '').casefold() == 'local'
+                                 and Path(str(v.get('file') or '')).suffix.lower() in MODELS), None)
+        if original_version:
+            from runtime.assets.asset_management import inspect_model
+            model = owned / safe_relative(str(original_version['file']))
+            # Server's asset inspector resolves its paths and log destination
+            # from the selected Assets library context. Do not call it outside
+            # the same library scope as the import writer.
+            with original.library(server):
+                inspected = inspect_model(model)
+            embedded = bool(inspected.get('has_embedded_animations'))
+            imported = bool(original_manifest.get('import_animation'))
+            expected_category = 'Animated' if (embedded or imported or inspected.get('mixamo_compatible_rig')) else 'Objects'
+            upgrade_clipless_rig = (bool(inspected.get('mixamo_compatible_rig'))
+                                    and not embedded and not imported)
+            if upgrade_clipless_rig or str(original_manifest.get('category') or '') != expected_category:
+                migration = {'current': False, 'reason': 'reimport-animation-or-category-upgrade'}
     result['migration'] = migration['reason']
     if not migration['current']:
         manifest_data = resolved['manifest']
@@ -377,6 +403,11 @@ def import_path(server, raw: str) -> dict:
         command_name = result['uci'].partition('#')[2].removesuffix('en').lower()
         if not command_name:
             raise RuntimeError('Canonical UCI has no original asset command identifier')
+        # Use the existing glTF inspector; a humanoid-looking skeleton is not
+        # proof that an external Mixamo animation can be retargeted.
+        from runtime.assets.asset_management import inspect_model
+        with original.library(server):
+            compatible_rig = bool(inspect_model(model).get('mixamo_compatible_rig'))
         row = {
             'uci': result['uci'], 'name': str(manifest_data.get('name') or model.stem),
             'minecraft_name': str(manifest_data.get('minecraft_name') or manifest_data.get('name') or model.stem),
@@ -385,6 +416,7 @@ def import_path(server, raw: str) -> dict:
             'source_path': (Path(resolved['folder']) / file).as_posix(),
             'source_format': file.suffix.lower().lstrip('.'),
             'blockify_resolution': 16, 'mixamo': False, 'local_import': True,
+            'mixamo_compatible_rig': compatible_rig,
             'reuse_completed': False,
         }
         # The browser runs the ORIGINAL migration for precisely this one UCI,
@@ -486,8 +518,17 @@ def serve(handler, url_path: str) -> bool:
     try:
         base = original.source_root()
         relative = unquote(url_path[len('/assets-library/'):])
-        if relative == 'workspace':
-            _html_response(handler, (base.parent.parent / 'views/workspace.html').read_bytes())
+        if relative == 'workspace' or (relative == 'asset' and not
+                any(parse_qs(urlsplit(handler.path).query).get(key) for key in ('uci', 'job'))):
+            # Retired source/category library and empty asset views go to the report.
+            handler.send_response(302)
+            handler.send_header('Location', '/assets-library/SVG/Assets/AssetGallery.html')
+            handler.send_header('Cache-Control', 'no-store')
+            handler.send_header('Content-Length', '0')
+            handler.end_headers()
+            return True
+        if relative == 'asset':
+            _html_response(handler, (base.parent.parent / 'views/asset.html').read_bytes())
             return True
         if relative.startswith('SVG/Assets/'):
             root = root_for(handler.server)

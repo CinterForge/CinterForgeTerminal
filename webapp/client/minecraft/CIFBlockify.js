@@ -1336,47 +1336,38 @@ class CIFBlockify {
         return {label:String(label||group.name||'Animation'),animation_length:length,bones,sample_rate:sampleHz,transform_space:'voxel_world_delta_flat'};
     }
 
-    static async BlockifyCaptureMixamoClip(scene,character,characterNodes,rig,ref,label){
+    static async BlockifyCaptureMixamoClip(scene,character,characterNodes,rig,ref,label,{returnGroup=false}={}){
         const B=window.BABYLON;
         if (!B) {
             throw new Error('Babylon.js is unavailable.');
         }
-        if (!ref?.id&&!ref?.folder) {
-            return null;
+        if (!ref?.folder || !ref?.file) {
+            throw new Error(`Saved animation source is missing a local file: ${label}`);
         }
         const rest=this.BlockifyRestRotationMap(character,characterNodes),groupsBefore=new Set(scene.animationGroups),nodesBefore=new Set(scene.getNodes());
-        const animationUrl=ref.id
-            ? await CIFRuntime.stagedAssetUrl('preview-model',{kind:'animation',id:String(ref.id)})
-            : await CIFRuntime.stagedAssetUrl('saved-runtime-animation',{path:`${ref.folder}/${ref.file}`});
-            await B.SceneLoader.ImportMeshAsync('','',animationUrl,scene,undefined,'.glb');
+        // Both imported-rig and Blockify pose sources are local saved assets.
+        // Never resolve motion through the retired Mixamo search index.
+        const animationUrl = await CIFRuntime.stagedAssetUrl('saved-runtime-animation', {
+            path: `${ref.folder}/${ref.file}`
+        });
+        const extension = String(ref.file).toLowerCase().endsWith('.gltf') ? '.gltf' : '.glb';
+        await B.SceneLoader.ImportMeshAsync('', '', animationUrl, scene, undefined, extension);
         const sourceNodes=scene.getNodes().filter(n=>!nodesBefore.has(n)),sourceGroups=scene.animationGroups.filter(g=>!groupsBefore.has(g));
             const retarget=this.RetargetAnimation(scene,character,characterNodes,sourceNodes,sourceGroups,`blockify-${label}`),playing=retarget.playing;
         const clip=this.BlockifyClipFromAnimationGroup(playing,rig,rest,String(ref.name||ref.file||label));
             try{playing.stop();
             }catch(_){}if(!clip)throw new Error(`Mixamo ${label} produced no retargeted bone rotations for Blockify.`);
-            return clip;
+            return returnGroup?{clip,playing}:clip;
     }
 
     static async BlockifyApplyMixamoPose(scene, character, characterNodes, animationAssets, stableKey) {
-        // Blockify All is fully local. Choose the pose animation entirely from
-        // catalog metadata first; staging is an execution step, never a search/probe.
-        let candidates = (this.allMixamoAnimations?.length
-            ? this.allMixamoAnimations
-            : this.mixamoAnimations) || [];
-
-        if (!candidates.length) {
-            const payload = await CIFRuntime.assetCommand({
-                operation: 'search',
-                provider: 'library',
-                kind: 'animation',
-                q: '',
-                limit: 10000
-            });
-            candidates = Array.isArray(payload?.results) ? payload.results : [];
-            this.allMixamoAnimations = candidates.slice();
-        }
-
-        candidates = candidates.filter(animationAsset => String(animationAsset?.id || '').trim());
+        // Reuse motion in the local Assets library rather than the optional
+        // downloaded Mixamo search index. Do not provision missing catalogs.
+        const payload = await CIFRuntime.assetCommand({
+            operation: 'saved-animation-candidates'
+        });
+        const candidates = (Array.isArray(payload?.results) ? payload.results : [])
+            .filter(row => row?.folder && row?.file && row?.id);
         if (!candidates.length) {
             return null;
         }
@@ -1387,28 +1378,25 @@ class CIFBlockify {
             hash = Math.imul(hash, 16777619);
         }
 
-        // The local RuntimeAnimations catalog is the compatibility boundary. Pick
-        // exactly one deterministic animation from it. If that asset cannot retarget,
-        // fail loudly instead of staging/probing every other animation in the library.
+        // Choose one deterministic saved animation for ordinary Blockify jobs.
+        // If retargeting fails, report the real problem rather than guessing at
+        // another source or silently completing without movement.
         const selectedIndex = (hash >>> 0) % candidates.length;
         const animationAsset = candidates[selectedIndex];
-        const animationId = String(animationAsset.id || '').trim();
-        const animationName = String(
-            animationAsset.title ||
-            animationAsset.name ||
-            animationAsset.file ||
-            animationId
-        );
+        const animationId = String(animationAsset.id);
+        const animationName = String(animationAsset.name || animationAsset.file);
 
         const groupsBefore = new Set(scene.animationGroups);
         const nodesBefore = new Set(scene.getNodes());
 
         try {
-            const animationUrl = await CIFRuntime.stagedAssetUrl('preview-model', {
-                kind: 'animation',
-                id: animationId
+            const animationUrl = await CIFRuntime.stagedAssetUrl('saved-runtime-animation', {
+                path: `${animationAsset.folder}/${animationAsset.file}`
             });
-            await BABYLON.SceneLoader.ImportMeshAsync('', '', animationUrl, scene, undefined, '.glb');
+            const extension = String(animationAsset.file).toLowerCase().endsWith('.gltf')
+                ? '.gltf'
+                : '.glb';
+            await BABYLON.SceneLoader.ImportMeshAsync('', '', animationUrl, scene, undefined, extension);
 
             const sourceNodes = scene.getNodes().filter(node => !nodesBefore.has(node));
             const sourceGroups = scene.animationGroups.filter(group => !groupsBefore.has(group));

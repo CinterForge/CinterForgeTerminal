@@ -268,10 +268,31 @@ def execute_asset_migration_command(operation: str, body: dict[str, Any]) -> dic
 
             solid_rows = list(body.get("solid_files") or [])
             block_rows = list(body.get("block_files") or [])
+            import_animation = body.get("import_animation")
+            if import_animation is not None:
+                if (not isinstance(import_animation, dict) or
+                        not str(import_animation.get("id") or "").strip() or
+                        not str(import_animation.get("name") or "").strip()):
+                    raise ValueError("Imported animation identity must name a real catalog clip")
+                import_animation = {"id": str(import_animation["id"]),
+                                    "name": str(import_animation["name"])}
             if not solid_rows:
                 raise ValueError("asset migration requires a Solid GLTF export")
             if resolution > 0 and not block_rows:
                 raise ValueError("blockified asset migration requires a Block GLTF export")
+            if import_animation:
+                solid_document = next((row for row in solid_rows if
+                    str(row.get("name") or "").lower().endswith(".gltf") and
+                    str(row.get("encoding") or "text") == "text"), None)
+                if not solid_document:
+                    raise ValueError("Imported animation has no authored Solid GLTF")
+                solid_model = json.loads(str(solid_document.get("data") or "{}"))
+                joints = {index for skin in solid_model.get("skins") or []
+                          for index in skin.get("joints") or []}
+                if not any(channel.get("target", {}).get("node") in joints
+                           for animation in solid_model.get("animations") or []
+                           for channel in animation.get("channels") or []):
+                    raise ValueError("Imported Solid GLTF has no playable skinned animation")
 
             try:
                 solid_files = write_export_files(destination / "solid", solid_rows, "solid")
@@ -406,6 +427,8 @@ def execute_asset_migration_command(operation: str, body: dict[str, Any]) -> dic
                     "category": _migration_asset_category(source_path),
                     "representations": representations,
                 }
+                if import_animation:
+                    manifest["import_animation"] = import_animation
                 manifest_path = destination / "manifest.json"
                 if manifest_path.is_file():
                     # Server's IFEditor save_version and its original migration
@@ -419,15 +442,43 @@ def execute_asset_migration_command(operation: str, body: dict[str, Any]) -> dic
                     merged_reps = dict(prior_reps) if isinstance(prior_reps, dict) else {}
                     merged_reps.update(representations)
                     preserved.update(manifest)
+                    if body.get("local_import") and not import_animation:
+                        preserved.pop("import_animation", None)
+                    if not body.get("local_import") and not import_animation and isinstance(previous.get("import_animation"), dict):
+                        preserved["import_animation"] = previous["import_animation"]
                     preserved["representations"] = merged_reps
                     if isinstance(previous.get("versions"), list):
                         # Native viewer and animation assignments depend on these
                         # original Server saved-version fields.
                         for field in ("schema", "versions", "default_version", "last_viewed",
                                       "assigned_animations", "default_animation", "subgroup", "category"):
-                            if field in previous:
+                            if field in previous and (not body.get("local_import") or field not in {"category", "subgroup"}):
                                 preserved[field] = previous[field]
                     manifest = preserved
+                if body.get("local_import"):
+                    # The import's final classification is determined by actual
+                    # clips, not by the original rig or provisional source path.
+                    # Embedded non-Mixamo animations count without retargeting.
+                    from runtime.assets.asset_management import inspect_model
+                    inspection = inspect_model(source)
+                    category = "Animated" if (
+                        inspection.get("has_embedded_animations")
+                        or inspection.get("mixamo_compatible_rig")
+                        or import_animation
+                    ) else "Objects"
+                    manifest["category"] = category
+                    manifest["subgroup"] = ""
+                    desired = (root / category / uci).resolve()
+                    if desired != destination:
+                        if desired.exists() or desired.is_symlink():
+                            raise FileExistsError(f"Cannot relocate imported UCI; destination already exists: {desired}")
+                        desired.parent.mkdir(parents=True, exist_ok=True)
+                        # All UCI representations and original bytes move as one
+                        # owned directory. No UCI or source content is changed.
+                        destination.rename(desired)
+                        destination = desired
+                    manifest["legacy_source"] = (destination / source.name).relative_to(root).as_posix()
+                    manifest_path = destination / "manifest.json"
                 manifest_path.write_text(
                     json.dumps(manifest, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",

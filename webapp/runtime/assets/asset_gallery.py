@@ -55,6 +55,12 @@ def _card(manifest: dict, folder: Path, library: Path) -> str:
     solid_thumb = _asset_url(folder, library, solid.get("thumbnail"))
     block_thumb = _asset_url(folder, library, block.get("thumbnail"))
     thumbnail = block_thumb or solid_thumb
+    for version in manifest.get('versions') or []:
+        if (isinstance(version, dict) and version.get('thumbnail_recipe') == 'animation-frame-zero-v1'):
+            frame_zero = _asset_url(folder, library, version.get('thumbnail_file'))
+            if frame_zero and (folder / str(version.get('thumbnail_file') or '')).is_file():
+                thumbnail = frame_zero
+                break
     name = str(manifest.get("name") or folder.name)
     uci = str(manifest.get("uci") or folder.name)
     shown = escape(name)
@@ -62,13 +68,11 @@ def _card(manifest: dict, folder: Path, library: Path) -> str:
     image_html = (f'<img loading="lazy" src="{attr(thumbnail)}" alt="{attr(name)}">'
                   if thumbnail else "No preview")
     return (
-        f'<article class="asset" data-name="{attr(name)}">'
-        f'<button type="button" class="thumb" data-uci="{attr(uci)}" '
+        f'<button type="button" class="asset" data-uci="{attr(uci)}" data-name="{attr(name)}" '
         f'aria-label="Open Asset View for {attr(name)}">'
-        f'{image_html}'
-        '</button><div class="meta">'
-        f'<strong>{shown}</strong><small>{escape(uci)}</small>'
-        '</div></article>'
+        f'<span class="thumb">{image_html}</span>'
+        f'<span class="meta"><strong>{shown}</strong><small>{escape(uci)}</small></span>'
+        '</button>'
     )
 
 
@@ -78,12 +82,14 @@ HTML = '''<!doctype html>
 <style>
 body{margin:0;background:#101113;color:#eee;font:14px system-ui,-apple-system,sans-serif}
 header{position:sticky;top:0;z-index:2;background:#191b1e;padding:12px 16px;border-bottom:1px solid #333;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
-h1{font-size:18px;margin:0}#filter{flex:1;min-width:160px;max-width:320px;padding:9px;background:#242629;color:#fff;border:1px solid #444;border-radius:6px}
+h1{font-size:18px;margin:0}
+#filter{flex:1;min-width:160px;max-width:320px;padding:9px;background:#242629;color:#fff;border:1px solid #444;border-radius:6px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;padding:12px}
-.asset{background:#1b1d20;border:1px solid #353535;border-radius:8px;overflow:hidden}
-.thumb{display:block;width:100%;height:180px;padding:0;border:0;background:#262626;cursor:pointer;color:#aaa}
-.thumb:hover,.thumb:focus-visible{outline:2px solid #8ccaff;outline-offset:-2px}
-.thumb img{width:100%;height:100%;object-fit:contain}.meta{padding:9px}
+.asset{background:#1b1d20;border:1px solid #353535;border-radius:8px;overflow:hidden;display:block;width:100%;padding:0;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.thumb{display:block;width:100%;height:180px;background:#262626;color:#aaa}
+.asset:hover,.asset:focus-visible{outline:2px solid #8ccaff;outline-offset:-2px}
+.asset[hidden]{display:none}
+.thumb img{width:100%;height:100%;object-fit:contain}.meta{display:block;padding:9px}
 .meta strong,.meta small{display:block;overflow:hidden;text-overflow:ellipsis}.meta small{color:#999;font-size:10px;margin-top:3px}
 #gallery-status{padding:8px 16px;color:#f4bd77}#gallery-status:empty{display:none}
 </style></head>
@@ -109,9 +115,11 @@ document.addEventListener('click',async event=>{
   finally{button.disabled=false;}
 });
 document.getElementById('filter').addEventListener('input',event=>{
-  const search=event.target.value.toLocaleLowerCase();
-  for(const card of document.querySelectorAll('.asset'))
-    card.hidden=!card.dataset.name.toLocaleLowerCase().includes(search);
+  const search=event.target.value.trim().toLocaleLowerCase();
+  for(const card of document.querySelectorAll('.asset')){
+    const haystack=(card.dataset.name+' '+card.dataset.uci).toLocaleLowerCase();
+    card.hidden=!haystack.includes(search);
+  }
 });
 </script></body></html>
 '''

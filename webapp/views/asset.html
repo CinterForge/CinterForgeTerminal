@@ -1,69 +1,23 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>CinterForge Asset Browser</title><link rel="stylesheet" href="/css/ifplayer.css"><style>html,body{margin:0;width:100%;height:100%;background:#11151a;color:#eee;font-family:system-ui}#if_root{height:100%;width:100%;position:relative;display:block!important}#objaverse-browser{display:flex!important;flex-direction:column;position:absolute!important;inset:0!important;width:100%!important;height:100%!important;overflow:auto!important;opacity:1!important;visibility:visible!important;transform:none!important}#objaverse-head{flex:0 0 auto}#objaverse-results{flex:1 1 auto;overflow:auto;min-height:220px}#asset-terminal-status{display:none!important}#asset-terminal-status:empty{display:none}#bottom-response{position:fixed;bottom:0;left:0;right:0;max-height:25%;overflow:auto;z-index:20002;padding:4px 10px;background:#1b2330;color:#dce5f5;font:12px monospace;white-space:pre-wrap;pointer-events:none}#bottom-response:empty{display:none}html.cinter-uci-view #objaverse-head{display:none!important}html.cinter-uci-view #objaverse-results{height:100%;min-height:0!important}html.cinter-uci-view #objaverse-results.asset-fullview-active{height:100%;min-height:0;overflow-y:auto;overflow-x:hidden}html.cinter-uci-view #if_root{display:flex!important;flex-direction:column}html.cinter-uci-view #objaverse-browser{position:relative!important;inset:auto!important;height:auto!important;flex:1 1 auto;min-height:0;overflow:hidden!important}html.cinter-uci-view #bottom-response{position:relative;inset:auto;flex:0 0 auto;max-height:22%;overflow:auto}html.cinter-uci-view #if_root .saved-asset-card.asset-fullview{max-height:none;min-height:min-content;overflow:visible}html.cinter-uci-view #if_root .saved-asset-card.asset-fullview .objaverse-visual{min-height:120px;flex:1 1 0}html.cinter-uci-view #if_root .saved-asset-card.asset-fullview .objaverse-card-body{flex:0 0 auto;max-height:none;min-height:min-content;overflow:visible}html.cinter-uci-view .saved-asset-card.asset-fullview .objaverse-actions,html.cinter-uci-view .saved-asset-card.asset-fullview .asset-blockify-controls{display:flex;flex-wrap:wrap}</style></head><body><div id="if_root" class="if_dark-ui"><section aria-label="CinterForge asset search" id="objaverse-browser">
-<header id="objaverse-head">
-<div id="asset-head-row-primary">
-<div id="asset-head-title">
-<strong id="objaverse-title"></strong>
-<span id="objaverse-status"></span>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CinterForge Asset View</title>
+<link rel="stylesheet" href="/css/ifplayer.css">
+<link rel="stylesheet" href="/css/asset-view.css">
+</head>
+<body>
+<div id="if_root" class="if_dark-ui">
+  <section aria-label="CinterForge asset view" id="objaverse-browser">
+    <div id="objaverse-results"></div>
+  </section>
+  <div id="asset-terminal-status" role="status"></div>
+  <div id="bottom-response" role="status"></div>
 </div>
-<nav aria-label="Asset sources" id="asset-search-tabs">
-<button class="asset-search-tab" data-asset-kind="objaverse" type="button">Objaverse</button>
-<button class="asset-search-tab" data-asset-kind="pd12m" type="button">PD12M</button>
-<button class="asset-search-tab" data-asset-kind="mixamo" type="button">Mixamo</button>
-<button class="asset-search-tab" data-asset-kind="heroicons" type="button">Heroicons</button>
-<button class="asset-search-tab" data-asset-kind="lucide" type="button">Lucide</button>
-<button class="asset-search-tab" data-asset-kind="openclipart" type="button">SVG</button>
-<button class="asset-search-tab" data-asset-kind="freesound" type="button">Freesound</button>
-<button class="asset-search-tab" data-asset-kind="kenney" type="button">Sound Effects</button>
-<button class="asset-search-tab" data-asset-kind="incompetech" type="button">Music</button>
-<button class="asset-search-tab" data-asset-kind="cloudflare" type="button">Cloudflare</button>
-<button class="asset-search-tab active" data-asset-kind="saved" type="button">Library</button>
-<button class="asset-search-tab" data-asset-kind="assign" type="button">Assignments</button>
-</nav>
-<div id="asset-head-actions">
-<button id="asset-blockify-button" type="button">Blockify All</button>
-</div>
-</div>
-<div class="asset-head-tab-row" id="asset-head-row-secondary">
-<nav aria-label="Mixamo asset types" hidden="" id="mixamo-search-tabs">
-<button class="asset-saved-tab active" data-mixamo-kind="animation" type="button"></button>
-<button class="asset-saved-tab" data-mixamo-kind="character" type="button"></button>
-</nav>
-<nav aria-label="Saved asset categories" hidden="" id="saved-assets-tabs">
-<button class="asset-saved-tab active" data-saved-category="Images" type="button"></button>
-<button class="asset-saved-tab" data-saved-category="Objects" type="button"></button>
-<button class="asset-saved-tab" data-saved-category="Animated" type="button"></button>
-<button class="asset-saved-tab" data-saved-category="Unassigned" type="button"></button>
-</nav>
-</div>
-<div class="asset-head-tab-row" id="asset-head-row-tertiary">
-<nav aria-label="Mixamo animation categories" hidden="" id="mixamo-animation-categories"></nav>
-<nav aria-label="Saved animated asset types" hidden="" id="saved-animated-tabs">
-<button class="asset-saved-tab active" data-saved-animated="Mixamo" type="button"></button>
-<button class="asset-saved-tab" data-saved-animated="Fixed" type="button"></button>
-</nav>
-</div>
-<div id="asset-head-row-search">
-<form id="objaverse-search-form">
-<input autocomplete="off" id="objaverse-search-input" spellcheck="false" type="search" value=""/>
-<button id="objaverse-search-button" type="submit"></button>
-</form>
-<label hidden="" id="asset-character-picker-wrap">
-<span id="asset-character-picker-label"></span>
-<select aria-label="Mixamo preview character" id="asset-character-picker"></select>
-</label>
-<label hidden="" id="asset-animation-category-picker-wrap">
-<span id="asset-animation-category-picker-label"></span>
-<select aria-label="Mixamo animation category" id="asset-animation-category-picker"></select>
-</label>
-<label hidden="" id="asset-animation-picker-wrap">
-<span id="asset-animation-picker-label"></span>
-<select aria-label="Mixamo default animation" id="asset-animation-picker"></select>
-</label>
-</div>
-</header>
-<div id="objaverse-results"></div>
-</section><div id="asset-terminal-status" role="status"></div><div id="bottom-response" role="status"></div></div><script>
+<script>
 window.CINTERFORGE_IF_ASSET_WORKSPACE=true;
+window.CINTERFORGE_ASSET_VIEW_UCI=new URLSearchParams(location.search).get('uci')||'';
 window.CINTERFORGE_IF_AUTHORING_BASE=window.location.origin;
 window.CINTERFORGE_IF_ASSETS_PUBLIC_BASE_URL=window.location.origin+'/assets-library/SVG/Assets';
 window.CINTERFORGE_IF_HOST_BASE=window.location.origin;
@@ -80,6 +34,11 @@ async function ensureBabylon(){if(!window.BABYLON)throw new Error('Staged origin
 (async()=>{
  const status=document.getElementById('asset-terminal-status');
  const packResultsUrl='/assets-library/SVG/Assets/MCAddons/index.html';
+ const reportUrl='/assets-library/SVG/Assets/AssetGallery.html';
+ const returnToReport=()=>{
+   if(window.parent!==window) window.parent.postMessage({type:'cinterforge-assets-open-report'},location.origin);
+   else window.location.replace(reportUrl);
+ };
  const showBlockifyFailure=message=>{
    // A failed CSV job must not fall through to the unrelated saved-asset
    // gallery. Use the existing main workspace area, not another status bar.
@@ -95,8 +54,9 @@ async function ensureBabylon(){if(!window.BABYLON)throw new Error('Staged origin
    if(window.CINTERFORGE_IF_HOST_API_READY!==true)throw new Error('Original IFPlayer authoring host not ready');
    const query=new URLSearchParams(location.search);
    const uci=query.get('uci');
-   if(uci)document.documentElement.classList.add('cinter-uci-view');
+   if(!uci&&!query.get('job')){returnToReport();return;}
    const job=query.get('job');
+   if(job&&!uci)document.documentElement.classList.add('asset-batch-running');
    // Import is not complete when the source GLB is saved. The original
    // migration must run before the interactive browser initializes its saved
    // preview renderers, which compete for the same WebGL context and can fail
@@ -220,58 +180,48 @@ async function ensureBabylon(){if(!window.BABYLON)throw new Error('Staged origin
    // Imported source-only UCIs have priority over preview initialization.
    // Explicit batch/CSV jobs keep their established browser-first lifecycle.
    if(job&&uci)await runMigrationJob();
-   CIFAssetBrowser.mode='saved';
-   await CIFAssetBrowser.Activate();
-   // A visible view UCI must not rely on the search box or the cached initial
-   // category. Force an authoritative original Server saved-list read.
-   await CIFAssetBrowser.LoadSaved();
-   const library=CIFAssetBrowser.savedLibrary?.groups||{};
-   if(!([...(library[CIFAssetBrowser.savedCategory] instanceof Array ? library[CIFAssetBrowser.savedCategory] : [])].length)){
-     if((library.Animated?.Mixamo||[]).length){CIFAssetBrowser.savedCategory='Animated';CIFAssetBrowser.savedAnimated='Mixamo';}
-     else if((library.Animated?.Fixed||[]).length){CIFAssetBrowser.savedCategory='Animated';CIFAssetBrowser.savedAnimated='Fixed';}
-     else if((library.Objects||[]).length){CIFAssetBrowser.savedCategory='Objects';}
-     else if((library.Images||[]).length){CIFAssetBrowser.savedCategory='Images';}
-     CIFAssetBrowser.RenderSaved();
-   }
    if(uci){
-     const library=CIFAssetBrowser.savedLibrary?.groups||{};
-     // The original Server groups assets into these browser categories. The
-     // manifest's category may be a synonym (e.g. Characters) and cannot be
-     // used as a tab key: locate the UCI in its actual authoritative group.
+     const payload=await CIFRuntime.assetCommand({operation:'saved-list'});
+     const groups=payload?.groups||{};
+     // A single asset view must use the authoritative Server category, not
+     // fall back to an entire library category if the UCI has been removed.
      const categories=[
-       {name:'Images',rows:library.Images||[]},
-       {name:'Objects',rows:library.Objects||[]},
-       {name:'Animated',animated:'Mixamo',rows:library.Animated?.Mixamo||[]},
-       {name:'Animated',animated:'Fixed',rows:library.Animated?.Fixed||[]},
-       {name:'Animations',rows:library.Animations||[]}
+       {name:'Images',rows:groups.Images||[]},
+       {name:'Objects',rows:groups.Objects||[]},
+       {name:'Animated',animated:'Mixamo',rows:groups.Animated?.Mixamo||[]},
+       {name:'Animated',animated:'Fixed',rows:groups.Animated?.Fixed||[]},
+       {name:'Animations',rows:groups.Animations||[]}
      ];
-     const matchedCategory=categories.find(category=>category.rows.some(row=>row.uci===uci));
-     if(!matchedCategory)throw new Error('UCI not present in original saved library: '+uci);
-     const match=matchedCategory.rows.find(row=>row.uci===uci);
-     CIFAssetBrowser.savedCategory=matchedCategory.name;
-     if(matchedCategory.animated)CIFAssetBrowser.savedAnimated=matchedCategory.animated;
-     CIFAssetBrowser.RenderSaved();
+     const category=categories.find(item=>item.rows.some(row=>row.uci===uci));
+     if(!category)throw new Error('UCI not present in saved library: '+uci);
+     const match=category.rows.find(row=>row.uci===uci);
+     CIFAssetBrowser.savedCategory=category.name;
+     if(category.animated)CIFAssetBrowser.savedAnimated=category.animated;
+     CIFAssetBrowser.mode='saved';
+     await CIFAssetBrowser.Initialize();
+     CIFAssetBrowser.ResumeRendering();
+     await CIFAssetBrowser.LoadSaved();
      const card=[...document.querySelectorAll('.saved-asset-card')].find(el=>el.dataset.folder===match.folder);
-     if(!card)throw new Error('Original Server returned UCI, but the saved-asset viewer card was not rendered: '+uci);
-     // The ORIGINAL browser card is the one Asset View for gallery and CLI.
-     // Its Blockify, CinterForge Voxel, Export and Remove actions remain usable
-     // even if an incomplete imported model cannot yet be previewed.
+     if(!card)throw new Error('Saved asset UCI was not rendered: '+uci);
+     // Original saved-asset card owns preview, Blockify, Voxel, Export and Remove.
      CIFAssetBrowser.ToggleSavedMinecraftFullView(card,true);
      if(migrationComplete){
        try{await CIFAssetBrowser.LoadSavedPreview(card);}
-       catch(error){status.textContent='Preview unavailable: '+String(error.message||error);}
+       catch(error){status.textContent='Preview unavailable: '+String(error.message||error);document.documentElement.classList.add('asset-view-error');}
      }
      CIFAssetBrowser.SetProgress(card,'UCI: '+uci+(job?
        (migrationComplete?' · Original migration complete':' · Migration failed'):' · Asset View'));
-     if(job&&!migrationComplete)status.textContent='Original migration failed: '+migrationFailure;
+     if(job&&!migrationComplete){
+       status.textContent='Original migration failed:\n'+migrationFailure;
+       document.documentElement.classList.add('asset-view-error');
+     }
    }
    if(job&&!uci){
      await runMigrationJob();
      if(migrationComplete){
        // The entire CSV pipeline (including pack index, galleries, and the
-       // canonical Assets report) has passed. Show its actual deliverable in
-       // this same tab rather than leaving the authoring-library gallery open.
-       window.location.replace(packResultsUrl);
+       // canonical Assets report) has passed. Open the generated Assets Report tab and close this conversion tab.
+       returnToReport();
      }else{
        showBlockifyFailure(migrationFailure);
      }
@@ -279,7 +229,9 @@ async function ensureBabylon(){if(!window.BABYLON)throw new Error('Staged origin
  }catch(error){
    if(new URLSearchParams(location.search).get('job')&&!new URLSearchParams(location.search).get('uci'))
      showBlockifyFailure(error?.stack||error?.message||error);
-   status.textContent='Asset Browser error: '+(error.stack||error.message||error);console.error(error);
+   status.textContent='Asset View error: '+(error.stack||error.message||error);
+   document.documentElement.classList.add('asset-view-error');
+   console.error(error);
    const job=new URLSearchParams(location.search).get('job');
    if(job){try{await fetch('/api/assets/blockify/progress',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job,processed:0,failed:0,error:String(error?.stack||error)})});}catch(_){}}
  }

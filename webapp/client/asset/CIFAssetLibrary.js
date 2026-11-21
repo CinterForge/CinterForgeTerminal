@@ -111,6 +111,15 @@ class CIFAssetLibrary {
 
     static SavedRows() {
         const groups=this.savedLibrary?.groups||{};
+        // Terminal Asset View is one selected UCI, never the old category gallery.
+        const selected=String(window.CINTERFORGE_ASSET_VIEW_UCI||'').trim();
+        if(selected){
+            return [
+                ...(groups.Images||[]),...(groups.Objects||[]),
+                ...(groups.Animated?.Mixamo||[]),...(groups.Animated?.Fixed||[]),
+                ...(groups.Animations||[])
+            ].filter(folder=>folder?.uci===selected);
+        }
         if (this.savedCategory==='Unassigned') {
             const assigned=this.ActiveAssignedUCIs();
             const folders=[
@@ -202,7 +211,8 @@ class CIFAssetLibrary {
             // Every 3D saved asset gets a thumbnail request. If no cached/provider
             // thumbnail exists, saved-thumb renders the model once, persists the
             // JPEG in the managed asset manifest, and all later views reuse it.
-            const thumbnail=!isImage?`<img class="objaverse-thumb saved-asset-thumb" data-staged-resource="saved-thumb" data-staged-path="${this.escapeHtml(rel)}" alt="${this.escapeHtml(folder.name||'asset')}">`:'';
+            const animated=String(folder.category||'').toLowerCase()==='animated'||(Array.isArray(current.inspection?.animation_names)&&current.inspection.animation_names.length>0);
+            const thumbnail=!isImage?`<img class="objaverse-thumb saved-asset-thumb" data-staged-resource="saved-thumb" data-staged-path="${this.escapeHtml(rel)}" ${animated?'data-thumbnail-recipe="animation-frame-zero-v1"':''} alt="${this.escapeHtml(folder.name||'asset')}">`:'';
             const visual=isImage?`<img class="objaverse-thumb saved-image-source" data-staged-resource="saved-file" data-staged-path="${this.escapeHtml(rel)}" alt="${this.escapeHtml(folder.name||'asset')}"><canvas class="objaverse-canvas saved-asset-canvas image-minecraft-canvas" aria-label="Minecraft preview for ${this.escapeHtml(folder.name||'asset')}"></canvas>`:`${thumbnail}<canvas class="objaverse-canvas saved-asset-canvas" aria-label="${this.escapeHtml(folder.name||'asset')}"></canvas>`;
             const mixamo=this.savedCategory==='Animated'&&this.savedAnimated==='Mixamo';
             const fixed=this.savedCategory==='Animated'&&this.savedAnimated==='Fixed';

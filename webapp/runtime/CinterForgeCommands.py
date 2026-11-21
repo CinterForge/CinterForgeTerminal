@@ -112,7 +112,7 @@ supported fallback if direct opening is unavailable.
 ASSETS_HELP = '''assets [report|import|view|blockify|setup|publish]
   assets report                    Open/refresh the local Assets gallery tab
   assets import [absolute path]   Import a GLB/GLTF or canonical UCI folder/ZIP
-  assets view <uci>               Open/refresh the original UCI Asset Browser
+  assets view <uci>               Open/refresh the individual UCI Asset View
   assets delete <uci>             Delete the canonical asset and all versions
   assets blockify <CSV path>      Run original CSV/Blockify/ContentPack authoring in a tab
   assets setup <channel>          Download verified individual Assets files without overwriting edits

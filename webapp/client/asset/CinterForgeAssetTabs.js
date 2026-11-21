@@ -122,6 +122,22 @@
     if (input.files?.[0]) void state.uploadAssetFile(input.files[0]);
   });
 
+  // A removed Asset View or completed batch no longer belongs in a tab.
+  // Reuse the existing report generator and tab opener, then close only the
+  // sending asset tab. Do not expose report editing controls.
+  window.addEventListener('message', event => {
+    if (event.origin !== window.location.origin ||
+        event.data?.type !== 'cinterforge-assets-open-report') return;
+    const tab = state.tabs.find(item => !item.closed && item.kind === 'asset-view' &&
+      item.assetKey !== 'report' && item.mapFrame?.contentWindow === event.source);
+    if (!tab) return;
+    void (async () => {
+      const report = await state.api('/api/assets/report', {});
+      await state.openAssetTab(report);
+      await state.closeTab(tab);
+    })().catch(error => state.notice('Unable to open Assets Report: ' + error.message));
+  });
+
   state.openAssetTab = async request => {
     if (!['report', 'view', 'blockify'].includes(request?.kind) || typeof request.url !== 'string' ||
         !request.url.startsWith('/assets-library/')) return;

@@ -8,9 +8,9 @@
 class CIFAssetThumbnail {
     static VERSION = 'refactor-v4';
     static CHARACTER_THUMBNAIL_RECIPE = Object.freeze({
-        schema: 'cinterforge.mixamo-character-thumbnail.v3',
-        posePolicy: 'stable-varied-local-animation',
-        poseFraction: 0.42,
+        schema: 'cinterforge.mixamo-character-thumbnail.v4',
+        posePolicy: 'animation-frame-zero',
+        poseFraction: 0,
         background: [.39, .68, .93, 1],
         camera: { alpha: -Math.PI / 2, beta: Math.PI / 2.25, radius: 2.6 },
         hemisphericLight: { direction: [.4, 1, .2], intensity: 1.8 },
@@ -247,7 +247,41 @@ class CIFAssetThumbnail {
             if (!modelUrl) {
                 throw new Error(`Saved GLB unavailable: ${rel}`);
             }
-            const result=await BABYLON.SceneLoader.ImportMeshAsync('','',modelUrl,scene,undefined,'.glb');
+            const extension=new URL(modelUrl,window.location.href).pathname.toLowerCase().endsWith('.gltf')?'.gltf':'.glb';
+            const name=modelUrl.slice(modelUrl.lastIndexOf('/')+1),rootUrl=modelUrl.slice(0,modelUrl.lastIndexOf('/')+1);
+            const result=await BABYLON.SceneLoader.ImportMeshAsync('',rootUrl,name,scene,undefined,extension);
+            const recipe=String(image?.dataset.thumbnailRecipe||'');
+            let poseGroup=null;
+            if (recipe === 'animation-frame-zero-v1') {
+                const groups=(result.animationGroups||[]).filter(group=>group?.targetedAnimations?.length);
+                let selected=groups[0]||null;
+                if (!selected) {
+                    const folderRel=rel.slice(0,rel.lastIndexOf('/'));
+                    const saved=this.SavedRows().find(row=>row.folder===folderRel)||this.AssignmentSavedRows().map(row=>row.folder).find(row=>row?.folder===folderRel);
+                    const refs=(saved?.assigned_animations||[]).filter(row=>row?.folder&&row?.file);
+                    if(!refs.length&&saved?.default_animation?.folder&&saved?.default_animation?.file) refs.push(saved.default_animation);
+                    if(refs.length) {
+                        const ref=refs[0],originalNodes=scene.getNodes().slice(),beforeGroups=new Set(scene.animationGroups);
+                        const url=await CIFRuntime.stagedAssetUrl('saved-runtime-animation',{path:`${ref.folder}/${ref.file}`});
+                        if (!url) throw new Error(`Saved animation unavailable: ${ref.folder}/${ref.file}`);
+                        await BABYLON.SceneLoader.ImportMeshAsync('','',url,scene,undefined,'.glb');
+                        const sources=scene.getNodes().filter(node=>!originalNodes.includes(node));
+                        const sourceGroups=scene.animationGroups.filter(group=>!beforeGroups.has(group));
+                        selected=this.RetargetAnimation(scene,result,originalNodes,sources,sourceGroups,'saved-thumbnail').playing;
+                    }
+                }
+                // A clipless rig can be classified Animated while its import
+                // migration is still pending or failed. Do not publish a
+                // rest-pose thumbnail as an animation frame or flood the console
+                // with a second error; retry after a real clip is installed.
+                if (!selected) {
+                    this.savedThumbnailFailures=this.savedThumbnailFailures||new Set();
+                    this.savedThumbnailFailures.add(rel);
+                    console.info('[IFPlayer Assets] animated-thumbnail-awaiting-clip: '+rel);
+                    return '';
+                }
+                poseGroup=selected;
+            }
             const meshes=(result.meshes||[]).filter(mesh=>{try{return mesh.getTotalVertices()>0;
                 }catch(_){return false;
                 }});
@@ -267,6 +301,17 @@ class CIFAssetThumbnail {
             } catch (_) {
             }
             engine.resize();
+            if(poseGroup){
+                // Babylon evaluates the imported rig only after a render. Seek
+                // after that evaluation, then freeze the first animation frame.
+                poseGroup.start(false,1,poseGroup.from,poseGroup.to,false);
+                scene.render();
+                await new Promise(resolve=>requestAnimationFrame(resolve));
+                poseGroup.goToFrame(Number(poseGroup.from||0));
+                scene.render();
+                await new Promise(resolve=>requestAnimationFrame(resolve));
+                poseGroup.pause();
+            }
             for(let frame=0;frame<4;frame++){scene.render();
             await new Promise(resolve=>requestAnimationFrame(resolve));
             }
@@ -274,7 +319,7 @@ class CIFAssetThumbnail {
             if (!String(dataUrl||'').startsWith('data:image/')) {
                 return '';
             }
-            const saved=await CIFRuntime.assetCommand({operation:'save-saved-thumbnail',path:rel,data_url:dataUrl});
+            const saved=await CIFRuntime.assetCommand({operation:'save-saved-thumbnail',path:rel,data_url:dataUrl,recipe:String(image?.dataset.thumbnailRecipe||'')});
             if (!String(saved?.thumbnail_path||'').trim()) {
                 return '';
             }
@@ -337,6 +382,9 @@ class CIFAssetThumbnail {
                 }
                 if (resource === 'character-thumb') {
                     params.recipe = window.CIFAssetThumbnail.CharacterThumbnailRecipeFingerprint();
+                }
+                if (resource === 'saved-thumb' && image.dataset.thumbnailRecipe) {
+                    params.recipe = image.dataset.thumbnailRecipe;
                 }
                 const staged=(resource==='objaverse-thumb')
                     ? CIFRuntime.assetCommand({operation:'stage',resource,...params}).then(payload=>{

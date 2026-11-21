@@ -95,6 +95,11 @@ def import_model(server, source: Path) -> dict:
         # ignore them for Terminal imports instead of reusing a non-UCI record.
         for folder, manifest in api._uci_asset_folders():
             for version in manifest.get('versions') or []:
+                # Older assets can contain a non-object version entry. One
+                # unrelated legacy manifest must not abort a new GLB import.
+                # Only an actual saved version can match the source digest.
+                if not isinstance(version, dict):
+                    continue
                 if (str(version.get('provider') or '').casefold() != 'local' or
                         str(version.get('kind') or '').casefold() != '3d' or
                         str(version.get('asset_id') or '') != digest):
@@ -165,6 +170,8 @@ def authoring_command(server, body: dict) -> dict:
     with library(server) as api:
         if operation == 'saved-list':
             return {'ok': True, **api.list_saved()}
+        if operation == 'saved-animation-candidates':
+            return {'ok': True, 'results': api.local_animation_candidates()}
         if operation == 'saved-delete':
             # Preserve the original per-version operation for existing clients.
             return {'ok': True, **api.delete_version(str(body.get('folder') or ''),
@@ -198,7 +205,7 @@ def authoring_command(server, body: dict) -> dict:
             if kind == 'saved-thumb':
                 # Thumbnail generation belongs to the original Server module;
                 # don't substitute the GLB as an image if not yet available.
-                requested = api.ensure_saved_thumbnail(rel.as_posix())
+                requested = api.ensure_saved_thumbnail(rel.as_posix(), required_recipe=str(body.get('recipe') or ''))
                 if requested is None:
                     return {'ok': True, 'available': False, 'url': ''}
             if not requested.resolve().is_relative_to(root) or requested.is_symlink() or not requested.is_file():
@@ -208,7 +215,7 @@ def authoring_command(server, body: dict) -> dict:
             encoded = '/'.join(quote(part, safe='') for part in requested.relative_to(root).parts)
             return {'ok': True, 'available': True, 'url': 'Assets/' + encoded}
         if operation == 'save-saved-thumbnail':
-            file = api.save_generated_thumbnail(str(body.get('path') or ''), str(body.get('data_url') or ''))
+            file = api.save_generated_thumbnail(str(body.get('path') or ''), str(body.get('data_url') or ''), recipe=str(body.get('recipe') or ''))
             return {'ok': True, 'saved': True, 'thumbnail_path': file.resolve().relative_to(api.assets_root().resolve()).as_posix(), 'authority': 'local'}
         if operation == 'saved-assign-animation':
             return {'ok': True, **api.add_animation_assignment(str(body.get('folder') or ''), str(body.get('animation_folder') or ''), str(body.get('animation_file') or ''), name=str(body.get('name') or ''))}
@@ -439,9 +446,13 @@ def blockify_progress(server, body: dict) -> dict:
             record['error'] = str(body['error'])[:4000]
             record['messages'].append('ERROR: ' + record['error'][:1000])
             record['messages'] = record['messages'][-25:]
-            print('[ASSETS MIGRATION] FAILED job=' + job + ' uci='
-                  + ','.join(str(row.get('uci') or '') for row in rows)
-                  + ' reason=' + record['error'], flush=True)
+            failure = ('[ASSETS MIGRATION] FAILED job=' + job + ' uci='
+                       + ','.join(str(row.get('uci') or '') for row in rows)
+                       + ' reason=' + record['error'])
+            # The browser owns Babylon migration. Store its actual exception in
+            # the persistent server log, not only the worker's stdout stream.
+            server.log_event(failure)
+            print(failure, flush=True)
             return {'ok': False, 'state': 'error', 'error': record['error']}
         index = body.get('processed')
         if not isinstance(index, int) or not (0 <= index <= record['total']) or index < record['completed'] + record['failed']:
