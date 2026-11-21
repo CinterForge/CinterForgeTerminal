@@ -11,6 +11,26 @@
   'use strict';
   const CinterForgeState = window.CinterForgeClientState || (window.CinterForgeClientState = Object.create(null));
 
+  // Terminal uses the same narration and speech settings as the bundled JOSHUA
+  // game; the real shell prints the greeting, so its typewriter targets are
+  // deliberately off-screen. This is browser audio, never PTY output.
+  function playJoshuaWelcome() {
+    if (!window.JoshuaBootSequence || !window.JoshuaSpeech || !window.JoshuaPresentation) return;
+    void window.JoshuaBootSequence.runBootMessages({
+      typePrelude: () => {},
+      playBootNoise: () => {},
+      createGreetingTarget: () => ({textContent: ''}),
+      createPlayPromptTarget: () => ({textContent: ''}),
+      greetingText: 'Welcome to CinterForge.',
+      playPromptText: 'Shall we play a game?',
+      playPromptSpokenText: 'Shall we play a game?',
+      lang: 'en',
+      speed: window.JoshuaPresentation.DEFAULT_SPEED,
+      speech: window.JoshuaSpeech,
+      sleep: ms => new Promise(resolve => setTimeout(resolve, ms))
+    }).catch(() => { /* A missing native speech voice must not prevent Terminal startup. */ });
+  }
+
   // Original source lines 3141–3275
 (async () => {
     try {
@@ -79,6 +99,9 @@
           void CinterForgeState.openSession(initialId);
         }
       }
+      // The JOSHUA welcome is spoken once per Terminal WebView startup,
+      // not once per Bash tab, and does not run during native UI acceptance.
+      if (!CinterForgeState.acceptUI) playJoshuaWelcome();
       // Historical categories are four independent menus; don't flatten
       // Macintosh, BeOS and NeXTSTEP into the existing Terminals list.
       const menuLists = {

@@ -174,11 +174,15 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
                 + 'if [ "${CINTER_TERMINAL_BRIDGE:-}" = bedrock ]; then\n'
                 + "  PS1=''\n  stty -echo\n"
                 + "else\n  PS1='\\u@\\h \\w \\$ '\n"
-                + "  printf 'Welcome to CinterForge. Type help for instructions.\\n'\n"
+                + "  printf 'Welcome to CinterForge. Shall we play a game?\\n'\n"
                 + "fi\n"
                 + "HISTIGNORE='setpass *'\n")  # Do not retain credentials in Bash history.
 
-    (directory / 'terminal-init.sh').write_text(preamble + functions + '\n', encoding='utf-8')
+    # The startup list is the same dynamically gated help command users can
+    # invoke later. Do not print it in interactive Bedrock console sessions.
+    startup_help = ('\nif [ "${CINTER_TERMINAL_BRIDGE:-}" != bedrock ]; then help; fi\n')
+    (directory / 'terminal-init.sh').write_text(preamble + functions + startup_help,
+                                                encoding='utf-8')
     return directory
 
 
@@ -317,6 +321,10 @@ def _session_environment(builds: Path, system: str) -> dict[str, str]:
         # launching them never creates a development Builds directory.
         env.pop('CINTER_BUILDS_ROOT', None)
         env['CINTER_TERMINAL_RUNTIME_MODE'] = 'installed'
+    if system == 'mac':
+        # Apple Bash emits a zsh migration notice before our own greeting.
+        # Suppress only that notice; keep the real native Bash and user prompt.
+        env['BASH_SILENCE_DEPRECATION_WARNING'] = '1'
     if system == 'win':
         env.update({'USERPROFILE': str(paths['home']), 'APPDATA': str(paths['data']),
                     'LOCALAPPDATA': str(paths['data'])})

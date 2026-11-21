@@ -55,24 +55,13 @@ from runtime.CinterForgeGuest import CinterForgeGuestSupervisor
 
 
 
-HELP = '''CinterForgeTerminal custom commands
-
-  <command> help               Display this help or one command's options
-
-  games                         List Playable Infinite-Mac macOS Games
+# Only the canonical commands are shown to every user. Optional commands
+# are added according to the running Host's DevTools and external grants.
+HELP = '''  games                         List Playable Infinite-Mac macOS Games
   stories                       List Interactive Fiction Stories
   play <title>                  Launch a game or story in a Session Window
   bedrock <world>               List and load and serve a Minecraft Bedrock world
-  craftmaster <world>           Convert a Minecraft Java world to Bedrock
-
-  debugger                      Debug the current WebView (default: open). See debugger help
-  devtools                      Manage Developer Tools. See devtools help
-  code                          Open CinterForge Code. See code help
-
-  setpass                       Set this host's LAN login credentials. See setpass help
-
-  Other commands                Run in the real OS shell (zsh, bash, or PowerShell).
-'''
+  craftmaster <world>           Convert a Minecraft Java world to Bedrock'''
 
 
 DEBUGGER_HELP = '''debugger [open|status|help]
@@ -148,6 +137,42 @@ def _external_capabilities() -> dict[str, bool]:
         return status.get('capabilities', {}) if isinstance(status.get('capabilities'), dict) else {}
     except (RuntimeError, ValueError, OSError):
         return {}  # Fail closed if the live owner is missing.
+
+
+def _cfdev_config_present() -> bool:
+    """Check only for the existing external config file, never its credentials."""
+    from runtime import CinterForgeAssetCloudflare
+    try:
+        path = CinterForgeAssetCloudflare._config_path()
+        return not path.is_symlink() and path.is_file()
+    except (OSError, ValueError):
+        return False
+
+
+def _visible_help(capabilities: dict[str, bool], *, devtools_installed: bool,
+                  cfdev_config: bool) -> str:
+    """One help display for initial Session startup and the `help` command."""
+    lines = [HELP]
+    if devtools_installed:
+        lines.extend(('',
+                      '  debugger                      Debug the current WebView (default: open). See debugger help',
+                      '  devtools                      Manage Developer Tools. See devtools help',
+                      '  code                          Open CinterForge Code. See code help'))
+    external = []
+    if cfdev_config:
+        if capabilities.get('assets'):
+            external.append('  assets                        Manage the Assets library. See assets help')
+        if capabilities.get('packs'):
+            external.append('  packs                         Manage Minecraft behavior packs. See packs help')
+        if capabilities.get('discord'):
+            external.append('  discord                       Open a bot-connected Session tab. See discord help')
+        external.append('  setpass                       Set this host\'s LAN login credentials. See setpass help')
+    if external:
+        lines.extend(('', *external))
+    lines.extend(('', '  Other commands                Run in the real OS shell (zsh, bash, or PowerShell).'))
+    if not devtools_installed:
+        lines.append('  devtools                      Install CinterForge Developer Toolchains.')
+    return '\n'.join(lines)
 
 
 def _assets_root_for_session() -> Path:
@@ -622,14 +647,12 @@ def execute(args: list[str]) -> int:
     if not args or args[0] in ('help', '--help', '-h'):
         option = args[1:] if args else []
         if not option:
-            additions = []
-            if capabilities.get('assets'):
-                additions.append('  assets                       Manage the Assets library. See assets help')
-            if capabilities.get('packs'):
-                additions.append('  packs                        Manage Minecraft behavior packs. See packs help')
-            if capabilities.get('discord'):
-                additions.append('  discord                      Open a bot-connected Session tab. See discord help')
-            print(HELP.replace('  setpass ', ('\n'.join(additions) + '\n' if additions else '') + '  setpass ', 1))
+            try:
+                devtools_installed = bool(_api('/api/status').get('devtools_installed'))
+            except (RuntimeError, ValueError, OSError):
+                devtools_installed = False
+            print(_visible_help(capabilities, devtools_installed=devtools_installed,
+                                cfdev_config=_cfdev_config_present()))
         elif len(option) == 1 and option[0] == 'infinite-mac':
             print('67 Macintosh games — https://infinitemac.org/ (experimental guest auto-open):')
             for slug, game in _cli_mac_catalog().items():
