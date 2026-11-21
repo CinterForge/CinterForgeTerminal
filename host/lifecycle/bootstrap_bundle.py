@@ -169,7 +169,7 @@ def _smoke_http(builds: Path, stage: Path, executable: Path) -> dict:
     server_py = stage / 'webapp/CinterForgeTerminal.py'
     assets = stage / 'webapp'
     for name in ('CinterForgeTerminal.py', 'data/if_titles.json', 'data/mac_games.json', 'index.html',
-                 'CinterForgeTerminal.js', 'terminal.css', 'data/terminal_styles.json', 'views/startup.html', 'startup.js', 'views/discord.html'):
+                 'CinterForgeTerminal.js', 'css/terminal.css', 'data/terminal_styles.json', 'views/startup.html', 'client/startup.js', 'views/discord.html'):
         if not (assets / name).is_file():
             raise RuntimeError(f'HTTP service asset missing: {name}')
     for component in (*sorted(assets.glob('client/CinterForge*.js')), *sorted(assets.glob('runtime/CinterForge*.py'))):

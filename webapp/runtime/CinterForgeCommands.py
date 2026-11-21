@@ -142,7 +142,7 @@ def _external_capabilities() -> dict[str, bool]:
 
 def _cfdev_config_present() -> bool:
     """Check only for the existing external config file, never its credentials."""
-    from runtime import CinterForgeAssetCloudflare
+    from runtime.assets import CinterForgeAssetCloudflare
     try:
         path = CinterForgeAssetCloudflare._config_path()
         return not path.is_symlink() and path.is_file()
@@ -181,7 +181,7 @@ def _assets_root_for_session() -> Path:
     root = os.environ.get('CINTER_TERMINAL_STATE_ROOT', '')
     if not root or not Path(root).is_absolute() or Path(root).is_symlink():
         raise RuntimeError('assets requires an active trusted Terminal session')
-    from runtime import CinterForgeAssetViews
+    from runtime.assets import CinterForgeAssetViews
     return CinterForgeAssetViews.root_for_state(Path(root))
 
 
@@ -882,7 +882,7 @@ def execute(args: list[str]) -> int:
         if not capabilities.get(allowed):
             print('Unknown custom command. Type help.', file=sys.stderr)
             return 2
-        from runtime import CinterForgeAssetCloudflare as cloudflare
+        from runtime.assets import CinterForgeAssetCloudflare as cloudflare
         root = _assets_root_for_session()
         result = cloudflare.setup(channel, root) if args[1] == 'setup' else cloudflare.publish(channel, root)
         if result.get('conflicts'):

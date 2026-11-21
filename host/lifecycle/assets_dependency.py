@@ -27,25 +27,26 @@ MODULES = ('CIFBlockify.js', 'CIFBlockifyPreview.js',
 CLASS_NAMES = ('CIFBlockify', 'CIFBlockifyPreview', 'CIFBlockifyBatch',
                'CIFBlockifyMinecraftServer')
 PIN_FILES = ('babylon.js', 'babylonjs.loaders.min.js')
-_ORIGINAL_SOURCE = Path(__file__).resolve().parents[2] / 'webapp/data/asset_engine/original'
-ORIGINAL_FILES = tuple(
-    'original/' + file.relative_to(_ORIGINAL_SOURCE).as_posix()
-    for file in sorted(_ORIGINAL_SOURCE.rglob('*'))
-    if file.is_file() and not _python_cache_member(file.relative_to(_ORIGINAL_SOURCE))
-)
+# Retain the public asset Build receipt layout. Its authored sources are now in
+# webapp/runtime/assets, webapp/client/minecraft and webapp/data, never the
+# removed data/asset_engine/original checkout.
 BUNDLE_FILES = (
     'api/asset_gallery.py', 'api/asset_packaging.py',
-    'api/asset_minecraft.py',
-    'build/browser-dependencies.json',
+    'api/asset_minecraft.py', 'build/browser-dependencies.json',
     *(f'blockify/{name}' for name in MODULES),
     *(f'vendor/{name}' for name in PIN_FILES),
     'blockify/manifest.json',
-    *ORIGINAL_FILES,
 )
+_SOURCE_LOCATIONS = {
+    **{f'api/{name}': f'runtime/assets/{name}' for name in
+       ('asset_gallery.py', 'asset_packaging.py', 'asset_minecraft.py')},
+    'build/browser-dependencies.json': 'data/browser-dependencies.json',
+    **{f'blockify/{name}': f'client/minecraft/{name}' for name in MODULES},
+}
 
 
 def source_root() -> Path:
-    return Path(__file__).resolve().parents[2] / 'webapp/data/asset_engine'
+    return Path(__file__).resolve().parents[2] / 'webapp'
 
 
 def release_root(builds: Path) -> Path:
@@ -61,7 +62,7 @@ def digest(path: Path) -> str:
 
 
 def _pins() -> dict:
-    record = json.loads((source_root() / 'build/browser-dependencies.json').read_text(encoding='utf-8'))
+    record = json.loads((source_root() / 'data/browser-dependencies.json').read_text(encoding='utf-8'))
     if (record.get('schema') != 'cinterforge.converter.browser.dependencies.v1'
             or record.get('version') != '9.26.1'
             or set(record.get('assets', {})) != set(PIN_FILES)):
@@ -394,7 +395,7 @@ def build_asset_engine(builds: Path) -> Path:
         for relative in BUNDLE_FILES:
             if relative == 'blockify/manifest.json':
                 continue
-            source = browser / Path(relative).name if relative.startswith('vendor/') else src / relative
+            source = browser / Path(relative).name if relative.startswith('vendor/') else src / _SOURCE_LOCATIONS[relative]
             if source.is_symlink() or not source.is_file():
                 raise FileNotFoundError('Authored Terminal asset engine module missing: ' + str(source))
             destination = candidate / relative

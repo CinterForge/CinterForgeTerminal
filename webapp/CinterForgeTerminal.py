@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from runtime import CinterForgeSettings
 from runtime import CinterForgeApplication
-from runtime import CinterForgeIF
+from runtime import CinterForgeState
 from runtime import CinterForgeSessions
 from runtime import CinterForgeAuthentication
 from runtime import CinterForgeDiscovery

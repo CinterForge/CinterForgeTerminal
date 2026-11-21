@@ -167,6 +167,11 @@ class CinterForgeHTTPAuthorization:
         """
         from runtime import CinterForgeSettings as _CinterForgeSettings
         path = unquote(raw_path)
+        # Terminal's own Code-OSS bridge is an authored webapp script, not a
+        # built Code-OSS workbench resource. Let the normal protected webapp
+        # static resolver serve this exact file.
+        if path == '/codeoss/CinterForgeCodeOSS.js':
+            return False
         is_code = path.startswith('/codeoss/')
         is_lag = path == '/lagomorph/Lagomorph-Quadra650.iso'
         if not (is_code or is_lag):

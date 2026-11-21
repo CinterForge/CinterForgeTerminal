@@ -1317,7 +1317,7 @@ class CinterForgeBedrockManager:
         only prints prefixed structured text into the existing PTY; it opens
         no network listener and executes no JavaScript received from players.
         """
-        authored = ASSET_LOCATION / 'data' / 'bedrock_status_bridge'
+        authored = ASSET_LOCATION / 'bedrock_status_bridge'
         manifest_file = authored / 'manifest.json'
         script_file = authored / 'scripts' / 'main.js'
         if any(not f.is_file() or f.is_symlink() for f in (manifest_file, script_file)):

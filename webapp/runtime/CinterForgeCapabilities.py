@@ -36,7 +36,7 @@ def _discord_identity() -> bool:
 
 def detect() -> dict[str, bool]:
     """Probe buckets and Discord concurrently; return only boolean grants."""
-    from runtime import CinterForgeAssetCloudflare
+    from runtime.assets import CinterForgeAssetCloudflare
     checks = {
         'cloudflare_internal': lambda: CinterForgeAssetCloudflare.probe_read('internal'),
         'cloudflare_public': lambda: CinterForgeAssetCloudflare.probe_read('release'),

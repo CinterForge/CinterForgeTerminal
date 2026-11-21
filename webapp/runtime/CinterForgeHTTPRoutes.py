@@ -75,7 +75,7 @@ def _webapp_static_file(root: Path, url_path: str) -> Path | None:
     members = relative.split('/')
     if ('\\' in relative or '\x00' in relative or
             any(not member or member in ('.', '..') or member.startswith('.') for member in members) or
-            members[0] in ('runtime', 'codeoss') or
+            (members[0] == 'runtime' or (members[0] == 'codeoss' and relative != 'codeoss/CinterForgeCodeOSS.js')) or
             Path(members[-1]).suffix.lower() not in _BROWSER_ASSET_EXTENSIONS):
         return None
     if not root.is_dir() or root.is_symlink():
@@ -124,9 +124,9 @@ class CinterForgeHTTPRoutes:
     def do_GET(self) -> None:
         from runtime import CinterForgeAuthentication as _CinterForgeAuthentication
         from runtime import CinterForgeCraftMasterMap as _CinterForgeCraftMasterMap
-        from runtime import CinterForgeAssetViews as _CinterForgeAssetViews
+        from runtime.assets import CinterForgeAssetViews as _CinterForgeAssetViews
         from runtime import CinterForgeDiscord as _CinterForgeDiscord
-        from runtime import CinterForgeIF as _CinterForgeIF
+        from runtime import CinterForgeState as _CinterForgeIF
         from runtime import CinterForgeSessions as _CinterForgeSessions
         from runtime import CinterForgeSettings as _CinterForgeSettings
         path = urlsplit(self.path).path
@@ -201,7 +201,7 @@ class CinterForgeHTTPRoutes:
             if not self.server.capabilities.get('assets') or not (browser_origin or self._authorized()):
                 self._json(403, {'error': 'not authorized'})
                 return
-            from runtime import CinterForgeAssetOriginal as original
+            from runtime.assets import CinterForgeAssetOriginal as original
             try:
                 self._json(200, original.blockify_job(self.server, unquote(path.split('/')[-1]), include_rows=parse_qs(urlsplit(self.path).query).get('summary') != ['1']))
             except (ValueError, FileNotFoundError) as exc:
@@ -622,10 +622,10 @@ class CinterForgeHTTPRoutes:
     def do_POST(self) -> None:
         from runtime import CinterForgeAuthentication as _CinterForgeAuthentication
         from runtime import CinterForgeCraftMasterMap as _CinterForgeCraftMasterMap
-        from runtime import CinterForgeAssetViews as _CinterForgeAssetViews
+        from runtime.assets import CinterForgeAssetViews as _CinterForgeAssetViews
         from runtime import CinterForgeDiscord as _CinterForgeDiscord
         from runtime import CinterForgeGuestShells as _CinterForgeGuestShells
-        from runtime import CinterForgeIF as _CinterForgeIF
+        from runtime import CinterForgeState as _CinterForgeIF
         from runtime import CinterForgeLaunchers as _CinterForgeLaunchers
         from runtime import CinterForgeRuntimeBootstrap as _CinterForgeRuntimeBootstrap
         from runtime import CinterForgeService as _CinterForgeService
@@ -841,7 +841,8 @@ class CinterForgeHTTPRoutes:
         # existing native token requirement. An exact Origin and fetch-site are
         # mandatory for browser writes (no permissive missing-Origin fallback).
         route = self.path.split('?', 1)[0]
-        browser_asset_write = (route in ('/assets/command', '/api/assets/blockify/progress')
+        browser_asset_write = (route in ('/assets/command', '/api/assets/view',
+                                         '/api/assets/blockify/progress')
                                and self.server.capabilities.get('assets')
                                and self._code_authorized()
                                and self.headers.get('Sec-Fetch-Site') == 'same-origin'
@@ -868,7 +869,7 @@ class CinterForgeHTTPRoutes:
                 if not self.server.capabilities.get('assets') or not self._local() or not self._lan_logged_in():
                     self._json(403, {'ok': False, 'error': 'not authorized'})
                     return
-                from runtime import CinterForgeAssetOriginal as original
+                from runtime.assets import CinterForgeAssetOriginal as original
                 result = original.authoring_command(self.server, body)
                 self._json(200, result)
                 return
@@ -888,7 +889,7 @@ class CinterForgeHTTPRoutes:
                 if route == '/api/assets/import':
                     result = _CinterForgeAssetViews.import_path(self.server, body.get('path'))
                 elif route == '/api/assets/delete':
-                    from runtime import CinterForgeAssetOriginal as original
+                    from runtime.assets import CinterForgeAssetOriginal as original
                     result = original.delete_uci(self.server, str(body.get('uci') or ''))
                 elif route == '/api/assets/picker':
                     result = _CinterForgeAssetViews.queue_tab(self.server, 'picker')
@@ -897,10 +898,10 @@ class CinterForgeHTTPRoutes:
                 elif route == '/api/assets/view':
                     result = _CinterForgeAssetViews.queue_tab(self.server, 'view', uci=body.get('uci'))
                 elif route == '/api/assets/blockify/start':
-                    from runtime import CinterForgeAssetOriginal as original
+                    from runtime.assets import CinterForgeAssetOriginal as original
                     result = original.start_blockify(self.server, body.get('path'))
                 elif route == '/api/assets/blockify/progress':
-                    from runtime import CinterForgeAssetOriginal as original
+                    from runtime.assets import CinterForgeAssetOriginal as original
                     result = original.blockify_progress(self.server, body)
                 elif route == '/api/assets/upload/start':
                     result = _CinterForgeAssetViews.upload_start(self.server, body.get('name'), body.get('size'))

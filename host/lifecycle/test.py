@@ -109,10 +109,10 @@ def verify_staged_asset_modules(app: Path, target: str, release: str) -> None:
                 else app / 'Builds')
     service = embedded / 'Python/Host' / target / FOUR_ARCH[target] / release / 'webapp'
     for relative in (
-        'runtime/CinterForgeAssetCloudflare.py',
-        'runtime/CinterForgeAssetViews.py',
+        'runtime/assets/CinterForgeAssetCloudflare.py',
+        'runtime/assets/CinterForgeAssetViews.py',
         'runtime/CinterForgeCommands.py',
-        'data/asset_engine/api/asset_gallery.py',
+        'runtime/assets/asset_gallery.py',
     ):
         source = REPO / 'webapp' / relative
         installed = service / relative
@@ -475,7 +475,7 @@ class RepositoryContractSmoke(unittest.TestCase):
         self.assertEqual(len(games['games']), 67)
         self.assertEqual(len(titles['titles']), 16)
         self.assertEqual(len({item['command'] for item in games['games']}), 67)
-        terminal = (REPO / 'webapp/runtime/CinterForgeCommands.py').read_text() + (REPO / 'webapp/runtime/CinterForgeIF.py').read_text()
+        terminal = (REPO / 'webapp/runtime/CinterForgeCommands.py').read_text() + (REPO / 'webapp/runtime/CinterForgeState.py').read_text()
         self.assertIn('lagomorph', terminal.lower())
         self.assertTrue((REPO / 'webapp/index.html').is_file())
         self.assertIn('codeoss', (REPO / 'webapp/data/terminal_styles.json').read_text().lower())

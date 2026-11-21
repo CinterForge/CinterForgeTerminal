@@ -810,7 +810,7 @@ def stage_host(builds: Path) -> dict:
     product.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='python-host-stage-', dir=product.parent) as temp:
         candidate = Path(temp) / HOST_RELEASE
-        for directory in ('lib', 'bin', 'include', 'python', 'webapp', 'lifecycle/host'):
+        for directory in ('lib', 'bin', 'include', 'python', 'lifecycle/host'):
             (candidate / directory).mkdir(parents=True)
         for name, source in located.items():
             destination = ('bin' if (name.startswith('cinter-') and name.endswith(executable_suffix))
@@ -831,19 +831,11 @@ def stage_host(builds: Path) -> dict:
         # without falling back to a checkout or old flat module names.
         shutil.copytree(repo / 'host', candidate / 'lifecycle/host', dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store'))
-        # Obsolete standalone HTTP example is not part of the Terminal stage.
-        # CinterForgeTerminal is a separately deployable, authenticated HTTP/PTy
-        # application service. Never omit its JS, terminal bindings or EULA
-        # manager from the immutable artifact consumed by product applications.
-        # Ship every authored top-level browser/server entry automatically;
-        # new .py/.js/.html/.css modules must not require a second allowlist.
-        for source in (repo / 'webapp').iterdir():
-            if source.is_file() and source.suffix.lower() in ('.py', '.js', '.html', '.css', '.json'):
-                shutil.copy2(source, candidate / 'webapp' / source.name)
-        for directory in ('data', 'views', 'client', 'runtime'):
-            shutil.copytree(repo / 'webapp' / directory,
-                            candidate / 'webapp' / directory,
-                            ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store'))
+        # Stage the complete authored webapp, preserving every nested resource
+        # and filename without an allowlist or a second directory-copy pass.
+        # Generated caches and Finder metadata are not authored resources.
+        shutil.copytree(repo / 'webapp', candidate / 'webapp',
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store'))
         # Ship the existing Host-owned Cloudflare transport as a staged resource,
         # not a duplicated authored implementation or a source-checkout import.
         shutil.copy2(repo / 'host/publishing/cloudflare_r2_sync.py',
@@ -854,13 +846,6 @@ def stage_host(builds: Path) -> dict:
             dest = candidate / 'webapp/data/asset_engine' / relative
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, dest)
-        # JOSHUA remains self-contained (including its AGPL license) and is
-        # embedded in the same authenticated Terminal origin, not a repo clone.
-        shutil.copytree(repo / 'webapp/joshua', candidate / 'webapp/joshua')
-        # Shared Mac/Windows/Linux Launcher UI and replaceable PNGs are part
-        # of the signed/staged Host closure, never read from a sibling repo.
-        shutil.copytree(repo / 'webapp/launcher', candidate / 'webapp/launcher',
-                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store'))
         files = {item.relative_to(candidate).as_posix(): hashlib.sha256(item.read_bytes()).hexdigest()
                  for item in sorted(candidate.rglob('*')) if item.is_file()}
         receipt = {'schema': _HOST_STAGE_SCHEMA, 'platform': system,
