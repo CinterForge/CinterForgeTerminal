@@ -175,7 +175,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
                 + 'if [ "${CINTER_TERMINAL_BRIDGE:-}" = bedrock ]; then\n'
                 + "  PS1=''\n  stty -echo\n"
                 + "else\n  PS1='\\u@\\h \\w \\$ '\n"
-                + "  printf 'Welcome to CinterForge. Shall we play a game?\\n'\n"
+                + "  printf 'Welcome to CinterForge. SHALL WE PLAY A GAME?\\n'\n"
                 + "fi\n"
                 + "HISTIGNORE='setpass *'\n")  # Do not retain credentials in Bash history.
 

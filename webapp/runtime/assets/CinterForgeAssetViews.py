@@ -902,7 +902,15 @@ def _pack_gallery_page(page: bytes) -> bytes:
         return updated  # Root redirect has no pack action.
     if b'</body>' not in updated:
         raise ValueError('Pack gallery is missing its closing body element')
-    return updated.replace(b'</body>', b'<script>' + _PACK_BUTTON_SCRIPT.encode('utf-8') + b'</script></body>', 1)
+    # Frame styling is authored once in Terminal and loaded by a WebApp-relative
+    # URL, so the published and local pack pages use the same replaceable art.
+    card_link = b'<link rel="stylesheet" href="/css/card-frames.css">'
+    if b'</head>' in updated:
+        updated = updated.replace(b'</head>', card_link + b'</head>', 1)
+    # Existing pack-gallery script builds the .slot buttons synchronously before
+    # the injected handler runs. Preserve click/selection handlers intact.
+    asset_script = b'<script>document.querySelectorAll("#grid .slot:not(.empty)").forEach(b=>b.classList.add("cf-card","cf-card--asset"));</script>'
+    return updated.replace(b'</body>', asset_script + b'<script>' + _PACK_BUTTON_SCRIPT.encode('utf-8') + b'</script></body>', 1)
 
 
 def serve_packs(handler, relative: str) -> bool:

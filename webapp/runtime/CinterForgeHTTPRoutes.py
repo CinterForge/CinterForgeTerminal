@@ -1017,6 +1017,49 @@ class CinterForgeHTTPRoutes:
                     return
                 self._json(200, result)
                 return
+            if route == '/api/startup/speech':
+                # WebKit's Web Speech voice list can omit an installed Zarvox;
+                # macOS must use the native voice, never a silent substitute.
+                # Only the native loopback WebView may play host audio.
+                import http.cookies
+                try:
+                    cookies = http.cookies.SimpleCookie(self.headers.get('Cookie', ''))
+                    native = cookies['cinter_native'].value if 'cinter_native' in cookies else ''
+                except (KeyError, http.cookies.CookieError):
+                    native = ''
+                if (self.server.system != 'mac' or
+                        self.client_address[0] not in ('127.0.0.1', '::1') or
+                        not native or not secrets.compare_digest(native, self.server.native_cookie)):
+                    self._json(403, {'error': 'Native Mac startup voice unavailable'})
+                    return
+                phrases = {'welcome': 'Welcome to CinterForge.',
+                           'question': 'Shall... we... play... eh... game?'}
+                if set(body) != {'part'} or body['part'] not in phrases:
+                    raise ValueError('Unknown startup speech segment')
+                speaker = Path('/usr/bin/say')
+                error = ''
+                try:
+                    if not speaker.is_file():
+                        error = 'macOS say binary unavailable'
+                    else:
+                        # Invoke the same native command that users can test
+                        # with `say -v Zarvox`; WebKit's voice list is irrelevant.
+                        spoken = subprocess.run([str(speaker), '-v', 'Zarvox',
+                                                 phrases[body['part']]],
+                                                capture_output=True, text=True,
+                                                stdin=subprocess.DEVNULL, timeout=15, check=False)
+                        if spoken.returncode != 0:
+                            detail = (spoken.stderr or '').strip().splitlines()
+                            error = 'macOS Zarvox speech failed (exit ' + str(spoken.returncode) + ')'
+                            if detail:
+                                error += ': ' + detail[0][:200]
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    error = 'macOS Zarvox speech unavailable: ' + type(exc).__name__
+                if error:
+                    self.server.log_event('[VOICE] ' + error)
+                self._json(200, {'spoken': not bool(error), 'voice': 'Zarvox',
+                                 **({'error': error} if error else {})})
+                return
             if route == '/api/launcher/start':
                 if self.server.system != 'mac':
                     raise ValueError('Cross-platform Launchers are only available on the Mac host')

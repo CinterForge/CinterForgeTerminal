@@ -23,6 +23,7 @@
     #notice{min-height:1.25rem;color:#bfe5be;font-size:.85rem;margin-top:9px}#notice.error{color:#ffd1c3}
     @media(max-width:550px){header{padding:12px}main{padding:0 12px 18px}.group{grid-template-columns:1fr}}
   </style>
+  <link rel="stylesheet" href="../css/card-frames.css">
 </head>
 <body>
 <header><h1>CraftMaster · Bedrock Worlds</h1>
@@ -32,7 +33,7 @@
     <div class="toolbar"><button id="packs" type="button">Packs</button><button id="server" class="primary" type="button">Start</button><button id="refresh" type="button">Refresh</button></div>
   </div><div id="notice" role="status" aria-live="polite"></div>
 </header>
-<main><h2>Java Worlds</h2><section class="group" id="java" aria-label="Java world saves"></section>
-  <h2>Bedrock Worlds</h2><section class="group" id="bedrock" aria-label="Bedrock world saves"></section></main>
+<main><h2>Java Worlds</h2><section class="group cf-world-grid" id="java" aria-label="Java world saves"></section>
+  <h2>Bedrock Worlds</h2><section class="group cf-world-grid" id="bedrock" aria-label="Bedrock world saves"></section></main>
 <script src="/client/minecraft/CinterForgeBedrockReport.js" defer></script>
 </body></html>

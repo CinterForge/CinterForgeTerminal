@@ -155,7 +155,7 @@ def _visible_help(capabilities: dict[str, bool], *, devtools_installed: bool,
     if devtools_installed:
         lines.extend(('  code                          Open CinterForge Code. See code help',
                       '  debugger                      Debug the current WebView. See debugger help'))
-    lines.extend(('', '  Other commands                Run in the real OS shell (zsh, bash, or PowerShell).'))
+    lines.extend(('  Other commands                Run in the real OS shell (zsh, bash, or PowerShell).', ''))
     return '\n'.join(lines)
 
 

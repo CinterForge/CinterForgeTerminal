@@ -16,23 +16,45 @@
   // deliberately off-screen. This is browser audio, never PTY output.
   function playJoshuaWelcome() {
     if (!window.JoshuaBootSequence || !window.JoshuaSpeech || !window.JoshuaPresentation) return;
+    // The macOS WebKit speech voice list can omit Zarvox even when it is
+    // installed. Use the authenticated native Mac voice for this greeting,
+    // while retaining JOSHUA's timing and all other platforms' speech paths.
+    const welcomeSpeech = CinterForgeState.platform === 'mac' ? {
+      async typeSpeak(text, target, delay, options) {
+        // Type independently without playing a second, incorrect Web Speech voice.
+        const typing = window.JoshuaSpeech.typeSpeak(text, target, delay,
+          { ...options, muted: true });
+        const narration = (async () => {
+          await new Promise(resolve => setTimeout(resolve,
+            Math.max(0, options.speechStartDelayMs || 0)));
+          const part = text === 'Welcome to CinterForge.' ? 'welcome' : 'question';
+          try {
+            const result = await CinterForgeState.api('/api/startup/speech', { part });
+            if (!result.spoken) console.warn('Zarvox startup speech unavailable:', result.error);
+          } catch (error) {
+            console.warn('Zarvox startup speech failed:', error);
+          }
+        })();
+        await Promise.all([typing, narration]);
+      }
+    } : window.JoshuaSpeech;
     void window.JoshuaBootSequence.runBootMessages({
-      typePrelude: () => {},
-      playBootNoise: () => {},
-      createGreetingTarget: () => ({textContent: ''}),
-      createPlayPromptTarget: () => ({textContent: ''}),
+      typePrelude: () => { },
+      playBootNoise: () => { },
+      createGreetingTarget: () => ({ textContent: '' }),
+      createPlayPromptTarget: () => ({ textContent: '' }),
       greetingText: 'Welcome to CinterForge.',
-      playPromptText: 'Shall we play a game?',
-      playPromptSpokenText: 'Shall we play a game?',
+      playPromptText: 'SHALL WE PLAY A GAME?',
+      playPromptSpokenText: 'Shall... we... play... eh... game?',
       lang: 'en',
       speed: window.JoshuaPresentation.DEFAULT_SPEED,
-      speech: window.JoshuaSpeech,
+      speech: welcomeSpeech,
       sleep: ms => new Promise(resolve => setTimeout(resolve, ms))
     }).catch(() => { /* A missing native speech voice must not prevent Terminal startup. */ });
   }
 
   // Original source lines 3141–3275
-(async () => {
+  (async () => {
     try {
       const status = await CinterForgeState.api('/api/status');
       CinterForgeState.platform = status.platform;
@@ -84,14 +106,16 @@
           }
           // Filtering obsolete tab records must also translate the saved
           // active index; otherwise a different emulator steals the foreground.
-          const kept = previous.map((tab, index) => ({tab, index})).filter(({tab}) =>
+          const kept = previous.map((tab, index) => ({ tab, index })).filter(({ tab }) =>
             tab && (tab.kind === 'server' || tab.kind === 'launcher' &&
               ['mac', 'win', 'linux'].includes(tab.backend) ||
               tab.profileId === 'codeoss' || byId.has(tab.profileId) &&
               ['terminal', 'emulator', 'joshua'].includes(tab.kind)));
           const active = kept.findIndex(item => item.index === CinterForgeState.startupGuestRestore?.active);
-          CinterForgeState.startupGuestRestore = {...CinterForgeState.startupGuestRestore, active,
-            tabs: kept.map(item => item.tab)};
+          CinterForgeState.startupGuestRestore = {
+            ...CinterForgeState.startupGuestRestore, active,
+            tabs: kept.map(item => item.tab)
+          };
           CinterForgeState.retainingPriorLayout = CinterForgeState.startupGuestRestore.tabs.length > 0;
           void CinterForgeState.openSession('modern', 'native');
           void CinterForgeState.openServerTab(false); // Live background log, never startup foreground.
@@ -172,7 +196,7 @@
   })();
 
   // Original source lines 3276–3281
-setInterval(
+  setInterval(
     () => {
       if (document.visibilityState === 'visible' && !CinterForgeState.acceptUI && !CinterForgeState.$('lan-menu')?.open)
         void CinterForgeState.refreshLAN().catch(() => { });
@@ -180,7 +204,7 @@ setInterval(
     12000);
 
   // Original source lines 3282–3289
-window.addEventListener(
+  window.addEventListener(
     'resize',
     () => {
       if (CinterForgeState.session) {
@@ -190,7 +214,7 @@ window.addEventListener(
     });
 
   // Original source lines 3291–3293
-window.addEventListener('beforeunload', () => {
+  window.addEventListener('beforeunload', () => {
     if (CinterForgeState.tabs.length) navigator.sendBeacon?.('/__noop');
   });
 

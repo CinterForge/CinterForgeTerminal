@@ -232,10 +232,10 @@
       const group = familyOf(profile);
       const container = groups.get(group);
       if (!container) continue;
-      const card = element('article', 'emulator-gallery-card');
+      const card = element('article', 'emulator-gallery-card cf-card cf-card--machine');
       const searchText = [profile.name, profile.machine, profile.disk,
         profile.year, profile.columns, group].filter(Boolean).join(' ').toLocaleLowerCase();
-      const thumb = element('button', 'emulator-gallery-thumb');
+      const thumb = element('button', 'emulator-gallery-thumb cf-card__media');
       thumb.type = 'button';
       thumb.setAttribute('aria-label', 'Open ' + profile.name + ' in a new Terminal tab');
       thumb.title = 'Open ' + profile.name;
@@ -272,12 +272,19 @@
         // Do not hide or destroy the gallery: returning to it must work.
         state.openMuseumProfile(profile.id);
       });
-      const body = element('div', 'emulator-gallery-meta');
+      const body = element('div', 'emulator-gallery-meta cf-card__details');
       addText(body, 'strong', '', profile.name);
       addText(body, 'small', '', group === 'Terminal Styles'
         ? [profile.year, profile.columns ? profile.columns + ' columns' : ''].filter(Boolean).join(' · ')
         : [profile.year, profile.disk, profile.machine].filter(Boolean).join(' · '));
-      card.append(thumb, body);
+      const actions = element('div', 'cf-card__actions');
+      const open = element('button', '', group === 'Terminal Styles' ? 'Apply Style' : 'Open Emulator');
+      open.type = 'button';
+      open.addEventListener('click', () => state.openMuseumProfile(profile.id));
+      const note = element('span', 'cf-card__action-note', group === 'Terminal Styles'
+        ? 'Terminal' : group);
+      actions.append(open, note);
+      card.append(thumb, body, actions);
       container.grid.append(card);
       const entry = {card, query: searchText, family: group};
       entries.push(entry);

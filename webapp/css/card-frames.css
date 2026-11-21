@@ -1,0 +1,146 @@
+/* CinterForge search result cards — authored artwork, resolution-independent slots.
+ * Replace cards/{Asset,Machine,World}Card.png with artwork of the same aspect
+ * ratio. All coordinates below are percentages of the 219:340 source design;
+ * no screen pixels or absolute host paths determine element placement.
+ */
+.cf-card{
+  position:relative;box-sizing:border-box;isolation:isolate;
+  width:100%;max-width:290px;min-width:0;aspect-ratio:219 / 340;
+  container-type:inline-size;overflow:hidden;
+  border:0!important;border-radius:0!important;padding:0!important;
+  background-color:transparent!important;background-repeat:no-repeat!important;
+  background-size:100% 100%!important;background-position:center!important;
+  box-shadow:none!important;
+}
+.cf-card--machine{background-image:url('../cards/MachineCard.png')!important}
+.cf-card--asset{background-image:url('../cards/AssetCard.png')!important}
+.cf-card--world{background-image:url('../cards/WorldCard.png')!important}
+.cf-card__media{
+  position:absolute!important;left:12%!important;top:15.5%!important;
+  width:76%!important;height:49.5%!important;
+  min-width:0;box-sizing:border-box;
+  display:flex!important;align-items:center;justify-content:center;
+  margin:0!important;padding:1%!important;
+  border:0!important;border-radius:2%!important;
+  overflow:hidden;background:transparent!important;
+}
+.cf-card__media img,.cf-card__media>img{width:100%;height:100%;object-fit:contain}
+.cf-card__details{
+  position:absolute!important;left:10%!important;top:67.8%!important;
+  width:80%!important;height:11.1%!important;min-height:0;
+  box-sizing:border-box;padding:0!important;margin:0!important;
+  display:flex!important;flex-direction:column;align-items:center;
+  justify-content:center;gap:0;overflow:hidden;
+  text-align:center;color:#f1f6fb!important;background:transparent!important;
+}
+.cf-card__details strong,.cf-card__details h3{
+  margin:0!important;max-width:100%;font-size:clamp(10px,5.5cqw,16px)!important;
+  line-height:1.05!important;font-weight:750;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;
+}
+.cf-card__details small,.cf-card__details .state,.cf-card__details .meta{
+  display:block;max-width:100%;margin:1px 0 0!important;
+  font-size:clamp(8px,3.9cqw,11px)!important;line-height:1.09!important;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  color:#c0d0e1!important;
+}
+.cf-card__details .state.stale{color:#ffd298!important}
+.cf-card__details .error{color:#ffb4aa!important;font-size:clamp(8px,3.7cqw,11px)!important}
+.cf-card__actions{
+  position:absolute!important;left:6.3%!important;top:81.6%!important;
+  width:87.4%!important;height:11.5%!important;
+  min-height:0;box-sizing:border-box;margin:0!important;padding:1.2% 1%!important;
+  background:transparent!important;display:grid!important;
+  grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+  grid-template-rows:minmax(0,1fr) minmax(0,1fr);
+  align-items:stretch;justify-items:stretch;gap:2% 6%;
+}
+.cf-card__actions button,.cf-card__actions .cf-card__action-note{
+  display:flex;justify-content:center;align-items:center;
+  width:100%;height:100%;min-width:0;min-height:0;
+  padding:0 2%!important;margin:0!important;box-sizing:border-box;
+  border:0!important;border-radius:2%!important;
+  background:#1426349c!important;color:#e9f5fd!important;
+  font:600 clamp(8px,4.25cqw,13px)/1.05 system-ui,sans-serif!important;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.cf-card__actions button:not(:disabled){cursor:pointer}
+.cf-card__actions button:hover:not(:disabled),.cf-card__actions button:focus-visible,
+.cf-card__media:is(button):hover,.cf-card__media:is(button):focus-visible{
+  outline:2px solid #8bdcff!important;outline-offset:-2px;
+  background-color:#0b4365aa!important;
+}
+.cf-card__actions button:disabled{opacity:.55}
+.cf-card__actions .cf-card__action-note{font-size:clamp(8px,4cqw,12px)!important;color:#bfd3e1!important}
+.cf-card.current-world{filter:drop-shadow(0 0 5px #7acd99)}
+/* Machine and World art have bright information bands; Asset art is dark. */
+.cf-card--machine .cf-card__details,.cf-card--world .cf-card__details{color:#112432!important}
+.cf-card--machine .cf-card__details :is(strong,small),
+.cf-card--world .cf-card__details :is(h3,.state,.meta){color:#112432!important}
+.cf-card--world .cf-card__details .state.stale{color:#844308!important}
+.cf-card--world .cf-card__details .error{color:#8e1010!important}
+/* Emulator gallery: all previews and labels belong to their illustrated cards. */
+.emulator-gallery-grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,230px),1fr))!important;gap:16px!important}
+.emulator-gallery-grid>.emulator-gallery-card.cf-card{justify-self:center;display:block!important}
+.emulator-gallery-card.cf-card .emulator-gallery-thumb.cf-card__media{
+  cursor:pointer!important;aspect-ratio:auto!important;box-shadow:none!important;
+}
+.emulator-gallery-card.cf-card .emulator-gallery-meta.cf-card__details{min-height:0!important}
+.emulator-gallery-card.cf-card .cf-card__actions{grid-template-rows:1fr!important}
+.emulator-gallery-card.cf-card .emulator-gallery-style-preview,
+.emulator-gallery-card.cf-card .emulator-gallery-desktop{height:100%;width:100%;box-sizing:border-box;font-size:clamp(8px,4cqw,12px)}
+.emulator-gallery-card.cf-card .emulator-gallery-style-preview{padding:5%}
+.emulator-gallery-card.cf-card .emulator-gallery-style-screen{font-size:clamp(7px,3.7cqw,11px)}
+.emulator-gallery-card.cf-card .emulator-gallery-desktop-window{margin:4% auto 0}
+/* Bedrock report: honor the whole frame, not the former landscape mini-card. */
+.group.cf-world-grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,250px),1fr));gap:16px;align-items:start}
+.group.cf-world-grid article.cf-card{display:block!important;justify-self:center}
+.group.cf-world-grid article.cf-card .thumb,
+.group.cf-world-grid article.cf-card .fallback{
+  width:76%!important;height:49.5%!important;object-fit:contain!important;
+  background:transparent!important;border:0!important;border-radius:2%!important;
+  font-size:clamp(30px,16cqw,60px)!important;
+}
+.group.cf-world-grid article.cf-card .thumb.cf-card__media,
+.group.cf-world-grid article.cf-card .fallback.cf-card__media{width:76%!important;height:49.5%!important}
+.group.cf-world-grid article.cf-card .actions.cf-card__actions{grid-column:auto!important;flex-wrap:nowrap!important}
+/* The asset grid is nested inside an individual MCAddon's detail view, not
+ * a full-page catalog. Keep these cards compact; Machine and World cards stay
+ * large. Each slot is already one working preview button from the pack page.
+ * Relative frame coordinates continue to scale with the 219:340 artwork. */
+#stage #grid{display:grid!important;grid-template-columns:repeat(auto-fill,minmax(min(100%,106px),1fr))!important;
+  grid-auto-rows:auto!important;gap:8px!important;align-items:start!important}
+#stage #grid>.slot.cf-card{display:block!important;justify-self:center!important;cursor:pointer!important;max-width:126px!important}
+#stage #grid>.slot.empty{display:none!important}
+#stage #grid>.slot.cf-card img{
+  position:absolute;left:12%;top:15.5%;width:76%;height:49.5%;
+  padding:2%;box-sizing:border-box;object-fit:contain;background:transparent!important;
+  border:0;border-radius:2%;
+}
+#stage #grid>.slot.cf-card>span{
+  position:absolute!important;left:10%!important;top:68%!important;
+  width:80%!important;height:10.5%!important;margin:0!important;padding:0!important;
+  display:flex;align-items:center;justify-content:center;text-align:center;
+  color:#f1f6fb!important;background:transparent!important;
+  font:700 clamp(8px,6.8cqw,10px)/1.04 system-ui,sans-serif!important;
+  white-space:normal!important;overflow:hidden!important;
+  overflow-wrap:anywhere;
+}
+#stage #grid>.slot.cf-card::before,#stage #grid>.slot.cf-card::after{
+  position:absolute;top:82%;height:10.5%;width:36%;display:flex;
+  align-items:center;justify-content:center;
+  font:650 clamp(7px,5.8cqw,9px)/1 system-ui,sans-serif;
+  color:#e8f4fc;background:#1232479c;pointer-events:none;
+  border-radius:2%;
+}
+#stage #grid>.slot.cf-card::before{content:'Preview';left:8%}
+#stage #grid>.slot.cf-card::after{content:'Asset';right:8%}
+#stage #grid>.slot.cf-card.character::after{content:'Character'}
+#stage #grid>.slot.cf-card.creature::after{content:'Creature'}
+#stage #grid>.slot.cf-card.object::after{content:'Object'}
+#stage #grid>.slot.cf-card:is(:focus-visible,:hover){outline:2px solid #7ed9ff!important;outline-offset:-2px}
+#stage #grid>.slot.cf-card.selected{filter:drop-shadow(0 0 7px #7ad9ff)}
+@media(max-width:520px){
+  .emulator-gallery-grid,.group.cf-world-grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,180px),1fr))!important}
+  #stage #grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,96px),1fr))!important}
+}

@@ -10,7 +10,7 @@ window.JOSHUA_CONTENT_EN = {
   ],
   "greeting": "GREETINGS PROFESSOR FALKEN.",
   "playPrompt": "SHALL WE PLAY A GAME?",
-  "playPromptSpoken": "Shall we play a game?",
+  "playPromptSpoken": "SHALL WE PLAY A GAME?",
   "terminal": {
     "inputLabel": "COMMAND"
   },
