@@ -57,7 +57,8 @@ from runtime.CinterForgeGuest import CinterForgeGuestSupervisor
 
 # Only the canonical commands are shown to every user. Optional commands
 # are added according to the running Host's DevTools and external grants.
-HELP = '''  games                         List Playable Infinite-Mac macOS Games
+HELP = '''Commands:
+  games                         List Playable Infinite-Mac macOS Games
   stories                       List Interactive Fiction Stories
   play <title>                  Launch a game or story in a Session Window
   bedrock <world>               List and load and serve a Minecraft Bedrock world
