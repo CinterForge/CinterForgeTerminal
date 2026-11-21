@@ -205,9 +205,12 @@ def _cli_if_catalog():
         parsed = urlparse(entry['url'])
         if parsed.scheme != 'https' or not parsed.netloc or parsed.username or parsed.password or not parsed.path.endswith('/' + filename):
             raise RuntimeError('Invalid original story URL for ' + name)
-        if name in result:
-            raise RuntimeError('Duplicate story command: ' + name)
-        result[name] = entry
+        command = entry.get('command', name)
+        if not isinstance(command, str) or not re.fullmatch(r'[a-z0-9]+', command):
+            raise RuntimeError('Invalid short IF command for ' + filename)
+        if command in result:
+            raise RuntimeError('Duplicate short IF command: ' + command)
+        result[command] = entry
     return result
 
 
@@ -274,7 +277,8 @@ def _if_root():
 
 
 def _if_path(name, entry):
-    return _if_root() / name / entry['file']
+    # The short public command must never rename installed story files or saves.
+    return _if_root() / Path(entry['file']).stem / entry['file']
 
 
 def _if_command(name, operation, entry):
@@ -336,7 +340,8 @@ def _if_command(name, operation, entry):
             result = _if_command(name, 'install', entry)
             if result:
                 return result
-        body = {'command': name}
+        # HTTP IF sessions and their autosaves retain the original story identity.
+        body = {'command': Path(entry['file']).stem}
         source = os.environ.get('CINTER_TERMINAL_SESSION_ID', '')
         if re.fullmatch(r'[0-9a-f]{32}', source):
             body['session_id'] = source
@@ -934,6 +939,9 @@ def execute(args: list[str]) -> int:
                     'infinitemac': 'infinitemac', 'infinite-mac': 'infinitemac',
                     'bedrock': 'bedrock'}
         commands.update({name.casefold(): name for name in stories})
+        # Preserve existing filename-stem commands as optional legacy aliases.
+        commands.update({Path(entry['file']).stem.casefold(): name
+                         for name, entry in stories.items()})
         commands.update({name.casefold(): name for name in games})
         commands['wargames'] = 'joshua'  # Catalog's legacy key is an alias, not a CLI handler.
         by_title = {entry['title'].casefold(): name for name, entry
@@ -946,8 +954,14 @@ def execute(args: list[str]) -> int:
         # Exactly the same existing command handler runs with or without `play`.
         return execute([name])
     # Easter egg: deliberately not listed in help, menu commands, or CLI usage.
-    if command in _cli_if_catalog() and not options:
-        return _if_command(command, 'play', _cli_if_catalog()[command])
+    stories = _cli_if_catalog()
+    story_entry = stories.get(command)
+    if story_entry is None:
+        story_entry = next((entry for entry in stories.values()
+                            if Path(entry['file']).stem == command), None)
+    if story_entry is not None and not options:
+        return _if_command(story_entry.get('command', Path(story_entry['file']).stem),
+                           'play', story_entry)
     if command in _cli_mac_catalog() and not options:
         return _mac_launch(command, _cli_mac_catalog()[command])
     if command == 'lagomorph':

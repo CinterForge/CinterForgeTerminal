@@ -88,25 +88,25 @@ The game commands are:
 
 ## Interactive fiction
 
-`stories` lists the Z-machine story catalog. A title's **case-sensitive filename stem** is its command. The app downloads story files only on request from their declared upstream sources; it does not redistribute them with the native Terminal application.
+`stories` lists the Z-machine story catalog. Each title has a short lowercase command in the checked-in JSON; original filename stems remain accepted as aliases. The app downloads story files only on request from their declared upstream sources; it does not redistribute them with the native Terminal application.
 
 | Command | Story |
 |---|---|
-| `Advent` | Colossal Cave Adventure |
-| `Hat` | Oh no, Mr.Crab stole your hat! |
-| `HugeCave` | Adventure In Humongous Cave |
-| `Forest_Demo` | Forest Demo |
+| `advent` | Colossal Cave Adventure |
+| `hat` | Oh no, Mr.Crab stole your hat! |
+| `huge` | Adventure In Humongous Cave |
+| `forest` | Forest Demo |
 | `zork1` | Zork I: The Great Underground Empire |
 | `zork2` | Zork II: The Wizard of Frobozz |
 | `zork3` | Zork III: The Dungeon Master |
-| `library_of_horror` | The Library of Horror |
-| `404-Life_not_found` | 404- Life not Found (Beta) |
-| `BedTime` | Bed Time |
-| `QuestForTheMagicMuffin` | The Quest for The Magic Muffin |
-| `Elephants` | When I Was Shot By Elephants III |
+| `library` | The Library of Horror |
+| `404` | 404- Life not Found (Beta) |
+| `bed` | Bed Time |
+| `muffin` | The Quest for The Magic Muffin |
+| `elephants` | When I Was Shot By Elephants III |
 | `cluedo` | Mini-Cluedo |
-| `HellsBasement` | Hell's Basement |
-| `QuestForTheMagicMuffin3` | The Quest for The Magic Bagel...Err Muffin 3 |
+| `hells` | Hell's Basement |
+| `muffin3` | The Quest for The Magic Bagel...Err Muffin 3 |
 | `devours` | All Things Devours |
 
 Use `<command> install`, `<command> status`, `<command>` (or `<command> start`), and `<command> stop` as appropriate. The JavaScript Z-machine interpreter is bundled with the Terminal, while individual story files live under the user's designated `steamapps` content tree. CONV/Quetzal saves persist independently of the application archive.

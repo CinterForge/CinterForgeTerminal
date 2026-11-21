@@ -146,13 +146,25 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     if len(catalog.get('titles', [])) != 16:
         raise RuntimeError('Incomplete staged external IF catalog')
     story_names = []
+    short_names = []
     for entry in catalog['titles']:
         stem = Path(entry['file']).stem
         if not __import__('re').fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_-]*', stem):
             raise RuntimeError('Unsafe IF command name: ' + stem)
-        story_names.append(stem)
-    if len(set(story_names)) != 16:
-        raise RuntimeError('Duplicate IF commands')
+        short = entry.get('command', stem)
+        if not isinstance(short, str) or not __import__('re').fullmatch(r'[a-z0-9]+', short):
+            raise RuntimeError('Invalid short IF command for ' + stem)
+        short_names.append(short)
+        story_names.extend((short, stem))  # Keep the original stem as a working alias.
+    if len(set(short_names)) != 16:
+        raise RuntimeError('Duplicate short IF commands')
+    story_names = list(dict.fromkeys(story_names))
+    reserved = {'help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft',
+                'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories',
+                'install', 'craftmaster', 'assets', 'discord', 'joshua',
+                'infinitemac', 'yes', 'code', 'htmlmenus', 'setpass'}
+    if any(name in reserved for name in story_names):
+        raise RuntimeError('IF command collides with a Terminal command')
     functions += '\n' + '\n'.join(
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
         for name in ['games', 'stories'] + story_names)
