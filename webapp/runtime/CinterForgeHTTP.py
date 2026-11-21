@@ -116,6 +116,7 @@ class CinterForgeHTTPServer(ThreadingHTTPServer):
         self.craftmaster_maps = {}
         # UI-visible asset reports, viewers and native file selection requests.
         self.asset_actions_lock = threading.RLock()
+        self.asset_pack_lock = threading.RLock()  # Persistent selected Minecraft pack.
         self.asset_actions = deque()
         self.asset_upload_lock = threading.RLock()
         self.asset_uploads = {}

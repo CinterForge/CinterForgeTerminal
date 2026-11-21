@@ -62,6 +62,7 @@ HELP = '''Commands:
   stories                       List Interactive Fiction Stories
   play <title>                  Launch a game or story in a Session Window
   bedrock <world>               List and load and serve a Minecraft Bedrock world
+  bedrock packs                 Browse Minecraft content packs
   craftmaster <world>           Convert a Minecraft Java world to Bedrock'''
 
 
@@ -83,6 +84,7 @@ CODE_HELP = '''code [open|status|help]
 BEDROCK_HELP = """bedrock [world name]
   bedrock                      List local Bedrock and Java worlds
   bedrock <world>              Start a world in its own interactive console tab
+  bedrock packs                 Open MCAddons (local with cfdev, otherwise beta)
   bedrock op                   List persistent server operators
   bedrock op <gamertag>       Remember an operator and also allowlist them
   bedrock op remove <name>    Remove persistent operator privilege
@@ -659,7 +661,8 @@ def execute(args: list[str]) -> int:
             for slug, game in _cli_mac_catalog().items():
                 print(f"{slug:30} {game['title']}")
         elif len(option) == 1 and (option[0] in ('debugger', 'bedrock', 'devtools', 'code', 'setpass')
-                                   or option[0] in ('assets', 'packs', 'discord') and capabilities.get(option[0])):
+                                   or option[0] == 'assets'
+                                   or option[0] in ('packs', 'discord') and capabilities.get(option[0])):
             print({'debugger': DEBUGGER_HELP, 'bedrock': BEDROCK_HELP,
                    'devtools': DEVTOOLS_HELP, 'code': CODE_HELP,
                    'assets': ASSETS_HELP, 'packs': PACKS_HELP,
@@ -976,6 +979,10 @@ def execute(args: list[str]) -> int:
                 print('If no Inspector appears, open Safari > Develop > CinterForge Terminal.')
         return 0
     if command == 'bedrock':
+        if options == ['packs']:
+            _api('/api/assets/packs/open', body={})
+            print('[bedrock] Opening Minecraft content packs.', flush=True)
+            return 0
         if options and options[0].casefold() in ('op', 'allowlist'):
             kind = options[0].casefold()
             remainder = options[1:]

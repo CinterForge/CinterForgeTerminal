@@ -214,7 +214,7 @@ class CinterForgeHTTPRoutes:
             if _CinterForgeAssetViews.serve_voxel(self, path):
                 return
         if path.startswith('/assets-library/'):
-            if not self.server.capabilities.get('assets'):
+            if not self.server.capabilities.get('assets') and not path.startswith('/assets-library/packs/'):
                 self._json(404, {'error': 'Not found'})
                 return
             if _CinterForgeAssetViews.serve(self, path):
@@ -499,8 +499,17 @@ class CinterForgeHTTPRoutes:
                 self._json(503, {'error': 'Bedrock requires a host Steam library: '
                                  + self.server.bedrock_error})
             return
+        if path == '/api/assets/packs/current':
+            if not self._local() or not self._lan_logged_in():
+                self._json(403, {'error': 'not authorized'})
+                return
+            try:
+                self._json(200, _CinterForgeAssetViews.pack_current(self.server))
+            except (ValueError, OSError, RuntimeError) as exc:
+                self._json(400, {'error': str(exc)})
+            return
         if path == '/api/assets/next':
-            if not self._authorized() or not self.server.capabilities.get('assets'):
+            if not self._authorized():
                 self._json(404, {'error': 'Not found'})
                 return
             with self.server.asset_actions_lock:
@@ -842,8 +851,8 @@ class CinterForgeHTTPRoutes:
         # mandatory for browser writes (no permissive missing-Origin fallback).
         route = self.path.split('?', 1)[0]
         browser_asset_write = (route in ('/assets/command', '/api/assets/view',
-                                         '/api/assets/blockify/progress')
-                               and self.server.capabilities.get('assets')
+                                         '/api/assets/blockify/progress', '/api/assets/packs/set')
+                               and (self.server.capabilities.get('assets') or route == '/api/assets/packs/set')
                                and self._code_authorized()
                                and self.headers.get('Sec-Fetch-Site') == 'same-origin'
                                and self.headers.get('Origin') == 'http://' + self.headers.get('Host', ''))
@@ -874,7 +883,7 @@ class CinterForgeHTTPRoutes:
                 self._json(200, result)
                 return
             if route.startswith('/api/assets/'):
-                if not self.server.capabilities.get('assets'):
+                if not self.server.capabilities.get('assets') and route not in ('/api/assets/packs/open', '/api/assets/packs/set'):
                     self._json(404, {'error': 'Not found'})
                     return
                 # Only a native Terminal session may request arbitrary host
@@ -886,7 +895,11 @@ class CinterForgeHTTPRoutes:
                     if not session_live or self.client_address[0] not in ('127.0.0.1', '::1') or not self.headers.get('X-Cinter-CLI-Token') or not secrets.compare_digest(self.headers.get('X-Cinter-CLI-Token', ''), self.server.cli_token):
                         self._json(403, {'error': 'Assets file commands require a native Terminal session'})
                         return
-                if route == '/api/assets/import':
+                if route == '/api/assets/packs/open':
+                    result = _CinterForgeAssetViews.pack_open(self.server)
+                elif route == '/api/assets/packs/set':
+                    result = _CinterForgeAssetViews.pack_set_current(self.server, body.get('name'))
+                elif route == '/api/assets/import':
                     result = _CinterForgeAssetViews.import_path(self.server, body.get('path'))
                 elif route == '/api/assets/delete':
                     from runtime.assets import CinterForgeAssetOriginal as original

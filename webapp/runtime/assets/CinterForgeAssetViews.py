@@ -438,6 +438,278 @@ def import_path(server, raw: str) -> dict:
     return result
 
 
+
+# Minecraft pack selection builds on the existing generated MCAddons galleries.
+# The authored library is not changed when a pack is selected; only this
+# Terminal instance's writable state is changed.
+_PACK_STATE_SCHEMA = 'cinterforge.terminal.current-pack.v1'
+_PACK_BETA_CDN = 'https://cinterforge.ucreg.io/cinterforge/assets/beta/'
+_PACK_VIEW_EXTENSIONS = frozenset(('.html', '.js', '.css', '.json', '.png', '.jpg', '.jpeg', '.webp', '.glb', '.gltf', '.bin', '.mcaddon'))
+_PACK_DOWNLOAD_LIMIT = 2 * 1024**3
+
+
+def _pack_name(value: str) -> str:
+    if (not isinstance(value, str) or not value or len(value) > 160
+            or value.strip() != value or value in ('.', '..')
+            or any(c in value for c in ('/', '\\', '\x00', ':'))):
+        raise ValueError('Invalid Minecraft pack name')
+    return value
+
+
+def _pack_state_dir(server) -> Path:
+    # Existing mutable root resolves to sibling Builds in development and
+    # TerminalState under the selected steamapps library when installed.
+    root = server.mutable_builds / 'Packs/CinterForgeTerminal'
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        raise RuntimeError('Terminal pack state directory is unsafe')
+    return root
+
+
+def _pack_local_mode() -> bool:
+    """The requested cfdev JSON switches the view to local Builds output."""
+    from runtime.assets import CinterForgeAssetCloudflare as cloudflare
+    config = cloudflare._config_path()
+    if config.is_symlink() or not config.is_file():
+        return False
+    try:
+        parsed = json.loads(config.read_text(encoding='utf-8'))
+        return isinstance(parsed, dict) and bool(parsed)
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
+def _pack_beta_base() -> str:
+    # Public beta is served under the published R2 object_prefix=cinterforge.
+    # There is no cfdev credential/config in public mode from which to infer it.
+    return _PACK_BETA_CDN
+
+
+def _pack_remote_url(relative: str) -> str:
+    from urllib.parse import quote
+    rel = safe_relative(relative)
+    return _pack_beta_base() + '/'.join(quote(part, safe='') for part in rel.parts)
+
+
+def _pack_remote_open(relative: str):
+    from urllib.request import Request, urlopen
+    url = _pack_remote_url(relative)
+    response = urlopen(Request(url, headers={'User-Agent': 'CinterForgeTerminal/Packs'}), timeout=30)
+    actual = urlsplit(response.geturl())
+    expected = urlsplit(_pack_beta_base())
+    # A Cloudflare redirect must not turn a pack fetch into arbitrary host IO.
+    if (actual.scheme != 'https' or actual.hostname != expected.hostname or
+            not actual.path.startswith(expected.path)):
+        response.close()
+        raise RuntimeError('Pack download redirected outside the published beta Assets folder')
+    return response
+
+
+def _pack_state(server) -> dict | None:
+    root = _pack_state_dir(server)
+    path = root / 'current.json'
+    if not path.exists():
+        return None  # Default: no current pack. This is a valid state.
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError('Current pack selection is unsafe')
+    record = json.loads(path.read_text(encoding='utf-8'))
+    if (not isinstance(record, dict) or record.get('schema') != _PACK_STATE_SCHEMA
+            or not re.fullmatch(r'[0-9a-f]{64}', str(record.get('sha256') or ''))):
+        raise ValueError('Current pack selection has an invalid manifest')
+    name = _pack_name(record.get('name'))
+    file = root / 'Downloaded' / name / (name + '.mcaddon')
+    if (file.is_symlink() or not file.is_file() or
+            not file.resolve().is_relative_to(root.resolve()) or
+            file.stat().st_size != record.get('bytes')):
+        raise FileNotFoundError('Current pack is missing or incomplete: ' + name)
+    return record
+
+
+def pack_current(server) -> dict:
+    with server.asset_pack_lock:
+        record = _pack_state(server)
+        return {'current': record['name'] if record else None}
+
+
+def pack_open(server) -> dict:
+    # No DevTools library is required for the published beta gallery.
+    if _pack_local_mode():
+        index = root_for(server) / 'MCAddons/index.html'
+        if not index.is_file() or index.is_symlink():
+            raise FileNotFoundError('Local Builds/Assets/MCAddons/index.html is missing')
+    request = {'kind': 'packs', 'url': '/assets-library/packs/index.html'}
+    with server.asset_actions_lock:
+        server.asset_actions = type(server.asset_actions)(row for row in server.asset_actions if row['kind'] != 'packs')
+        server.asset_actions.append(request)
+    return request
+
+
+def pack_set_current(server, name: str) -> dict:
+    name = _pack_name(name)
+    import tempfile
+    root = _pack_state_dir(server)
+    with server.asset_pack_lock:
+        previous = _pack_state(server)
+        if previous and previous['name'] == name:
+            (root / 'current.json').unlink()
+            return {'current': None, 'removed': name}
+        relative = 'MCAddons/' + name + '/' + name + '.mcaddon'
+        root.mkdir(parents=True, exist_ok=True)
+        destination_dir = root / 'Downloaded' / name
+        if destination_dir.is_symlink() or (destination_dir.exists() and not destination_dir.is_dir()):
+            raise RuntimeError('Unsafe downloaded pack directory')
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / (name + '.mcaddon')
+        if destination.is_symlink():
+            raise RuntimeError('Unsafe downloaded pack file')
+        source_type = 'local' if _pack_local_mode() else 'beta'
+        expected = None
+        if source_type == 'local':
+            source = root_for(server) / safe_relative(relative)
+            if source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(root_for(server).resolve()):
+                raise FileNotFoundError('Local Minecraft pack was not assembled: ' + relative)
+            stream = source.open('rb')
+        else:
+            from runtime.assets.CinterForgeAssetCloudflare import INDEX_SCHEMA
+            with _pack_remote_open('index.json') as response:
+                data = response.read(32 * 1024 * 1024 + 1)
+            if len(data) > 32 * 1024 * 1024:
+                raise RuntimeError('Published beta Assets index is too large')
+            published = json.loads(data)
+            if published.get('schema') != INDEX_SCHEMA or not isinstance(published.get('files'), dict):
+                raise ValueError('Published beta Assets index is invalid')
+            expected = published['files'].get(relative)
+            if (not isinstance(expected, dict) or
+                    not isinstance(expected.get('bytes'), int) or
+                    not 0 < expected['bytes'] <= _PACK_DOWNLOAD_LIMIT or
+                    not re.fullmatch(r'[0-9a-f]{64}', str(expected.get('sha256') or ''))):
+                raise FileNotFoundError('Pack is missing from the verified beta index: ' + relative)
+            stream = _pack_remote_open(relative)
+        temp_path = None
+        try:
+            digest = hashlib.sha256()
+            size = 0
+            with stream, tempfile.NamedTemporaryFile(dir=destination_dir, prefix='pack-', delete=False) as target:
+                temp_path = Path(target.name)
+                while True:
+                    chunk = stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > _PACK_DOWNLOAD_LIMIT:
+                        raise ValueError('Downloaded Minecraft pack exceeds 2 GiB limit')
+                    digest.update(chunk)
+                    target.write(chunk)
+                target.flush()
+                os.fsync(target.fileno())
+            checksum = digest.hexdigest()
+            if not size or (expected and (size != expected['bytes'] or checksum != expected['sha256'])):
+                raise RuntimeError('Downloaded Minecraft pack failed beta index SHA-256 verification')
+            if not zipfile.is_zipfile(temp_path):
+                raise ValueError('Downloaded Minecraft Add-On is not a valid .mcaddon archive')
+            with zipfile.ZipFile(temp_path) as archive:
+                if not any(row.filename.lower().endswith('.mcpack') for row in archive.infolist()):
+                    raise ValueError('Downloaded Minecraft Add-On has no nested .mcpack files')
+            os.replace(temp_path, destination)
+            temp_path = None
+            record = {'schema': _PACK_STATE_SCHEMA, 'name': name, 'bytes': size,
+                      'sha256': checksum, 'source': source_type}
+            with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=root,
+                                             prefix='current-', delete=False) as state_file:
+                state_temp = Path(state_file.name)
+                json.dump(record, state_file, indent=2)
+                state_file.write('\n')
+                state_file.flush()
+                os.fsync(state_file.fileno())
+            try:
+                os.replace(state_temp, root / 'current.json')
+            finally:
+                state_temp.unlink(missing_ok=True)
+            return {'current': name, 'downloaded_bytes': size, 'sha256': checksum}
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+
+
+# The generator's already-published HTML may still contain its original inert
+# Minecraft element. Adapt that one element when served by Terminal so both
+# local and existing beta gallery pages have the same working current-pack UI.
+_PACK_BUTTON_SCRIPT = r'''(()=>{"use strict";const d=window.CINTERFORGE_PACK_DATA;
+  const button=document.getElementById("minecraft");
+  if(!button||!d||!d.currentPack)return;
+  const label=document.createElement("span");label.setAttribute("role","status");
+  label.style.cssText="color:#b5d7ea;align-self:center;font-size:12px";
+  button.parentElement.append(label);
+  const name=String(d.currentPack);
+  async function status(){const r=await fetch("/api/assets/packs/current",{credentials:"same-origin"});
+    const j=await r.json();if(!r.ok)throw Error(j.error||"Current-pack lookup failed");
+    button.textContent=j.current===name?"Remove as Current Pack":"Set as Current Pack";}
+  button.onclick=async()=>{button.disabled=true;label.textContent="Downloading and verifying pack…";
+    try{const r=await fetch("/api/assets/packs/set",{method:"POST",credentials:"same-origin",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({name})});
+      const j=await r.json();if(!r.ok)throw Error(j.error||"Pack selection failed");
+      button.textContent=j.current===name?"Remove as Current Pack":"Set as Current Pack";
+      label.textContent=j.current===name?"Current pack set":"No current pack";
+    }catch(e){label.textContent=e.message;console.error("[bedrock packs]",e)}finally{button.disabled=false}};
+  status().catch(e=>{label.textContent=e.message;console.error("[bedrock packs]",e)});
+})();'''
+
+
+def _pack_gallery_page(page: bytes) -> bytes:
+    old = b'<div id="minecraft">View in Minecraft</div>'
+    button = b'<button id="minecraft" type="button">Set as Current Pack</button>'
+    updated = page.replace(old, button)
+    if b'id="minecraft"' not in updated:
+        return updated  # Root redirect has no pack action.
+    if b'</body>' not in updated:
+        raise ValueError('Pack gallery is missing its closing body element')
+    return updated.replace(b'</body>', b'<script>' + _PACK_BUTTON_SCRIPT.encode('utf-8') + b'</script></body>', 1)
+
+
+def serve_packs(handler, relative: str) -> bool:
+    if not relative:
+        relative = 'index.html'
+    rel = safe_relative(relative)
+    if rel.suffix.lower() not in _PACK_VIEW_EXTENSIONS:
+        raise FileNotFoundError('Unsupported Minecraft pack gallery resource')
+    if _pack_local_mode():
+        base = root_for(handler.server) / 'MCAddons'
+        file = base / rel
+        if (base.is_symlink() or file.is_symlink() or not file.is_file() or
+                not file.resolve().is_relative_to(base.resolve()) or
+                any(p.is_symlink() for p in file.parents if p == base or base in p.parents)):
+            raise FileNotFoundError('Local Minecraft pack gallery resource missing: ' + str(rel))
+        if file.suffix.lower() == '.html':
+            _html_response(handler, _pack_gallery_page(file.read_bytes()))
+        else:
+            handler._send(200, file.read_bytes(), mimetypes.guess_type(file.name)[0] or 'application/octet-stream', same_origin_frame=True)
+    else:
+        with _pack_remote_open('MCAddons/' + rel.as_posix()) as response:
+            if rel.suffix.lower() == '.html':
+                page = response.read(16 * 1024 * 1024 + 1)
+                if len(page) > 16 * 1024 * 1024:
+                    raise ValueError('Published Minecraft gallery page is too large')
+                _html_response(handler, _pack_gallery_page(page))
+            else:
+                size_header = response.headers.get('Content-Length')
+                if not size_header or not size_header.isdigit() or not 0 < int(size_header) <= _PACK_DOWNLOAD_LIMIT:
+                    raise ValueError('Published pack resource has an invalid length')
+                size = int(size_header)
+                mime = mimetypes.guess_type(rel.name)[0] or 'application/octet-stream'
+                handler.send_response(200)
+                handler.send_header('Content-Type', mime)
+                handler.send_header('Content-Length', str(size))
+                handler.send_header('X-Content-Type-Options', 'nosniff')
+                handler.send_header('Cache-Control', 'no-store')
+                handler.end_headers()
+                remaining = size
+                while remaining:
+                    chunk = response.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise RuntimeError('Truncated published Minecraft pack resource')
+                    handler.wfile.write(chunk)
+                    remaining -= len(chunk)
+    return True
+
 def _html_response(handler, page: bytes) -> None:
     # The existing Converter AssetGallery and Server Pack galleries embed
     # generated scripts. Hash-allow only those exact bytes instead of turning
@@ -518,6 +790,8 @@ def serve(handler, url_path: str) -> bool:
     try:
         base = original.source_root()
         relative = unquote(url_path[len('/assets-library/'):])
+        if relative.startswith('packs/'):
+            return serve_packs(handler, relative[len('packs/'):])
         if relative == 'workspace' or (relative == 'asset' and not
                 any(parse_qs(urlsplit(handler.path).query).get(key) for key in ('uci', 'job'))):
             # Retired source/category library and empty asset views go to the report.

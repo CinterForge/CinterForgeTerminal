@@ -139,9 +139,9 @@
   });
 
   state.openAssetTab = async request => {
-    if (!['report', 'view', 'blockify'].includes(request?.kind) || typeof request.url !== 'string' ||
+    if (!['report', 'view', 'blockify', 'packs'].includes(request?.kind) || typeof request.url !== 'string' ||
         !request.url.startsWith('/assets-library/')) return;
-    const identity = request.kind === 'report' ? 'report' : request.kind === 'blockify' ? 'blockify' : request.uci;
+    const identity = request.kind === 'packs' ? 'packs' : request.kind === 'report' ? 'report' : request.kind === 'blockify' ? 'blockify' : request.uci;
     if (request.kind === 'view' && !/^CINTERASST[A-Za-z0-9#_-]{5,90}$/.test(identity || '')) return;
     const current = state.tabs.find(tab => !tab.closed && tab.kind === 'asset-view' && tab.assetKey === identity);
     if (current) {
@@ -150,14 +150,14 @@
       return;
     }
     const frame = document.createElement('iframe');
-    frame.title = request.kind === 'report' ? 'CinterForge Assets library report' : request.kind === 'blockify' ? 'CinterForge original Blockify authoring' : 'CinterForge asset ' + identity;
+    frame.title = request.kind === 'packs' ? 'CinterForge Minecraft Packs' : request.kind === 'report' ? 'CinterForge Assets library report' : request.kind === 'blockify' ? 'CinterForge original Blockify authoring' : 'CinterForge asset ' + identity;
     frame.referrerPolicy = 'no-referrer';
     frame.hidden = true;
     state.computerView.append(frame);
     const buffer = state.makeBuffer();
     const tab = {
       key: ++state.tabSerial,
-      label: request.kind === 'report' ? 'Assets · Report' : request.kind === 'blockify' ? 'Assets · Blockify' : 'Asset · ' + (request.name || identity),
+      label: request.kind === 'packs' ? 'Bedrock · Packs' : request.kind === 'report' ? 'Assets · Report' : request.kind === 'blockify' ? 'Assets · Blockify' : 'Asset · ' + (request.name || identity),
       kind: 'asset-view', assetKey: identity, mapFrame: frame, profileId: 'modern',
       session: null, closed: false, display: new state.VTOutput(buffer), buffer
     };
