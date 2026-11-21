@@ -1,6 +1,6 @@
 # Games and Experiences
 
-**Every game launches by typing its command in any existing Terminal Session.** There is no separate Game mode or New Game Terminal menu action. Type `wargames` to open the **original, unchanged JOSHUA** application as a new Session tab; it is game #1 in the 68-game `games` list. The other 67 entries are classic Macintosh games, launched with their existing commands. `stories` lists 16 independent interactive-fiction titles; their original filename commands still work. `infinite-mac` lists the 67 classic Macintosh games; `bedrock` manages Minecraft; `minecraft` opens a live server console; `lagomorph` retains its hidden original easter egg.
+**Every game launches by typing its command in any existing Terminal Session, with or without the optional `play` prefix.** There is no separate Game mode or New Game Terminal menu action. Type `joshua` (or `play joshua`, or its `wargames` alias) to open the **original, unchanged JOSHUA** application as a new Session tab; `joshua` is first in `games`. The `games` list then shows each of the 16 actual interactive-fiction title commands (from the authored JSON), one `infinitemac` emulator gallery command, and `bedrock` last. The 67 classic Macintosh game aliases remain available directly but do not clutter `games`. `infinitemac` / `play infinitemac` opens a searchable/filterable gallery of the same 47 public historical Macintosh, NeXTSTEP and BeOS emulator profiles shown in the machine menus, with each thumbnail opening its emulator in a new tab. `bedrock` / `play bedrock` opens Bedrock help and controls Minecraft; `minecraft` opens a live server console; `lagomorph` retains its hidden original easter egg.
 
 Games run in their existing appropriate player, emulator or service. `wargames` uses JOSHUA's existing standalone web application and original audio, presentation and input logic. Terminal commands remain available from ordinary Mac/Windows/Linux shell Sessions, while `code` opens Code-OSS for development. Native Mac/Windows/Linux and Minecraft console actions remain in the system menu; game names are typed, not selected through a special Game-mode menu.
 
@@ -10,9 +10,9 @@ The original WarGames/JOSHUA application retains its **Tic-Tac-Toe**, **Hangman*
 
 The JOSHUA source has its own attribution and **AGPL-3.0-only** license obligations; anyone bundling or modifying it must satisfy those obligations. General game/media licensing is separate from the Terminal Host license.
 
-## Games #2–68 — classic Macintosh games
+## Classic Macintosh games — direct commands
 
-`infinite-mac` (or `help infinite-mac`) lists the classic Macintosh titles. The catalog is based on the [Infinite Mac](https://infinitemac.org/) game library; titles use their command aliases rather than arbitrary file paths. Infinite Mac's browser runtime and game media may require network access, and each game's appropriate Mac profile/software media must be respected.
+`infinitemac` opens the 47-public-profile emulator gallery; individual classic Macintosh game aliases remain available as direct commands but are not separate `games` entries. The catalog is based on the [Infinite Mac](https://infinitemac.org/) game library; titles use their command aliases rather than arbitrary file paths. Infinite Mac's browser runtime and game media may require network access, and each game's appropriate Mac profile/software media must be respected.
 
 The game commands are:
 
@@ -113,9 +113,11 @@ Use `<command> install`, `<command> status`, `<command>` (or `<command> start`),
 
 ## Minecraft Bedrock
 
-Minecraft is a managed game/server experience, not a generic developer terminal. `bedrock` lists installed **Bedrock** worlds and the user's local **Java** saves. Selecting a Java world runs the bundled native CraftMaster CLI, reuses validated conversions when present, and imports its Bedrock copy before starting the server. `bedrock <world>` installs the official server after EULA acceptance when needed, retrieves a published world by name if absent, and launches it in an interactive tab. `minecraft` opens another console attached to that same running server; closing a client console merely detaches, while closing the server-owning Bedrock tab stops its managed server and guests.
+The `games` list places `bedrock` last, after JOSHUA, the 16 individual interactive-fiction titles, and `infinitemac`. Typing `bedrock` displays Bedrock-specific help; `bedrock report` opens the local HTML overview of Java and Bedrock worlds with Minecraft icons, sanitized world names, Set Current, Download, and Java-world Update for Bedrock and Map controls.
 
-Bedrock uses the LinuxKit/Rosetta guest and host LAN relay on macOS. Client connectivity and discovery must be verified on the host LAN; the guest does not receive its own LAN IP. Details are in the [User Manual](User%20Manual.md).
+Choose the single Current World through the report or with `bedrock world <name>`. Each world independently remembers its selected CinterForge pack, which can be chosen with `bedrock pack <name>` or through `bedrock packs` (available without developer credentials). Use `bedrock pack none` to clear the selected pack for that world only. The server commands are `bedrock start`, `bedrock run` and `bedrock stop`; neither start command accepts a world name. If the Java source changed since its converted Bedrock world was created, Bedrock asks to update the conversion or run the older conversion explicitly. The report and map viewer show the same readiness state, and conversion outputs reside inside the source Java save's `CinterForge/` folder.
+
+The official Bedrock Dedicated Server is installed only as needed after explicit EULA acceptance. It runs the selected Bedrock world in its own interactive terminal tab, retaining the existing managed server copy and authoritative saves. Existing server-wide operator and allowlist commands remain under `bedrock op` and `bedrock allowlist`. For the complete current command flow, see the [User Manual](User%20Manual.md).
 
 ## Lagomorph
 

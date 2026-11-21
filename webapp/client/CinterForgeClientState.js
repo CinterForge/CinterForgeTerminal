@@ -152,7 +152,7 @@
     if (profile?.kind === 'codeoss' || profile?.id === 'codeoss') return 'codeoss';
     if (profile?.kind !== 'emulator') return 'terminal';
     if (profile.id?.startsWith('beos-')) return 'beos';
-    if (profile.id?.startsWith('next-')) return 'nextstep';
+    if (String(profile.disk || '').startsWith('NeXTSTEP')) return 'nextstep';
     return 'macintosh';
   };
 

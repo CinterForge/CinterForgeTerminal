@@ -29,7 +29,7 @@ def open_map_tab(server, world: dict) -> dict:
     if manager is None:
         raise RuntimeError('CraftMaster requires a configured Bedrock runtime')
     world_name = manager.java_world_export_name(world)
-    output_root = manager.craftmaster_output_root()
+    output_root = manager.craftmaster_output_root(world)
     # CraftMaster names its map cache after the original Java save folder,
     # not the shortened .mcworld/export name (e.g. Candlewood (Candlewood)).
     map_directory = output_root / 'Maps' / Path(world['path']).name / 'Overworld'
@@ -49,6 +49,44 @@ def open_map_tab(server, world: dict) -> dict:
             'message': 'Preparing live Zoomify map…',
         }
         server.craftmaster_map_requests.append(request)
+    return request
+
+
+def open_existing_map(server, name: str) -> dict:
+    """View the last authored Zoomify map without running CraftMaster."""
+    if server.bedrock is None:
+        raise RuntimeError('CraftMaster is unavailable')
+    world = server.bedrock.find_java_world(name)
+    if world is None:
+        raise ValueError('No Java save named ' + repr(name))
+    output = server.bedrock.craftmaster_output_root(world)
+    viewer = output / 'Maps' / Path(world['path']).name / 'Overworld/Live Map.htm'
+    if not viewer.is_file() or viewer.is_symlink():
+        raise FileNotFoundError('No CraftMaster map yet; select Update for Bedrock')
+    request = open_map_tab(server, world)
+    mark_finished(server, request['id'])
+    return {'map': request, 'opened': True}
+
+
+def map_progress(server, map_id: str) -> dict:
+    if not re.fullmatch(r'[0-9a-f]{32}', map_id):
+        raise ValueError('Invalid map tab ID')
+    with server.craftmaster_map_lock:
+        state = server.craftmaster_maps.get(map_id)
+        if state is None:
+            raise ValueError('Unknown Map tab')
+        return {'phase': state['phase'], 'message': state['message'], 'name': state['name']}
+
+
+def open_world_report(server) -> dict:
+    """Reuse the existing iframe-tab command queue for the Bedrock report."""
+    if server.bedrock is None:
+        raise RuntimeError(server.bedrock_error or 'Bedrock is unavailable')
+    request = {'kind': 'bedrock-report', 'url': '/bedrock-report/index.html'}
+    with server.asset_actions_lock:
+        server.asset_actions = type(server.asset_actions)(
+            row for row in server.asset_actions if row['kind'] != 'bedrock-report')
+        server.asset_actions.append(request)
     return request
 
 

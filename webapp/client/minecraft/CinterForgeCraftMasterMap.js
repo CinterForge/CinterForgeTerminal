@@ -20,11 +20,16 @@
       await state.activateTab(existing);
       return;
     }
+    const shell = document.createElement('div');
+    shell.className = 'craftmaster-map-shell';
+    shell.hidden = true;
+    const controls = document.createElement('div');
+    controls.className = 'craftmaster-map-controls';
     const frame = document.createElement('iframe');
     frame.title = 'CraftMaster live Zoomify map: ' + request.world;
     frame.referrerPolicy = 'no-referrer';
-    frame.hidden = true;
-    state.computerView.append(frame);
+    shell.append(controls, frame);
+    state.computerView.append(shell);
     const buffer = state.makeBuffer();
     const mapTab = {
       key: ++state.tabSerial,
@@ -32,7 +37,7 @@
       kind: 'craftmaster-map',
       profileId: 'modern',
       mapId: request.id,
-      mapFrame: frame,
+      mapFrame: shell,
       session: null,
       closed: false,
       display: new state.VTOutput(buffer),
@@ -41,6 +46,89 @@
     mapTab.display.target = buffer;
     state.tabs.push(mapTab);
     await state.activateTab(mapTab);
+
+    const create = (label, action) => {
+      const node = document.createElement('button');
+      node.type = 'button'; node.textContent = label;
+      node.addEventListener('click', () => {void action().catch(error => state.notice(error.message));});
+      controls.append(node);
+      return node;
+    };
+    const played = document.createElement('span'), updated = document.createElement('span');
+    const pack = document.createElement('span'), progress = document.createElement('span');
+    controls.append(played, updated);
+    const update = create('Update for Bedrock', async () => {
+      const result = await state.api('/api/craftmaster/map/run', {name: request.world});
+      state.notice('CraftMaster update started in map tab ' + (result.map?.world || request.world));
+    });
+    const select = create('Set Current', async () => {
+      const details = await state.api('/api/bedrock/report');
+      const world = details.java_worlds.find(w => w.command_name === request.world);
+      if (!world) throw new Error('Java world is no longer available');
+      await state.api('/api/bedrock/world/select', {name:world.id});
+      await refreshControls();
+    });
+    controls.append(pack);
+    const startStop = create('Start', async () => {
+      const details = await state.api('/api/bedrock/report');
+      if (details.running) await state.api('/api/bedrock/stop', {});
+      else {
+        const world = details.java_worlds.find(w => w.command_name === request.world);
+        if (!world) throw new Error('Java world is no longer available');
+        if (!world.current) await state.api('/api/bedrock/world/select', {name: world.id});
+        let allow_stale=false;
+        if (world.conversion?.needs_update) {
+          if (!world.conversion.has_conversion || confirm('Update for Bedrock before starting?')) {
+            await state.api('/api/craftmaster/map/run', {name:request.world});
+            state.notice('CraftMaster update started; start again after it finishes');
+            return;
+          }
+          if (!confirm('Run the last converted world anyway?')) return;
+          allow_stale=true;
+        }
+        try {await state.api('/api/bedrock/run', {allow_stale});}
+        catch (error) {
+          if (/EULA|not installed/i.test(error.message)) {
+            await state.api('/api/bedrock/eula', {});
+            state.requestLicense();
+          }
+          throw error;
+        }
+      }
+      await refreshControls();
+    });
+    controls.append(progress);
+    const format = value => value ? new Date(value * 1000).toLocaleString() : 'Unknown';
+    const refreshControls = async () => {
+      if (mapTab.closed) return;
+      const details = await state.api('/api/bedrock/report');
+      const world = details.java_worlds.find(w => w.command_name === request.world);
+      if (!world) return;
+      played.textContent='Last Played: ' + format(world.conversion?.last_played);
+      updated.textContent='Last Updated: ' + format(world.conversion?.last_updated);
+      update.disabled = world.conversion?.needs_update !== true;
+      select.disabled = world.current === true;
+      select.textContent = world.current ? '✓ Current World' : 'Set Current';
+      pack.textContent = 'Current Pack: ' + (world.pack || 'None');
+      startStop.textContent = details.running ? 'Stop' : 'Start';
+      try {
+        const phase = await state.api('/api/craftmaster/map/status?id=' + request.id);
+        progress.textContent = phase.phase === 'failed' ? 'Failed: ' + phase.message :
+          phase.phase === 'preparing' ? phase.message :
+          world.conversion?.ready ? 'Bedrock ready' :
+          !world.conversion?.has_conversion ? 'Not converted to Bedrock' :
+          world.conversion?.needs_update ? 'Update for Bedrock required' :
+          'Bedrock conversion present · freshness unverified';
+      } catch (_) {progress.textContent = 'Map status unavailable';}
+    };
+    mapTab.mapControlTimer = setInterval(() => {
+      if (mapTab.closed) {clearInterval(mapTab.mapControlTimer);return;}
+      if (state.activeTab === mapTab) void refreshControls().catch(error => state.notice(error.message));
+    }, 30000);
+    window.addEventListener('cinter-bedrock-pack-changed', () => {
+      if (!mapTab.closed) void refreshControls().catch(error => state.notice(error.message));
+    });
+    void refreshControls().catch(error => state.notice(error.message));
 
     // The converter writes its own viewer + all black ZFY placeholders first.
     // Poll only its HTML readiness. Load that SAME authored viewer once, then

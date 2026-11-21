@@ -139,9 +139,9 @@
   });
 
   state.openAssetTab = async request => {
-    if (!['report', 'view', 'blockify', 'packs'].includes(request?.kind) || typeof request.url !== 'string' ||
-        !request.url.startsWith('/assets-library/')) return;
-    const identity = request.kind === 'packs' ? 'packs' : request.kind === 'report' ? 'report' : request.kind === 'blockify' ? 'blockify' : request.uci;
+    if (!['report', 'view', 'blockify', 'packs', 'bedrock-report'].includes(request?.kind) || typeof request.url !== 'string' ||
+        !(request.kind === 'bedrock-report' ? request.url === '/bedrock-report/index.html' : request.url.startsWith('/assets-library/'))) return;
+    const identity = request.kind === 'bedrock-report' ? 'bedrock-report' : request.kind === 'packs' ? 'packs' : request.kind === 'report' ? 'report' : request.kind === 'blockify' ? 'blockify' : request.uci;
     if (request.kind === 'view' && !/^CINTERASST[A-Za-z0-9#_-]{5,90}$/.test(identity || '')) return;
     const current = state.tabs.find(tab => !tab.closed && tab.kind === 'asset-view' && tab.assetKey === identity);
     if (current) {
@@ -150,14 +150,14 @@
       return;
     }
     const frame = document.createElement('iframe');
-    frame.title = request.kind === 'packs' ? 'CinterForge Minecraft Packs' : request.kind === 'report' ? 'CinterForge Assets library report' : request.kind === 'blockify' ? 'CinterForge original Blockify authoring' : 'CinterForge asset ' + identity;
+    frame.title = request.kind === 'bedrock-report' ? 'Bedrock and CraftMaster world report' : request.kind === 'packs' ? 'CinterForge Minecraft Packs' : request.kind === 'report' ? 'CinterForge Assets library report' : request.kind === 'blockify' ? 'CinterForge original Blockify authoring' : 'CinterForge asset ' + identity;
     frame.referrerPolicy = 'no-referrer';
     frame.hidden = true;
     state.computerView.append(frame);
     const buffer = state.makeBuffer();
     const tab = {
       key: ++state.tabSerial,
-      label: request.kind === 'packs' ? 'Bedrock · Packs' : request.kind === 'report' ? 'Assets · Report' : request.kind === 'blockify' ? 'Assets · Blockify' : 'Asset · ' + (request.name || identity),
+      label: request.kind === 'bedrock-report' ? 'Bedrock · Worlds' : request.kind === 'packs' ? 'Bedrock · Packs' : request.kind === 'report' ? 'Assets · Report' : request.kind === 'blockify' ? 'Assets · Blockify' : 'Asset · ' + (request.name || identity),
       kind: 'asset-view', assetKey: identity, mapFrame: frame, profileId: 'modern',
       session: null, closed: false, display: new state.VTOutput(buffer), buffer
     };
@@ -167,6 +167,153 @@
     frame.src = request.url;
   };
 
+  // Reuse the very same terminal and emulator profiles used by the museum
+  // menus. The gallery is only a different discovery surface, never a second
+  // emulator launcher or a second catalog of boot configurations.
+  state.openEmulatorGalleryTab = async () => {
+    const open = state.tabs.find(tab => !tab.closed && tab.kind === 'asset-view' && tab.assetKey === 'emulators');
+    if (open) {
+      await state.activateTab(open);
+      return;
+    }
+    const styles = state.profiles.filter(profile => profile?.kind === 'terminal' &&
+      typeof profile.id === 'string');
+    const machines = state.profiles.filter(profile => profile?.kind === 'emulator' &&
+      !profile.lagomorph && !profile.macGame && typeof profile.id === 'string');
+    if (!machines.length || !styles.length) throw new Error('Museum catalog is not ready');
+    const byYear = (a, b) => (Number(a.year) || 0) - (Number(b.year) || 0) || a.name.localeCompare(b.name);
+    machines.sort(byYear);
+    styles.sort(byYear);
+    const sections = ['Terminal Styles', 'macOS', 'BeOS', 'NeXTSTEP'];
+    const familyOf = profile => profile.kind === 'terminal' ? 'Terminal Styles' :
+      profile.os === 'beos' ? 'BeOS' :
+      /nextstep|openstep/i.test(String(profile.disk || '')) || /^next/i.test(profile.id) ? 'NeXTSTEP' : 'macOS';
+    const element = (tag, cls, value) => {
+      const node = document.createElement(tag);
+      if (cls) node.className = cls;
+      if (value != null) node.textContent = String(value);
+      return node;
+    };
+    const shell = element('section', 'emulator-gallery');
+    shell.hidden = true;
+    shell.setAttribute('aria-label', 'Terminal styles and Infinite Mac emulators');
+    const header = element('header', 'emulator-gallery-header');
+    const heading = element('h2', '', 'Infinite Mac & Terminal Styles');
+    const search = element('input', 'emulator-gallery-search');
+    search.type = 'search';
+    search.placeholder = 'Search styles, emulators, systems, years…';
+    search.setAttribute('aria-label', 'Search terminal styles and emulators');
+    const family = element('select', 'emulator-gallery-filter');
+    family.setAttribute('aria-label', 'Filter by operating system or styles');
+    for (const name of ['All sections', ...sections]) {
+      const option = element('option', '', name);
+      option.value = name === 'All sections' ? '' : name;
+      family.append(option);
+    }
+    const count = element('span', 'emulator-gallery-count');
+    header.append(heading, search, family, count);
+    const scroll = element('div', 'emulator-gallery-scroll');
+    const entries = [];
+    const groups = new Map();
+    for (const name of sections) {
+      const section = element('section', 'emulator-gallery-section');
+      section.dataset.family = name;
+      const sectionHeader = element('div', 'emulator-gallery-section-header');
+      const title = element('h3', '', name);
+      const tally = element('span', 'emulator-gallery-section-count');
+      sectionHeader.append(title, tally);
+      const grid = element('div', 'emulator-gallery-grid');
+      section.append(sectionHeader, grid);
+      scroll.append(section);
+      groups.set(name, {section, grid, tally, entries: []});
+    }
+    const addText = (parent, tag, cls, value) => parent.append(element(tag, cls, value));
+    for (const profile of [...styles, ...machines]) {
+      const group = familyOf(profile);
+      const container = groups.get(group);
+      if (!container) continue;
+      const card = element('article', 'emulator-gallery-card');
+      const searchText = [profile.name, profile.machine, profile.disk,
+        profile.year, profile.columns, group].filter(Boolean).join(' ').toLocaleLowerCase();
+      const thumb = element('button', 'emulator-gallery-thumb');
+      thumb.type = 'button';
+      thumb.setAttribute('aria-label', 'Open ' + profile.name + ' in a new Terminal tab');
+      thumb.title = 'Open ' + profile.name;
+      thumb.dataset.family = group;
+      if (group === 'Terminal Styles') {
+        // A true sample of this profile's authored palette, not an image of
+        // an operating system that this presentation-only style cannot run.
+        const preview = element('div', 'emulator-gallery-style-preview');
+        preview.style.setProperty('--preview-bg', profile.background);
+        preview.style.setProperty('--preview-fg', profile.foreground);
+        preview.style.setProperty('--preview-accent', profile.accent);
+        addText(preview, 'span', 'emulator-gallery-style-caption', 'CinterForge Terminal');
+        const screen = element('pre', 'emulator-gallery-style-screen');
+        screen.textContent = '> help\n' + profile.name + '\n> _';
+        preview.append(screen);
+        thumb.append(preview);
+      } else {
+        // Lightweight visual depiction of the selected OS family; no heavy
+        // embedded emulator is started just to populate a search result.
+        const screen = element('div', 'emulator-gallery-desktop');
+        screen.dataset.family = group;
+        const menubar = element('div', 'emulator-gallery-desktop-menu');
+        addText(menubar, 'span', '', group === 'macOS' ? '◆  File  Edit  View' :
+          group === 'BeOS' ? 'Be  Deskbar' : 'Workspace  Tools  Services');
+        const window = element('div', 'emulator-gallery-desktop-window');
+        addText(window, 'div', 'emulator-gallery-desktop-window-title', profile.disk || profile.name);
+        addText(window, 'div', 'emulator-gallery-desktop-window-text', profile.machine || profile.name);
+        addText(window, 'div', 'emulator-gallery-desktop-window-lines', '▣    ▤    ▥');
+        screen.append(menubar, window);
+        thumb.append(screen);
+      }
+      thumb.addEventListener('click', () => {
+        // The existing profile/menu action creates the real Session tab.
+        // Do not hide or destroy the gallery: returning to it must work.
+        state.openMuseumProfile(profile.id);
+      });
+      const body = element('div', 'emulator-gallery-meta');
+      addText(body, 'strong', '', profile.name);
+      addText(body, 'small', '', group === 'Terminal Styles'
+        ? [profile.year, profile.columns ? profile.columns + ' columns' : ''].filter(Boolean).join(' · ')
+        : [profile.year, profile.disk, profile.machine].filter(Boolean).join(' · '));
+      card.append(thumb, body);
+      container.grid.append(card);
+      const entry = {card, query: searchText, family: group};
+      entries.push(entry);
+      container.entries.push(entry);
+    }
+    const refresh = () => {
+      const query = search.value.trim().toLocaleLowerCase();
+      let visible = 0;
+      for (const entry of entries) {
+        entry.card.hidden = (Boolean(family.value) && family.value !== entry.family) ||
+          (Boolean(query) && !entry.query.includes(query));
+        if (!entry.card.hidden) visible++;
+      }
+      for (const group of groups.values()) {
+        const shown = group.entries.filter(entry => !entry.card.hidden).length;
+        group.section.hidden = shown === 0;
+        group.tally.textContent = shown + ' of ' + group.entries.length;
+      }
+      count.textContent = visible + ' of ' + entries.length + ' profiles';
+    };
+    search.addEventListener('input', refresh);
+    family.addEventListener('change', refresh);
+    shell.append(header, scroll);
+    refresh();
+    state.computerView.append(shell);
+    const buffer = state.makeBuffer();
+    const tab = {key: ++state.tabSerial, label: 'Infinite Mac · Emulators',
+      kind: 'asset-view', assetKey: 'emulators', mapFrame: shell,
+      profileId: 'modern', session: null, closed: false,
+      display: new state.VTOutput(buffer), buffer};
+    tab.display.target = buffer;
+    state.tabs.push(tab);
+    await state.activateTab(tab);
+    search.focus();
+  };
+
   let polling = false;
   setInterval(async () => {
     if (polling || document.visibilityState === 'hidden') return;
@@ -174,6 +321,7 @@
     try {
       const request = await state.api('/api/assets/next');
       if (request?.kind === 'picker') state.openAssetPicker();
+      else if (request?.kind === 'emulators') await state.openEmulatorGalleryTab();
       else if (request?.kind) await state.openAssetTab(request);
     } catch (_) { /* Not configured, no credentials, or server exiting. */ }
     finally { polling = false; }

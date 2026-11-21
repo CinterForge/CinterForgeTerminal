@@ -58,13 +58,11 @@ from runtime.CinterForgeGuest import CinterForgeGuestSupervisor
 # Only the canonical commands are shown to every user. Optional commands
 # are added according to the running Host's DevTools and external grants.
 HELP = '''Commands:
-  games                         List Playable Infinite-Mac macOS Games
-  stories                       List Interactive Fiction Stories
-  play <title>                  Launch a game or story in a Session Window
-  bedrock <world>               List and load and serve a Minecraft Bedrock world
-  bedrock packs                 Browse Minecraft content packs
-  craftmaster <world>           Convert a Minecraft Java world to Bedrock'''
+  games                         List of playable games
+  play <title>                  Launch a game (play is optional)'''
 
+GAMES_HELP = '''Games:
+  joshua                        WarGames (JOSHUA) simulator'''
 
 DEBUGGER_HELP = '''debugger [open|status|help]
   debugger             Request the live JavaScript WebView inspector
@@ -81,19 +79,20 @@ CODE_HELP = '''code [open|status|help]
   code open <workspace>     Open the specified workspace in the CinterForge Code editor
 '''
 
-BEDROCK_HELP = """bedrock [world name]
-  bedrock                      List local Bedrock and Java worlds
-  bedrock <world>              Start a world in its own interactive console tab
-  bedrock packs                 Open MCAddons (local with cfdev, otherwise beta)
-  bedrock op                   List persistent server operators
-  bedrock op <gamertag>       Remember an operator and also allowlist them
-  bedrock op remove <name>    Remove persistent operator privilege
-  bedrock allowlist            List server-wide allowed players
-  bedrock allowlist <name>     Allow a player onto this server
-  bedrock allowlist remove <name>  Remove allowed player (if not an op)
-  Operators are assigned by Xbox XUID once their authenticated player joins.
-  These rules persist across world changes. Close Bedrock tab to stop server.
-"""
+BEDROCK_HELP = '''bedrock [command]
+  bedrock report                Open the Java and Bedrock worlds report
+  bedrock packs                 Open Minecraft behavior pack gallery
+  bedrock world <name>          Select the Current World
+  bedrock pack <name>           Select a pack for the Current World
+  bedrock pack none             Clear the Current World's pack
+  bedrock start                 Start the Current World and its selected pack
+  bedrock run                   Prompt before running an outdated Java conversion
+  bedrock stop                  Stop the running Bedrock server
+  bedrock op [name|remove name]  List or manage persistent operators
+  bedrock allowlist [name|remove name]  List or manage allowed players
+  bedrock help                  Show these commands
+  Each world remembers its own current pack.
+  Operators and allowlist entries persist across worlds.'''
 
 DEVTOOLS_HELP = '''devtools [install|update|uninstall|version|list|report|help]
     devtools                          Ask to start installed DevTools or install them
@@ -125,14 +124,6 @@ Native file picker: assets import with no path offers the OS file selection dial
 in Terminal. Blockify runs in the original Babylon browser and Server exporter.
 '''
 
-PACKS_HELP = '''packs
-  packs                   List complete behavior packs in Assets/ContentPacks
-  packs set <pack>        Select the one user behavior pack for the next Bedrock launch
-  packs report <pack>     Open the pack gallery (when a report is present)
-The CinterForge communications pack is always installed separately.
-'''
-
-
 def _external_capabilities() -> dict[str, bool]:
     """Get only launch-validated grants; never inspect credentials in CLI mode."""
     try:
@@ -153,28 +144,18 @@ def _cfdev_config_present() -> bool:
 
 
 def _visible_help(capabilities: dict[str, bool], *, devtools_installed: bool,
-                  cfdev_config: bool) -> str:
-    """One help display for initial Session startup and the `help` command."""
-    lines = [HELP]
-    if devtools_installed:
-        lines.extend(('',
-                      '  debugger                      Debug the current WebView (default: open). See debugger help',
-                      '  devtools                      Manage Developer Tools. See devtools help',
-                      '  code                          Open CinterForge Code. See code help'))
-    external = []
+                   cfdev_config: bool) -> str:
+    """The single conditional main-help ordering, independent of game details."""
+    lines = [HELP, '', '  devtools                      Manage Developer Tools. See devtools help']
     if cfdev_config:
         if capabilities.get('assets'):
-            external.append('  assets                        Manage the Assets library. See assets help')
-        if capabilities.get('packs'):
-            external.append('  packs                         Manage Minecraft behavior packs. See packs help')
+            lines.append('  assets                        Manage the Assets library. See assets help')
         if capabilities.get('discord'):
-            external.append('  discord                       Open a bot-connected Session tab. See discord help')
-        external.append('  setpass                       Set this host\'s LAN login credentials. See setpass help')
-    if external:
-        lines.extend(('', *external))
+            lines.append('  discord                       Open a Discord Session. See discord help')
+    if devtools_installed:
+        lines.extend(('  code                          Open CinterForge Code. See code help',
+                      '  debugger                      Debug the current WebView. See debugger help'))
     lines.extend(('', '  Other commands                Run in the real OS shell (zsh, bash, or PowerShell).'))
-    if not devtools_installed:
-        lines.append('  devtools                      Install CinterForge Developer Toolchains.')
     return '\n'.join(lines)
 
 
@@ -550,7 +531,7 @@ def _packaged_craftmaster() -> Path:
     return binary
 
 
-def _open_bedrock_with_progress(world_name: str) -> dict:
+def _open_bedrock_with_progress(world_name: str, *, allow_stale: bool = False) -> dict:
     """Stream conversion/download status while the host creates the Bedrock tab.
 
     The HTTP run call may take minutes for a large Java world. Keep the calling
@@ -567,7 +548,7 @@ def _open_bedrock_with_progress(world_name: str) -> dict:
 
     def request_server() -> None:
         try:
-            result.update(_api('/api/bedrock/run', body={'name': world_name}))
+            result.update(_api('/api/bedrock/run', body={'allow_stale': allow_stale}))
         except Exception as error:
             failures.append(error)
         finally:
@@ -644,7 +625,7 @@ def _games_download() -> int:
 def execute(args: list[str]) -> int:
     from runtime import CinterForgeDevTools as _CinterForgeDevTools
     capabilities = _external_capabilities()
-    if args and args[0] in ('assets', 'packs', 'discord') and not capabilities.get(args[0]):
+    if args and args[0] in ('assets', 'discord') and not capabilities.get(args[0]):
         print('Unknown custom command. Type help.', file=sys.stderr)
         return 2
     if not args or args[0] in ('help', '--help', '-h'):
@@ -656,19 +637,18 @@ def execute(args: list[str]) -> int:
                 devtools_installed = False
             print(_visible_help(capabilities, devtools_installed=devtools_installed,
                                 cfdev_config=_cfdev_config_present()))
-        elif len(option) == 1 and option[0] == 'infinite-mac':
-            print('67 Macintosh games — https://infinitemac.org/ (experimental guest auto-open):')
-            for slug, game in _cli_mac_catalog().items():
-                print(f"{slug:30} {game['title']}")
-        elif len(option) == 1 and (option[0] in ('debugger', 'bedrock', 'devtools', 'code', 'setpass')
+        elif len(option) == 1 and option[0] in ('infinitemac', 'infinite-mac'):
+            print('infinitemac — Open a searchable gallery of Macintosh, NeXTSTEP and BeOS emulators.')
+            print('Select a thumbnail to open that machine in a new Session tab.')
+        elif len(option) == 1 and (option[0] in ('bedrock', 'devtools', 'setpass') or option[0] in ('debugger', 'code') and bool(_api('/api/status').get('devtools_installed'))
                                    or option[0] == 'assets'
-                                   or option[0] in ('packs', 'discord') and capabilities.get(option[0])):
+                                   or option[0] == 'discord' and capabilities.get('discord')):
             print({'debugger': DEBUGGER_HELP, 'bedrock': BEDROCK_HELP,
                    'devtools': DEVTOOLS_HELP, 'code': CODE_HELP,
-                   'assets': ASSETS_HELP, 'packs': PACKS_HELP,
+                   'assets': ASSETS_HELP,
                    'discord': DISCORD_HELP, 'setpass': SETPASS_HELP}[option[0]])
         else:
-            permitted = [name for name in ('assets', 'packs', 'discord') if capabilities.get(name)]
+            permitted = [name for name in ('assets', 'discord') if capabilities.get(name)]
             print('Usage: help [debugger|bedrock|devtools|code|setpass' +
                   ''.join('|' + name for name in permitted) + ']', file=sys.stderr)
             return 2
@@ -762,6 +742,9 @@ def execute(args: list[str]) -> int:
             'session_id': os.environ.get('CINTER_TERMINAL_SESSION_ID', '')})
         print('HTML menus: ' + ('visible' if state['show'] else 'hidden'), flush=True)
         return 0
+    if args[0] in ('code', 'debugger') and not _api('/api/status').get('devtools_installed'):
+        print('Install DevTools to use ' + args[0], file=sys.stderr)
+        return 2
     if args[0] == 'code':
         if args[1:] == ['help']:
             print(CODE_HELP)
@@ -914,9 +897,20 @@ def execute(args: list[str]) -> int:
         if options:
             print('Usage: games', file=sys.stderr)
             return 2
-        for index, (name, entry) in enumerate(_game_catalog().items(), start=1):
-            print(f"{index:2}. {name:30} {entry['title']}")
+        print(GAMES_HELP)
+        for name, entry in _cli_if_catalog().items():
+            print(f"  {name:29} {entry['title']}")
+        print('  infinitemac                   Search historical Macintosh, NeXTSTEP and BeOS emulators')
+        print('  bedrock                       Serve any Java or Bedrock world with CinterForge Behavior Packs')
         return 0
+    if command in ('infinitemac', 'infinite-mac') and not options:
+        result = _api('/api/emulators/open', body={})
+        if not result.get('requested'):
+            raise RuntimeError('Emulator gallery was not opened')
+        print('[infinitemac] Opening searchable emulator gallery in a Session tab.', flush=True)
+        return 0
+    if command in ('joshua', 'wargames') and not options:
+        return _launch_wargames()
     if command == 'stories':
         if options:
             print('Usage: stories', file=sys.stderr)
@@ -927,23 +921,35 @@ def execute(args: list[str]) -> int:
     if command == 'play':
         selected = ' '.join(options).strip()
         if not selected:
-            print('Usage: play <game-or-story-name>', file=sys.stderr)
+            print('Usage: play <game-name> (or type the game name directly)', file=sys.stderr)
             return 2
-        # Accept an exact command slug or a displayed title (case-insensitive).
+        # "play" is an optional prefix for every entry printed by `games`.
+        # Preserve Bedrock's own subcommands under either spelling, e.g.
+        # `bedrock report` and `play bedrock report`.
+        if len(options) > 1 and options[0].casefold() == 'bedrock':
+            return execute(['bedrock', *options[1:]])
         stories = _cli_if_catalog()
-        games = _game_catalog()
-        by_title = {str(entry['title']).casefold(): name for name, entry
-                    in {**stories, **games}.items()}
-        name = selected if selected in stories or selected in games else by_title.get(selected.casefold(), selected)
-        if name in stories:
-            return _if_command(name, 'play', stories[name])
-        if name == 'wargames':
-            return _launch_wargames()
-        if name in games:
-            return _mac_launch(name, games[name])
-        print('Unknown game/story: ' + selected + '. Type games or stories.', file=sys.stderr)
-        return 2
+        games = _game_catalog()  # JOSHUA's wargames alias and Classic Mac titles.
+        commands = {'joshua': 'joshua', 'wargames': 'joshua',
+                    'infinitemac': 'infinitemac', 'infinite-mac': 'infinitemac',
+                    'bedrock': 'bedrock'}
+        commands.update({name.casefold(): name for name in stories})
+        commands.update({name.casefold(): name for name in games})
+        commands['wargames'] = 'joshua'  # Catalog's legacy key is an alias, not a CLI handler.
+        by_title = {entry['title'].casefold(): name for name, entry
+                    in {**games, **stories}.items()}
+        by_title['wargames (joshua)'] = 'joshua'
+        name = commands.get(selected.casefold()) or by_title.get(selected.casefold())
+        if name is None:
+            print('Unknown game/story: ' + selected + '. Type games to see the available commands.', file=sys.stderr)
+            return 2
+        # Exactly the same existing command handler runs with or without `play`.
+        return execute([name])
     # Easter egg: deliberately not listed in help, menu commands, or CLI usage.
+    if command in _cli_if_catalog() and not options:
+        return _if_command(command, 'play', _cli_if_catalog()[command])
+    if command in _cli_mac_catalog() and not options:
+        return _mac_launch(command, _cli_mac_catalog()[command])
     if command == 'lagomorph':
         if options:
             return 2
@@ -1014,62 +1020,95 @@ def execute(args: list[str]) -> int:
             if state.get('allowlist') and not state.get('allowlist_enabled'):
                 print('Note: allow-list will be enabled on the next server launch.')
             return 0
-        if not options:
-            state = _api('/api/bedrock/worlds')
-            print('Available Bedrock worlds:')
-            for world in state.get('worlds', []):
-                print('  ' + world.get('command_name', world['name']))
-            if not state.get('worlds'):
-                print('  (no installed Bedrock worlds)')
-            print('Available Java worlds:')
-            for world in state.get('java_worlds', []):
-                print('  ' + world.get('command_name', world['name']))
-            if state.get('java_error'):
-                print('  (Java discovery error: ' + state['java_error'] + ')')
-            print('Launch with: bedrock <world name>')
-            return 0
-        selected = ' '.join(options).strip()
-        if not selected or selected in ('help', '--help', '-h'):
+        if not options or options in (['help'], ['--help'], ['-h']):
             print(BEDROCK_HELP)
             return 0
-        # No separate install/start/run/stop/status public commands. Retain
-        # internal HTTP actions for the owning Bedrock tab and EULA UI only.
-        if selected.casefold() in ('install', 'run', 'stop', 'start', 'status', 'restart', 'eula', 'log', 'command', 'path'):
-            print('Usage: bedrock <world name> (or bedrock to list worlds)', file=sys.stderr)
-            return 2
-        state = _api('/api/bedrock/status')
-        if not state.get('eula_accepted'):
-            _api('/api/bedrock/eula', body={})
-            print('[bedrock] Review and accept the official Minecraft EULA in Terminal.', flush=True)
-        elif not state.get('installed') and not state.get('installing'):
-            _api('/api/bedrock/install', body={})
-        # The accepted EULA starts the existing background Bedrock installer.
-        # Poll only while the user-requested command remains open. Cancellation
-        # of the EULA returns without downloading any server or world content.
-        last_progress = None
-        start_wait = time.monotonic()
-        while not state.get('installed'):
-            if time.monotonic() - start_wait > 1800:
-                raise RuntimeError('Bedrock installation did not complete; view the persistent Bedrock log')
-            time.sleep(0.75)
+        action = options[0].casefold()
+        if action == 'report' and len(options) == 1:
+            _api('/api/bedrock/report/open', body={})
+            print('[bedrock] Opening Java and Bedrock Worlds report.', flush=True)
+            return 0
+        if action == 'world' and len(options) >= 2:
+            result = _api('/api/bedrock/world/select', body={'name': ' '.join(options[1:])})
+            print('[bedrock] Current World: ' + str(result['current_world']), flush=True)
+            return 0
+        if action == 'pack' and len(options) >= 2:
+            result = _api('/api/bedrock/pack/set', body={'name': ' '.join(options[1:])})
+            print('[bedrock] Current World pack: ' + str(result.get('current') or 'None'), flush=True)
+            return 0
+        if action == 'stop' and len(options) == 1:
+            result = _api('/api/bedrock/stop', body={})
+            print('[bedrock] Server stopped.', flush=True)
+            return 0
+        if action in ('start', 'run') and len(options) == 1:
+            info = _api('/api/bedrock/report')
+            current = next((w for w in info['worlds'] + info['java_worlds'] if w['current']), None)
+            if current is None:
+                raise ValueError('No Current World selected. Use bedrock world <name> or bedrock report.')
+            allow_stale = False
+            readiness = current.get('conversion') or {}
+            if current['edition'] == 'java' and readiness.get('needs_update'):
+                print('[bedrock] Java world ' + current['command_name'] + ' is not up to date for Bedrock.', flush=True)
+                prompt = ('Update for Bedrock [u], Run Anyway [r], Cancel [c]? '
+                          if readiness.get('has_conversion') else
+                          'No completed conversion. Update for Bedrock [u] or Cancel [c]? ')
+                answer = input(prompt).strip().casefold()
+                if answer in ('u', 'update'):
+                    job = _api('/api/craftmaster/map/run', body={'name': current['command_name']})
+                    map_id = job['map']['id']
+                    previous_message = ''
+                    last_heartbeat = time.monotonic()
+                    while True:
+                        time.sleep(1.5)
+                        progress = _api('/api/craftmaster/map/status?id=' + map_id)
+                        message = progress.get('message', '')
+                        if message and message != previous_message:
+                            print('[CraftMaster] ' + message, flush=True)
+                            previous_message = message
+                        if progress['phase'] == 'failed':
+                            raise RuntimeError('Update for Bedrock failed: ' + message)
+                        if progress['phase'] == 'ready':
+                            break
+                        if time.monotonic() - last_heartbeat >= 15:
+                            print('[CraftMaster] Conversion continues; map and Server Log show progress.', flush=True)
+                            last_heartbeat = time.monotonic()
+                elif answer in ('r', 'run') and readiness.get('has_conversion'):
+                    allow_stale = True
+                else:
+                    print('[bedrock] Cancelled. No server was started.', flush=True)
+                    return 0
             state = _api('/api/bedrock/status')
-            if state.get('install_error'):
-                raise RuntimeError('Bedrock installation failed: ' + state['install_error'])
-            if state.get('eula_accepted') and not state.get('installing') and not state.get('installed'):
+            if not state.get('eula_accepted'):
+                _api('/api/bedrock/eula', body={})
+                print('[bedrock] Review and accept the official Minecraft EULA in Terminal.', flush=True)
+            elif not state.get('installed') and not state.get('installing'):
                 _api('/api/bedrock/install', body={})
-            if not state.get('eula_accepted') and not state.get('eula_requested'):
-                print('[bedrock] EULA dialog dismissed; no installation was started.')
-                return 1
-            progress = state.get('install_progress')
-            if progress and progress != last_progress:
-                print('[bedrock] ' + str(progress), flush=True)
-                last_progress = progress
-        print('[bedrock] Starting ' + selected + ' in a new interactive terminal tab…', flush=True)
-        result = _open_bedrock_with_progress(selected)
-        if not result.get('terminal_session'):
-            raise RuntimeError('Bedrock did not create its interactive terminal tab')
-        print('[bedrock] Opened ' + selected + '; close its tab to stop the server.', flush=True)
-        return 0
+            last_progress = None
+            started = time.monotonic()
+            while not state.get('installed'):
+                if time.monotonic() - started > 1800:
+                    raise RuntimeError('Bedrock installation did not complete; view the persistent Bedrock log')
+                time.sleep(0.75)
+                state = _api('/api/bedrock/status')
+                if state.get('install_error'):
+                    raise RuntimeError('Bedrock installation failed: ' + state['install_error'])
+                if state.get('eula_accepted') and not state.get('installing') and not state.get('installed'):
+                    _api('/api/bedrock/install', body={})
+                if not state.get('eula_accepted') and not state.get('eula_requested'):
+                    print('[bedrock] EULA dialog dismissed; no server started.', flush=True)
+                    return 1
+                progress = state.get('install_progress')
+                if progress and progress != last_progress:
+                    print('[bedrock] ' + str(progress), flush=True)
+                    last_progress = progress
+            print('[bedrock] Starting ' + current['command_name'] + ' in an interactive tab…', flush=True)
+            started_server = _open_bedrock_with_progress(current['command_name'], allow_stale=allow_stale)
+            if not started_server.get('terminal_session'):
+                raise RuntimeError('Bedrock failed to create its interactive console tab')
+            print('[bedrock] Opened ' + current['command_name'] + '; close its tab or use bedrock stop.', flush=True)
+            return 0
+        print(BEDROCK_HELP, file=sys.stderr)
+        return 2
     print('Unknown custom command. Type help.', file=sys.stderr)
     return 2
 

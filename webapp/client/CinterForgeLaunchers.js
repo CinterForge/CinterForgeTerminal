@@ -29,11 +29,6 @@ CinterForgeState.frame.addEventListener('load', () => {
     if (CinterForgeState.activeTab?.kind === 'launcher') {
       if (CinterForgeState.activeTab.launcherResult)
         CinterForgeState.sendLauncherState(CinterForgeState.activeTab, CinterForgeState.activeTab.launcherResult);
-      const platform = CinterForgeState.activeTab.backend;
-      void CinterForgeState.api('/api/status').then(result => {
-        CinterForgeState.frame.contentWindow?.postMessage({type: 'cinter-launcher-assets',
-          platform, available: result.capabilities?.assets === true}, location.origin);
-      }).catch(() => {});
     }
   });
 
@@ -88,6 +83,13 @@ window.addEventListener('message', event => {
     }
     if (message.action === 'open' && Object.hasOwn(CinterForgeState.launcherKinds, message.platform)) {
       void CinterForgeState.openLauncherTab(message.platform);
+      return;
+    }
+    if (message.action === 'bedrock-report' &&
+        CinterForgeState.activeTab?.kind === 'launcher' &&
+        CinterForgeState.activeTab.backend === message.platform) {
+      void CinterForgeState.api('/api/bedrock/report/open', {})
+        .catch(error => CinterForgeState.notice('CraftMaster report: ' + error.message));
       return;
     }
     if (message.action !== 'launch' || !CinterForgeState.launcherApps.has(message.app) ||

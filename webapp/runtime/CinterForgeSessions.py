@@ -135,11 +135,11 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     python = str(Path(sys.executable).resolve())
     functions = '\n'.join(
         f'{name}() {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in ('help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'setpass', 'code', 'htmlmenus', 'craftmaster'))
+        for name in ('help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'setpass', 'code', 'htmlmenus', 'craftmaster', 'joshua', 'infinitemac'))
     permitted = set(env.get('CINTER_TERMINAL_ALLOWED_COMMANDS', '').split(','))
     functions += '\n' + '\n'.join(
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in ('assets', 'packs', 'discord') if name in permitted)
+        for name in ('assets', 'discord') if name in permitted)
     # These exact source filenames are the shell commands. Load the bundled
     # Terminal manifest; no sibling WebApp source or story package is required.
     catalog = json.loads((_CinterForgeSettings.ASSETS / 'data/if_titles.json').read_text(encoding='utf-8'))
@@ -156,8 +156,9 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     functions += '\n' + '\n'.join(
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
         for name in ['games', 'stories'] + story_names)
+    functions += '\nyes() { games "$@"; }'  # Startup yes is exactly the games command.
     mac_names = list(_mac_catalog())
-    if set(mac_names) & set(['help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories', 'install', 'craftmaster', 'assets', 'packs', 'discord'] + story_names):
+    if set(mac_names) & set(['help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories', 'install', 'craftmaster', 'assets', 'discord', 'joshua', 'infinitemac', 'yes'] + story_names):
         raise RuntimeError('Mac game command collides with existing Terminal command')
     functions += '\n' + '\n'.join(
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
@@ -952,36 +953,29 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
         # Existing Bedrock saves are authoritative. Never regenerate their maps or
         # run CraftMaster just because a Java save with a similar name exists.
         from runtime.CinterForgeBedrock import _world_command_name
+        current_selection = server.bedrock.current_world()
+        if not name.strip():
+            if current_selection is None:
+                raise ValueError('No Current World selected; use bedrock world <name> or bedrock report')
+            name = current_selection['folder']
         requested = name.strip().casefold()
-        # Reopening an already-running world must not trigger any conversion.
-        if not restart:
-            with server.sessions_lock:
-                active = [item for item in server.sessions.values()
-                          if getattr(item, 'kind', None) == 'bedrock' and _terminal_process_exit_code(item.process) is None]
-                if active:
-                    selected = server.bedrock._world_settings().get('selected') or {}
-                    if requested and requested not in (
-                            str(selected.get('name', '')).casefold(),
-                            str(selected.get('folder', '')).casefold(),
-                            str(selected.get('command_name', '')).casefold()):
-                        raise RuntimeError('A different Bedrock world is already running; stop it before switching')
-                    item = active[0]
-                    server.bedrock_terminal_requests.append({
-                        'id': item.id, 'label': 'Bedrock', 'kind': 'bedrock',
-                        'shell': 'Bedrock', 'platform': server.system})
-                    return {**server.bedrock.status(), 'terminal_session': item.id,
-                            'reused': True}
+        # The chosen Java identity takes precedence over a same-named Bedrock
+        # folder: converted Bedrock saves must be associated by source receipt.
+        java_world = (current_selection if current_selection and
+                      current_selection['edition'] == 'java' and requested in
+                      (current_selection['folder'].casefold(),
+                       current_selection['name'].casefold(),
+                       current_selection['command_name'].casefold()) else None)
+        if java_world is None:
+            java_world = server.bedrock.find_java_world(name)
         existing = [world for world in server.bedrock.list_worlds()['worlds']
                     if requested in (world['name'].casefold(), world['folder'].casefold(),
                                      _world_command_name(world).casefold())]
-        java_world = None
-        if not existing and requested:
-            java_world = server.bedrock.find_java_world(name)
-            if java_world is not None:
-                export_name = server.bedrock.java_world_export_name(java_world).casefold()
-                existing = [world for world in server.bedrock.list_worlds()['worlds']
-                            if export_name in (world['name'].casefold(), world['folder'].casefold(),
-                                               _world_command_name(world).casefold())]
+        if java_world is not None:
+            export = server.bedrock.java_world_export_name(java_world).casefold()
+            existing = [world for world in server.bedrock.list_worlds()['worlds']
+                        if export in (world['name'].casefold(), world['folder'].casefold(),
+                                      _world_command_name(world).casefold())]
         from runtime import CinterForgeCraftMasterMap as _CinterForgeCraftMasterMap
         map_request = (_CinterForgeCraftMasterMap.open_map_tab(server, java_world)
                        if java_world is not None and not existing else None)
@@ -995,7 +989,8 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
         # Preparation is synchronous. The Bedrock PTY must not start until a missing
         # Java world has been fully converted, validated and imported.
         try:
-            prepared_name = server.bedrock.prepare_world(name, progress=report_progress)
+            prepared_name = (server.bedrock.prepare_selected_java_world(java_world, progress=report_progress)
+                             if java_world is not None else server.bedrock.prepare_world(name, progress=report_progress))
         except Exception as error:
             if map_request is not None:
                 _CinterForgeCraftMasterMap.mark_finished(server, map_request['id'], error)
@@ -1034,7 +1029,7 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
         with server.sessions_lock:
             if len(server.sessions) >= _CinterForgeSettings.MAX_SESSIONS:
                 raise ValueError('Maximum terminal sessions reached')
-        state = server.bedrock.run_world(prepared_name, launch=False)
+        state = server.bedrock.run_world(prepared_name, launch=False, selected_world=java_world)
         if state.get('running'):
             raise RuntimeError('Bedrock already running outside a Session; stop it explicitly first')
         terminal = CinterForgeBedrockTerminalSession(server.bedrock, server.mutable_builds,

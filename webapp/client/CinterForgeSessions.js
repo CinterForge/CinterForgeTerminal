@@ -108,9 +108,10 @@ CinterForgeState.activateTab = async function activateTab(tab) {
       CinterForgeState.codeError.hidden = true;
       tab.mapFrame.hidden = false;
       CinterForgeState.$('terminal-shell').textContent = tab.label +
-        (tab.kind === 'craftmaster-map' ? ' · live Zoomify map' : ' · canonical Assets Library');
+        (tab.kind === 'craftmaster-map' ? ' · live Zoomify map' : tab.assetKey === 'emulators' ? ' · searchable museum' : ' · canonical Assets Library');
       CinterForgeState.notice(tab.kind === 'craftmaster-map'
         ? 'CraftMaster map refreshes as the native converter writes tiles'
+        : tab.assetKey === 'emulators' ? 'Search or filter emulators; select a machine to open it in a new tab'
         : 'Assets preview · saved models and animations from the canonical UCI library');
       CinterForgeState.renderTabs();
       CinterForgeState.saveTerminalLayout();

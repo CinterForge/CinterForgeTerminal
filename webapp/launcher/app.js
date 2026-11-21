@@ -42,17 +42,10 @@ for (const button of document.querySelectorAll('[data-app]')) {
       app: button.getAttribute('data-app')}, location.origin);
   });
 }
-// Only show this launcher action after Terminal has probed Cloudflare credentials.
-// It uses the standard OS chooser in the parent WebView, not a guest file path.
-const assetImport = document.getElementById('assets-import-launcher');
-assetImport.addEventListener('click', () => {
-  if (assetImport.hidden) return;
-  window.parent.postMessage({type: 'cinter-launcher', action: 'assets-import', platform}, location.origin);
-});
-window.addEventListener('message', event => {
-  if (event.origin !== location.origin || event.source !== window.parent ||
-      event.data?.type !== 'cinter-launcher-assets' || event.data?.platform !== platform) return;
-  assetImport.hidden = event.data.available !== true;
+// CraftMaster is always available without developer credentials. The parent
+// Terminal opens its existing Bedrock Report in a Session tab.
+document.getElementById('craftmaster-report-launcher').addEventListener('click', () => {
+  window.parent.postMessage({type:'cinter-launcher', action:'bedrock-report', platform}, location.origin);
 });
 document.getElementById('tray').addEventListener('click', () => showToast(title + ' session'));
 window.addEventListener('message', event => {

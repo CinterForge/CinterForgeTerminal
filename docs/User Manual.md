@@ -12,7 +12,7 @@ CinterForge Terminal is a native application for **macOS, Windows and Linux**. Y
 
 1. Download the **macOS Apple-silicon DMG**, **Windows x64 ZIP**, or **Linux x64 ZIP** using the links at the top of the [README](../README.md).
 2. On Windows, extract the ZIP and run `CinterForgeTerminal-win.msi` to install the app. On macOS, open the DMG; on Linux, extract the ZIP and launch its native executable. The Terminal launches into its main Session view.
-3. Type `help` to discover commands, `games` to see the catalog, or `code` to enter the development workspace.
+3. The startup Session asks “Shall we play a game?”. Type `yes` to display the same catalog as `games`, or continue using the shell. Type `help` for the short command list, `games` for the catalog, or `bedrock` for Minecraft server commands. `code` and `debugger` are available only after optional DevTools have been installed.
 4. Navigate between Sessions using the application tabs. Games and consoles open in their own tabs rather than replacing your original terminal.
 
 ### Finding your way around the Terminal
@@ -100,44 +100,55 @@ native output logs.
 
 | Feature | What it does | Start with |
 |---|---|---|
-| **68 game commands** | WarGames/JOSHUA plus 67 classic Macintosh games | `games` |
+| **Games** | WarGames/JOSHUA, the actual IF title commands, `infinitemac` and `bedrock`; classic Mac aliases remain callable directly | `games` |
 | **16 interactive-fiction titles** | Story-driven text games with a bundled JavaScript Z-machine player | `stories` |
-| **48 classic-Mac configurations** | Browse and launch supported historical Macintosh emulator configurations | Museum / `infinite-mac` |
+| **47 public museum emulator configurations** | Search and launch the existing Macintosh, NeXTSTEP and BeOS emulators | `infinitemac` / museum menus |
 | **19 terminal styles** | Explore historical and modern screen aesthetics, distinct from real OS emulation | Museum / terminal styles |
-| **Minecraft Bedrock** | Launch local Java or Bedrock saves and use the live server console | `bedrock` |
+| **Minecraft Bedrock** | Choose Java or Bedrock worlds, apply a world-specific CinterForge pack, inspect maps, and serve a selected world | `games` → `bedrock` → `bedrock report` |
 | **Cross-platform shells** | Actual Mac, Windows and Linux sessions where supported environments are present | Native Terminal menu / Code-OSS |
-| **Code-OSS** | Edit and save local projects, use integrated terminals and build tools | `code run`, File → New CinterForge Code Terminal |
+| **Code-OSS (optional DevTools)** | Edit and save local projects, use integrated terminals and build tools | `code` after installing DevTools |
 | **Application platform** | Native WebView shell plus a supervised Python/HTTP backend | [Architecture](Architecture.md) |
 
 The counts come from the checked-in catalog: the game commands, separate interactive-fiction titles, emulator configurations and visual profiles are **different lists**. A style is not a bootable emulator, and historical or third-party media may be separate from the app.
 
-## 3. Commands you will use most
+## 3. Commands and help hierarchy
+
+The top-level `help` stays short. Its normal entries are:
 
 ```text
-help                 View Terminal commands and usage
-help infinite-mac    Explore the classic Macintosh game commands
-games                List the 68 game commands
-wargames             Launch the original JOSHUA experience
-stories              List 16 interactive-fiction titles
-infinite-mac         List 67 classic Macintosh game commands
-simcity              Example: open a classic Mac game
-lagomorph            Launch the special Quadra 650 easter egg
-bedrock              List local Java and Bedrock worlds
-bedrock Candlewood   Convert a Java save if needed and open a live map and server tab
-craftmaster Candlewood  Convert/update a Java world and open its live Zoomify map
-minecraft            Attach a live console to an already-running server
-code [run]           Open Code-OSS in a new or existing tab
-code mode light|dark Set and remember the Code-OSS theme
-code open "/path"    Open and remember a folder or .code-workspace
+Commands:
+  games                         List of playable games
+  play <title>                  Launch a game (play is optional)
+
+  devtools                      Manage Developer Tools. See devtools help
 ```
 
-Type commands in an ordinary Terminal Session, not inside JOSHUA's game dialogue or an emulator's own keyboard buffer. Some commands are routed to separate sessions; they do not destroy or replace the session from which you launched them.
+When a valid development configuration grants the corresponding capability, `assets` and/or `discord` appear after `devtools`. When DevTools is **actually installed**, `code` and `debugger` appear after those optional entries. Neither Code-OSS nor the debugger is advertised as installed merely because development credentials exist. The app may also display an ordinary OS-shell reminder.
+
+At the launch question, entering `yes` displays the **same list** as entering `games`. Entering `games` again at any time redisplays it. The catalog shows `joshua` (WarGames) first, each interactive-fiction title loaded from JSON, one `infinitemac` (searchable Macintosh, NeXTSTEP and BeOS emulator gallery), and `bedrock` (Minecraft) last. Every command shown in `games` works directly **or** after `play`: `joshua` / `play joshua`, `zork1` / `play zork1`, `infinitemac` / `play infinitemac`, and `bedrock` / `play bedrock`. Both forms use exactly the same action. Bedrock retains its own subcommands (`bedrock report` and `play bedrock report` are equivalent).
+
+```text
+help                         Main help and installed-capability commands
+games                        Display the playable-games catalog
+yes                          Display the same games catalog at launch
+play <title>                 Optional prefix for any game command
+bedrock                      Display Bedrock command help
+bedrock report               Open the Minecraft worlds HTML report
+bedrock packs                Open the Minecraft behavior pack gallery
+devtools                     Manage or offer to install developer toolchains
+code                         Open Code-OSS (DevTools installation required)
+debugger                     Open native WebView debugging (DevTools installation required)
+```
+
+Standalone `packs` is no longer a public Terminal command; pack browsing and selection are under `bedrock`. Native CraftMaster CLI internals are developer integration tools, not separate top-level gaming commands.
+
+Type commands in a Terminal Session, not in a game, map or emulator text field. Sessions open in separate tabs rather than replacing the original shell.
 
 ## 4. Games and interactive fiction
 
-**Game #1: `wargames`.** This opens the existing JOSHUA experience, including its interactive game modes and its fictional WarGames narrative. Type `wargames` to launch it; its interface remains separate from the shell.
+**Game #1: `joshua` (also `wargames`).** This opens the existing JOSHUA experience, including its interactive game modes and its fictional WarGames narrative. Type `joshua`, `play joshua`, or `wargames` to launch it; its interface remains separate from the shell.
 
-**Games #2–68: classic Macintosh.** Type `games` or `infinite-mac` to browse the available command aliases, then enter a title such as `simcity`, `loom`, `marathon`, `princeofpersia` or `theoregontrail`. The catalog uses specific machine/media profiles and may load a browser-hosted Infinite Mac experience. Network access or separately licensed game software may be required.
+**Infinite Mac and Terminal Styles gallery.** The `games` command lists the actual interactive-fiction titles individually, followed by one `infinitemac` entry, then `bedrock` last. Type `infinitemac` or `play infinitemac` to open a responsive, searchable gallery. The first section contains all 19 actual Terminal Styles with live palette thumbnails generated from their foreground, background and accent settings; clicking one opens a new Terminal session using that style. Below are distinct macOS, BeOS and NeXTSTEP sections containing the same 47 public emulator profiles used by the existing museum menus (the Lagomorph-only Quadra 650 remains separate). Search or filter by section, model, operating system or year. Click a thumbnail to launch the existing emulator in a new Session tab; returning to the gallery preserves its search state. Emulator thumbnails are lightweight representations of their operating-system families, **not** verified guest screenshots. No unverified Infinite Mac screenshot URLs are embedded. Classic Macintosh game commands such as `simcity`, `loom`, `marathon`, `princeofpersia` and `theoregontrail` remain available where the authored catalog and licensed media permit, but are not 67 separate entries in `games`.
 
 **Interactive fiction.** Type `stories` for 16 distinct text adventures. Depending on the title, you may need to install its authorized story content before launching it. The JavaScript Z-machine interpreter handles compatible stories and supports independently stored saved game state.
 
@@ -147,52 +158,56 @@ Browse the complete [Game Catalog](Game%20Catalog.md) for aliases and descriptio
 
 ## 5. The Computer History Museum: emulators versus styles
 
-The configuration data describes **48 classic Macintosh emulator configurations** and **19 visual terminal profiles**. Museum entries span early microcomputers, historical terminal designs and classic Macintosh systems, including Apple II, VT100, IBM PC, Macintosh, BeOS and NeXTSTEP references.
+The configuration data describes **48 historical machine emulator profiles** (47 public museum entries across Macintosh, NeXTSTEP and BeOS, plus the Lagomorph-only Quadra 650) and **19 visual terminal profiles**. Museum entries span early microcomputers, historical terminal designs and classic Macintosh systems, including Apple II, VT100, IBM PC, Macintosh, BeOS and NeXTSTEP references.
 
 A **terminal style** changes the visual presentation, for example color, character columns and a period-appropriate appearance. A **real emulated system** requires an underlying emulator and, where relevant, system software or boot media. The Museum distinguishes these so a period-inspired theme is not presented as a running historical operating system. The exact selectable experiences depend on installed runtimes and available media.
 
-## 6. Minecraft Bedrock Dedicated Server
+## 6. Minecraft Bedrock Dedicated Server and CraftMaster
 
-CinterForge Terminal manages the official **Minecraft Bedrock Dedicated Server**. It provides world selection, a dedicated server Session with real output, console commands, and a second reconnectable console without launching a duplicate server.
+CinterForge Terminal manages the official **Minecraft Bedrock Dedicated Server** and its Java-to-Bedrock conversions. The server is not shipped inside Terminal; installation requires accepting the official Minecraft EULA. One world is the **Current World** across the app. Each individual world remembers its own **Current Pack**, so switching back to a world restores that world's chosen pack.
 
-### List, convert and launch worlds
+### Discover worlds and choose a pack
 
 ```text
-bedrock                         List local Java saves and Bedrock worlds
-bedrock "Candlewood"            Convert a local Java save as needed, then launch Bedrock
-craftmaster "Candlewood"        Convert/update the Java save and open its live Zoomify map
+bedrock                         Show Bedrock command help
+bedrock report                  Open the worlds report tab
+bedrock packs                   Open the Minecraft behavior-pack gallery
+bedrock world "Candlewood"      Set Candlewood as Current World
+bedrock pack "<name>"           Select a pack for the Current World
+bedrock pack none               Clear only the Current World's pack
 ```
 
-Java worlds are selected by exact display name, folder name, or their
-CraftMaster export name; for example `Candlewood` resolves the local folder
-`Candlewood (Candlewood)`. CraftMaster writes 512×512 Zoomify tiles and a live
-`Live Map.htm` viewer as it converts. Terminal opens that viewer immediately in
-a separate **Map** tab. Switching to the Bedrock console does not close the
-map; it continues displaying incremental tile updates in its own tab.
+The **Bedrock Report** shows available Java and Bedrock worlds with their Minecraft thumbnails and readable, sanitized world names. Its header shows Current World, Current Pack and a Start/Stop control. Each world has **Set Current**; only the built-in **Candlewood** world offers **Download** for now. Its `.mcworld` download saves a usable Bedrock export. When a Java-derived export is stale, the report identifies that state instead of presenting its older conversion as up to date.
 
-The public `craftmaster <world>` shortcut explicitly updates the Bedrock copy
-and opens a live Zoomify map as the tiles are written. If that world is running,
-Terminal stops its Bedrock server first, converts and validates the updated
-world, replaces the managed save, and relaunches it. If the world was stopped,
-it stays stopped. `bedrock <world>` launches a validated existing Bedrock save
-without starting CraftMaster; automatic conversion runs only if the save is
-missing and must finish before Bedrock starts. Native CLI subcommands such as
-`craftmaster worlds --json` and `craftmaster convert --world ...` retain their
-original interface.
+Java worlds also show **Last Played**, **Last Updated**, conversion readiness, **Update for Bedrock**, and **Map**. Update for Bedrock is enabled when the Java save is new or has changed since its latest valid Bedrock conversion. It starts CraftMaster in a separate Terminal tab and displays real progress. Map opens the latest existing live Zoomify conversion in a separate tab without needlessly rerunning conversion. The CraftMaster map view includes those same world readiness and selection controls along its top row.
 
-If the selected world is absent locally, `bedrock <world>` tries the public
-release and beta `.mcworld` archive URLs directly. It validates ZIP contents
-and Bedrock/LevelDB structure before installing, without depending on a separate
-publication manifest. A locally recorded SHA-256 verifies the downloaded bytes
-but, without independently published metadata, is not a publisher signature.
-The official Bedrock Dedicated Server is downloaded separately, only after
-explicit EULA acceptance.
+Every discovered Java save receives a `CinterForge/` subfolder **inside that world's actual Minecraft save directory**. CraftMaster stores that world's conversion assets, intermediate data, 512×512 Zoomify tiles, final `.mcworld` and associated records there rather than the disposable shared Builds tree. Original Java game data is preserved. Terminal runs a prepared copy of the Bedrock world, not the Java source directory.
 
-Type Minecraft server commands such as `list` directly into the live Bedrock
-tab. Closing that tab stops its owned server and helper processes without
-deleting the world. From another Terminal Session, `minecraft` attaches an
-additional console to the running server. Closing that client console only
-detaches it. The Zoomify Map tab does not own or stop the server.
+The `bedrock packs` gallery uses local generated MCAddons when a valid development configuration is present, otherwise published Cloudflare beta packs. Set as Current Pack completes and verifies the archive before changing this world's selection. **Download Pack** saves a verified `.mcaddon` to the host account's Downloads folder without changing the selection, and displays the exact output path or an error. The selected addon applies to the **current world only**, coexisting with the always-separate CinterForge server communications pack. Changing worlds restores each world's own selection. Removing a pack from one world does not affect any other world.
+
+### Start and stop
+
+```text
+bedrock start                   Start Current World with its selected pack
+bedrock run                     Run Current World; prompt when Java conversion is stale
+bedrock stop                    Stop the running server
+bedrock op                      List operators
+bedrock op <gamertag>           Remember an operator and allowlist the player
+bedrock op remove <name>        Remove an operator
+bedrock allowlist               List allowed players
+bedrock allowlist <name>        Allow a player
+bedrock allowlist remove <name> Remove a player
+```
+
+`bedrock start` **does not take a world argument**. First choose a world with `bedrock world <name>` or Set Current in the report. The active pack is always the pack stored for that specific world, not a global default. `bedrock run` checks whether a Java-derived Bedrock conversion is outdated; if so, the shell asks whether to **Update for Bedrock** or **Run Anyway**. Start from the report follows the same freshness protection so it cannot silently bypass that decision. A missing or invalid conversion must be updated before the world can run.
+
+The server opens in its owned interactive console tab. Type supported Minecraft server commands, such as `list`, into that tab. Closing the server tab or using `bedrock stop` stops the server; closing an independent Zoomify Map tab does not. Server operators and allowlist entries are server-wide and persist when you change worlds. If a second console attaches to the existing server, it must not launch a duplicate server.
+
+### Conversions and world storage
+
+CraftMaster uses its existing incremental conversion and fingerprints to decide whether regions or maps need regeneration. The same readiness state appears in `bedrock report`, the map header, and the terminal's out-of-date warning. A failed conversion keeps the previously validated Bedrock output and does not mark the new conversion ready. The map viewer reuses CraftMaster's existing Zoomify tiles and live refresh; it does not generate a giant world-sized PNG.
+
+When exporting a world, the `.mcworld` includes valid Bedrock world content. Terminal-owned state, private selection records and intermediate conversion files remain outside the exported gameplay archive.
 
 ## 7. Real terminals on three platforms
 
@@ -208,7 +223,7 @@ CinterForge Terminal supports native platform shells and integrated developer se
 The shared **Terminal** menu creates an integrated Code-OSS terminal tab while
 Code is active; outside Code it creates a separate outer CinterForge Session.
 This also applies to the plus button. The native menu can create supported terminal,
-Server log or Minecraft console sessions. **Server** is a read-only Terminal tab showing the live local Python/HTTP backend log, not a new shell or a second server process. Choose **Machines → Server · Live log** or **Terminal → New Server Log Terminal**. Its footer displays the complete log path so you can retrieve it after a failure. It must not silently launch a second Bedrock server. To open the **Code-OSS** workbench, type `code`; platform developer terminals are integrated there as well. Ordinary commands such as `pwd`, `ls`, `cd`, Git or a compiler belong in a real shell, not in a game/emulator text field.
+Server log or Minecraft console sessions. **Server** is a read-only Terminal tab showing the live local Python/HTTP backend log, not a new shell or a second server process. Choose **Machines → Server · Live log** or **Terminal → New Server Log Terminal**. Its footer displays the complete log path so you can retrieve it after a failure. It must not silently launch a second Bedrock server. With DevTools installed, type `code` to open the **Code-OSS** workbench; platform developer terminals are integrated there as well. Ordinary commands such as `pwd`, `ls`, `cd`, Git or a compiler belong in a real shell, not in a game/emulator text field.
 
 ### Runtime files and diagnostic logs
 
@@ -220,7 +235,7 @@ In repository development mode—when using `./Cinter` or an explicit repository
 
 ## 8. Code-OSS: edit, save and build projects
 
-1. Type `code` in a Terminal Session. The default folder is the host user's `~/Source`, otherwise `~/Documents`.
+1. Install the optional DevTools, then type `code` in a Terminal Session. The default folder is the host user's `~/Source`, otherwise `~/Documents`.
 2. In Code-OSS's Command Palette, choose **CinterForge: Open Local Folder…** or **CinterForge: Open Local Workspace…** and enter an absolute host path (folders or `.code-workspace` files). The chosen workspace is restored on relaunch.
 3. Browse, edit and save files with the host account's normal filesystem permissions. Use the Code-OSS status-bar theme control to switch **Dark** (default) / **Light**; your choice is remembered.
 4. The workbench starts its integrated terminal tabs: on macOS **Mac, Server Log, Linux, Windows**; on Windows/Linux **Current Platform, Server Log**. All real shells start in the selected workspace directory. Server Log is read-only; Mac-hosted guest shells require the optional DevTools runtime.
@@ -271,7 +286,7 @@ In an authorized developer shell, the documented command family is:
 | `devtools uninstall` | Remove only the confirmed managed optional toolchain |
 | `devtools report` | Produce a detailed tool/version report under `Builds/Logs/CinterForgeTerminal/` |
 
-The package is not required merely to browse games, terminal styles or the core editor UI. For details, see [Developer Tooling](Developer%20Tooling.md).
+The package is not required merely to browse or play games, inspect worlds, select packs, or run the Bedrock report. `code` and `debugger` only appear in the main help after DevTools are installed. For details, see [Developer Tooling](Developer%20Tooling.md).
 
 ## 10. Cloudflare downloads and updates
 
@@ -301,15 +316,15 @@ Use the [Architecture](Architecture.md), [Integrating the Host](Integrating%20th
 
 ## 12. Tips and troubleshooting
 
-**A game isn't starting:** Check the exact command in `games` or `infinite-mac`, verify that its permitted media is available, and look for in-app error messages. A style preview is not equivalent to an installed emulator.
+**A game isn't starting:** Check the game name in `games`, or search for the emulator profile in `infinitemac`; verify permitted game media is available, and look for in-app error messages. A style preview is not equivalent to an installed emulator.
 
-**`minecraft` reports no server:** Start a world first with `bedrock "<world>"`. A second console cannot attach to a server that is stopped.
+**`minecraft` reports no server:** Select a world with `bedrock world "<name>"`, then use `bedrock start`. A second console cannot attach to a server that is stopped.
 
 **A Windows/Linux shell is unavailable on macOS:** The real guest environment or optional DevTools may be missing. Follow the in-app install flow if offered; Terminal will not fake the platform shell.
 
 **A build fails:** Rerun the appropriate `./Cinter` lifecycle command. Prerequisite checks occur during Setup; detailed PASS/FAIL transcripts and structured summaries remain under sibling `Builds/Logs/CinterForgeTerminal/Lifecycle/`. For an installed application failure, open the read-only Server tab; logs are in the selected Steam library for Steam installs or `~/Library/Logs/CinterForgeTerminal/` for standalone macOS downloads.
 
-**Security or content:** The official Bedrock server and third-party games, operating systems and images have their own licenses and access requirements. The local HTTP service is authenticated and loopback-only; do not open control routes on a public network.
+**Security or content:** The official Bedrock server and third-party games, operating systems and images have their own licenses and access requirements. Control routes require the Terminal authorization policy; before `setpass`, the LAN interface is open on the private LAN. Do not expose it to the public Internet.
 
 ## LAN Web Services (Bonjour)
 

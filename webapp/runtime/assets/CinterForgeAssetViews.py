@@ -457,12 +457,44 @@ def _pack_name(value: str) -> str:
 
 
 def _pack_state_dir(server) -> Path:
-    # Existing mutable root resolves to sibling Builds in development and
-    # TerminalState under the selected steamapps library when installed.
-    root = server.mutable_builds / 'Packs/CinterForgeTerminal'
+    """One pack cache and current.json per selected Minecraft world."""
+    manager = server.bedrock
+    if manager is None:
+        raise RuntimeError('Bedrock world management is unavailable')
+    world = manager.current_world()
+    if world is None:
+        raise ValueError('Select a Current World with bedrock world <name> first')
+    root = manager.world_data_root(world) / 'Packs'
     if root.is_symlink() or (root.exists() and not root.is_dir()):
-        raise RuntimeError('Terminal pack state directory is unsafe')
+        raise RuntimeError('Per-world pack state directory is unsafe')
     return root
+
+
+def _migrate_previous_pack(server, root: Path) -> None:
+    """Adopt the previously global pack only once, for the selected world."""
+    previous = server.mutable_builds / 'Packs/CinterForgeTerminal'
+    original = previous / 'current.json'
+    new = root / 'current.json'
+    if new.exists() or not original.is_file() or original.is_symlink():
+        return
+    record = json.loads(original.read_text(encoding='utf-8'))
+    if (record.get('schema') != _PACK_STATE_SCHEMA or
+            not re.fullmatch(r'[0-9a-f]{64}', str(record.get('sha256', '')))):
+        return
+    name = _pack_name(record.get('name'))
+    source = previous / 'Downloaded' / name / (name + '.mcaddon')
+    if not source.is_file() or source.is_symlink() or source.stat().st_size != record.get('bytes'):
+        return
+    if hashlib.sha256(source.read_bytes()).hexdigest() != record['sha256']:
+        return
+    destination = root / 'Downloaded' / name
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination / (name + '.mcaddon'))
+    root.mkdir(parents=True, exist_ok=True)
+    new.write_text(json.dumps(record, indent=2) + '\n', encoding='utf-8')
+    # Retain old downloaded bytes for recovery, but prevent silently assigning
+    # the old global choice to a second world on the next selection.
+    original.rename(previous / 'migrated-current.json')
 
 
 def _pack_local_mode() -> bool:
@@ -505,7 +537,12 @@ def _pack_remote_open(relative: str):
 
 
 def _pack_state(server) -> dict | None:
-    root = _pack_state_dir(server)
+    try:
+        root = _pack_state_dir(server)
+    except ValueError:
+        return None
+    if not (root / 'current.json').exists():
+        _migrate_previous_pack(server, root)
     path = root / 'current.json'
     if not path.exists():
         return None  # Default: no current pack. This is a valid state.
@@ -543,115 +580,318 @@ def pack_open(server) -> dict:
     return request
 
 
-def pack_set_current(server, name: str) -> dict:
+def _inspect_mcaddon_contents(path: Path) -> dict:
+    """Verify the real RP/BP closure, script entries, items and payload size.
+
+    An Add-On is nested ZIP archives. A small compressed download does not
+    establish missing content; inspect both layers before selecting it.
+    """
+    total_unpacked = 0
+    total_members = 0
+    item_ids: set[str] = set()
+    modules = []
+    behavior_count = resource_count = script_count = 0
+    with zipfile.ZipFile(path) as archive:
+        nested = [part for part in archive.infolist()
+                  if part.filename.lower().endswith('.mcpack') and not part.is_dir()]
+        if not 1 <= len(nested) <= 32:
+            raise ValueError('MCAddon must contain 1–32 .mcpack modules')
+        if any(part.file_size > _PACK_DOWNLOAD_LIMIT for part in nested):
+            raise ValueError('Nested Minecraft pack exceeds the download size limit')
+        if sum(part.file_size for part in nested) > 4 * 1024**3:
+            raise ValueError('Nested Minecraft packs exceed the combined size limit')
+        for part in nested:
+            with tempfile.SpooledTemporaryFile(max_size=16 * 1024**2) as storage:
+                with archive.open(part) as compressed:
+                    shutil.copyfileobj(compressed, storage, 1024 * 1024)
+                storage.seek(0)
+                if not zipfile.is_zipfile(storage):
+                    raise ValueError('Invalid nested Minecraft pack: ' + part.filename)
+                storage.seek(0)
+                with zipfile.ZipFile(storage) as inner:
+                    files = [row for row in inner.infolist() if not row.is_dir()]
+                    total_members += len(files)
+                    if total_members > 100000:
+                        raise ValueError('MCAddon contains too many files')
+                    total_unpacked += sum(row.file_size for row in files)
+                    if total_unpacked > 4 * 1024**3:
+                        raise ValueError('Unpacked Minecraft Add-On exceeds 4 GiB')
+                    manifest_candidates = [row for row in files if
+                        row.filename == 'manifest.json' or
+                        (row.filename.endswith('/manifest.json') and
+                         len(row.filename.split('/')) == 2)]
+                    if len(manifest_candidates) != 1:
+                        raise ValueError('MCAddon module needs one root manifest.json')
+                    manifest = json.loads(inner.read(manifest_candidates[0]).decode('utf-8'))
+                    header = manifest.get('header') or {}
+                    entries = manifest.get('modules') or []
+                    if not isinstance(entries, list):
+                        raise ValueError('Invalid Minecraft pack module declarations')
+                    types = {row.get('type') for row in entries if isinstance(row, dict)}
+                    kind = ('resource' if 'resources' in types else
+                            'behavior' if types.intersection(('data', 'script')) else None)
+                    if (not kind or not re.fullmatch(r'[0-9a-fA-F-]{36}', str(header.get('uuid', '')))
+                            or not isinstance(header.get('version'), list)
+                            or len(header['version']) != 3):
+                        raise ValueError('Invalid nested Minecraft pack manifest')
+                    prefix = manifest_candidates[0].filename[:-len('manifest.json')]
+                    names = {row.filename for row in files}
+                    if kind == 'behavior':
+                        behavior_count += 1
+                        for module in entries:
+                            if not isinstance(module, dict) or module.get('type') != 'script':
+                                continue
+                            entry = module.get('entry')
+                            if (not isinstance(entry, str) or not entry.endswith(('.js', '.mjs'))
+                                    or not re.fullmatch(r'[A-Za-z0-9_./-]+', entry)
+                                    or any(part in ('', '.', '..') for part in entry.split('/'))
+                                    or prefix + entry not in names):
+                                raise ValueError('Behavior pack declares missing/unsafe script code: ' + str(entry))
+                            script_count += 1
+                        for row in files:
+                            relative = row.filename.removeprefix(prefix)
+                            if relative.startswith('items/') and relative.endswith('.json'):
+                                if row.file_size > 2 * 1024 * 1024:
+                                    raise ValueError('Minecraft item definition is unexpectedly large')
+                                item = json.loads(inner.read(row).decode('utf-8'))
+                                identifier = str((((item.get('minecraft:item') or {})
+                                                  .get('description') or {}).get('identifier') or ''))
+                                if identifier.startswith('cinter:'):
+                                    item_ids.add(identifier)
+                    else:
+                        resource_count += 1
+                    broken = inner.testzip()
+                    if broken is not None:
+                        raise ValueError('Corrupted nested Minecraft pack member: ' + broken)
+                    modules.append({'type': kind, 'uuid': header['uuid']})
+    if not behavior_count:
+        raise ValueError('Selected Minecraft Add-On contains only resources; behavior definitions are missing')
+    return {'unpacked_bytes': total_unpacked, 'mcpack_count': len(modules),
+            'member_count': total_members, 'cinter_items': len(item_ids),
+            'behavior_packs': behavior_count, 'resource_packs': resource_count,
+            'script_entries': script_count, 'modules': modules}
+
+
+def _acquire_verified_pack(server, name: str, directory: Path) -> tuple[Path, dict]:
+    """Stream and validate one authored MCAddon; caller owns the returned temp file.
+
+    Download Pack and Set Current share the identical local/beta source and
+    integrity checks. Neither may publish a partial or unverified archive.
+    """
     name = _pack_name(name)
-    import tempfile
+    relative = 'MCAddons/' + name + '/' + name + '.mcaddon'
+    source_type = 'local' if _pack_local_mode() else 'beta'
+    expected = None
+    if source_type == 'local':
+        # Read the real authored library without synthesizing an Assets tree.
+        library = root_for(server)
+        source = library / safe_relative(relative)
+        if (source.is_symlink() or not source.is_file()
+                or not source.resolve().is_relative_to(library.resolve())):
+            raise FileNotFoundError('Local Minecraft pack was not assembled: ' + relative)
+        stream = source.open('rb')
+    else:
+        from runtime.assets.CinterForgeAssetCloudflare import INDEX_SCHEMA
+        with _pack_remote_open('index.json') as response:
+            data = response.read(32 * 1024 * 1024 + 1)
+        if len(data) > 32 * 1024 * 1024:
+            raise RuntimeError('Published beta Assets index is too large')
+        published = json.loads(data)
+        if published.get('schema') != INDEX_SCHEMA or not isinstance(published.get('files'), dict):
+            raise ValueError('Published beta Assets index is invalid')
+        expected = published['files'].get(relative)
+        if (not isinstance(expected, dict) or type(expected.get('bytes')) is not int
+                or not 0 < expected['bytes'] <= _PACK_DOWNLOAD_LIMIT
+                or not re.fullmatch(r'[0-9a-f]{64}', str(expected.get('sha256') or ''))):
+            raise FileNotFoundError('Pack is missing from the verified beta index: ' + relative)
+        stream = _pack_remote_open(relative)
+    directory.mkdir(parents=True, exist_ok=True)
+    if directory.is_symlink():
+        stream.close()
+        raise RuntimeError('Unsafe pack download directory')
+    temp_path = None
+    try:
+        digest = hashlib.sha256()
+        size = 0
+        with stream, tempfile.NamedTemporaryFile(dir=directory, prefix='pack-', delete=False) as target:
+            temp_path = Path(target.name)
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > _PACK_DOWNLOAD_LIMIT:
+                    raise ValueError('Downloaded Minecraft pack exceeds 2 GiB limit')
+                digest.update(chunk)
+                target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        checksum = digest.hexdigest()
+        if not size or (expected and (size != expected['bytes'] or checksum != expected['sha256'])):
+            raise RuntimeError('Downloaded Minecraft pack failed beta index SHA-256 verification')
+        if not zipfile.is_zipfile(temp_path):
+            raise ValueError('Downloaded Minecraft Add-On is not a valid .mcaddon archive')
+        detail = _inspect_mcaddon_contents(temp_path)
+        result = {'schema': _PACK_STATE_SCHEMA, 'name': name, 'bytes': size,
+                  'sha256': checksum, 'source': source_type, **detail}
+        verified = temp_path
+        temp_path = None
+        return verified, result
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def pack_download(server, name: str) -> dict:
+    """Save an MCAddon to the logged-in host Downloads folder, without selecting it.
+
+    The embedded WebView does not guarantee handling of HTML's download
+    attribute. A browser action therefore saves through the authorized Python
+    host, and returns the real destination or a visible error.
+    """
+    from runtime import CinterForgeSessions
+    home = CinterForgeSessions._real_login_home()
+    downloads = home / 'Downloads'
+    if downloads.is_symlink() or not downloads.is_dir():
+        raise RuntimeError('Host Downloads directory is not available')
+    name = _pack_name(name)
+    with server.asset_pack_lock:
+        staging, record = _acquire_verified_pack(server, name, downloads)
+        try:
+            for i in range(1, 10000):
+                destination = downloads / (name + '.mcaddon' if i == 1 else
+                                           f'{name} ({i}).mcaddon')
+                # Exclusive creation: never overwrite another user download.
+                try:
+                    with destination.open('xb') as output, staging.open('rb') as source:
+                        shutil.copyfileobj(source, output, 1024 * 1024)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    return {'downloaded': True, 'name': name, 'path': str(destination),
+                            'bytes': record['bytes'], 'sha256': record['sha256'],
+                            'unpacked_bytes': record['unpacked_bytes'],
+                            'mcpack_count': record['mcpack_count'],
+                            'cinter_items': record['cinter_items'],
+                            'behavior_packs': record['behavior_packs'],
+                            'resource_packs': record['resource_packs'],
+                            'script_entries': record['script_entries']}
+                except FileExistsError:
+                    continue
+                except BaseException:
+                    destination.unlink(missing_ok=True)
+                    raise
+            raise RuntimeError('Too many existing Minecraft pack downloads')
+        finally:
+            staging.unlink(missing_ok=True)
+
+
+def pack_set_current(server, name: str | None) -> dict:
+    if isinstance(name, str) and name.casefold() in ('none', 'remove', 'clear'):
+        name = None
+    if name is not None:
+        name = _pack_name(name)
     root = _pack_state_dir(server)
     with server.asset_pack_lock:
         previous = _pack_state(server)
-        if previous and previous['name'] == name:
-            (root / 'current.json').unlink()
-            return {'current': None, 'removed': name}
-        relative = 'MCAddons/' + name + '/' + name + '.mcaddon'
+        if name is None or previous and previous['name'] == name:
+            (root / 'current.json').unlink(missing_ok=True)
+            return {'current': None, 'removed': previous['name'] if previous else None}
         root.mkdir(parents=True, exist_ok=True)
         destination_dir = root / 'Downloaded' / name
         if destination_dir.is_symlink() or (destination_dir.exists() and not destination_dir.is_dir()):
             raise RuntimeError('Unsafe downloaded pack directory')
-        destination_dir.mkdir(parents=True, exist_ok=True)
-        destination = destination_dir / (name + '.mcaddon')
-        if destination.is_symlink():
-            raise RuntimeError('Unsafe downloaded pack file')
-        source_type = 'local' if _pack_local_mode() else 'beta'
-        expected = None
-        if source_type == 'local':
-            source = root_for(server) / safe_relative(relative)
-            if source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(root_for(server).resolve()):
-                raise FileNotFoundError('Local Minecraft pack was not assembled: ' + relative)
-            stream = source.open('rb')
-        else:
-            from runtime.assets.CinterForgeAssetCloudflare import INDEX_SCHEMA
-            with _pack_remote_open('index.json') as response:
-                data = response.read(32 * 1024 * 1024 + 1)
-            if len(data) > 32 * 1024 * 1024:
-                raise RuntimeError('Published beta Assets index is too large')
-            published = json.loads(data)
-            if published.get('schema') != INDEX_SCHEMA or not isinstance(published.get('files'), dict):
-                raise ValueError('Published beta Assets index is invalid')
-            expected = published['files'].get(relative)
-            if (not isinstance(expected, dict) or
-                    not isinstance(expected.get('bytes'), int) or
-                    not 0 < expected['bytes'] <= _PACK_DOWNLOAD_LIMIT or
-                    not re.fullmatch(r'[0-9a-f]{64}', str(expected.get('sha256') or ''))):
-                raise FileNotFoundError('Pack is missing from the verified beta index: ' + relative)
-            stream = _pack_remote_open(relative)
-        temp_path = None
+        staging, record = _acquire_verified_pack(server, name, destination_dir)
         try:
-            digest = hashlib.sha256()
-            size = 0
-            with stream, tempfile.NamedTemporaryFile(dir=destination_dir, prefix='pack-', delete=False) as target:
-                temp_path = Path(target.name)
-                while True:
-                    chunk = stream.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    if size > _PACK_DOWNLOAD_LIMIT:
-                        raise ValueError('Downloaded Minecraft pack exceeds 2 GiB limit')
-                    digest.update(chunk)
-                    target.write(chunk)
-                target.flush()
-                os.fsync(target.fileno())
-            checksum = digest.hexdigest()
-            if not size or (expected and (size != expected['bytes'] or checksum != expected['sha256'])):
-                raise RuntimeError('Downloaded Minecraft pack failed beta index SHA-256 verification')
-            if not zipfile.is_zipfile(temp_path):
-                raise ValueError('Downloaded Minecraft Add-On is not a valid .mcaddon archive')
-            with zipfile.ZipFile(temp_path) as archive:
-                if not any(row.filename.lower().endswith('.mcpack') for row in archive.infolist()):
-                    raise ValueError('Downloaded Minecraft Add-On has no nested .mcpack files')
-            os.replace(temp_path, destination)
-            temp_path = None
-            record = {'schema': _PACK_STATE_SCHEMA, 'name': name, 'bytes': size,
-                      'sha256': checksum, 'source': source_type}
-            with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=root,
-                                             prefix='current-', delete=False) as state_file:
-                state_temp = Path(state_file.name)
-                json.dump(record, state_file, indent=2)
-                state_file.write('\n')
-                state_file.flush()
-                os.fsync(state_file.fileno())
-            try:
-                os.replace(state_temp, root / 'current.json')
-            finally:
-                state_temp.unlink(missing_ok=True)
-            return {'current': name, 'downloaded_bytes': size, 'sha256': checksum}
+            destination = destination_dir / (name + '.mcaddon')
+            if destination.is_symlink():
+                raise RuntimeError('Unsafe downloaded pack file')
+            os.replace(staging, destination)
         finally:
-            if temp_path is not None:
-                temp_path.unlink(missing_ok=True)
+            staging.unlink(missing_ok=True)
+        with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=root,
+                                         prefix='current-', delete=False) as state_file:
+            state_temp = Path(state_file.name)
+            json.dump(record, state_file, indent=2)
+            state_file.write('\n')
+            state_file.flush()
+            os.fsync(state_file.fileno())
+        try:
+            os.replace(state_temp, root / 'current.json')
+        finally:
+            state_temp.unlink(missing_ok=True)
+        return {'current': name, 'downloaded_bytes': record['bytes'],
+                'sha256': record['sha256'], 'unpacked_bytes': record['unpacked_bytes'],
+                'mcpack_count': record['mcpack_count'],
+                'cinter_items': record['cinter_items'],
+                'behavior_packs': record['behavior_packs'],
+                'resource_packs': record['resource_packs'],
+                'script_entries': record['script_entries']}
 
 
 # The generator's already-published HTML may still contain its original inert
 # Minecraft element. Adapt that one element when served by Terminal so both
 # local and existing beta gallery pages have the same working current-pack UI.
-_PACK_BUTTON_SCRIPT = r'''(()=>{"use strict";const d=window.CINTERFORGE_PACK_DATA;
+_PACK_BUTTON_SCRIPT = r'''(()=>{"use strict";
+  const d=window.CINTERFORGE_PACK_DATA;
   const button=document.getElementById("minecraft");
-  if(!button||!d||!d.currentPack)return;
+  const download=document.getElementById("download");
+  if(!d||typeof d.currentPack!=="string"||!d.currentPack)return;
+  const name=d.currentPack;
+  const actions=button?.parentElement||download?.parentElement;
+  if(!actions)return;
   const label=document.createElement("span");label.setAttribute("role","status");
-  label.style.cssText="color:#b5d7ea;align-self:center;font-size:12px";
-  button.parentElement.append(label);
-  const name=String(d.currentPack);
-  async function status(){const r=await fetch("/api/assets/packs/current",{credentials:"same-origin"});
-    const j=await r.json();if(!r.ok)throw Error(j.error||"Current-pack lookup failed");
-    button.textContent=j.current===name?"Remove as Current Pack":"Set as Current Pack";}
-  button.onclick=async()=>{button.disabled=true;label.textContent="Downloading and verifying pack…";
-    try{const r=await fetch("/api/assets/packs/set",{method:"POST",credentials:"same-origin",
+  label.setAttribute("aria-live","polite");
+  label.style.cssText="color:#b5d7ea;align-self:center;font-size:12px;flex-basis:100%;overflow-wrap:anywhere";
+  actions.append(label);
+  async function request(path){
+    const r=await fetch(path,{method:"POST",credentials:"same-origin",cache:"no-store",
       headers:{"Content-Type":"application/json"},body:JSON.stringify({name})});
-      const j=await r.json();if(!r.ok)throw Error(j.error||"Pack selection failed");
+    const j=await r.json();if(!r.ok)throw Error(j.error||"Pack request failed (HTTP "+r.status+")");
+    return j;
+  }
+  const size=bytes=>Number.isFinite(Number(bytes))?(Number(bytes)/1048576).toFixed(1)+" MiB":"unknown size";
+  const sizes=j=>" · "+size(j.downloaded_bytes??j.bytes)+" archive / "+size(j.unpacked_bytes)+" unpacked"+
+    " · "+j.mcpack_count+" modules ("+j.behavior_packs+" BP / "+j.resource_packs+" RP)"+
+    " · "+j.cinter_items+" cinter items · "+j.script_entries+" scripts";
+  async function status(){
+    const r=await fetch("/api/assets/packs/current",{credentials:"same-origin",cache:"no-store"});
+    const j=await r.json();if(!r.ok)throw Error(j.error||"Current-pack lookup failed");
+    if(button)button.textContent=j.current===name?"Remove as Current Pack":"Set as Current Pack";
+  }
+  if(button)button.onclick=async()=>{
+    button.disabled=true;label.textContent="Downloading and verifying pack…";
+    try{
+      const j=await request("/api/assets/packs/set");
       button.textContent=j.current===name?"Remove as Current Pack":"Set as Current Pack";
-      label.textContent=j.current===name?"Current pack set":"No current pack";
-    }catch(e){label.textContent=e.message;console.error("[bedrock packs]",e)}finally{button.disabled=false}};
-  status().catch(e=>{label.textContent=e.message;console.error("[bedrock packs]",e)});
+      label.textContent=j.current===name?"Current Pack: "+name+sizes(j):"Current Pack removed";
+      parent.postMessage({type:"cinter-bedrock-pack-changed"},location.origin);
+    }catch(e){label.textContent="Pack selection failed: "+e.message;console.error("[bedrock packs]",e)}
+    finally{button.disabled=false}
+  };
+  if(download){
+    // Host downloads are explicit: WebView navigation to .mcaddon often does
+    // not invoke a native download delegate and silently does nothing.
+    download.style.visibility="visible";
+    download.removeAttribute("href");
+    download.removeAttribute("download");
+    download.setAttribute("role","button");
+    download.tabIndex=0;
+    const save=async(event)=>{
+      event.preventDefault();if(download.dataset.busy)return;
+      download.dataset.busy="1";download.setAttribute("aria-disabled","true");
+      label.textContent="Downloading and verifying "+name+"…";
+      try{
+        const j=await request("/api/assets/packs/download");
+        label.textContent="Pack downloaded: "+j.path+sizes(j);
+      }catch(e){label.textContent="Pack download failed: "+e.message;console.error("[bedrock packs]",e)}
+      finally{delete download.dataset.busy;download.removeAttribute("aria-disabled")}
+    };
+    download.addEventListener("click",save);
+    download.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" ")void save(e)});
+  }
+  if(button)status().catch(e=>{label.textContent=e.message;console.error("[bedrock packs]",e)});
 })();'''
+
 
 
 def _pack_gallery_page(page: bytes) -> bytes:

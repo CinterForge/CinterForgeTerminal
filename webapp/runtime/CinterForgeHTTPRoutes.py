@@ -219,6 +219,85 @@ class CinterForgeHTTPRoutes:
                 return
             if _CinterForgeAssetViews.serve(self, path):
                 return
+        if path == '/bedrock-report/index.html':
+            page = _CinterForgeSettings.ASSETS / 'views/BedrockReport.html'
+            if not self._code_authorized() or not page.is_file() or page.is_symlink():
+                self._json(403, {'error': 'Bedrock report unavailable'})
+            else:
+                self._send(200, page.read_bytes(), 'text/html; charset=utf-8', same_origin_frame=True)
+            return
+        if path == '/api/bedrock/report':
+            if not self._code_authorized() or self.server.bedrock is None:
+                self._json(403, {'error': 'Bedrock report unavailable'})
+                return
+            try:
+                inventory = self.server.bedrock.report_worlds()
+                def browser_world(world):
+                    return {key: world.get(key) for key in
+                            ('id', 'name', 'command_name', 'edition', 'current',
+                             'conversion', 'storage_error', 'pack')} | {
+                                'thumbnail': self.server.bedrock.world_thumbnail(world) is not None,
+                                'downloadable': self.server.bedrock.is_builtin_candlewood(world)}
+                self._json(200, {'worlds': [browser_world(w) for w in inventory['worlds']],
+                                 'java_worlds': [browser_world(w) for w in inventory['java_worlds']],
+                                 'current_world': inventory['current_world'],
+                                 'current_pack': inventory['current_pack'],
+                                 'running': inventory['running'],
+                                 'java_error': inventory['java_error']})
+            except (RuntimeError, OSError, ValueError) as exc:
+                self._json(400, {'error': str(exc)})
+            return
+        if path in ('/api/bedrock/world/icon', '/api/bedrock/world/download'):
+            if not self._code_authorized() or self.server.bedrock is None:
+                self._json(403, {'error': 'Not authorized'})
+                return
+            try:
+                identifier = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
+                world = self.server.bedrock.world_by_id(identifier)
+                if path.endswith('/icon'):
+                    icon = self.server.bedrock.world_thumbnail(world)
+                    if icon is None:
+                        self._json(404, {'error': 'Minecraft has no world thumbnail'})
+                        return
+                    mime = 'image/png' if icon.suffix.lower() == '.png' else 'image/jpeg'
+                    self._send(200, icon.read_bytes(), mime)
+                    return
+                if not self.server.bedrock.is_builtin_candlewood(world):
+                    self._json(404, {'error': 'Only built-in Candlewood supports Download'})
+                    return
+                archive, disposable = self.server.bedrock.export_world_file(world, self.server.mutable_builds)
+                try:
+                    from urllib.parse import quote
+                    name = str(world['command_name']).replace('/', '_').replace('\\', '_') + '.mcworld'
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/octet-stream')
+                    self.send_header('Content-Disposition', "attachment; filename*=UTF-8''" + quote(name, safe=''))
+                    self.send_header('Content-Length', str(archive.stat().st_size))
+                    self.send_header('Cache-Control', 'no-store')
+                    self.send_header('X-Content-Type-Options', 'nosniff')
+                    self.end_headers()
+                    with archive.open('rb') as stream:
+                        for chunk in iter(lambda: stream.read(1024*1024), b''):
+                            self.wfile.write(chunk)
+                finally:
+                    if disposable:
+                        archive.unlink(missing_ok=True)
+            except (RuntimeError, OSError, ValueError, FileNotFoundError, zipfile.BadZipFile) as exc:
+                try:
+                    self._json(400, {'error': str(exc)})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            return
+        if path == '/api/craftmaster/map/status':
+            if not self._code_authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            try:
+                mid = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
+                self._json(200, _CinterForgeCraftMasterMap.map_progress(self.server, mid))
+            except ValueError as exc:
+                self._json(404, {'error': str(exc)})
+            return
         if _CinterForgeCraftMasterMap.serve_map_asset(self, path):
             return
         if self._serve_artifact(path):
@@ -850,9 +929,16 @@ class CinterForgeHTTPRoutes:
         # existing native token requirement. An exact Origin and fetch-site are
         # mandatory for browser writes (no permissive missing-Origin fallback).
         route = self.path.split('?', 1)[0]
-        browser_asset_write = (route in ('/assets/command', '/api/assets/view',
-                                         '/api/assets/blockify/progress', '/api/assets/packs/set')
-                               and (self.server.capabilities.get('assets') or route == '/api/assets/packs/set')
+        browser_world_actions = ('/api/bedrock/world/select', '/api/bedrock/report/open',
+                                 '/api/bedrock/run', '/api/bedrock/start', '/api/bedrock/stop',
+                                 '/api/bedrock/eula', '/api/bedrock/pack/set', '/api/assets/packs/open',
+                                 '/api/craftmaster/map/open', '/api/craftmaster/map/run',
+                                 '/api/assets/packs/download')
+        browser_asset_write = (route in (('/assets/command', '/api/assets/view',
+                                         '/api/assets/blockify/progress', '/api/assets/packs/set',
+                                         '/api/assets/packs/download') + browser_world_actions)
+                               and (self.server.capabilities.get('assets') or route in
+                                    (('/api/assets/packs/set', '/api/assets/packs/download') + browser_world_actions))
                                and self._code_authorized()
                                and self.headers.get('Sec-Fetch-Site') == 'same-origin'
                                and self.headers.get('Origin') == 'http://' + self.headers.get('Host', ''))
@@ -883,7 +969,7 @@ class CinterForgeHTTPRoutes:
                 self._json(200, result)
                 return
             if route.startswith('/api/assets/'):
-                if not self.server.capabilities.get('assets') and route not in ('/api/assets/packs/open', '/api/assets/packs/set'):
+                if not self.server.capabilities.get('assets') and route not in ('/api/assets/packs/open', '/api/assets/packs/set', '/api/assets/packs/download'):
                     self._json(404, {'error': 'Not found'})
                     return
                 # Only a native Terminal session may request arbitrary host
@@ -899,6 +985,8 @@ class CinterForgeHTTPRoutes:
                     result = _CinterForgeAssetViews.pack_open(self.server)
                 elif route == '/api/assets/packs/set':
                     result = _CinterForgeAssetViews.pack_set_current(self.server, body.get('name'))
+                elif route == '/api/assets/packs/download':
+                    result = _CinterForgeAssetViews.pack_download(self.server, body.get('name'))
                 elif route == '/api/assets/import':
                     result = _CinterForgeAssetViews.import_path(self.server, body.get('path'))
                 elif route == '/api/assets/delete':
@@ -1015,6 +1103,21 @@ class CinterForgeHTTPRoutes:
                 _CinterForgeIF._if_store_save(self.server, unquote(route[len('/api/if/save/'):]), body)
                 self._json(200, {'saved':True})
                 return
+            if route == '/api/bedrock/report/open':
+                self._json(200, _CinterForgeCraftMasterMap.open_world_report(self.server))
+                return
+            if route == '/api/bedrock/world/select':
+                if self.server.bedrock is None:
+                    raise RuntimeError('Bedrock is unavailable')
+                self._json(200, self.server.bedrock.select_world(body.get('name', '')))
+                return
+            if route == '/api/bedrock/pack/set':
+                self._json(200, _CinterForgeAssetViews.pack_set_current(self.server, body.get('name')))
+                return
+            if route == '/api/craftmaster/map/open':
+                self._json(200, _CinterForgeCraftMasterMap.open_existing_map(
+                    self.server, str(body.get('name', ''))))
+                return
             if route == '/api/bedrock/eula':
                 with self.server.eula_lock:
                     self.server.eula_requested = True
@@ -1075,9 +1178,17 @@ class CinterForgeHTTPRoutes:
                     )
                 self._json(200, {'closed': True})
                 return
-            if route == '/api/bedrock/run':
+            if route in ('/api/bedrock/run', '/api/bedrock/start'):
+                chosen = self.server.bedrock.current_world()
+                if chosen is None:
+                    raise ValueError('Select a Current World before running Bedrock')
+                if chosen['edition'] == 'java':
+                    freshness = self.server.bedrock.conversion_status(chosen)
+                    if freshness.get('needs_update'):
+                        if not (body.get('allow_stale') is True and freshness.get('has_conversion')):
+                            raise RuntimeError('Java conversion needs Update for Bedrock; choose Update or Run Anyway')
                 self._json(200, _CinterForgeSessions.open_bedrock_terminal(self.server,
-                    str(body.get('name', '')), body.get('cols', 80), body.get('rows', 24)))
+                    '', body.get('cols', 80), body.get('rows', 24)))
                 return
             if route == '/api/bedrock/restart':
                 selected = (self.server.bedrock._world_settings().get('selected') or {})
@@ -1085,10 +1196,6 @@ class CinterForgeHTTPRoutes:
                     raise RuntimeError('No selected Bedrock save to restart; type bedrock start')
                 self._json(200, _CinterForgeSessions.open_bedrock_terminal(self.server,
                     str(selected['folder']), body.get('cols', 80), body.get('rows', 24), restart=True))
-                return
-            if route == '/api/bedrock/start':
-                # `start` only lists saves. Never start an invisible background VM.
-                self._json(200, self.server.bedrock.list_worlds())
                 return
             if route == '/api/bedrock/stop':
                 with self.server.bedrock_terminal_lock:
@@ -1221,6 +1328,19 @@ class CinterForgeHTTPRoutes:
             if route == '/api/wargames/open':
                 with self.server.debug_lock:
                     self.server.wargames_requests += 1
+                self._json(200, {'requested': True})
+                return
+            if route == '/api/emulators/open':
+                if body:
+                    raise ValueError('Emulator gallery command takes no arguments')
+                # The browser paints the SAME staged machine profiles as the
+                # Macintosh, BeOS and NeXTSTEP menus and launches them through
+                # the existing openMuseumProfile/openSession path.
+                with self.server.asset_actions_lock:
+                    self.server.asset_actions = type(self.server.asset_actions)(
+                        request for request in self.server.asset_actions
+                        if request.get('kind') != 'emulators')
+                    self.server.asset_actions.append({'kind': 'emulators'})
                 self._json(200, {'requested': True})
                 return
             if route == '/api/macgames/open':

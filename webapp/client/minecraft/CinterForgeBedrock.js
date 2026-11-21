@@ -123,4 +123,33 @@ CinterForgeState.$('license-confirm').addEventListener('click', async () => {
     }
   });
 
+  // The unprivileged report iframe may request the EXISTING WebView license
+  // dialog, but never accepts EULA consent on the user's behalf.
+  window.addEventListener('message', event => {
+    if (event.origin === location.origin && event.data?.type === 'cinter-bedrock-pack-changed') {
+      const packTab = CinterForgeState.tabs?.find(tab => !tab.closed &&
+        tab.kind === 'asset-view' && tab.assetKey === 'packs' &&
+        tab.mapFrame?.contentWindow === event.source);
+      if (!packTab) return;
+      for (const tab of CinterForgeState.tabs || []) {
+        if (!tab.closed && tab.kind === 'asset-view' && tab.assetKey === 'bedrock-report') {
+          tab.mapFrame?.contentWindow?.postMessage({type:'cinter-bedrock-pack-changed'}, location.origin);
+        }
+      }
+      window.dispatchEvent(new Event('cinter-bedrock-pack-changed'));
+      return;
+    }
+    if (event.origin !== location.origin || event.data?.type !== 'cinter-bedrock-report') return;
+    const reportTab = CinterForgeState.tabs?.find(tab => !tab.closed &&
+      tab.kind === 'asset-view' && tab.assetKey === 'bedrock-report' &&
+      tab.mapFrame?.contentWindow === event.source);
+    if (!reportTab) return;
+    if (event.data.action === 'eula') {
+      void CinterForgeState.api('/api/bedrock/eula', {}).then(() =>
+        CinterForgeState.requestLicense()).catch(error => CinterForgeState.notice(error.message));
+    } else if (event.data.action === 'server-started') {
+      CinterForgeState.notice('Bedrock opened in its interactive terminal tab');
+    }
+  });
+
 })();

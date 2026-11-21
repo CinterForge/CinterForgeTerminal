@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CinterForge Bedrock · Worlds</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,-apple-system,sans-serif;background:#111c29;color:#edf4fb}
+    *{box-sizing:border-box}body{margin:0}header{position:sticky;top:0;z-index:2;background:#172639;border-bottom:1px solid #4a637d;padding:16px 20px;box-shadow:0 3px 20px #080f1c90}
+    h1{font-size:1.25rem;margin:0 0 12px}h2{font-size:1.03rem;margin:25px 0 12px}main{padding:0 20px 28px;max-width:1350px;margin:auto}
+    .summary{display:flex;align-items:center;flex-wrap:wrap;gap:12px 24px}.current{display:flex;flex-direction:column;gap:2px;min-width:180px}
+    .key{color:#a9c3d9;font-size:.79rem}.value{font-weight:600;overflow-wrap:anywhere}button,.download{font:inherit;border-radius:6px;background:#304f71;border:1px solid #6687a9;color:#fff;padding:7px 10px;cursor:pointer;text-decoration:none;white-space:nowrap}
+    button:hover:not(:disabled),.download:hover{background:#42688f}button:disabled{cursor:default;opacity:.48}
+    button.primary{background:#246641;border-color:#5fbc85}button.stop{background:#713b40;border-color:#d46d76}
+    .toolbar{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.group{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:12px}
+    article{padding:14px;background:#1b2b3e;border:1px solid #344c65;border-radius:10px;display:grid;grid-template-columns:84px minmax(0,1fr);gap:10px 14px;align-content:start}
+    article.current-world{border-color:#7acd99;box-shadow:inset 0 0 0 1px #7acd99}
+    .thumb{width:84px;height:84px;object-fit:cover;background:#2b4554;border:1px solid #527082;border-radius:5px}
+    .fallback{width:84px;height:84px;display:grid;place-items:center;background:#284359;border-radius:5px;font-size:29px}
+    h3{font-size:1rem;margin:0;overflow-wrap:anywhere}.desc{color:#bbcedd;margin:5px 0;font-size:.83rem}
+    .actions{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px}.meta{color:#b0c6d7;font-size:.77rem;margin:4px 0}
+    .state{font-size:.8rem;color:#bfe5be}.stale{color:#ffce86}.error{color:#ffc4a0}
+    #notice{min-height:1.25rem;color:#bfe5be;font-size:.85rem;margin-top:9px}#notice.error{color:#ffd1c3}
+    @media(max-width:550px){header{padding:12px}main{padding:0 12px 18px}.group{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<header><h1>CraftMaster · Bedrock Worlds</h1>
+  <div class="summary">
+    <div class="current"><span class="key">Current World</span><span class="value" id="current-world">None</span></div>
+    <div class="current"><span class="key">Current Pack</span><span class="value" id="current-pack">None</span></div>
+    <div class="toolbar"><button id="packs" type="button">Packs</button><button id="server" class="primary" type="button">Start</button><button id="refresh" type="button">Refresh</button></div>
+  </div><div id="notice" role="status" aria-live="polite"></div>
+</header>
+<main><h2>Java Worlds</h2><section class="group" id="java" aria-label="Java world saves"></section>
+  <h2>Bedrock Worlds</h2><section class="group" id="bedrock" aria-label="Bedrock world saves"></section></main>
+<script src="/client/minecraft/CinterForgeBedrockReport.js" defer></script>
+</body></html>

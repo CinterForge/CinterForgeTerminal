@@ -792,7 +792,8 @@ class CinterForgeBedrockManager:
             if not path.is_dir() or path.is_symlink():
                 raise ValueError('World search path must be an existing non-symlink directory: ' + str(path))
             path = path.resolve(strict=True)
-            self._save_world_settings({'root': str(path)})
+            previous = self._world_settings()
+            self._save_world_settings({'root': str(path), 'selected': previous.get('selected')})
             return self.list_worlds()
 
     def _java_world_roots(self) -> list[Path]:
@@ -848,6 +849,15 @@ class CinterForgeBedrockManager:
                          'path': str(path.resolve()), 'root': str(root),
                          'edition': 'java', 'dimensions': item.get('dimensions', {})}
                 world['command_name'] = _world_command_name(world)
+                world['id'] = self._world_id(world)
+                # User-owned world state lives beside the Java save, never in Builds.
+                local = path / 'CinterForge'
+                try:
+                    if local.is_symlink():
+                        raise OSError('CinterForge is a symlink')
+                    local.mkdir(exist_ok=True)
+                except OSError as error:
+                    world['storage_error'] = str(error)
                 worlds.append(world)
         return worlds
 
@@ -888,9 +898,373 @@ class CinterForgeBedrockManager:
             raise RuntimeError('Ambiguous Java world; select its unique folder name')
         return matches[0] if matches else None
 
-    def craftmaster_output_root(self) -> Path:
-        """Keep generated Zoomify tiles and archives in the managed Bedrock root."""
-        return self.root / 'Conversions' / 'CraftMaster'
+    @staticmethod
+    def _world_id(world: dict) -> str:
+        return hashlib.sha256((str(world['edition']) + ':' +
+                               str(Path(world['path']).resolve())).encode('utf-8')).hexdigest()[:24]
+
+    @staticmethod
+    def world_data_root(world: dict) -> Path:
+        """Persistent, world-local CinterForge data (never mixed into Java input)."""
+        source = Path(world['path'])
+        if source.is_symlink() or not source.is_dir():
+            raise RuntimeError('World is unavailable or symlinked: ' + str(source))
+        result = source / 'CinterForge'
+        if result.is_symlink() or (result.exists() and not result.is_dir()):
+            raise RuntimeError('World CinterForge directory is unsafe: ' + str(result))
+        return result
+
+    def craftmaster_output_root(self, world: dict) -> Path:
+        if world.get('edition') != 'java':
+            raise ValueError('CraftMaster output belongs inside an original Java save')
+        return self.world_data_root(world)
+
+    def _migrate_craftmaster_output(self, world: dict) -> None:
+        """Copy only known previous outputs; leave the working Builds originals intact."""
+        old = self.root / 'Conversions' / 'CraftMaster'
+        if old.is_symlink() or not old.is_dir():
+            return
+        source = Path(world['path'])
+        export = self.java_world_export_name(world)
+        destination = self.craftmaster_output_root(world)
+        for folder, name in (('Maps', source.name), ('Worlds', export)):
+            original = old / folder / name
+            target = destination / folder / name
+            if not original.is_dir() or target.exists():
+                continue
+            if any(path.is_symlink() for path in original.rglob('*')):
+                raise RuntimeError('Refusing to migrate linked CraftMaster output: ' + str(original))
+            # Prior shared Builds data cannot be attributed to this Java world
+            # solely by matching its name. Its receipt binds the source path.
+            if folder == 'Maps':
+                receipt = original / 'Working' / 'BedrockState.txt'
+                if not receipt.is_file():
+                    continue
+            else:
+                marker = self.curated_worlds / export / 'cinter-craftmaster-world.json'
+                if not marker.is_file() or marker.is_symlink():
+                    continue
+                try:
+                    if json.loads(marker.read_text('utf-8')).get('source') != str(source.resolve()):
+                        continue
+                except (ValueError, OSError):
+                    continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(original, target, symlinks=False)
+            self._append_log('Migrated previously generated CraftMaster ' + folder + '/' + name)
+
+    def current_world(self) -> dict | None:
+        selected = self._world_settings().get('selected') or {}
+        path = selected.get('path')
+        if not path:
+            return None
+        inventory = self.list_worlds()
+        matches = [world for world in inventory['worlds'] + inventory['java_worlds']
+                   if world['path'] == path and world['edition'] == selected.get('edition', 'bedrock')]
+        return matches[0] if len(matches) == 1 else None
+
+    def select_world(self, requested: str) -> dict:
+        """Exactly one global selection, stored by verified source path and edition."""
+        inventory = self.list_worlds()
+        worlds = inventory['worlds'] + inventory['java_worlds']
+        key = str(requested or '').strip().casefold()
+        if not key:
+            raise ValueError('Select a Java or Bedrock world by its displayed name or ID')
+        matched = [world for world in worlds if key in
+                   (world['id'], world['folder'].casefold(), world['name'].casefold(),
+                    world['command_name'].casefold())]
+        # The exact ID disambiguates same-named Java/Bedrock worlds.
+        exact_id = [world for world in matched if world['id'] == key]
+        if exact_id:
+            matched = exact_id
+        if len(matched) != 1:
+            raise ValueError('World not found or ambiguous; use the unique ID from bedrock report')
+        world = matched[0]
+        with self._lock:
+            previous = self._world_settings()
+            self._save_world_settings({'root': previous.get('root'),
+                'selected': {key: world[key] for key in ('id','path','edition','folder','name','command_name')}})
+        return {'current_world': world['command_name'], 'world': world}
+
+    def selected_pack_record(self, world: dict) -> dict | None:
+        file = self.world_data_root(world) / 'Packs/current.json'
+        if not file.exists():
+            return None
+        if file.is_symlink() or not file.is_file():
+            raise RuntimeError('Unsafe per-world pack selection')
+        record = json.loads(file.read_text('utf-8'))
+        if (record.get('schema') != 'cinterforge.terminal.current-pack.v1' or
+                not re.fullmatch(r'[0-9a-f]{64}', str(record.get('sha256', '')))):
+            raise RuntimeError('Invalid per-world pack selection')
+        return record
+
+    @staticmethod
+    def _java_source_files(source: Path) -> tuple[dict, float | None]:
+        """Inventory real Java save files, excluding our generated CinterForge tree.
+
+        Retain nanosecond modification times and sizes so the same inventory
+        can later identify individual files/regions for incremental map updates.
+        Minecraft's session.lock is recorded but does not mark gameplay stale.
+        """
+        files = {}
+        newest = None
+        for base, directories, names in os.walk(source, followlinks=False):
+            base_path = Path(base)
+            directories[:] = sorted(directory for directory in directories
+                                    if not (base_path == source and directory == 'CinterForge'))
+            for directory in directories:
+                if (base_path / directory).is_symlink():
+                    raise RuntimeError('Linked directory in Java save: ' + str(base_path / directory))
+            for name in sorted(names):
+                file = base_path / name
+                if file.is_symlink():
+                    raise RuntimeError('Linked file in Java save: ' + str(file))
+                info = file.stat()
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                relative = file.relative_to(source).as_posix()
+                files[relative] = {'size': info.st_size, 'mtime_ns': info.st_mtime_ns}
+                if relative != 'session.lock':
+                    newest = max(newest or 0, info.st_mtime_ns)
+        return files, newest / 1_000_000_000 if newest is not None else None
+
+    @staticmethod
+    def _java_gameplay_files(files: dict) -> dict:
+        """session.lock is touched by Minecraft without any world content edit."""
+        return {name: info for name, info in files.items() if name != 'session.lock'}
+
+    def _java_source_receipt(self, world: dict) -> Path:
+        return self.craftmaster_output_root(world) / 'JavaSourceFiles.json'
+
+    def _write_java_source_receipt(self, world: dict, files: dict, archive: Path) -> None:
+        """Commit the source inventory only after a successful native conversion."""
+        destination = self._java_source_receipt(world)
+        if destination.is_symlink():
+            raise RuntimeError('Unsafe Java source inventory path')
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        record = {'schema': 'cinterforge.craftmaster.java-source-files.v1',
+                  'source': str(Path(world['path']).resolve()),
+                  'archive': archive.name, 'files': files}
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=destination.parent,
+                                             prefix='java-source-', delete=False) as handle:
+                temporary = Path(handle.name)
+                json.dump(record, handle, ensure_ascii=False, sort_keys=True)
+                handle.write('\n')
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    def conversion_status(self, world: dict) -> dict:
+        if world.get('edition') != 'java':
+            return {'ready': True, 'needs_update': False, 'has_conversion': True}
+        source = Path(world['path'])
+        output = self.craftmaster_output_root(world)
+        result = {'ready': False, 'needs_update': False, 'has_conversion': False,
+                  'verification_unavailable': True, 'last_played': None, 'last_updated': None}
+        try:
+            files, last_modified = self._java_source_files(source)
+            result['last_played'] = last_modified
+        except (OSError, RuntimeError, ValueError) as error:
+            result['status_error'] = 'Cannot inspect Java save: ' + str(error)
+            return result
+        # The native export-name is authoritative, but an older or unavailable
+        # packaged binary must not hide dates or turn a conversion into 'stale'.
+        try:
+            export = self.java_world_export_name(world)
+        except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError,
+                subprocess.TimeoutExpired) as error:
+            export = world['command_name']
+            result['status_error'] = 'CraftMaster export-name unavailable: ' + str(error)
+        archive = output / 'Worlds' / export / (export + '.mcworld')
+        try:
+            if archive.is_symlink():
+                raise RuntimeError('Linked Bedrock archive')
+            if archive.is_file():
+                result['last_updated'] = archive.stat().st_mtime
+                result['has_conversion'] = True
+            if not result['has_conversion']:
+                # No archive is not an outdated conversion: no conversion exists.
+                result.update(verification_unavailable=False, needs_update=True, state='not_converted')
+                return result
+            receipt = self._java_source_receipt(world)
+            if receipt.is_symlink():
+                raise RuntimeError('Linked Java source inventory')
+            if receipt.is_file():
+                stored = json.loads(receipt.read_text(encoding='utf-8'))
+                if (stored.get('schema') != 'cinterforge.craftmaster.java-source-files.v1'
+                        or stored.get('source') != str(source.resolve())
+                        or stored.get('archive') != archive.name
+                        or not isinstance(stored.get('files'), dict)):
+                    raise ValueError('Invalid Java source inventory')
+                changed = (self._java_gameplay_files(files) !=
+                           self._java_gameplay_files(stored['files']))
+                result.update(ready=not changed, needs_update=changed,
+                              verification_unavailable=False,
+                              state='stale' if changed else 'ready')
+                return result
+            # Legacy conversion: no full save inventory was recorded at export.
+            # A file modified after the export proves the archive may be old;
+            # native status may establish readiness for older conversions. Do
+            # not equate a missing/invalid native receipt with changed Java data.
+            newer = (last_modified is not None and
+                     last_modified > archive.stat().st_mtime + 0.000001)
+            if newer:
+                result.update(ready=False, needs_update=True,
+                              verification_unavailable=False, state='stale')
+                return result
+            try:
+                binary, assets = self._craftmaster_cli()
+                response = subprocess.run([str(binary), 'status', '--world', str(source),
+                                           '--data-dir', str(assets), '--output-root', str(output), '--json'],
+                                          capture_output=True, text=True, timeout=180, check=False)
+                if response.returncode:
+                    raise RuntimeError(response.stderr.strip()[-600:] or 'CraftMaster status failed')
+                native = json.loads(response.stdout)
+                if native.get('schema') != 'cinterforge.craftmaster.bedrock-status.v1':
+                    raise RuntimeError('CraftMaster status returned an unexpected schema')
+                if native.get('ready') is True:
+                    result.update(ready=True, needs_update=False,
+                                  verification_unavailable=False, state='ready')
+                    return result
+                if native.get('source_changed') is True and native.get('source_readable') is True:
+                    result.update(ready=False, needs_update=True,
+                                  verification_unavailable=False, state='stale')
+                    return result
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+                result['status_error'] = str(error)
+            # Older conversions lack our complete-file snapshot. When every
+            # Java source file predates a valid local .mcworld, the file dates
+            # show no evidence of changes since the conversion. A missing or
+            # incompatible native receipt must never be interpreted as stale.
+            try:
+                with zipfile.ZipFile(archive) as bundle:
+                    names = set(bundle.namelist())
+                    if not {'level.dat', 'db/CURRENT'}.issubset(names) or not any(
+                            name.startswith('db/MANIFEST-') for name in names):
+                        raise ValueError('Bedrock archive has incomplete world data')
+                result.update(ready=True, needs_update=False,
+                              verification_unavailable=False,
+                              state='ready', verification_method='file_modification_dates')
+                result.pop('status_error', None)
+            except (OSError, ValueError, zipfile.BadZipFile) as error:
+                result['state'] = 'unverified'
+                result['status_error'] = str(error)
+            return result
+        except (OSError, RuntimeError, ValueError) as error:
+            result['status_error'] = str(error)
+            result['state'] = 'unverified'
+            return result
+
+    def world_by_id(self, id: str) -> dict:
+        if not re.fullmatch(r'[0-9a-f]{24}', str(id or '')):
+            raise ValueError('Invalid world ID')
+        inventory = self.list_worlds()
+        match = [w for w in inventory['worlds'] + inventory['java_worlds'] if w['id'] == id]
+        if len(match) != 1:
+            raise FileNotFoundError('World is no longer available')
+        return match[0]
+
+    def world_thumbnail(self, world: dict) -> Path | None:
+        source = Path(world['path'])
+        candidates = (('icon.png',) if world['edition'] == 'java'
+                      else ('world_icon.jpeg', 'world_icon.jpg', 'world_icon.png'))
+        for name in candidates:
+            image = source / name
+            if image.is_file() and not image.is_symlink() and image.stat().st_size <= 4*1024*1024:
+                return image
+        return None
+
+    def is_builtin_candlewood(self, world: dict) -> bool:
+        """Only the original Candlewood or its managed curated Bedrock export.
+
+        Download is a limited built-in feature for now. Matching a user-supplied
+        display name alone cannot make arbitrary world saves downloadable.
+        """
+        source = Path(world.get('path', ''))
+        if world.get('command_name') != 'Candlewood' or source.is_symlink():
+            return False
+        if world.get('edition') == 'java':
+            return source.name == 'Candlewood (Candlewood)' and any(
+                source.parent == saves for saves in self._java_world_roots())
+        if world.get('edition') == 'bedrock':
+            return (source.name == 'Candlewood' and
+                    source.parent == self.curated_worlds and source.is_dir())
+        return False
+
+    def export_world_file(self, world: dict, temporary_root: Path) -> tuple[Path, bool]:
+        """Return (validated archive, temporary); never expose private state."""
+        if not self.is_builtin_candlewood(world):
+            raise PermissionError('Only the built-in Candlewood world can be downloaded')
+        if world['edition'] == 'java':
+            source = Path(world['path'])
+            export = self.java_world_export_name(world)
+            archive = self.craftmaster_output_root(world) / 'Worlds' / export / (export + '.mcworld')
+            if not archive.is_file() or archive.is_symlink():
+                raise FileNotFoundError('Java world needs Update for Bedrock before download')
+            with zipfile.ZipFile(archive) as bundle:
+                names = set(bundle.namelist())
+                if not {'level.dat', 'db/CURRENT'}.issubset(names) or not any(
+                        name.startswith('db/MANIFEST-') for name in names):
+                    raise RuntimeError('CraftMaster archive is not a complete Bedrock world')
+            return archive, False
+        source = Path(world['path'])
+        if not all((source / name).is_file() for name in ('level.dat', 'db/CURRENT')) or not list((source / 'db').glob('MANIFEST-*')):
+            raise RuntimeError('Bedrock world is missing level.dat or LevelDB')
+        if source.is_symlink():
+            raise RuntimeError('Unsafe linked world')
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        fd, raw = tempfile.mkstemp(prefix='bedrock-export-', suffix='.mcworld', dir=temporary_root)
+        os.close(fd)
+        output = Path(raw)
+        try:
+            total = 0
+            with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as bundle:
+                for base, dirs, files in os.walk(source, followlinks=False):
+                    folder = Path(base)
+                    dirs[:] = [name for name in dirs if name != 'CinterForge' and
+                               not (folder / name).is_symlink()]
+                    for name in files:
+                        file = folder / name
+                        if file.is_symlink() or not file.is_file():
+                            raise RuntimeError('Unsafe linked Bedrock world member')
+                        rel = file.relative_to(source)
+                        if rel.name.startswith('cinter-') or rel.name == 'cinterforge-selected-pack.json':
+                            continue
+                        total += file.stat().st_size
+                        if total > 64 * 1024**3:
+                            raise RuntimeError('World exceeds 64 GiB export cap')
+                        bundle.write(file, rel.as_posix())
+            with zipfile.ZipFile(output) as verify:
+                names = set(verify.namelist())
+                if not {'level.dat', 'db/CURRENT'}.issubset(names) or not any(
+                        name.startswith('db/MANIFEST-') for name in names):
+                    raise RuntimeError('Export is missing required Bedrock content')
+            return output, True
+        except Exception:
+            output.unlink(missing_ok=True)
+            raise
+
+    def report_worlds(self) -> dict:
+        inventory = self.list_worlds()
+        selected = self._world_settings().get('selected') or {}
+        for world in inventory['worlds'] + inventory['java_worlds']:
+            world['current'] = world['path'] == selected.get('path') and world['edition'] == selected.get('edition', 'bedrock')
+            record = self.selected_pack_record(world)
+            world['pack'] = record['name'] if record else None
+            if world['edition'] == 'java':
+                world['conversion'] = self.conversion_status(world)
+            else:
+                world['conversion'] = {'ready': True, 'needs_update': False}
+        current = next((w for w in inventory['worlds'] + inventory['java_worlds'] if w['current']), None)
+        inventory['current_world'] = current['command_name'] if current else None
+        inventory['current_pack'] = ((self.selected_pack_record(current) or {}).get('name') if current else None)
+        inventory['running'] = bool(self.status().get('running'))
+        return inventory
 
     def run_native_craftmaster(
         self, world: dict, progress: Callable[[str], None] | None = None,
@@ -905,7 +1279,8 @@ class CinterForgeBedrockManager:
         if source.is_symlink() or not (source / 'level.dat').is_file():
             raise RuntimeError('Java world disappeared or became unsafe: ' + str(source))
         export_name = self.java_world_export_name(world)
-        output_root = self.craftmaster_output_root()
+        self._migrate_craftmaster_output(world)
+        output_root = self.craftmaster_output_root(world)
         output_root.mkdir(parents=True, exist_ok=True)
         command = [
             str(binary), 'convert',
@@ -916,6 +1291,7 @@ class CinterForgeBedrockManager:
         ]
         report = progress or self._append_log
         with self._craftmaster_conversion_lock:
+            source_before, _ = self._java_source_files(source)
             report(f'{export_name}: starting native CraftMaster conversion')
             process = subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -953,6 +1329,10 @@ class CinterForgeBedrockManager:
         live_map = output_root / 'Maps' / source.name / 'Overworld' / 'Live Map.htm'
         if not live_map.is_file() or live_map.is_symlink():
             raise RuntimeError('CraftMaster did not create the live Zoomify map: ' + str(live_map))
+        source_after, _ = self._java_source_files(source)
+        if self._java_gameplay_files(source_before) != self._java_gameplay_files(source_after):
+            raise RuntimeError('Java save changed during conversion; Bedrock freshness cannot be certified')
+        self._write_java_source_receipt(world, source_after, archive)
         report(export_name + ': Zoomify and Bedrock export ready')
         return archive
 
@@ -1232,6 +1612,23 @@ class CinterForgeBedrockManager:
             + '; '.join(missing_channels)
         )
 
+    def prepare_selected_java_world(self, world: dict, progress: Callable[[str], None] | None = None) -> str:
+        """Only reuse a curated conversion identified as this Java save's output."""
+        source = Path(world['path']).resolve(strict=True)
+        export = self.java_world_export_name(world)
+        curated = self.curated_worlds / export
+        receipt = curated / 'cinter-craftmaster-world.json'
+        if (curated.is_dir() and not curated.is_symlink() and receipt.is_file()
+                and not receipt.is_symlink()):
+            data = json.loads(receipt.read_text('utf-8'))
+            if (data.get('schema') == 'cinterforge.terminal.craftmaster-world.v1' and
+                    data.get('source') == str(source) and
+                    (curated / 'level.dat').is_file() and (curated / 'db/CURRENT').is_file()):
+                return export
+        if curated.exists():
+            raise RuntimeError('Cannot replace a Bedrock world with an unverified Java association: ' + export)
+        return self._convert_java_world(world, progress=progress).name
+
     def prepare_world(self, name: str, progress: Callable[[str], None] | None = None) -> str:
         """Resolve the requested world: Bedrock save, Java save, then public CDN.
 
@@ -1278,6 +1675,7 @@ class CinterForgeBedrockManager:
                          'path': str(folder.resolve()), 'root': str(root),
                          'edition': 'bedrock'}
                 world['command_name'] = _world_command_name(world)
+                world['id'] = self._world_id(world)
                 entries.append(world)
         settings = self._world_settings()
         java_error = None
@@ -1356,8 +1754,272 @@ class CinterForgeBedrockManager:
             finally:
                 temporary.unlink(missing_ok=True)
 
+    def _install_selected_world_pack(self, target: Path, world: dict) -> None:
+        """Install verified selected .mcaddon modules on the managed Bedrock COPY.
+
+        World-native packs and the built-in status bridge are left untouched;
+        only entries recorded by this installer are replaced or removed.
+        """
+        record = self.selected_pack_record(world)
+        previous_receipt = target / 'cinterforge-selected-pack.json'
+        if previous_receipt.is_symlink():
+            raise RuntimeError('Unsafe Bedrock pack receipt')
+        previous = (json.loads(previous_receipt.read_text('utf-8'))
+                    if previous_receipt.is_file() else {})
+        old = previous.get('entries', [])
+        if not isinstance(old, list):
+            raise RuntimeError('Invalid previously applied pack state')
+        additions: list[tuple[str, dict]] = []
+        if record:
+            from io import BytesIO
+            name = record['name']
+            source = self.world_data_root(world) / 'Packs' / 'Downloaded' / name / (name + '.mcaddon')
+            if (source.is_symlink() or not source.is_file() or
+                    source.stat().st_size != record['bytes'] or
+                    _sha256(source) != record['sha256']):
+                raise RuntimeError('Selected world pack is missing or failed SHA-256 verification')
+            with tempfile.TemporaryDirectory(prefix='bedrock-pack-', dir=self.run_root) as scratch:
+                temp = Path(scratch)
+                with zipfile.ZipFile(source) as addon:
+                    nested = [row for row in addon.infolist() if row.filename.lower().endswith('.mcpack') and not row.is_dir()]
+                    if not nested or len(nested) > 32:
+                        raise RuntimeError('Selected Add-On must contain 1–32 .mcpack archives')
+                    if sum(row.file_size for row in nested) > 4 * 1024**3:
+                        raise RuntimeError('Selected pack exceeds unpacked size limit')
+                    for index, member in enumerate(nested):
+                        embedded = temp / ('module-' + str(index) + '.mcpack')
+                        with addon.open(member) as reader, embedded.open('wb') as output:
+                            shutil.copyfileobj(reader, output, length=1024 * 1024)
+                        extracted = temp / ('unpacked-' + str(index))
+                        extracted.mkdir()
+                        _safe_extract(embedded, extracted, max_uncompressed_bytes=4 * 1024**3)
+                        roots = [extracted] if (extracted / 'manifest.json').is_file() else [
+                            row for row in extracted.iterdir() if row.is_dir() and (row / 'manifest.json').is_file()]
+                        if len(roots) != 1:
+                            raise RuntimeError('Pack module must contain exactly one manifest.json')
+                        manifest = json.loads((roots[0] / 'manifest.json').read_text('utf-8'))
+                        header = manifest.get('header') or {}
+                        pack_id, version = header.get('uuid'), header.get('version')
+                        modules = manifest.get('modules') or []
+                        if (not isinstance(pack_id, str) or not re.fullmatch(r'[0-9a-fA-F-]{36}', pack_id)
+                                or not isinstance(version, list) or len(version) != 3 or
+                                any(type(v) is not int or v < 0 for v in version)):
+                            raise RuntimeError('Selected pack has an invalid UUID/version')
+                        kinds = {m.get('type') for m in modules if isinstance(m, dict)}
+                        kind = 'resource' if 'resources' in kinds else 'behavior' if kinds.intersection(('data', 'script')) else None
+                        if kind is None:
+                            raise RuntimeError('Pack module has no behavior/resource modules')
+                        # The client downloads resource textures; behavior code
+                        # remains on this server. Validate its declared entry
+                        # before registering a seemingly successful Add-On.
+                        if kind == 'behavior':
+                            for module in modules:
+                                if not isinstance(module, dict) or module.get('type') != 'script':
+                                    continue
+                                entry = module.get('entry')
+                                if (not isinstance(entry, str) or not entry.endswith(('.js', '.mjs'))
+                                        or not re.fullmatch(r'[A-Za-z0-9_./-]+', entry)
+                                        or any(part in ('', '.', '..') for part in entry.split('/'))
+                                        or not (roots[0] / entry).is_file()):
+                                    raise RuntimeError('Selected behavior pack is missing declared script: ' + str(entry))
+                        key = 'cinterforge-selected-' + record['sha256'][:12] + '-' + str(index)
+                        root = self.run_root / (kind + '_packs')
+                        if root.is_symlink():
+                            raise RuntimeError('Unsafe managed pack root')
+                        root.mkdir(parents=True, exist_ok=True)
+                        destination = root / key
+                        if destination.is_symlink():
+                            raise RuntimeError('Unsafe managed selected-pack directory')
+                        if not destination.exists():
+                            shutil.copytree(roots[0], destination, symlinks=False)
+                        additions.append((kind, {'pack_id': pack_id, 'version': version}))
+        if record and not any(kind == 'behavior' for kind, _ in additions):
+            raise RuntimeError('Selected Add-On has no server behavior pack; resource download alone cannot provide items or commands')
+        if record:
+            behavior = sum(kind == 'behavior' for kind, _ in additions)
+            resources = sum(kind == 'resource' for kind, _ in additions)
+            self._append_log(f'CINTER_ADDON_VALIDATED name={record["name"]} '
+                             f'archive_bytes={record["bytes"]} behavior_packs={behavior} resource_packs={resources}')
+        # Commit the manifest registrations after the modules themselves were
+        # prepared. Unknown user/addon entries and the status bridge survive.
+        for kind, filename in (('behavior', 'world_behavior_packs.json'),
+                               ('resource', 'world_resource_packs.json')):
+            path = target / filename
+            if path.is_symlink():
+                raise RuntimeError('Unsafe Bedrock pack registry')
+            entries = json.loads(path.read_text('utf-8')) if path.is_file() else []
+            if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
+                raise RuntimeError('Invalid Bedrock pack registry')
+            removed_ids = {row['pack_id'] for row in old if isinstance(row, dict) and
+                           row.get('kind') == kind and isinstance(row.get('pack_id'), str)}
+            updated = [row for row in entries if row.get('pack_id') not in removed_ids]
+            for category, entry in additions:
+                if category == kind:
+                    updated = [row for row in updated if row.get('pack_id') != entry['pack_id']]
+                    updated.append(entry)
+            temporary = path.with_name(filename + '-' + uuid.uuid4().hex + '.tmp')
+            try:
+                temporary.write_text(json.dumps(updated, indent=2) + '\n', encoding='utf-8')
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        active = {'schema': 'cinterforge.terminal.applied-pack.v1',
+                  'name': record['name'] if record else None,
+                  'entries': [{'kind': kind, **entry} for kind, entry in additions]}
+        temporary = previous_receipt.with_name(previous_receipt.name + '-' + uuid.uuid4().hex + '.tmp')
+        try:
+            temporary.write_text(json.dumps(active, indent=2) + '\n', encoding='utf-8')
+            os.replace(temporary, previous_receipt)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _install_cinter_utility_pack(self, target: Path) -> dict:
+        """Install the existing Cinter chest command AFTER the selected Add-On.
+
+        The legacy guest CraftMaster helper provides this exact command, but is
+        not packaged inside the lightweight Terminal WebApp. This runtime owner
+        must generate the function in the managed BDS copy, never in a Java save.
+        Only item definitions belonging to the selected, registered behavior
+        modules are included; an unrelated server pack cannot contaminate it.
+        """
+        pack_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+            'https://cinterforge.com/minecraft/cinter-utility-pack'))
+        module_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+            'https://cinterforge.com/minecraft/cinter-utility-pack/module'))
+        registry = target / 'world_behavior_packs.json'
+        applied = target / 'cinterforge-selected-pack.json'
+        if registry.is_symlink() or applied.is_symlink():
+            raise RuntimeError('Unsafe world pack registration path')
+        references = json.loads(registry.read_text('utf-8')) if registry.is_file() else []
+        receipt = json.loads(applied.read_text('utf-8')) if applied.is_file() else {}
+        if (not isinstance(references, list) or
+                any(not isinstance(row, dict) for row in references) or
+                not isinstance(receipt, dict) or not isinstance(receipt.get('entries', []), list)):
+            raise RuntimeError('Invalid selected pack registration for utility commands')
+        selected_ids = {row.get('pack_id') for row in receipt.get('entries', [])
+                        if isinstance(row, dict) and row.get('kind') == 'behavior'
+                        and isinstance(row.get('pack_id'), str)}
+        active_ids = {row.get('pack_id') for row in references}
+        selected_ids.intersection_update(active_ids)
+        behavior_root = self.run_root / 'behavior_packs'
+        if behavior_root.is_symlink():
+            raise RuntimeError('Unsafe Bedrock behavior pack root')
+        item_ids: set[str] = set()
+        matched_ids: set[str] = set()
+        if selected_ids:
+            for pack_root in behavior_root.iterdir():
+                if pack_root.is_symlink():
+                    raise RuntimeError('Unsafe symlinked server behavior pack')
+                if not pack_root.is_dir() or not (pack_root / 'manifest.json').is_file():
+                    continue
+                manifest_file = pack_root / 'manifest.json'
+                if manifest_file.is_symlink():
+                    raise RuntimeError('Unsafe symlinked pack manifest')
+                manifest = json.loads(manifest_file.read_text('utf-8'))
+                identity = (manifest.get('header') or {}).get('uuid')
+                if identity not in selected_ids:
+                    continue
+                matched_ids.add(identity)
+                items = pack_root / 'items'
+                if not items.is_dir():
+                    continue
+                if items.is_symlink():
+                    raise RuntimeError('Unsafe symlinked item definitions')
+                for path in items.rglob('*.json'):
+                    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents
+                                               if parent == items or items in parent.parents):
+                        raise RuntimeError('Unsafe linked item definition: ' + str(path))
+                    entry = json.loads(path.read_text('utf-8'))
+                    identifier = str((((entry.get('minecraft:item') or {}).get('description') or {})
+                                      .get('identifier') or '')).strip()
+                    if identifier.startswith('cinter:'):
+                        if not re.fullmatch(r'cinter:[a-z0-9_./-]+', identifier):
+                            raise RuntimeError('Invalid Cinter item identifier: ' + identifier)
+                        item_ids.add(identifier)
+        if matched_ids != selected_ids:
+            raise RuntimeError('A selected behavior pack was not installed in the managed Bedrock server')
+        if len(item_ids) + (len(item_ids) + 26) // 27 > 10000:
+            raise RuntimeError('Cinter chest function exceeds Minecraft command limit')
+        utility_dir = behavior_root / ('cinterforge_' + pack_id)
+        if utility_dir.is_symlink():
+            raise RuntimeError('Unsafe generated Cinter utility pack path')
+        # No selected behavior pack: retire ONLY our own utility registration.
+        # Preserve the status bridge and other user-owned pack references.
+        if not selected_ids:
+            updated = [row for row in references if row.get('pack_id') != pack_id]
+            if updated != references:
+                replacement = registry.with_name(registry.name + '-' + uuid.uuid4().hex + '.tmp')
+                try:
+                    replacement.write_text(json.dumps(updated, indent=2) + '\n', 'utf-8')
+                    os.replace(replacement, registry)
+                finally:
+                    replacement.unlink(missing_ok=True)
+            self._append_log('Cinter utility commands: no selected behavior pack; previous utility disabled')
+            return {'items': 0, 'chests': 0, 'enabled': False}
+
+        sorted_items = sorted(item_ids)
+        # Change the pack version with the actual command contents so a different
+        # per-world pack does not reuse Minecraft's cached utility definition.
+        signature = hashlib.sha256('\n'.join(sorted_items).encode('utf-8')).digest()
+        version = [1, int.from_bytes(signature[:2], 'big'),
+                   int.from_bytes(signature[2:4], 'big')]
+        manifest = {'format_version': 2,
+                    'header': {'name': 'Cinter Utility Commands',
+                               'description': 'World-level utilities generated by CinterForge.',
+                               'uuid': pack_id, 'version': version,
+                               'min_engine_version': [1, 20, 0]},
+                    'modules': [{'type': 'data', 'uuid': module_id, 'version': version}]}
+        lines = []
+        # Preserve the original CraftMaster two-chest behavior: 27 items per
+        # chest, five columns, spaced two blocks, starting three ahead.
+        for index, item in enumerate(sorted_items):
+            chest, slot = divmod(index, 27)
+            x = (chest % 5) * 2
+            z = 3 + (chest // 5) * 2
+            if slot == 0:
+                lines.append(f'setblock ^{x} ^ ^{z} chest replace')
+            lines.append(f'replaceitem block ^{x} ^ ^{z} slot.container {slot} {item} 1')
+        if not lines:
+            lines.append('say CinterForge: the selected pack contains no cinter items')
+        behavior_root.mkdir(parents=True, exist_ok=True)
+        staging = behavior_root / ('cinterforge-utility-stage-' + uuid.uuid4().hex)
+        backup = behavior_root / ('cinterforge-utility-backup-' + uuid.uuid4().hex)
+        try:
+            (staging / 'functions' / 'cinter').mkdir(parents=True)
+            (staging / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', 'utf-8')
+            (staging / 'functions' / 'cinter' / 'makechests.mcfunction').write_text(
+                '\n'.join(lines) + '\n', 'utf-8')
+            if utility_dir.exists():
+                utility_dir.rename(backup)
+            try:
+                staging.rename(utility_dir)
+            except BaseException:
+                if backup.exists():
+                    backup.rename(utility_dir)
+                raise
+            updated = [row for row in references if row.get('pack_id') != pack_id]
+            updated.append({'pack_id': pack_id, 'version': version})
+            replacement = registry.with_name(registry.name + '-' + uuid.uuid4().hex + '.tmp')
+            try:
+                replacement.write_text(json.dumps(updated, indent=2) + '\n', 'utf-8')
+                os.replace(replacement, registry)
+            finally:
+                replacement.unlink(missing_ok=True)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
+            if backup.exists():
+                shutil.rmtree(backup)
+        chests = (len(sorted_items) + 26) // 27
+        self._append_log(f'CINTER_UTILITY_READY items={len(sorted_items)} chests={chests} '
+                         'command=/function cinter/makechests')
+        if not item_ids:
+            self._append_log('Cinter utility commands: selected Add-On provides no cinter:* items')
+        return {'items': len(sorted_items), 'chests': chests,
+                'enabled': True, 'command': '/function cinter/makechests'}
+
     # --- Bedrock world selection and managed server copy ---------------------
-    def run_world(self, name: str, *, launch: bool = True) -> dict:
+    def run_world(self, name: str, *, launch: bool = True, selected_world: dict | None = None) -> dict:
         with self._lock:
             # `bedrock run ""` explicitly reuses the previously chosen save;
             # never guess a world when no selection has been made.
@@ -1400,6 +2062,10 @@ class CinterForgeBedrockManager:
             elif not (target / 'level.dat').is_file() or not (target / 'db').is_dir():
                 raise RuntimeError('Managed Bedrock world is incomplete: ' + str(target))
             self._install_world_status_bridge(target)
+            self._install_selected_world_pack(target, selected_world or world)
+            # Must follow Add-On installation: discover its actual cinter:* item
+            # definitions, then register the generated function for this world.
+            self._install_cinter_utility_pack(target)
             config = self.run_root / 'server.properties'
             original = config.read_text('utf-8') if config.is_file() else ''
             lines = [line for line in original.splitlines()
@@ -1411,8 +2077,10 @@ class CinterForgeBedrockManager:
                 os.replace(temp, config)
             finally:
                 temp.unlink(missing_ok=True)
+            chosen = selected_world or world
             self._save_world_settings({'root': self._world_settings().get('root'),
-                                       'selected': world})
+                                       'selected': {key: chosen[key] for key in
+                                                    ('id','path','edition','folder','name','command_name')}})
             # The desktop API prepares the managed copy first, then starts the
             # EXACT Setup-tested launcher in its own visible PTY Session.
             # Keep launch=True for existing non-UI callers of run_world().
