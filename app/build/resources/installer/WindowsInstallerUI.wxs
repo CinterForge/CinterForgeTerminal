@@ -18,9 +18,9 @@ wixl define-variable option so both native and Docker toolchains locate the same
       <Dialog Id="CinterForgeWelcome" Width="370" Height="270"
               Title="[ProductName] Setup">
         <Control Id="Artwork" Type="Bitmap" X="0" Y="0" Width="370"
-                 Height="234" Text="CinterForgeDialog" />
+                 Height="234" FixedSize="yes" Text="CinterForgeDialog" />
         <Control Id="Banner" Type="Bitmap" X="0" Y="0" Width="370"
-                 Height="44" Text="CinterForgeBanner" />
+                 Height="44" FixedSize="yes" Text="CinterForgeBanner" />
         <Control Id="Heading" Type="Text" X="142" Y="78" Width="212"
                  Height="26" Transparent="yes"
                  Text="CinterForge Terminal" />
