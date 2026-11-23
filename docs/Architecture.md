@@ -212,7 +212,10 @@ application publisher uploads this raw disk (never an Assets pack or ZIP) to
 public beta, and the authorized
 Terminal runtime endpoint `/api/infinitemac/media` checks its HFS signature,
 HTTPS range response and Infinite Mac CORS before `CinterForgeEmulators.js`
-adds the `disk_url` query parameter to eligible System 7–9 profiles. All
-emulator profiles continue to request Infinite HD. The provider owns actual
+adds the `disk_url` query parameter **only for System 7.1, Mac OS 7.6
+and Mac OS 8.1** (excluding the dedicated Lagomorph launcher). Both 68K
+views use the same OS-scoped allowlist over the real Infinite HD APPL scan,
+including copy/export and launch resolution; other OSes never mount the app
+disk. Existing classic-Mac profiles continue to request Infinite HD. The provider owns actual
 machine compatibility and disposable guest-side disk writes. Lagomorph's
 hard-coded two-floppy boot path remains unchanged.

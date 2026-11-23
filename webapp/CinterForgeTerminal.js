@@ -95,11 +95,12 @@
             if (!id.startsWith('macgame-') || byId.has(id)) continue;
             const game = CinterForgeState.macCatalog.get(id.slice('macgame-'.length));
             if (!game) continue;
+            const emulator = byId.get(game.emulator_profile);
+            if (!emulator || !emulator.machine || !emulator.disk) continue;
             const profile = {
               id, name: game.title,
-              machine: game.needs_mac_os_x ? 'Power Macintosh G4 (PCI Graphics)' : 'Quadra 650',
-              disk: game.needs_mac_os_x ? 'Mac OS 9.2' : 'Mac OS 7.6',
-              kind: 'emulator', year: 1993, macGame: true
+              machine: emulator.machine, disk: emulator.disk,
+              kind: 'emulator', year: emulator.year, macGame: true
             };
             CinterForgeState.profiles.push(profile);
             byId.set(id, profile);
@@ -156,6 +157,8 @@
         return 'macintosh';
       };
       const displayed = new Set();
+      const publicMachines = new Set(CinterForgeState.uniqueMuseumEmulators(data.emulators || [])
+        .map(profile => profile.id));
       const available = [
         ...(data.profiles || []),
         ...(data.museum || []).map(item => byId.get(item.id)),
@@ -164,7 +167,8 @@
       ].filter(Boolean);
       available.sort((a, b) => (a.year || 0) - (b.year || 0) || a.name.localeCompare(b.name));
       for (const profile of available) {
-        if (!profile || displayed.has(profile.id) || profile.lagomorph) continue;
+        if (!profile || displayed.has(profile.id) || profile.lagomorph ||
+            (profile.kind === 'emulator' && !publicMachines.has(profile.id))) continue;
         displayed.add(profile.id);
         CinterForgeState.addMuseumEntry(menuLists[groupOf(profile)], profile);
       }

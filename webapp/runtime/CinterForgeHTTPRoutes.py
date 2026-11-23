@@ -1066,6 +1066,22 @@ class CinterForgeHTTPRoutes:
                 self._json(200, {'spoken': not bool(error), 'voice': 'Zarvox',
                                  **({'error': error} if error else {})})
                 return
+            if route == '/api/infinitemac/clipboard-event':
+                # Same-origin, authenticated host observation only. The browser
+                # reports a matched clipboard reply; it does not authorize a
+                # guest command or claim the emulator booted merely by loading.
+                os_version = body.get('os')
+                kind = body.get('kind')
+                if os_version not in ('7.1', '7.6', '8.1') or kind not in ('ready', 'ack'):
+                    raise ValueError('Invalid Infinite Mac clipboard event')
+                if kind == 'ready':
+                    self.server.log_event('[INFINITE MAC] CINTERFORGE_READY ' + os_version +
+                                          ' (matching clipboard HELLO token returned)')
+                else:
+                    self.server.log_event('[INFINITE MAC] cinter:' + os_version +
+                                          ':ack received from 68K clipboard')
+                self._json(200, {'logged': True})
+                return
             if route == '/api/launcher/start':
                 if self.server.system != 'mac':
                     raise ValueError('Cross-platform Launchers are only available on the Mac host')

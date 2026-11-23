@@ -11,6 +11,387 @@
   'use strict';
   const CinterForgeState = window.CinterForgeClientState || (window.CinterForgeClientState = Object.create(null));
 
+  /*
+   * Every Infinite Mac tab owns one iframe for its entire lifetime. Hiding an
+   * iframe preserves the Macintosh, its open files and its mounted disks;
+   * changing src, removing the node or moving it through another document
+   * reboots the guest.
+   */
+  CinterForgeState.emulatorFrames = new Map();
+  CinterForgeState.activeEmulatorFrame = null;
+
+  // Mount and auto-open only the actual three CinterForge 68K game guests.
+  // emulator_loaded means the ROM started, not that Finder is ready.
+  const cinterForge68KBootDelay = Object.freeze({
+    'System 7.1': 12000,
+    'Mac OS 7.6': 16000,
+    'Mac OS 8.1': 20000
+  });
+  const cinterForgeOSAddress = Object.freeze({
+    'System 7.1': '7.1', 'Mac OS 7.6': '7.6', 'Mac OS 8.1': '8.1'
+  });
+  // Guest framebuffer coordinates, never host-window positions. On the
+  // Quadra 650 the Infinite HD Finder window *covers* CinterForge HD. Its
+  // close box is (33, 62); simply clicking the exposed CinterForge title
+  // bar while Infinite HD is in front does not reliably expose the app icon.
+  // The Mac II and Power Macintosh 7500 already expose their app icons.
+  const cinterForge68KFinder = Object.freeze({
+    'System 7.1': Object.freeze({app: {x: 40, y: 98}}),
+    'Mac OS 7.6': Object.freeze({closeInfiniteHD: {x: 33, y: 62},
+      window: {x: 220, y: 36}, app: {x: 40, y: 98}}),
+    'Mac OS 8.1': Object.freeze({window: {x: 205, y: 35}, app: {x: 42, y: 102}})
+  });
+  const startupQueue = [];
+  let clipboardOwner = null;
+  let clipboardPoll = null;
+  let clipboardReading = false;
+  // Startup isolation: without a proven automatic guest-to-host READY bridge,
+  // a missing acknowledgment is not permission to double-click the app again.
+  // A second Finder open can disrupt a process that has already begun startup.
+  const maxFinderAttempts = 1;
+
+  // DingusPPC (Power Macintosh 7500) accepts relative movement, unlike the
+  // absolute-coordinate Mini vMac and Basilisk II emulators. All guests still
+  // need the parent pointer relay in the embedded Terminal WebView.
+  const relativeMouseMachines = new Set(['Power Macintosh 7500']);
+
+  const nativeClipboard = () => CinterForgeState.platform === 'mac' &&
+    typeof window.cinterClipboard === 'function';
+  const readClipboard = () => window.cinterClipboard({action: 'paste'});
+  const writeClipboard = text => window.cinterClipboard({action: 'copy', text});
+  const log68KEvent = (os, kind) => {
+    // The Python service writes the actual server log. Never treat a queued
+    // browser callback or a native copy result as proof of guest readiness.
+    void CinterForgeState.api('/api/infinitemac/clipboard-event', {os, kind})
+      .catch(error => console.error('CinterForge 68K event log:', error));
+  };
+  const speak68KReadyGreeting = async () => {
+    // The 68K app never invokes MacinTalk. Reuse the host's native Zarvox
+    // greeting, triggered only after the guest echoes this boot's HELLO token.
+    if (CinterForgeState.platform !== 'mac') return;
+    for (const part of ['welcome', 'question']) {
+      try {
+        const result = await CinterForgeState.api('/api/startup/speech', {part});
+        if (!result?.spoken) {
+          console.warn('68K READY greeting unavailable:', result?.error);
+          return;
+        }
+      } catch (error) {
+        console.warn('68K READY greeting failed:', error);
+        return;
+      }
+    }
+  };
+  const liveStartup = frame => {
+    const startup = frame?.cinterForge68KStartup;
+    return startup && !startup.tab.closed &&
+      CinterForgeState.emulatorFrames.get(startup.tab.key) === frame;
+  };
+
+  const startNextHandshake = async () => {
+    if (clipboardOwner || !nativeClipboard()) return;
+    while (startupQueue.length) {
+      const frame = startupQueue.shift();
+      if (!liveStartup(frame) || frame.cinterForge68KStartup.ready) continue;
+      const startup = frame.cinterForge68KStartup;
+      clipboardOwner = frame; // Only one HELLO owns the shared clipboard.
+      startup.helloStarted = Date.now();
+      try {
+        const sent = await writeClipboard(`cinter:${startup.address}:hello ${startup.nonce}`);
+        if (sent !== true) throw new Error('Native clipboard rejected HELLO');
+        if (!clipboardPoll) clipboardPoll = setInterval(pollClipboard, 1000);
+      } catch (error) {
+        console.error('CinterForge 68K HELLO:', error);
+        clipboardOwner = null;
+        continue;
+      }
+      return;
+    }
+
+    // The host keeps polling while any 68K guest is open, including after
+    // READY, so unsolicited guest messages remain observable.
+  };
+  const releaseHandshake = frame => {
+    if (clipboardOwner === frame) {
+      clipboardOwner = null;
+      void startNextHandshake();
+    } else {
+      const index = startupQueue.indexOf(frame);
+      if (index >= 0) startupQueue.splice(index, 1);
+    }
+  };
+  const pollClipboard = async () => {
+    if (clipboardReading || !nativeClipboard()) return;
+    clipboardReading = true;
+    try {
+      const value = await readClipboard();
+      if (typeof value !== 'string' || value.length > 192) return;
+      const frame = clipboardOwner;
+      if (liveStartup(frame)) {
+        const startup = frame.cinterForge68KStartup;
+        if (!startup.ready && value ===
+            `cinter:${startup.address}:ready ${startup.nonce}`) {
+          startup.ready = true;
+          if (startup.timer) clearTimeout(startup.timer);
+          startup.timer = null;
+          console.info(`CINTERFORGE_READY ${startup.address}: clipboard round trip`);
+          log68KEvent(startup.address, 'ready');
+          releaseHandshake(frame);
+          void speak68KReadyGreeting();
+        } else if (Date.now() - startup.helloStarted > 110000) {
+          // An unproven clipboard bridge must not retry clicks indefinitely.
+          console.error(`CinterForge 68K ${startup.address}: no clipboard READY`);
+          releaseHandshake(frame);
+        }
+      }
+      for (const candidate of CinterForgeState.emulatorFrames.values()) {
+        const startup = candidate.cinterForge68KStartup;
+        if (startup?.pendingCommand &&
+            value === `cinter:${startup.address}:ack ${startup.pendingCommand}`) {
+          startup.pendingCommand = null;
+          log68KEvent(startup.address, 'ack');
+        }
+      }
+    } catch (error) {
+      console.error('CinterForge 68K clipboard poll:', error);
+    } finally {
+      clipboardReading = false;
+    }
+  };
+
+  // Prepared before setting the iframe src, so HELLO precedes guest boot.
+  CinterForgeState.arm68KClipboard = async frame => {
+    if (!liveStartup(frame)) return;
+    startupQueue.push(frame);
+    await startNextHandshake();
+  };
+
+  // Future host Game Cards may call this same pipe. A machine card never
+  // invokes PLAY: it only starts the OS with the Terminal companion disk.
+  CinterForgeState.send68KCommand = async (os, command) => {
+    if (!['7.1', '7.6', '8.1'].includes(os) ||
+        !/^(play [a-zA-Z0-9 .!'-]{1,63}|games|games report|games rescan|help)$/.test(command))
+      throw new Error('Invalid OS-targeted CinterForge command');
+    if (!nativeClipboard() || clipboardOwner)
+      throw new Error('CinterForge clipboard pipe is unavailable or handshaking');
+    const matches = [...CinterForgeState.emulatorFrames.values()].filter(frame =>
+      liveStartup(frame) && frame.cinterForge68KStartup.address === os &&
+      frame.cinterForge68KStartup.ready);
+    if (matches.length !== 1) throw new Error('Exactly one ready CinterForge guest is required');
+    const startup = matches[0].cinterForge68KStartup;
+    if (startup.pendingCommand) throw new Error('Previous CinterForge command not acknowledged');
+    startup.pendingCommand = command;
+    try {
+      if (await writeClipboard(`cinter:${os}:${command}`) !== true)
+        throw new Error('Native clipboard rejected command');
+      if (!clipboardPoll) clipboardPoll = setInterval(pollClipboard, 1000);
+    } catch (error) {
+      startup.pendingCommand = null;
+      throw error;
+    }
+  };
+
+  // Retry a physical Finder open while the guest is the selected tab. Do not
+  // flag success just because mouse events were sent: READY is the evidence.
+  CinterForgeState.schedule68KAppOpen = frame => {
+    const startup = frame?.cinterForge68KStartup;
+    if (!startup?.loaded || startup.ready || startup.timer ||
+        startup.attempts >= maxFinderAttempts || !liveStartup(frame)) return;
+    // Until DingusPPC pointer alignment is proven in a live guest, do not
+    // inject blind Finder clicks that can hold up the guest mouse. Manual
+    // mouse control must work independently of startup automation.
+    if (frame.relativeMouse) return;
+    const finder = cinterForge68KFinder[startup.os];
+    if (!finder) return;
+    const active = () => liveStartup(frame) &&
+      CinterForgeState.activeTab === startup.tab &&
+      CinterForgeState.activeEmulatorFrame === frame &&
+      !CinterForgeState.computerView.hidden && !frame.hidden;
+    if (!active()) return; // Resume on tab activation; never click another tab.
+    // Attempt Finder launch only once per guest boot. The clipboard may not
+    // synchronize automatically, so no READY cannot trigger another launch.
+    const deadline = startup.readyAt;
+    startup.timer = setTimeout(async () => {
+      startup.timer = null;
+      if (!active() || startup.ready) return;
+      const target = frame.contentWindow;
+      if (!target) return;
+      const send = data => target.postMessage(data, 'https://infinitemac.org');
+      const delays = CinterForgeState.LAGOMORPH_DELAYS_MS;
+      const pause = CinterForgeState.lagPause;
+      let pressed = false;
+      const move = position =>
+        send({type: 'emulator_mouse_move', ...position, deltaX: 0, deltaY: 0});
+      const down = () => { send({type: 'emulator_mouse_down', button: 0}); pressed = true; };
+      const up = () => {
+        if (!pressed) return;
+        send({type: 'emulator_mouse_up', button: 0});
+        pressed = false;
+      };
+      const click = async position => {
+        if (!active() || startup.ready) return false;
+        move(position);
+        await pause(delays.clickPointerSettle);
+        if (!active() || startup.ready) return false;
+        down();
+        await pause(delays.clickPress);
+        up();
+        return active();
+      };
+      const doubleClick = async position => {
+        if (!active() || startup.ready) return false;
+        move(position);
+        await pause(delays.doubleClickPointerSettle);
+        if (!active() || startup.ready) return false;
+        down();
+        await pause(delays.doubleClickFirstPress);
+        up();
+        await pause(delays.doubleClickPressGap);
+        if (!active() || startup.ready) return false;
+        down();
+        await pause(delays.doubleClickSecondPress);
+        up();
+        return active();
+      };
+      startup.attempts++;
+      // Ignore simultaneous host pointer moves during the scripted click.
+      // A moving real cursor must not steal the guest pointer between presses.
+      frame.cinterForgeAutomationClicking = true;
+      try {
+        frame.focus();
+        if (finder.closeInfiniteHD) {
+          // Close the foreground Infinite HD Finder window (not its desktop
+          // disk icon) before targeting the CinterForge Terminal application.
+          if (!await click(finder.closeInfiniteHD)) return;
+          await pause(400);
+          if (!active() || startup.ready) return;
+        }
+        if (finder.window) {
+          if (!await click(finder.window)) return;
+          await pause(400);
+          if (!active() || startup.ready) return;
+        }
+        await doubleClick(finder.app);
+      } catch (error) {
+        console.error('CinterForge 68K Finder launch:', error);
+      } finally {
+        up();
+        frame.cinterForgeAutomationClicking = false;
+        frame.resetPointerRelay?.();
+        if (active() && !startup.ready) {
+          // Absence of READY does not mean failure: the guest may already
+          // be running, and unattended scrap synchronization is unverified.
+          console.info(`CinterForgeTerminal ${startup.address}: Finder open attempted; guest readiness unverified`);
+        }
+      }
+    }, Math.max(0, deadline - Date.now()));
+  };
+
+  window.addEventListener('message', event => {
+    if (event.origin !== 'https://infinitemac.org' ||
+        event.data?.type !== 'emulator_loaded') return;
+    for (const frame of CinterForgeState.emulatorFrames.values()) {
+      if (event.source !== frame.contentWindow) continue;
+      const startup = frame.cinterForge68KStartup;
+      if (startup && !startup.loaded) {
+        startup.loaded = true;
+        startup.readyAt = Date.now() + cinterForge68KBootDelay[startup.os];
+        CinterForgeState.schedule68KAppOpen(frame);
+      }
+      break;
+    }
+  });
+
+  // The public gallery and machine menus show one representative machine per
+  // operating-system version. Keep all original profiles in the registry:
+  // direct game commands, restored tabs and Lagomorph still need their IDs.
+  const preferredMuseumMachines = new Map([
+    ['System 7.1', 'mac-ii'],
+    ['Mac OS 7.6', 'mac-quadra-650'], // public, not Lagomorph's private Quadra
+    ['Mac OS 8.1', 'power-macintosh-7500'],
+    ['Mac OS 9.0.4', 'power-macintosh-g3-blue-white']
+  ]);
+  CinterForgeState.uniqueMuseumEmulators = profiles => {
+    const systems = new Map();
+    const rank = profile =>
+      (profile.id === preferredMuseumMachines.get(profile.disk) ? 0 : 1) +
+      (/\b(?:Snow|Experimental)\b/i.test(profile.name) ? 10 : 0);
+    for (const profile of profiles) {
+      if (profile?.kind !== 'emulator' || profile.lagomorph || profile.macGame ||
+          typeof profile.id !== 'string' || !profile.disk) continue;
+      const key = (profile.os || 'macos') + ':' + profile.disk;
+      const previous = systems.get(key);
+      if (!previous || rank(profile) < rank(previous)) systems.set(key, profile);
+    }
+    return [...systems.values()];
+  };
+
+  CinterForgeState.hideEmulatorFrames = () => {
+    for (const frame of CinterForgeState.emulatorFrames.values()) {
+      // Release a held mouse button while the guest is still addressable.
+      if (!frame.hidden) frame.resetPointerRelay?.();
+      frame.hidden = true;
+      if (frame.pointerRelay) frame.pointerRelay.hidden = true;
+    }
+    CinterForgeState.activeEmulatorFrame = null;
+  };
+
+  CinterForgeState.removeEmulatorFrame = tab => {
+    const frame = CinterForgeState.emulatorFrames.get(tab.key);
+    if (!frame) return;
+    // Releasing a tab is the only time we intentionally destroy its guest.
+    if (frame.cinterForge68KStartup?.timer)
+      clearTimeout(frame.cinterForge68KStartup.timer);
+    releaseHandshake(frame);
+    if (clipboardPoll && ![...CinterForgeState.emulatorFrames.values()].some(candidate =>
+        candidate !== frame && candidate.cinterForge68KStartup)) {
+      clearInterval(clipboardPoll);
+      clipboardPoll = null;
+    }
+    frame.pointerRelay?.remove();
+    frame.remove();
+    CinterForgeState.emulatorFrames.delete(tab.key);
+    if (CinterForgeState.activeEmulatorFrame === frame)
+      CinterForgeState.activeEmulatorFrame = null;
+  };
+
+  CinterForgeState.getActiveInfiniteMacFrame = () =>
+    CinterForgeState.activeEmulatorFrame || CinterForgeState.frame;
+
+  /**
+   * Infinite Mac's documented postMessage protocol accepts absolute mouse
+   * positions on Mini vMac/Basilisk/SheepShaver and relative deltas on other
+   * emulators. Its screen_update_messages notifications expose the *actual*
+   * guest framebuffer width/height, which can differ from the parent iframe's
+   * CSS box (notably when the display is letterboxed).
+   */
+  CinterForgeState.installInfiniteMacPointerRelay = frame => {
+    // The earlier pointer-relay overlay intercepted the entire iframe and
+    // regressed the 7.1 and 8.1 guest mice. Keep the *user-confirmed working*
+    // recovery input path: Infinite Mac receives native iframe pointer events.
+    // Guest launch automation still uses its separate postMessage control path.
+    // Do not reintroduce a pointer-capturing overlay without live testing.
+    if (frame) frame.resetPointerRelay = () => {};
+  };
+
+  // Screen dimension messages are restricted to the exact origin and iframe.
+  // Notifications do not expose application data; only dimensions are retained.
+  window.addEventListener('message', event => {
+    if (event.origin !== 'https://infinitemac.org' || event.data?.type !== 'emulator_screen') return;
+    for (const frame of CinterForgeState.emulatorFrames.values()) {
+      if (event.source !== frame.contentWindow) continue;
+      const width = event.data.width;
+      const height = event.data.height;
+      if (Number.isInteger(width) && Number.isInteger(height) &&
+          width > 0 && height > 0 && width <= 8192 && height <= 8192 &&
+          (frame.guestScreen?.width !== width || frame.guestScreen?.height !== height)) {
+        frame.guestScreen = {width, height};
+        frame.resetPointerRelay?.();
+      }
+      break;
+    }
+  });
+
   // Original source lines 441–441
   CinterForgeState.lagBootSequence = 0;
 
@@ -27,7 +408,7 @@
      * generation.
      */
     const valid = () => stamp === CinterForgeState.lagBootSequence && !CinterForgeState.computerView.hidden &&
-      CinterForgeState.selected === 'quadra-650' && CinterForgeState.frame.contentWindow === target;
+      CinterForgeState.selected === 'quadra-650' && CinterForgeState.getActiveInfiniteMacFrame().contentWindow === target;
     let down = false, meta = false, q = false;
     /**
      * Post an emulator control message to Infinite Mac’s fixed, trusted origin.
@@ -124,7 +505,7 @@
         // Infinite Mac expects physical ADB MetaLeft + KeyQ, not a browser
         // keyboard shortcut.  Keep both keys held long enough for the guest
         // to see them; release even if the profile changes mid-sequence.
-        CinterForgeState.frame.focus();
+        CinterForgeState.getActiveInfiniteMacFrame().focus();
         send({ type: 'emulator_key_down', code: 'MetaLeft' });
         meta = true;
         await CinterForgeState.lagPause(CinterForgeState.LAGOMORPH_DELAYS_MS.quitModifierDown);
@@ -151,7 +532,7 @@
       // affects the currently focused guest application, never the app shell.
       await CinterForgeState.lagPause(CinterForgeState.LAGOMORPH_DELAYS_MS.beforeCloseWindowFallback);
       if (!valid()) return;
-      CinterForgeState.frame.focus();
+      CinterForgeState.getActiveInfiniteMacFrame().focus();
       send({ type: 'emulator_key_down', code: 'MetaLeft' });
       meta = true;
       await CinterForgeState.lagPause(CinterForgeState.LAGOMORPH_DELAYS_MS.closeModifierDown);
@@ -187,7 +568,7 @@
 
   // Original source lines 608–624
   window.addEventListener('message', event => {
-    if (event.origin !== 'https://infinitemac.org' || event.source !== CinterForgeState.frame.contentWindow ||
+    if (event.origin !== 'https://infinitemac.org' || event.source !== CinterForgeState.getActiveInfiniteMacFrame().contentWindow ||
       CinterForgeState.computerView.hidden || event.data?.type !== 'emulator_loaded' ||
       CinterForgeState.selected !== 'quadra-650') return;
     const stamp = CinterForgeState.lagBootSequence;
@@ -197,7 +578,7 @@
     CinterForgeState.lagWelcomeTimer = setTimeout(() => {
       CinterForgeState.lagWelcomeTimer = null;
       if (stamp !== CinterForgeState.lagBootSequence) return;
-      const target = CinterForgeState.frame.contentWindow;
+      const target = CinterForgeState.getActiveInfiniteMacFrame().contentWindow;
       if (target) void CinterForgeState.lagomorphBootControls(stamp, target).catch(e => {
         console.error('Lagomorph guest controls:', e);
       });
@@ -216,6 +597,7 @@
     // Only the recyclable emulator frame is disposed. The Code-OSS iframe
     // retains its workbench, editor state and all legitimate PTYs.
     CinterForgeState.codeFrame.hidden = true;
+    CinterForgeState.hideEmulatorFrames();
     CinterForgeState.frame.hidden = false;
     CinterForgeState.frame.src = 'about:blank';
     delete CinterForgeState.frame.dataset.launcher;
@@ -227,7 +609,8 @@
   };
 
   // Original source lines 653–730
-  CinterForgeState.showComputer = async (profile) => {
+  CinterForgeState.showComputer = async (profile, tab) => {
+    CinterForgeState.hideEmulatorFrames();
     CinterForgeState.lagBootSequence++;
     if (CinterForgeState.lagWelcomeTimer) {
       clearTimeout(CinterForgeState.lagWelcomeTimer);
@@ -245,7 +628,7 @@
     CinterForgeState.codeError.hidden = true;
     if (CinterForgeState.museumKind(profile) !== 'codeoss') {
       CinterForgeState.codeFrame.hidden = true;
-      CinterForgeState.frame.hidden = false;
+      CinterForgeState.frame.hidden = CinterForgeState.museumKind(profile) !== 'joshua';
       delete CinterForgeState.frame.dataset.launcher;
     }
     if (CinterForgeState.museumKind(profile) === 'joshua') {
@@ -271,6 +654,15 @@
         }, 12500);
       }
     } else {
+      const existing = tab && CinterForgeState.emulatorFrames.get(tab.key);
+      if (existing) {
+        CinterForgeState.activeEmulatorFrame = existing;
+        existing.hidden = false;
+        if (existing.pointerRelay) existing.pointerRelay.hidden = false;
+        existing.resetPointerRelay?.();
+        CinterForgeState.schedule68KAppOpen(existing);
+        return;
+      }
       const url = new URL('https://infinitemac.org/embed');
       url.searchParams.set('machine', profile.machine);
       url.searchParams.set('disk', profile.disk);
@@ -281,12 +673,13 @@
       const classicMac = /^(?:System 7\.|Mac OS (?:7\.|8\.|9\.))/.test(profile.disk || '');
       if (profile.macGame || (classicMac && !profile.lagomorph))
         url.searchParams.set('infinite_hd', 'true');
-      // System 7/8/9 Macs mount BOTH the emulator's native Infinite HD and
-      // our published raw CinterForgeTerminal.68k.img. This uses the same
-      // Infinite Mac disk_url mechanism already proven by Lagomorph; do not override the
-      // system disk, game library_url or Lagomorph's fixed floppy mounts.
-      // System 6 and older, NeXT, BeOS and OS X do not mount the 68K disk.
-      if (classicMac && !profile.lagomorph) {
+      // The CinterForge Terminal disk is only for the three curated game OS versions.
+      // Leave every other System 7/8/9 guest's Infinite HD behavior alone,
+      // and never interfere with Lagomorph's separate calibrated media.
+      // The dynamic macGame profile for a Quadra 650 is not a Lagomorph
+      // session, even though the museum's Quadra 650 profile is reserved.
+      const cinterForgeGameOS = Object.hasOwn(cinterForge68KBootDelay, profile.disk);
+      if (cinterForgeGameOS && !profile.lagomorph) {
         try {
           const media = await CinterForgeState.api('/api/infinitemac/media');
           if (media.configured && media.url) {
@@ -299,7 +692,7 @@
               'CinterForge 68K application disk is not published yet. Run ./Cinter all 68k publish beta.');
           }
         } catch (e) {
-          CinterForgeState.notice('CinterForge HD unavailable: ' + e.message);
+          CinterForgeState.notice('CinterForge Terminal disk unavailable: ' + e.message);
         }
       }
       if (profile.macGame) {
@@ -336,7 +729,49 @@
           CinterForgeState.notice('Lagomorph CD-ROM unavailable: ' + e.message);
         }
       }
-      CinterForgeState.frame.src = url.toString();
+      if (!tab) throw new Error('Infinite Mac launch requires its owning session tab');
+      // Do not steal focus when an earlier asynchronous media lookup returns
+      // after the user has already selected a different tab.
+      if (tab.closed || CinterForgeState.activeTab !== tab) return;
+      let iframe = CinterForgeState.emulatorFrames.get(tab.key);
+      if (!iframe) {
+        iframe = document.createElement('iframe');
+        iframe.className = 'infinitemac-session-frame';
+        iframe.title = profile.name + ' emulator';
+        iframe.referrerPolicy = 'no-referrer';
+        iframe.relativeMouse = relativeMouseMachines.has(profile.machine);
+        iframe.setAttribute('allow', 'cross-origin-isolated');
+        iframe.hidden = true;
+        CinterForgeState.computerView.append(iframe);
+        CinterForgeState.emulatorFrames.set(tab.key, iframe);
+        // Only attempt guest app startup after its HFS disk URL was attached.
+        // No automation is scheduled for missing media or Lagomorph.
+        if (cinterForgeGameOS && !profile.lagomorph &&
+            url.searchParams.getAll('disk_url').length === 1)
+          iframe.cinterForge68KStartup = {
+            os: profile.disk, address: cinterForgeOSAddress[profile.disk],
+            nonce: [...crypto.getRandomValues(new Uint8Array(8))]
+              .map(byte => byte.toString(16).padStart(2, '0')).join(''),
+            tab, loaded: false, ready: false, attempts: 0,
+            timer: null, readyAt: 0, helloStarted: 0, pendingCommand: null
+          };
+        CinterForgeState.installInfiniteMacPointerRelay(iframe);
+        // Dimensions are sent at most once every 10 seconds.  The parent
+        // discards the pixel buffer and uses only width and height.
+        url.searchParams.set('screen_update_messages', 'true');
+        url.searchParams.set('screen_update_interval', '10000');
+        if (iframe.cinterForge68KStartup)
+          await CinterForgeState.arm68KClipboard(iframe);
+        // Boot its original tab even if the user switched while the native
+        // clipboard handshake was being prepared; do not reactivate it.
+        if (!tab.closed && CinterForgeState.emulatorFrames.get(tab.key) === iframe)
+          iframe.src = url.toString();
+      }
+      if (tab.closed || CinterForgeState.activeTab !== tab) return;
+      CinterForgeState.activeEmulatorFrame = iframe;
+      iframe.hidden = false;
+      if (iframe.pointerRelay) iframe.pointerRelay.hidden = false;
+      iframe.resetPointerRelay?.();
     }
   };
 

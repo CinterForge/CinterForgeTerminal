@@ -521,7 +521,7 @@ The `app/68k/` target compiles a genuine classic Macintosh
 `CinterForgeTerminal` APPL using the offline, Setup-provisioned Retro68 toolchain.
 Build generates classic Finder icons from `app/build/resources/AppIcon.png`,
 Game Card pixels from `webapp/cards/GameCard.png`, and a raw **8 MiB HFS
-Standard** disk with Finder volume name **CinterForge HD**. It reuses
+Standard** disk with Finder volume name **CinterForge Terminal**. It reuses
 Lagomorph's proven HFS formatter, MacBinary resource-fork handling and
 root-level `APPL` packaging, while placing the editable `Game.txt` at the
 root and extra resources under `Support Files`. Neither the

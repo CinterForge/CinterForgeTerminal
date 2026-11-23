@@ -24,6 +24,8 @@ DISTRIBUTION_RELATIVE = Path('CinterForgeTerminal/Distribution')
 RECEIPT_RELATIVE = Path('Intermediates/CinterForgeTerminal/InfiniteMac/launcher-receipt.json')
 STAGE_RECEIPT_RELATIVE = Path('Intermediates/CinterForgeTerminal/InfiniteMac/stage-receipt.json')
 APPLICATION_NAME = 'CinterForgeTerminal'
+FINDER_APPLICATION_NAME = 'CinterForge Terminal'
+HFS_VOLUME_NAME = 'CinterForge Terminal'
 CAPACITY = 8 * 1024 * 1024
 RECEIPT_SCHEMA = 'cinterforge.infinitemac.hfs-build.v4'
 STAGE_SCHEMA = 'cinterforge.infinitemac.hfs-stage.v1'
@@ -127,6 +129,18 @@ def _card_rgb(source_png: Path, destination: Path) -> None:
             file.write(struct.pack('>H', (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3)))
 
 
+
+def _rgb555_artwork(source_png: Path, destination: Path, width: int, height: int) -> None:
+    """Native classic Mac 16-bit RGB data, using the authored product icon."""
+    source_width, source_height, rgb = _png_rgb(source_png)
+    scaled = _resized_rgb(source_width, source_height, rgb, width, height)
+    with destination.open('wb') as file:
+        file.write(struct.pack('>HH', width, height))
+        for offset in range(0, len(scaled), 3):
+            r, g, b = scaled[offset:offset+3]
+            file.write(struct.pack('>H', (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3)))
+
+
 def _icon_resources(source_png: Path, destination: Path) -> None:
     width, height, rgb = _png_rgb(source_png)
     rgb = _resized_rgb(width, height, rgb, 32, 32)
@@ -185,6 +199,44 @@ def _icon_resources(source_png: Path, destination: Path) -> None:
             output.write('};\n')
 
 
+def _fork_resource(fork: bytes, kind: bytes, identity: int) -> bytes | None:
+    """Read one classic Mac resource by type/ID, respecting resource-map offsets."""
+    if len(fork) < 16:
+        raise ValueError('Truncated classic Mac resource fork')
+    data_offset, map_offset, data_length, map_length = struct.unpack_from('>IIII', fork)
+    data_end, map_end = data_offset + data_length, map_offset + map_length
+    if data_end > len(fork) or map_end > len(fork) or map_length < 30:
+        raise ValueError('Invalid classic Mac resource fork bounds')
+    type_list = map_offset + struct.unpack_from('>H', fork, map_offset + 24)[0]
+    if type_list + 2 > map_end:
+        raise ValueError('Invalid classic Mac resource type list')
+    type_count = struct.unpack_from('>H', fork, type_list)[0] + 1
+    if type_list + 2 + type_count * 8 > map_end:
+        raise ValueError('Truncated classic Mac resource type entries')
+    for type_index in range(type_count):
+        entry = type_list + 2 + type_index * 8
+        if fork[entry:entry + 4] != kind:
+            continue
+        ref_count, ref_offset = struct.unpack_from('>HH', fork, entry + 4)
+        references = type_list + ref_offset
+        if references + (ref_count + 1) * 12 > map_end:
+            raise ValueError('Truncated classic Mac resource references')
+        for ref_index in range(ref_count + 1):
+            reference = references + ref_index * 12
+            if struct.unpack_from('>h', fork, reference)[0] != identity:
+                continue
+            offset = int.from_bytes(fork[reference + 5:reference + 8], 'big')
+            resource = data_offset + offset
+            if resource + 4 > data_end:
+                raise ValueError('Invalid classic Mac resource data offset')
+            size = struct.unpack_from('>I', fork, resource)[0]
+            if resource + 4 + size > data_end:
+                raise ValueError('Truncated classic Mac resource data')
+            return fork[resource + 4:resource + 4 + size]
+        return None
+    return None
+
+
 def _validated_macbinary(raw: bytes) -> tuple[bytes, bytes, bytes]:
     if len(raw) < 256 or raw[0] != 0 or not 1 <= raw[1] <= 63 or raw[65:69] != b'APPL':
         raise ValueError('Retro68 did not produce a classic APPL MacBinary file')
@@ -194,9 +246,23 @@ def _validated_macbinary(raw: bytes) -> tuple[bytes, bytes, bytes]:
     end = start + fork_len
     if not fork_len or end > len(raw) or data_len > 20*1024*1024 or fork_len > 20*1024*1024:
         raise ValueError('Classic Mac APPL data/resource forks are incomplete')
-    if b'BNDL' not in raw[start:end] or b'ICN#' not in raw[start:end]:
+    fork = raw[start:end]
+    if b'BNDL' not in fork or b'ICN#' not in fork:
         raise ValueError('Retro68 output is missing the Finder icon/BNDL resource')
-    return raw[128:128 + data_len], raw[start:end], raw[65:73]
+    # Finder/Process Manager uses SIZE (0) if present, otherwise SIZE (-1).
+    # Validate the final combined APPL, not merely the authored Rez source:
+    # Retro68 otherwise supplies its own smaller SIZE resource by default.
+    for identity in (-1, 0):
+        size_resource = _fork_resource(fork, b'SIZE', identity)
+        if identity == 0 and size_resource is None:
+            continue
+        if size_resource is None or len(size_resource) < 10:
+            raise ValueError('Retro68 output is missing SIZE (-1)')
+        preferred, minimum = struct.unpack_from('>II', size_resource, 2)
+        if preferred != 4 * 1024 * 1024 or minimum != 2 * 1024 * 1024:
+            raise ValueError(f'Wrong classic Mac SIZE ({identity}): '
+                             f'preferred={preferred}, minimum={minimum}; expected 4 MB/2 MB')
+    return raw[128:128 + data_len], fork, raw[65:73]
 
 
 def _compile(builds: Path, scratch: Path) -> Path:
@@ -216,7 +282,7 @@ def _compile(builds: Path, scratch: Path) -> Path:
         raise RuntimeError('Setup-owned Docker CLI missing')
     src = scratch / 'Source'
     src.mkdir()
-    for filename in ('CMakeLists.txt', 'CinterForgeTerminal.c'):
+    for filename in ('CMakeLists.txt', 'CinterForgeTerminal.c', 'memory.r'):
         shutil.copy2(SOURCE/'app/68k'/filename, src/filename)
     _icon_resources(SOURCE/'app/build/resources/AppIcon.png', src/'generated_icons.r')
     print('[INFINITE MAC] Compiling CinterForgeTerminal APPL in offline Retro68 68K OCI', flush=True)
@@ -273,6 +339,7 @@ def setup_check(builds: Path) -> dict:
         raise RuntimeError('Missing sealed HFS assembly tool; run ./Cinter setup all')
     for source in (SOURCE / 'app/68k/CMakeLists.txt',
                    SOURCE / 'app/68k/CinterForgeTerminal.c',
+                   SOURCE / 'app/68k/memory.r',
                    SOURCE / 'app/build/resources/AppIcon.png',
                    SOURCE / 'webapp/cards/GameCard.png'):
         if not source.is_file() or source.is_symlink():
@@ -313,7 +380,7 @@ def build(builds: Path) -> dict:
     receipt.parent.mkdir(parents=True, exist_ok=True)
     output = root / IMAGE_NAME
     inputs = [Path(__file__), SOURCE / 'app/68k/CinterForgeTerminal.c',
-              SOURCE / 'app/68k/CMakeLists.txt',
+              SOURCE / 'app/68k/CMakeLists.txt', SOURCE / 'app/68k/memory.r',
               SOURCE / 'app/build/resources/AppIcon.png', SOURCE / 'webapp/cards/GameCard.png']
     for source in inputs:
         if not source.is_file() or source.is_symlink():
@@ -349,28 +416,29 @@ def build(builds: Path) -> dict:
         support_files.mkdir()
         (contents / 'Game.txt').write_bytes(b'\r')
         (support_files / 'README').write_bytes((
-            'CinterForgeTerminal - classic Macintosh application\r'
-            'Double-click CinterForgeTerminal for the classic Mac terminal.\r'
-            'Type games to list apps; games report opens a separate card window.\r'
+            'CinterForge Terminal - classic Macintosh application\r'
+            'CinterForge Terminal starts without automatically launching a game.\r'
+            'Type games to list apps; games report opens the five-column cards.\r'
             'The Game Cards show the real Finder application name and icon.\r'
-            'To test a game name: edit Game.txt in SimpleText, save, then open\r'
-            'CinterForgeTerminal again. An exact name launches automatically.\r'
-            'Clear Game.txt for Terminal, then games report for cards.\r'
-            'Use Games menu: Run Game.txt after edits, without rebooting.\r'
+            'To launch a game from Game.txt, edit it in SimpleText then choose\r'
+            'Games: Run Game.txt. Games never start automatically at boot.\r'
+            'The Terminal stays open and listens for cinter:<os>: commands.\r'
             'This disk is writable only for the current emulator session.\r'
         ).encode('mac_roman'))
         _card_rgb(SOURCE / 'webapp/cards/GameCard.png',
                   support_files / 'GameCard.rgb')
+        _rgb555_artwork(SOURCE / 'app/build/resources/AppIcon.png',
+                        support_files / 'CinterForgeLogo.rgb', 40, 40)
         for document in (support_files / 'README', contents / 'Game.txt'):
             _setxattr(document, 'com.apple.FinderInfo', b'TEXTttxt' + bytes(24))
-        application = contents / APPLICATION_NAME
+        application = contents / FINDER_APPLICATION_NAME
         application.write_bytes(data)
         _setxattr(application, 'com.apple.FinderInfo',
                   type_creator + struct.pack('>H', 0x2000) + bytes(22))
         _setxattr(application, 'com.apple.ResourceFork', fork)
         image = scratch / IMAGE_NAME
-        _stage_hfs_linux(builds, scratch, [(contents, image, 'CinterForge HD', CAPACITY,
-                                           ':' + APPLICATION_NAME)])
+        _stage_hfs_linux(builds, scratch, [(contents, image, HFS_VOLUME_NAME, CAPACITY,
+                                           ':' + FINDER_APPLICATION_NAME)])
         _classic_hfs_signature(image)
         if output.exists() and _hash(output) != previous.get('image_sha256'):
             raise RuntimeError('68K Build image changed during compilation; preserving edits')

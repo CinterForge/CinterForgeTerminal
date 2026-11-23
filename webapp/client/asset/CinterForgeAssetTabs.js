@@ -178,8 +178,7 @@
     }
     const styles = state.profiles.filter(profile => profile?.kind === 'terminal' &&
       typeof profile.id === 'string');
-    const machines = state.profiles.filter(profile => profile?.kind === 'emulator' &&
-      !profile.lagomorph && !profile.macGame && typeof profile.id === 'string');
+    const machines = state.uniqueMuseumEmulators(state.profiles);
     if (!machines.length || !styles.length) throw new Error('Museum catalog is not ready');
     const byYear = (a, b) => (Number(a.year) || 0) - (Number(b.year) || 0) || a.name.localeCompare(b.name);
     machines.sort(byYear);
@@ -235,10 +234,11 @@
       const card = element('article', 'emulator-gallery-card cf-card cf-card--machine');
       const searchText = [profile.name, profile.machine, profile.disk,
         profile.year, profile.columns, group].filter(Boolean).join(' ').toLocaleLowerCase();
+      const displayName = group === 'Terminal Styles' ? profile.name : profile.disk;
       const thumb = element('button', 'emulator-gallery-thumb cf-card__media');
       thumb.type = 'button';
-      thumb.setAttribute('aria-label', 'Open ' + profile.name + ' in a new Terminal tab');
-      thumb.title = 'Open ' + profile.name;
+      thumb.setAttribute('aria-label', 'Open ' + displayName + ' on ' + (profile.machine || profile.name) + ' in a new Terminal tab');
+      thumb.title = 'Open ' + displayName;
       thumb.dataset.family = group;
       if (group === 'Terminal Styles') {
         // A true sample of this profile's authored palette, not an image of
@@ -273,10 +273,10 @@
         state.openMuseumProfile(profile.id);
       });
       const body = element('div', 'emulator-gallery-meta cf-card__details');
-      addText(body, 'strong', '', profile.name);
+      addText(body, 'strong', '', displayName);
       addText(body, 'small', '', group === 'Terminal Styles'
         ? [profile.year, profile.columns ? profile.columns + ' columns' : ''].filter(Boolean).join(' · ')
-        : [profile.year, profile.disk, profile.machine].filter(Boolean).join(' · '));
+        : [profile.year, profile.machine].filter(Boolean).join(' · '));
       const actions = element('div', 'cf-card__actions');
       const open = element('button', '', group === 'Terminal Styles' ? 'Apply Style' : 'Open Emulator');
       open.type = 'button';

@@ -128,11 +128,27 @@ CinterForgeState.openSession = async function openSession(profileId, backend = '
         !await CinterForgeState.requestDevTools('code')) return;
     if ((backend === 'linux' || backend === 'win') && !CinterForgeState.terminalActionEnabled(backend) &&
         !await CinterForgeState.requestDevTools(backend)) return;
-    // CodeOSS owns a single workbench and guest terminal set. A second
-    // click or restored layout MUST focus, not allocate a second worker.
-    if (profileId === 'codeoss') {
-      const current = CinterForgeState.tabs.find(tab => !tab.closed && tab.profileId === 'codeoss');
-      if (current) return CinterForgeState.activateTab(current);
+    // Code-OSS is singleton. Infinite Mac machine cards are also singleton
+    // per OS version: different hardware profiles for the same OS must not
+    // boot another copy. Keep the independent Lagomorph guest isolated, and
+    // preserve direct macGame sessions until the host Game Cards replace them.
+    const requestedProfile = CinterForgeState.profiles.find(p => p.id === profileId);
+    const requestedKind = CinterForgeState.museumKind(requestedProfile);
+    if (profileId === 'codeoss' || requestedKind === 'emulator' || requestedKind === 'joshua') {
+      const emulatorKey = profile => profile?.macGame || profile?.lagomorph
+        ? profile.id : `${profile?.os || 'macos'}:${profile?.disk || profile?.id}`;
+      const current = CinterForgeState.tabs.find(tab => {
+        if (tab.closed || tab.backend !== backend) return false;
+        if (profileId === 'codeoss' || requestedKind === 'joshua')
+          return tab.profileId === profileId;
+        if (tab.kind !== 'emulator') return false;
+        const previous = CinterForgeState.profiles.find(p => p.id === tab.profileId);
+        return previous && emulatorKey(requestedProfile) === emulatorKey(previous);
+      });
+      if (current) {
+        if (current !== CinterForgeState.activeTab) await CinterForgeState.activateTab(current);
+        return current;
+      }
     }
     // Do not drop a native/File-menu request while the initial PTY is still
     // connecting. Windows WebView2 can deliver the click during first startup.
@@ -185,6 +201,13 @@ CinterForgeState.openSession = async function openSession(profileId, backend = '
       CinterForgeState.activeTab.display.render();
     }
     CinterForgeState.activeTab = tab;
+    // New sessions select their tab directly instead of going through
+    // activateTab(). Hide any existing gallery/map view here as well, or it
+    // remains painted over the new emulator until the user switches tabs.
+    for (const openTab of CinterForgeState.tabs) {
+      if ((openTab.kind === 'craftmaster-map' || openTab.kind === 'asset-view') && openTab.mapFrame)
+        openTab.mapFrame.hidden = true;
+    }
     CinterForgeState.updateCodeMenuMode();
     CinterForgeState.session = null;
     CinterForgeState.selected = profile.id;
@@ -199,7 +222,7 @@ CinterForgeState.openSession = async function openSession(profileId, backend = '
         if (!CinterForgeState.acceptUI) localStorage.setItem('cinterterminal.profile.' + CinterForgeState.platform, profile.id);
       if (tab.kind !== 'terminal') {
         CinterForgeState.notice('Opening ' + profile.name + ' emulator…');
-        await CinterForgeState.showComputer(profile);
+        await CinterForgeState.showComputer(profile, tab);
         CinterForgeState.updateCodeMenuMode();
         CinterForgeState.$('terminal-overlay').dataset.profile = profile.id;
         CinterForgeState.$('terminal-machine-title').textContent = profile.name.toUpperCase();
@@ -305,7 +328,7 @@ CinterForgeState.reconnectTab = async function reconnectTab() {
     if (tab.kind !== 'terminal') {
       // Reconnect is not permission to reconstruct a live Code-OSS workbench.
       if (tab.profileId === 'codeoss') return;
-      await CinterForgeState.showComputer(CinterForgeState.profiles.find(p => p.id === tab.profileId));
+      await CinterForgeState.showComputer(CinterForgeState.profiles.find(p => p.id === tab.profileId), tab);
       return;
     }
     CinterForgeState.closeTerminalSocket(tab);

@@ -55,8 +55,12 @@ setInterval(async () => {
       if (!result.game) return;
       const game = CinterForgeState.macCatalog.get(result.game);
       if (!game) throw new Error('Unknown Macintosh game: ' + result.game);
-      const machine = game.needs_mac_os_x ? 'Power Macintosh G4 (PCI Graphics)' : 'Quadra 650';
-      const disk = game.needs_mac_os_x ? 'Mac OS 9.2' : 'Mac OS 7.6';
+      // Resolve the curated starting OS through the existing museum profiles:
+      // never invent a disk/machine pair or treat a guess as guest-tested.
+      const emulator = CinterForgeState.profiles.find(profile => profile.id === game.emulator_profile);
+      if (!emulator || !emulator.machine || !emulator.disk)
+        throw new Error('Unsupported Macintosh emulator profile for ' + game.title);
+      const { machine, disk } = emulator;
       CinterForgeState.profiles = CinterForgeState.profiles.filter(profile => profile.id !== 'macgame-' + result.game);
       CinterForgeState.profiles.push({
         id: 'macgame-' + result.game,
@@ -64,7 +68,7 @@ setInterval(async () => {
         machine,
         disk,
         kind: 'emulator',
-        year: 1993,
+        year: emulator.year,
         macGame: true,
         gameAttemptUrl: result.url || null,
         gameUnverified: !result.verified

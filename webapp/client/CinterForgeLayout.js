@@ -99,7 +99,9 @@ CinterForgeState.addMuseumEntry = (target, profile) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'museum-entry';
-    button.textContent = `${profile.year} ${profile.name}`;
+    button.textContent = profile.kind === 'emulator'
+      ? `${profile.disk} · ${profile.machine || profile.name}`
+      : `${profile.year} ${profile.name}`;
     CinterForgeState.appendDecorativeIcon(button, CinterForgeState.iconCategoryForProfile(profile));
     button.addEventListener('click', () => CinterForgeState.openMuseumProfile(profile.id));
     target.append(button);

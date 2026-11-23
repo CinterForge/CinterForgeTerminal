@@ -392,6 +392,14 @@
       "kind": "emulator"
     },
     {
+      "id": "mac-quadra-650",
+      "name": "Quadra 650 (Mac OS 7.6)",
+      "machine": "Quadra 650",
+      "disk": "Mac OS 7.6",
+      "year": 1993,
+      "kind": "emulator"
+    },
+    {
       "id": "power-macintosh-6100",
       "name": "Power Macintosh 6100",
       "machine": "Power Macintosh 6100",
@@ -824,6 +832,11 @@
     },
     {
       "id": "quadra-650",
+      "year": 1993,
+      "kind": "emulator"
+    },
+    {
+      "id": "mac-quadra-650",
       "year": 1993,
       "kind": "emulator"
     },

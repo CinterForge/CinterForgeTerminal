@@ -1,5 +1,5 @@
 /*
- * CinterForgeTerminal for classic Macintosh (Motorola 68000 / System 7+).
+ * CinterForge Terminal for classic Macintosh (Motorola 68000 / System 7+).
  *
  * This is a real Macintosh application, not the modern Terminal WebView.
  * It has two ordinary Mac OS windows:
@@ -9,11 +9,11 @@
  *
  * Games are discovered from actual APPL files on the mounted Infinite HD.
  * Their Finder names and native icon resources are read from those files.
- * On startup, an optional plain-text Game.txt on CinterForge HD requests an
- * automatic launch. An empty Game.txt opens the regular Terminal interface.
+ * Machine-card startup opens only this Terminal. Game.txt is available only
+ * through the explicit Run Game.txt command; no games auto-launch at boot.
  *
- * No AppleScript, networking, modern OS APIs, or host-side game catalog is
- * required at runtime. Setup/Build create this app using Retro68.
+ * The System 7 Scrap Manager is polled for OS-addressed cinter: commands.
+ * Setup/Build create this app using Retro68.
  */
 #include <Types.h>
 #include <Quickdraw.h>
@@ -33,18 +33,28 @@
 #include <ctype.h>
 #include <stdio.h>
 
-#define MAX_DISCOVERED_APPLICATIONS 1200
+/* The OS-specific allowlist currently contains 83 APPL entries in total.
+ * Avoid reserving ~200 KB for 1,200 applications in every classic Mac process;
+ * 256 leaves substantial room for distinct versions and later additions. */
+#define MAX_DISCOVERED_APPLICATIONS 256
 #define MAX_CATALOG_FOLDERS 1200
 #define MAX_CATALOG_ENTRIES 50000
-#define CARD_WIDTH 145
-#define CARD_HEIGHT 225
-#define CARD_SPACING 12
+/* The authored 145x225 artwork stretches horizontally to fill five
+ * columns at every Games Report window width. Keep the card height fixed. */
+#define CARD_ARTWORK_WIDTH 145
+#define CARD_ARTWORK_HEIGHT 225
+#define CARD_HEIGHT 144
+#define CARD_SPACING 7
+#define REPORT_COLUMN_COUNT 5
 #define REPORT_HEADER_HEIGHT 98
 #define REPORT_FOOTER_HEIGHT 23
-#define REPORT_SIDE_MARGIN 14
+#define REPORT_SIDE_MARGIN 8
 #define MAX_TERMINAL_HISTORY_LINES 1300
 #define TERMINAL_OUTPUT_LINE_SIZE 110
 #define TERMINAL_INPUT_SIZE 128
+#define CLASSIC_SCROLLBAR_WIDTH 16
+#define TERMINAL_LINE_HEIGHT 15
+#define TERMINAL_PROMPT_AREA_HEIGHT 47
 
 /* Every classic HFS volume uses directory ID 2 for its root directory.
  * Multiversal Interfaces omits Apple's fsRtDirID compatibility constant. */
@@ -75,17 +85,19 @@ static UInt32 mac_double_click_interval_in_ticks(void)
 /* Classic Macintosh menu and resource identifiers. */
 #define FILE_MENU_ID 128
 #define GAMES_MENU_ID 129
+#define EDIT_MENU_ID 130
 #define APPLICATION_ICON_RESOURCE_ID (-16455)
 #define TERMINAL_MONACO_FONT_ID 4
 
 /* Keep the event loop responsive while enumerating large HFS volumes. */
 #define CATALOG_ENTRIES_PER_EVENT_TICK 70
-#define CARD_OPEN_BUTTON_OFFSET_Y 197
+#define CARD_OPEN_BUTTON_OFFSET_Y 124
 
 /* Finder location and display name for one executable found on Infinite HD. */
 typedef struct {
     FSSpec spec;
     Str63 finderName;
+    char shortName[32]; /* Stable, unique single-word command for this game. */
 } DiscoveredApplication;
 
 /* One level of the incremental depth-first traversal of the HFS catalog. */
@@ -104,24 +116,39 @@ static short g_discoveredApplicationCount = 0;
 static CatalogFolder g_catalogFolderStack[MAX_CATALOG_FOLDERS];
 static short g_catalogFolderDepth = 0;
 static short g_infiniteHdVolumeRef = 0;
+static short g_runningGameOS = 0; /* The supported classic Mac OS family. */
 static long g_catalogEntriesScanned = 0;
 static Boolean g_catalogScanActive = false;
 static Boolean g_catalogScanTruncated = false;
 static Boolean g_autoLaunchAttempted = false;
+/* Clipboard text is treated as a single, OS-targeted message; identical
+ * scrap contents are never executed twice. Poll at most once per second. */
+#define CINTER_CLIPBOARD_POLL_TICKS 60U
+static UInt32 g_nextClipboardPollTick = 0;
+static char g_lastClipboardMessage[192] = "";
+static char g_pendingClipboardCommand[128] = "";
+/* Defer unattended Scrap Manager calls until the Finder has handed the
+ * application its first update event. This avoids accessing the startup
+ * clipboard while the Process Manager is still activating the new app. */
+static Boolean g_terminalHasDrawn = false;
+/* Wait for the first window update before scanning Infinite HD. Clipboard
+ * polling begins after this initial scan, not during Process Manager startup. */
+static Boolean g_startupTasksPending = true;
 /* Game.txt is read at startup or by the explicit Run Game.txt menu command. */
 static char g_requestedFinderName[64] = "";
 
 /* Games Report search, selection, and scrolling state. */
 static char g_applicationNameFilter[64] = "";
-static char g_gamesReportStatus[128] = "Scanning Infinite HD...";
+static char g_gamesReportStatus[128] = "Searching Infinite HD:Games...";
 static short g_visibleApplicationIndices[MAX_DISCOVERED_APPLICATIONS];
 static short g_visibleApplicationCount = 0;
-static short g_reportColumnCount = 2;
 static short g_reportFirstRow = 0;
 static short g_selectedApplicationIndex = -1;
 static WindowPtr g_gamesReportWindow = NULL; /* Games Report, created on demand. */
+static ControlHandle g_gamesReportScrollBar = NULL;
 /* The Terminal window and its bounded, scrollable text history. */
 static WindowPtr g_terminalWindow = NULL;
+static ControlHandle g_terminalScrollBar = NULL;
 static char g_terminalHistoryLines[MAX_TERMINAL_HISTORY_LINES][TERMINAL_OUTPUT_LINE_SIZE];
 static short g_terminalHistoryCount = 0;
 static short g_terminalFirstVisibleLine = 0;
@@ -132,11 +159,19 @@ static short g_terminalWindowHeight = 360;
 /* One decoded copy of the authored GameCard.rgb image for all visible cards. */
 static PixMap g_cardPixelMap;
 static Ptr g_cardPixelBuffer = NULL;
+/* The window's full-colour CinterForge logo is RGB555, independent of Finder's
+ * classic indexed icon resources (which can render monochrome on some Macs). */
+static PixMap g_logoPixelMap;
+static Ptr g_logoPixelBuffer = NULL;
+static Boolean g_logoArtworkReady = false;
 static Boolean g_applicationIsRunning = true;
 static Boolean g_cardArtworkReady = false;
 static short g_gamesReportWidth = 620;
 static short g_gamesReportHeight = 470;
 static Rect g_searchFieldBounds;
+
+/* Keyboard handlers are above the clipboard implementation in this file. */
+static void copy_game_list_to_mac_clipboard(void);
 
 /* -------------------------------------------------------------------------
  * String helpers: Toolbox names are Pascal strings, user commands are C text
@@ -168,6 +203,95 @@ static Boolean names_match_ignoring_case(const char *leftName, const char *right
     return *leftName == 0 && *rightName == 0;
 }
 
+/* Crash-trace build 004. Every checkpoint is written and closed immediately.
+ * Try guest-to-host The Outside World:Uploads first; fall back to the writable
+ * CinterForge Terminal HFS disk. Logging never changes the terminal UI. */
+#define TRACE68K_VERSION "004"
+#define TRACE68K_FILE "\pCinterForgeTerminal.log"
+static Boolean g_traceSelected = false;
+static short g_traceVolume = 0;
+static long g_traceDir = HFS_ROOT_DIRECTORY_ID;
+static unsigned long g_traceNumber = 0;
+static Boolean g_traceFirstUpdate = false;
+/* Only instrument the very first history append; leave normal scrollback fast. */
+static Boolean g_traceFirstAppendActive = false;
+static Boolean g_traceFirstAppendDone = false;
+static short find_outside_world_volume(void);
+static short find_cinterforge_hd_volume(void);
+
+static OSErr trace_write(short volume, long directory, const char *line, Boolean reset)
+{
+    FSSpec spec;
+    OSErr result = FSMakeFSSpec(volume, directory, TRACE68K_FILE, &spec);
+    short refNum = 0;
+    long length;
+    if (result == fnfErr) result = FSpCreate(&spec, 'ttxt', 'TEXT', 0);
+    if (result != noErr) return result;
+    result = FSpOpenDF(&spec, fsRdWrPerm, &refNum);
+    if (result != noErr) return result;
+    if (reset) {
+        result = SetEOF(refNum, 0);
+        if (result == noErr) result = SetFPos(refNum, fsFromStart, 0);
+    } else {
+        result = SetFPos(refNum, fsFromLEOF, 0);
+    }
+    if (result == noErr) {
+        length = (long)strlen(line);
+        result = FSWrite(refNum, &length, line);
+    }
+    FSClose(refNum);
+    return result;
+}
+
+static void trace_checkpoint(const char *phase)
+{
+    char line[192];
+    short outside, terminal;
+    snprintf(line, sizeof(line), "trace=%s seq=%lu tick=%lu %s\r",
+             TRACE68K_VERSION, ++g_traceNumber, (unsigned long)TickCount(), phase);
+    if (g_traceSelected) {
+        if (g_traceVolume) (void)trace_write(g_traceVolume, g_traceDir, line, false);
+        return;
+    }
+    outside = find_outside_world_volume();
+    if (outside) {
+        CInfoPBRec folder;
+        Str255 folderName = "\pUploads";
+        memset(&folder, 0, sizeof(folder));
+        folder.dirInfo.ioNamePtr = folderName;
+        folder.dirInfo.ioVRefNum = outside;
+        folder.dirInfo.ioFDirIndex = 0;
+        folder.dirInfo.ioDrDirID = HFS_ROOT_DIRECTORY_ID;
+        if (PBGetCatInfoSync(&folder) == noErr &&
+                (folder.hFileInfo.ioFlAttrib & ioDirMask) &&
+                trace_write(outside, folder.dirInfo.ioDrDirID, line, true) == noErr) {
+            g_traceVolume = outside;
+            g_traceDir = folder.dirInfo.ioDrDirID;
+        }
+    }
+    if (!g_traceVolume) {
+        terminal = find_cinterforge_hd_volume();
+        if (terminal &&
+                trace_write(terminal, HFS_ROOT_DIRECTORY_ID, line, true) == noErr) {
+            g_traceVolume = terminal;
+            g_traceDir = HFS_ROOT_DIRECTORY_ID;
+        }
+    }
+    g_traceSelected = (g_traceVolume != 0); /* Retry if drives not ready yet. */
+}
+
+/* Query the application heap without allocating an image or a scratch buffer.
+ * Record free memory and the largest contiguous block at startup milestones. */
+static void trace_heap_checkpoint(const char *phase)
+{
+    char line[160];
+    long freeBytes = FreeMem();
+    long largestBlock = MaxBlock();
+    snprintf(line, sizeof(line), "heap: %s free=%ld maxblock=%ld",
+             phase, freeBytes, largestBlock);
+    trace_checkpoint(line);
+}
+
 static Boolean name_contains_filter(const char *name, const char *filter)
 {
     size_t startIndex, filterIndex;
@@ -182,6 +306,145 @@ static Boolean name_contains_filter(const char *name, const char *filter)
     return false;
 }
 
+/* Turn a genuine Finder name into a simple command token. Collisions are
+ * disambiguated, never collapsed onto the first game with that name. */
+static void assign_game_short_name(short applicationIndex)
+{
+    DiscoveredApplication *application = &g_discoveredApplications[applicationIndex];
+    char fullName[64], baseName[28], candidate[32];
+    short sourceIndex, targetIndex = 0, collisionNumber = 1, earlierIndex;
+    Boolean collides;
+    copy_pascal_string_to_c(application->finderName, fullName, sizeof(fullName));
+    for (sourceIndex = 0; fullName[sourceIndex] && targetIndex < 23; ++sourceIndex) {
+        unsigned char character = (unsigned char)fullName[sourceIndex];
+        if (isalnum(character)) baseName[targetIndex++] = (char)tolower(character);
+    }
+    baseName[targetIndex] = 0;
+    if (!targetIndex) strcpy(baseName, "game");
+    do {
+        if (collisionNumber == 1) {
+            strcpy(candidate, baseName);
+        } else {
+            snprintf(candidate, sizeof(candidate), "%.23s%d", baseName, (int)collisionNumber);
+        }
+        collides = false;
+        for (earlierIndex = 0; earlierIndex < applicationIndex; ++earlierIndex) {
+            if (names_match_ignoring_case(g_discoveredApplications[earlierIndex].shortName, candidate)) {
+                collides = true;
+                break;
+            }
+        }
+        ++collisionNumber;
+    } while (collides);
+    strcpy(application->shortName, candidate);
+}
+
+/* Finder type APPL alone does not mean "game": Infinite HD:Games contains
+ * map editors, sound tools, help viewers and installers as well as games.
+ * Keep a narrow, inspectable list of confirmed non-game Finder names. Do not
+ * suppress game versions, same-named copies, or uncertain applications: their
+ * exact FSSpec and launch behavior must be checked in a real Macintosh first.
+ * The scan, the Games Report, and clipboard/export share this one filter. */
+static Boolean is_non_game_application_name(const unsigned char *finderName)
+{
+    static const char *excludedFragments[] = {
+        "manual", "register", "registration", "documentation", "basics",
+        "read me", "readme"
+    };
+    static const char *excludedExactNames[] = {
+        "Avara MicroTracker", "BSPViewer", "MacroMind Player",
+        "F/A-18 Mission Chooser", "Improved Art Files.sea",
+        "Urban Renewal Kit", "SnoodEdit", "Warcraft Converter"
+    };
+    static const char *excludedPrefixes[] = {
+        "BSPSplitter", "SoundComp", "Anvil ", "Forge ",
+        "Pathways Guide", "Pathways Into Cheating", "Torch ",
+        "Room Editor", "EHelpEngine", "Terrain Editor", "TeachText",
+        "Microsoft Help", "Warcraft II Map Editor", "Warcraft II Sound Editor"
+    };
+    char applicationName[64];
+    size_t wordIndex;
+    copy_pascal_string_to_c(finderName, applicationName, sizeof(applicationName));
+    for (wordIndex = 0; wordIndex < sizeof(excludedFragments) / sizeof(excludedFragments[0]); ++wordIndex)
+        if (name_contains_filter(applicationName, excludedFragments[wordIndex])) return true;
+    for (wordIndex = 0; wordIndex < sizeof(excludedExactNames) / sizeof(excludedExactNames[0]); ++wordIndex)
+        if (names_match_ignoring_case(applicationName, excludedExactNames[wordIndex])) return true;
+    for (wordIndex = 0; wordIndex < sizeof(excludedPrefixes) / sizeof(excludedPrefixes[0]); ++wordIndex) {
+        size_t length = strlen(excludedPrefixes[wordIndex]);
+        size_t characterIndex;
+        for (characterIndex = 0; characterIndex < length && applicationName[characterIndex]; ++characterIndex)
+            if (tolower((unsigned char)applicationName[characterIndex]) !=
+                tolower((unsigned char)excludedPrefixes[wordIndex][characterIndex])) break;
+        if (characterIndex == length) return true;
+    }
+    return false;
+}
+
+/* The guest Game Catalog is intentionally per-OS, not an all-APPL list.
+ * These command tokens are the 83 copied Infinite HD entries curated in
+ * docs/Game Catalog.md. Both the Terminal and Games Report use this same
+ * discovered catalog; unknown APPL files are not exposed automatically.
+ * Games with duplicate Finder names all target the same OS. */
+#define GAME_OS_SYSTEM_71 71
+#define GAME_OS_MAC_76   76
+#define GAME_OS_MAC_81   81
+
+static short running_game_os(void)
+{
+    long systemVersion = 0;
+    /* gestaltSystemVersion ('sysv') returns packed BCD 0x0710, 0x0760,
+     * or 0x0810, with low bits optionally indicating maintenance updates. */
+    if (Gestalt('sysv', &systemVersion) != noErr) return 0;
+    switch ((unsigned long)systemVersion & 0xFFF0UL) {
+        case 0x0710UL: return GAME_OS_SYSTEM_71;
+        case 0x0760UL: return GAME_OS_MAC_76;
+        case 0x0810UL: return GAME_OS_MAC_81;
+        default: return 0;
+    }
+}
+
+static Boolean command_in_game_os_catalog(const char *command, short gameOS)
+{
+    static const char *system71Commands[] = {
+        "3wizcolunr", "maelstrom", "outofthisworld103", "battlechess", "bolo0997",
+        "minotaur", "minotaur2", "minotaur3", "minotaur4", "minotaur5",
+        "minotaur6", "minotaur7", "chainshot", "civilization", "continuum",
+        "cosmicosmo", "darkcastle", "glider406", "glider409", "zero220",
+        "lemmings", "fateofatlantis11", "fateofatlantisv15", "indy", "loom",
+        "pipedream", "monkeyisland", "missilecommand30", "ok020", "pararena206m",
+        "pipedream2", "princeofpersia", "colorrisk241", "scarabofra14", "shufflepuckcafv10",
+        "simcityclassic", "sokoban242a", "solarianii", "spectre11", "strategicconquest301",
+        "stuntcopter10", "stuntcopter12", "stuntcopter15", "stuntcopter16", "stuntcopter20",
+        "stuntcopterpatchedforan", "tetris", "tetriscolor", "oregontrail", "wesleyantetris",
+    };
+    static const char *mac76Commands[] = {
+        "a10attack15", "apeiron", "apeiron2", "avara", "avaracommuter",
+        "barrack", "bubbletrouble", "chiral", "escapevelocity", "swoop",
+        "blobbo102lite", "marathonv12", "marathon2", "pathwaysintodarkness", "hornetace10",
+        "fa18hornetclassic", "hellcats", "indysdesktopadventures", "nsshaft", "simcity200012",
+        "snood", "starbound", "strategicconquest401", "strategicconquestplus20", "troubledsouls",
+    };
+    static const char *mac81Commands[] = {
+        "boom10", "abuse101", "marathon15", "loomppc", "ultimatedoomi",
+        "warcraft", "warcraftii100k", "warcraftiiv122",
+    };
+    const char *const *commands = NULL;
+    size_t commandCount = 0, commandIndex;
+    if (gameOS == GAME_OS_SYSTEM_71) {
+        commands = system71Commands;
+        commandCount = sizeof(system71Commands) / sizeof(system71Commands[0]);
+    } else if (gameOS == GAME_OS_MAC_76) {
+        commands = mac76Commands;
+        commandCount = sizeof(mac76Commands) / sizeof(mac76Commands[0]);
+    } else if (gameOS == GAME_OS_MAC_81) {
+        commands = mac81Commands;
+        commandCount = sizeof(mac81Commands) / sizeof(mac81Commands[0]);
+    }
+    for (commandIndex = 0; commandIndex < commandCount; ++commandIndex)
+        if (names_match_ignoring_case(command, commands[commandIndex])) return true;
+    return false;
+}
+
 static void set_games_report_status(const char *message)
 {
     strncpy(g_gamesReportStatus, message, sizeof(g_gamesReportStatus)-1);
@@ -191,80 +454,211 @@ static void set_games_report_status(const char *message)
 /* -------------------------------------------------------------------------
  * Terminal: plain classic Macintosh window, output history and command line
  * ------------------------------------------------------------------------- */
+/* Use the live GrafPort bounds: cached width/height are unreliable during
+ * GrowWindow and update events, particularly when another window overlaps. */
+static Rect terminal_history_bounds(void)
+{
+    Rect bounds = {8, 8, 8, 8};
+    if (g_terminalWindow) {
+        bounds = g_terminalWindow->portRect;
+        bounds.left = 8;
+        bounds.top = 8;
+        bounds.right -= CLASSIC_SCROLLBAR_WIDTH + 4;
+        bounds.bottom -= TERMINAL_PROMPT_AREA_HEIGHT;
+    }
+    return bounds;
+}
+
 static short terminal_visible_line_count(void)
 {
-    short rows = (short)((g_terminalWindowHeight - 75) / 15);
-    return rows > 2 ? rows : 2;
+    Rect textBounds = terminal_history_bounds();
+    short availableHeight = textBounds.bottom - textBounds.top - 8;
+    short rows = availableHeight / TERMINAL_LINE_HEIGHT;
+    return rows > 0 ? rows : 1;
 }
 
+static short terminal_maximum_scroll_position(void)
+{
+    short maximumPosition = g_terminalHistoryCount - terminal_visible_line_count();
+    return maximumPosition > 0 ? maximumPosition : 0;
+}
+
+/* Both the scrollbar's thumb and our viewport refer to the same line index. */
+static void update_terminal_scrollbar(void)
+{
+    short maximumPosition;
+    if (g_traceFirstAppendActive) trace_checkpoint("append: update scrollbar enter");
+    maximumPosition = terminal_maximum_scroll_position();
+    if (g_traceFirstAppendActive) trace_checkpoint("append: scrollbar max calculated");
+    if (g_terminalFirstVisibleLine > maximumPosition)
+        g_terminalFirstVisibleLine = maximumPosition;
+    if (g_terminalFirstVisibleLine < 0) g_terminalFirstVisibleLine = 0;
+    if (g_terminalScrollBar) {
+        if (g_traceFirstAppendActive) trace_checkpoint("append: before SetControlMaximum");
+        SetControlMaximum(g_terminalScrollBar, maximumPosition);
+        if (g_traceFirstAppendActive) trace_checkpoint("append: after SetControlMaximum");
+        if (g_traceFirstAppendActive) trace_checkpoint("append: before SetControlValue");
+        SetControlValue(g_terminalScrollBar, g_terminalFirstVisibleLine);
+        if (g_traceFirstAppendActive) trace_checkpoint("append: after SetControlValue");
+    }
+}
+
+static void position_terminal_scrollbar(void)
+{
+    Rect bounds;
+    if (!g_terminalWindow || !g_terminalScrollBar) return;
+    bounds = g_terminalWindow->portRect;
+    MoveControl(g_terminalScrollBar, (short)(bounds.right - CLASSIC_SCROLLBAR_WIDTH), 1);
+    SizeControl(g_terminalScrollBar, CLASSIC_SCROLLBAR_WIDTH,
+                (short)(bounds.bottom - TERMINAL_PROMPT_AREA_HEIGHT - 1));
+    update_terminal_scrollbar();
+}
+
+/* InvalRect affects the window of the *current* QuickDraw GrafPort, not
+ * the window that supplied the rectangle. NewControl/Window Manager calls
+ * can leave another port current. Always select the Terminal's port before
+ * touching its update region, then restore the caller's graphics context. */
 static void invalidate_terminal_window(void)
 {
-    if (g_terminalWindow) InvalRect(&g_terminalWindow->portRect);
+    GrafPtr previousPort = NULL;
+    if (!g_terminalWindow) return;
+    GetPort(&previousPort);
+    if (g_traceFirstAppendActive)
+        trace_checkpoint(previousPort == (GrafPtr)g_terminalWindow
+                         ? "append: current port is Terminal"
+                         : "append: current port is NOT Terminal");
+    if (g_traceFirstAppendActive) trace_checkpoint("append: before SetPort Terminal");
+    SetPort(g_terminalWindow);
+    if (g_traceFirstAppendActive) trace_checkpoint("append: after SetPort Terminal");
+    InvalRect(&g_terminalWindow->portRect);
+    if (g_traceFirstAppendActive) trace_checkpoint("append: after InvalRect Terminal");
+    if (previousPort && previousPort != (GrafPtr)g_terminalWindow) {
+        SetPort(previousPort);
+        if (g_traceFirstAppendActive) trace_checkpoint("append: prior port restored");
+    }
 }
 
-/* The oldest line rolls off when the fixed history is full. */
+/* Keep a reader's place when output arrives. Follow new lines automatically
+ * only when the reader was already looking at the end of the transcript. */
 static void append_terminal_history_line(const char *value)
 {
+    Boolean followNewestLine;
+    Boolean firstAppend = !g_traceFirstAppendDone;
+    if (firstAppend) {
+        g_traceFirstAppendActive = true;
+        trace_checkpoint("append: entered first welcome line");
+        trace_checkpoint("append: before terminal_maximum_scroll_position");
+    }
+    followNewestLine = g_terminalFirstVisibleLine >= terminal_maximum_scroll_position();
+    if (firstAppend) trace_checkpoint("append: maximum scroll calculated");
     if (g_terminalHistoryCount == MAX_TERMINAL_HISTORY_LINES) {
         memmove(g_terminalHistoryLines,
                 g_terminalHistoryLines + 1,
                 sizeof(g_terminalHistoryLines[0]) * (MAX_TERMINAL_HISTORY_LINES - 1));
         --g_terminalHistoryCount;
+        if (!followNewestLine && g_terminalFirstVisibleLine > 0)
+            --g_terminalFirstVisibleLine;
     }
+    if (firstAppend) trace_checkpoint("append: before history strncpy");
     strncpy(g_terminalHistoryLines[g_terminalHistoryCount], value, TERMINAL_OUTPUT_LINE_SIZE - 1);
+    if (firstAppend) trace_checkpoint("append: history strncpy completed");
     g_terminalHistoryLines[g_terminalHistoryCount][TERMINAL_OUTPUT_LINE_SIZE - 1] = 0;
     ++g_terminalHistoryCount;
-    g_terminalFirstVisibleLine = g_terminalHistoryCount > terminal_visible_line_count()
-        ? (short)(g_terminalHistoryCount - terminal_visible_line_count()) : 0;
+    if (firstAppend) trace_checkpoint("append: history count incremented");
+    if (firstAppend) trace_checkpoint("append: before scroll follow calculation");
+    if (followNewestLine) g_terminalFirstVisibleLine = terminal_maximum_scroll_position();
+    if (firstAppend) trace_checkpoint("append: scroll follow calculated");
+    if (firstAppend) trace_checkpoint("append: before update_terminal_scrollbar");
+    update_terminal_scrollbar();
+    if (firstAppend) trace_checkpoint("append: update_terminal_scrollbar completed");
+    if (firstAppend) trace_checkpoint("append: before invalidate_terminal_window");
     invalidate_terminal_window();
+    if (firstAppend) {
+        trace_checkpoint("append: first welcome line complete");
+        g_traceFirstAppendActive = false;
+        g_traceFirstAppendDone = true;
+    }
 }
 
 static void scroll_terminal_history(short rows)
 {
-    short lastVisibleStart = g_terminalHistoryCount > terminal_visible_line_count()
-        ? (short)(g_terminalHistoryCount - terminal_visible_line_count()) : 0;
-    short newFirstLine = (short)(g_terminalFirstVisibleLine + rows);
-
+    long newFirstLine = (long)g_terminalFirstVisibleLine + rows;
     if (newFirstLine < 0) newFirstLine = 0;
-    if (newFirstLine > lastVisibleStart) newFirstLine = lastVisibleStart;
-    g_terminalFirstVisibleLine = newFirstLine;
+    if (newFirstLine > terminal_maximum_scroll_position())
+        newFirstLine = terminal_maximum_scroll_position();
+    g_terminalFirstVisibleLine = (short)newFirstLine;
+    update_terminal_scrollbar();
     invalidate_terminal_window();
 }
 
 static void draw_terminal_window(void)
 {
-    short lineIndex;
+    short rowIndex;
     short visibleLineCount = terminal_visible_line_count();
-    Rect windowBounds, divider;
+    Rect windowBounds, historyBounds, divider, promptBounds;
+    RgnHandle previousClip;
     if (!g_terminalWindow) return;
+    if (!g_traceFirstUpdate) trace_checkpoint("draw: before SetPort");
     SetPort(g_terminalWindow);
     windowBounds = g_terminalWindow->portRect;
+    historyBounds = terminal_history_bounds();
     EraseRect(&windowBounds);
+    if (!g_traceFirstUpdate) trace_checkpoint("draw: EraseRect done");
     TextFont(TERMINAL_MONACO_FONT_ID);
     TextSize(10);
+    TextMode(srcCopy);
 
-    for (lineIndex = 0;
-         lineIndex < visibleLineCount &&
-         g_terminalFirstVisibleLine + lineIndex < g_terminalHistoryCount;
-         ++lineIndex) {
+    /* Do not let long output paint into the scrollbar or the fixed prompt. */
+    if (!g_traceFirstUpdate) trace_checkpoint("draw: before first NewRgn");
+    previousClip = NewRgn();
+    if (previousClip) {
+        GetClip(previousClip);
+        ClipRect(&historyBounds);
+    }
+    for (rowIndex = 0;
+         rowIndex < visibleLineCount &&
+         g_terminalFirstVisibleLine + rowIndex < g_terminalHistoryCount;
+         ++rowIndex) {
         Str255 pascalLine;
         copy_c_string_to_pascal(
-            g_terminalHistoryLines[g_terminalFirstVisibleLine + lineIndex], pascalLine);
-        MoveTo(11, (short)(22 + lineIndex * 15));
+            g_terminalHistoryLines[g_terminalFirstVisibleLine + rowIndex], pascalLine);
+        MoveTo(historyBounds.left + 3,
+               (short)(historyBounds.top + 13 + rowIndex * TERMINAL_LINE_HEIGHT));
         DrawString(pascalLine);
     }
-    SetRect(&divider, 9, g_terminalWindowHeight - 41, g_terminalWindowWidth - 9, g_terminalWindowHeight - 40);
+    if (previousClip) {
+        SetClip(previousClip);
+        DisposeRgn(previousClip);
+    }
+
+    if (!g_traceFirstUpdate) trace_checkpoint("draw: history loop done");
+    SetRect(&divider, 9, windowBounds.bottom - 41,
+            windowBounds.right - CLASSIC_SCROLLBAR_WIDTH - 3, windowBounds.bottom - 40);
     PaintRect(&divider);
+    SetRect(&promptBounds, 9, windowBounds.bottom - 39,
+            windowBounds.right - CLASSIC_SCROLLBAR_WIDTH - 3, windowBounds.bottom - 2);
+    previousClip = NewRgn();
+    if (previousClip) {
+        GetClip(previousClip);
+        ClipRect(&promptBounds);
+    }
     {
         Str255 prompt;
         char content[TERMINAL_INPUT_SIZE + 24];
-        snprintf(content, sizeof(content), "CinterForgeTerminal> %s_", g_terminalInput);
+        snprintf(content, sizeof(content), "CinterForge Terminal> %s_", g_terminalInput);
         copy_c_string_to_pascal(content, prompt);
         TextFont(TERMINAL_MONACO_FONT_ID);
         TextSize(10);
-        MoveTo(10, g_terminalWindowHeight - 17);
+        MoveTo(10, (short)(windowBounds.bottom - 17));
         DrawString(prompt);
     }
+    if (previousClip) {
+        SetClip(previousClip);
+        DisposeRgn(previousClip);
+    }
+    if (!g_traceFirstUpdate) trace_checkpoint("draw: before DrawControls");
+    DrawControls(g_terminalWindow); /* EraseRect also erased the controls. */
+    if (!g_traceFirstUpdate) trace_checkpoint("draw: DrawControls done");
 }
 
 /* -------------------------------------------------------------------------
@@ -286,6 +680,8 @@ static short compare_application_names(short leftIndex, short rightIndex)
     }
     return leftName[characterIndex] ? 1 : rightName[characterIndex] ? -1 : 0;
 }
+
+static void update_games_report_scrollbar(void);
 
 static void rebuild_visible_application_list(void)
 {
@@ -312,6 +708,8 @@ static void rebuild_visible_application_list(void)
         g_visibleApplicationIndices[insertionIndex] = applicationToInsert;
     }
     g_reportFirstRow = 0;
+    g_selectedApplicationIndex = -1;
+    update_games_report_scrollbar();
     if (g_gamesReportWindow) InvalRect(&g_gamesReportWindow->portRect);
 }
 
@@ -343,17 +741,38 @@ static void start_infinite_hd_catalog_scan(void)
     g_catalogFolderDepth = 0;
     g_catalogEntriesScanned = 0;
     g_catalogScanTruncated = false;
+    g_runningGameOS = running_game_os();
     g_infiniteHdVolumeRef = find_infinite_hd_volume();
-    if (!g_infiniteHdVolumeRef) {
+    if (!g_runningGameOS) {
         g_catalogScanActive = false;
-        set_games_report_status("Infinite HD not mounted. Enable Infinite HD for this machine.");
+        set_games_report_status("No assigned games for this Mac OS.");
+        append_terminal_history_line("This Mac OS has no assigned CinterForge games.");
+    } else if (!g_infiniteHdVolumeRef) {
+        g_catalogScanActive = false;
+        set_games_report_status("Infinite HD is not mounted.");
         append_terminal_history_line("Infinite HD is not mounted on this Macintosh.");
     } else {
-        g_catalogScanActive = true;
-        g_catalogFolderStack[0].directoryId = HFS_ROOT_DIRECTORY_ID;
-        g_catalogFolderStack[0].nextEntryIndex = 1;
-        g_catalogFolderDepth = 1;
-        set_games_report_status("Discovering applications on Infinite HD...");
+        /* Only Infinite HD:Games, including publisher and title subfolders.
+         * Never scan the entire disk or infer that a folder itself is a game. */
+        CInfoPBRec gamesFolder;
+        Str255 folderName = "\pGames";
+        memset(&gamesFolder, 0, sizeof(gamesFolder));
+        gamesFolder.dirInfo.ioNamePtr = folderName;
+        gamesFolder.dirInfo.ioVRefNum = g_infiniteHdVolumeRef;
+        gamesFolder.dirInfo.ioFDirIndex = 0;
+        gamesFolder.dirInfo.ioDrDirID = HFS_ROOT_DIRECTORY_ID;
+        if (PBGetCatInfoSync(&gamesFolder) != noErr ||
+                !(gamesFolder.hFileInfo.ioFlAttrib & ioDirMask)) {
+            g_catalogScanActive = false;
+            set_games_report_status("Infinite HD:Games folder not found.");
+            append_terminal_history_line("Infinite HD:Games folder not found.");
+        } else {
+            g_catalogScanActive = true;
+            g_catalogFolderStack[0].directoryId = gamesFolder.dirInfo.ioDrDirID;
+            g_catalogFolderStack[0].nextEntryIndex = 1;
+            g_catalogFolderDepth = 1;
+            set_games_report_status("Finding games in Infinite HD:Games...");
+        }
     }
     rebuild_visible_application_list();
 }
@@ -394,15 +813,19 @@ static void scan_next_catalog_batch(void)
                 ++g_catalogFolderDepth;
             } else g_catalogScanTruncated = true;
         } else if (catalogInfo.hFileInfo.ioFlFndrInfo.fdType == 'APPL' &&
+                   !is_non_game_application_name(entryName) &&
                    g_discoveredApplicationCount < MAX_DISCOVERED_APPLICATIONS) {
             DiscoveredApplication *application =
                 &g_discoveredApplications[g_discoveredApplicationCount];
             if (FSMakeFSSpec(g_infiniteHdVolumeRef, currentFolder->directoryId,
                              entryName, &application->spec) == noErr) {
                 memcpy(application->finderName, entryName, (size_t)entryName[0] + 1);
-                ++g_discoveredApplicationCount;
-                /* Avoid rebuilding/sorting every single catalog record. */
-                if (!(g_discoveredApplicationCount % 32)) rebuild_visible_application_list();
+                assign_game_short_name(g_discoveredApplicationCount);
+                if (command_in_game_os_catalog(application->shortName, g_runningGameOS)) {
+                    ++g_discoveredApplicationCount;
+                    /* Avoid rebuilding/sorting every single catalog record. */
+                    if (!(g_discoveredApplicationCount % 32)) rebuild_visible_application_list();
+                }
             }
         } else if (g_discoveredApplicationCount >= MAX_DISCOVERED_APPLICATIONS) {
             g_catalogScanTruncated = true;
@@ -414,19 +837,20 @@ static void scan_next_catalog_batch(void)
         char message[128];
         g_catalogScanActive = false;
         rebuild_visible_application_list();
-        sprintf(message, "%d applications found on Infinite HD%s",
-                (int)g_discoveredApplicationCount, g_catalogScanTruncated ? " (limit reached)" : "");
+        strcpy(message, g_catalogScanTruncated
+               ? "Games catalog incomplete: scan limit reached."
+               : "Games catalog ready.");
         set_games_report_status(message);
         append_terminal_history_line(message);
         if (g_listGamesWhenScanCompletes) {
             short i;
-            for (i = 0; i < g_visibleApplicationCount; ++i) {
+            for (i = 0; i < g_discoveredApplicationCount; ++i) {
                 char listed[TERMINAL_OUTPUT_LINE_SIZE];
                 char finder[64];
-                copy_pascal_string_to_c(
-                    g_discoveredApplications[g_visibleApplicationIndices[i]].finderName,
-                    finder, sizeof(finder));
-                snprintf(listed, sizeof(listed), "%3d  %s", (int)(i + 1), finder);
+                copy_pascal_string_to_c(g_discoveredApplications[i].finderName,
+                                        finder, sizeof(finder));
+                snprintf(listed, sizeof(listed), "  %-27s %s",
+                         g_discoveredApplications[i].shortName, finder);
                 append_terminal_history_line(listed);
             }
             g_listGamesWhenScanCompletes = false;
@@ -435,7 +859,7 @@ static void scan_next_catalog_batch(void)
 }
 
 /* -------------------------------------------------------------------------
- * CinterForge HD: read the optional, user-editable automatic launch request
+ * CinterForge Terminal: read the optional, user-editable automatic launch request
  * ------------------------------------------------------------------------- */
 
 static short find_cinterforge_hd_volume(void)
@@ -450,7 +874,7 @@ static short find_cinterforge_hd_volume(void)
         volumeInfo.volumeParam.ioVolIndex = volumeIndex;
         if (PBHGetVInfoSync(&volumeInfo) != noErr) break;
         copy_pascal_string_to_c(volumeName, volumeNameText, sizeof(volumeNameText));
-        if (names_match_ignoring_case(volumeNameText, "CinterForge HD")) return volumeInfo.volumeParam.ioVRefNum;
+        if (names_match_ignoring_case(volumeNameText, "CinterForge Terminal")) return volumeInfo.volumeParam.ioVRefNum;
     }
     return 0;
 }
@@ -503,7 +927,8 @@ static OSErr launch_discovered_application(short applicationIndex)
     launchParameters.launchAppSpec = &g_discoveredApplications[applicationIndex].spec;
     launchError = LaunchApplication(&launchParameters);
     if (launchError == noErr) {
-        g_applicationIsRunning = false;
+        /* Keep the Terminal resident so it can accept the next clipboard
+         * command when the separate game application eventually exits. */
         return noErr;
     }
     copy_pascal_string_to_c(g_discoveredApplications[applicationIndex].finderName, applicationName, sizeof(applicationName));
@@ -551,6 +976,8 @@ static void draw_text(const char *text, short x, short y, short font, short size
     copy_c_string_to_pascal(text, pascalText);
     TextFont(font);
     TextSize(size);
+    TextMode(srcCopy);
+    ForeColor(blackColor);
     MoveTo(x, y);
     DrawString(pascalText);
 }
@@ -562,6 +989,16 @@ static void draw_centered_text(const char *text, short x, short y, short width, 
     copy_c_string_to_pascal(text, pascalText);
     TextFont(0);
     TextSize(size);
+    TextMode(srcCopy);
+    ForeColor(blackColor);
+    /* Never draw outside the card's embossed label panel. */
+    while (pascalText[0] > 3 && StringWidth(pascalText) > width - 3) {
+        pascalText[0]--;
+        pascalText[pascalText[0]+1] = 0;
+        pascalText[pascalText[0]-2] = '.';
+        pascalText[pascalText[0]-1] = '.';
+        pascalText[pascalText[0]] = '.';
+    }
     textWidth = StringWidth(pascalText);
     MoveTo((short)(x + (width - textWidth)/2), y);
     DrawString(pascalText);
@@ -574,58 +1011,92 @@ static void draw_centered_text(const char *text, short x, short y, short width, 
  * The RGB555 asset is authored once by Build, then copied into one persistent
  * on-heap pixel buffer (not decoded per visible card or screen refresh).
  */
-static void load_game_card_artwork(void)
+/* Load authored RGB555 support graphics from the mounted CinterForge disk.
+ * PixMap contents persist for the application lifetime and are never decoded
+ * in the update event. A missing asset leaves the normal Finder icon fallback.
+ */
+static Boolean load_support_rgb555_artwork(const unsigned char *filename,
+                                           short requiredWidth, short requiredHeight,
+                                           PixMap *pixelMap, Ptr *pixelBuffer)
 {
     FSSpec artworkFileSpec;
-    short artworkFileRef;
-    long headerSize = 4;
-    unsigned char header[4];
-    short imageWidth, imageHeight;
-    OSErr readError;
-    Rect bounds;
+    CInfoPBRec supportDirectory;
+    Str255 supportDirectoryName = "\pSupport Files";
+    short fileRef;
     short volumeRef = find_cinterforge_hd_volume();
-    CInfoPBRec artworkDirectory;
-    Str255 artworkDirectoryName = "\pSupport Files";
-    Ptr pixelBuffer = NULL;
-    long byteCount;
-    if (g_cardArtworkReady) return;
-    if (!volumeRef) return;
-    memset(&artworkDirectory, 0, sizeof(artworkDirectory));
-    artworkDirectory.dirInfo.ioNamePtr = artworkDirectoryName;
-    artworkDirectory.dirInfo.ioVRefNum = volumeRef;
-    artworkDirectory.dirInfo.ioFDirIndex = 0;
-    artworkDirectory.dirInfo.ioDrDirID = HFS_ROOT_DIRECTORY_ID;
-    if (PBGetCatInfoSync(&artworkDirectory) != noErr || !(artworkDirectory.hFileInfo.ioFlAttrib & ioDirMask) ||
-        FSMakeFSSpec(volumeRef, artworkDirectory.dirInfo.ioDrDirID, "\pGameCard.rgb", &artworkFileSpec) != noErr ||
-        FSpOpenDF(&artworkFileSpec, fsRdPerm, &artworkFileRef) != noErr) return;
-    readError = FSRead(artworkFileRef, &headerSize, header);
-    if (readError != noErr || headerSize != 4) { FSClose(artworkFileRef); return; }
-    imageWidth = (short)((header[0] << 8) | header[1]);
-    imageHeight = (short)((header[2] << 8) | header[3]);
-    if (imageWidth != CARD_WIDTH || imageHeight != CARD_HEIGHT) { FSClose(artworkFileRef); return; }
+    unsigned char imageHeader[4];
+    short imageWidth, imageHeight;
+    long byteCount, bytesRead;
+    Ptr decodedPixels;
+    Rect imageBounds;
+    OSErr readError;
+
+    if (!volumeRef) return false;
+    memset(&supportDirectory, 0, sizeof(supportDirectory));
+    supportDirectory.dirInfo.ioNamePtr = supportDirectoryName;
+    supportDirectory.dirInfo.ioVRefNum = volumeRef;
+    supportDirectory.dirInfo.ioFDirIndex = 0;
+    supportDirectory.dirInfo.ioDrDirID = HFS_ROOT_DIRECTORY_ID;
+    if (PBGetCatInfoSync(&supportDirectory) != noErr ||
+        !(supportDirectory.hFileInfo.ioFlAttrib & ioDirMask) ||
+        FSMakeFSSpec(volumeRef, supportDirectory.dirInfo.ioDrDirID,
+                     filename, &artworkFileSpec) != noErr ||
+        FSpOpenDF(&artworkFileSpec, fsRdPerm, &fileRef) != noErr) return false;
+
+    bytesRead = sizeof(imageHeader);
+    readError = FSRead(fileRef, &bytesRead, imageHeader);
+    if (readError != noErr || bytesRead != sizeof(imageHeader)) {
+        FSClose(fileRef);
+        return false;
+    }
+    imageWidth = (short)((imageHeader[0] << 8) | imageHeader[1]);
+    imageHeight = (short)((imageHeader[2] << 8) | imageHeader[3]);
+    if (imageWidth != requiredWidth || imageHeight != requiredHeight) {
+        FSClose(fileRef);
+        return false;
+    }
     byteCount = (long)imageWidth * imageHeight * 2;
-    pixelBuffer = NewPtr(byteCount);
-    if (!pixelBuffer) { FSClose(artworkFileRef); return; }
-    {
-        long bytes = byteCount;
-        readError = FSRead(artworkFileRef, &bytes, pixelBuffer);
-        FSClose(artworkFileRef);
-        if (readError != noErr || bytes != byteCount) { DisposePtr(pixelBuffer); return; }
+    decodedPixels = NewPtr(byteCount);
+    if (!decodedPixels) {
+        FSClose(fileRef);
+        return false;
+    }
+    bytesRead = byteCount;
+    readError = FSRead(fileRef, &bytesRead, decodedPixels);
+    FSClose(fileRef);
+    if (readError != noErr || bytesRead != byteCount) {
+        DisposePtr(decodedPixels);
+        return false;
     }
 
-    SetRect(&bounds, 0, 0, imageWidth, imageHeight);
-    memset(&g_cardPixelMap, 0, sizeof(g_cardPixelMap));
-    g_cardPixelMap.baseAddr = pixelBuffer;
-    g_cardPixelMap.rowBytes = (short)(0x8000U | (unsigned short)(imageWidth * 2));
-    g_cardPixelMap.bounds = bounds;
-    g_cardPixelMap.hRes = 72L << 16;
-    g_cardPixelMap.vRes = 72L << 16;
-    g_cardPixelMap.pixelType = 16;  /* Classic QuickDraw RGBDirect pixel data. */
-    g_cardPixelMap.pixelSize = 16;
-    g_cardPixelMap.cmpCount = 3;
-    g_cardPixelMap.cmpSize = 5;
-    g_cardPixelBuffer = pixelBuffer;
-    g_cardArtworkReady = true;
+    SetRect(&imageBounds, 0, 0, imageWidth, imageHeight);
+    memset(pixelMap, 0, sizeof(*pixelMap));
+    pixelMap->baseAddr = decodedPixels;
+    pixelMap->rowBytes = (short)(0x8000U | (unsigned short)(imageWidth * 2));
+    pixelMap->bounds = imageBounds;
+    pixelMap->hRes = 72L << 16;
+    pixelMap->vRes = 72L << 16;
+    pixelMap->pixelType = 16;
+    pixelMap->pixelSize = 16;
+    pixelMap->cmpCount = 3;
+    pixelMap->cmpSize = 5;
+    *pixelBuffer = decodedPixels;
+    return true;
+}
+
+static void load_game_card_artwork(void)
+{
+    if (g_cardArtworkReady) return;
+    g_cardArtworkReady = load_support_rgb555_artwork("\pGameCard.rgb",
+                           CARD_ARTWORK_WIDTH, CARD_ARTWORK_HEIGHT,
+                           &g_cardPixelMap, &g_cardPixelBuffer);
+}
+
+static void load_cinterforge_logo_artwork(void)
+{
+    if (g_logoArtworkReady) return;
+    g_logoArtworkReady = load_support_rgb555_artwork("\pCinterForgeLogo.rgb",
+                           40, 40, &g_logoPixelMap, &g_logoPixelBuffer);
 }
 
 static void draw_game_card_background(const Rect *cardBounds)
@@ -646,7 +1117,8 @@ static void draw_game_card_background(const Rect *cardBounds)
     }
 }
 
-static void draw_application_finder_icon(short applicationIndex, short x, short y)
+static void draw_application_finder_icon(short applicationIndex, short x, short y,
+                                         short iconSize)
 {
     short previousResourceFile;
     short applicationResourceFile;
@@ -668,7 +1140,7 @@ static void draw_application_finder_icon(short applicationIndex, short x, short 
     if (!iconResource) iconResource = Get1IndResource('icl8', 1);
     if (!iconResource) iconResource = Get1IndResource('ICN#', 1);
     if (iconResource) GetResInfo(iconResource, &resourceID, &resourceType, resourceName);
-    SetRect(&iconBounds, x, y, x + 42, y + 42);
+    SetRect(&iconBounds, x, y, x + iconSize, y + iconSize);
     if (iconResource && GetIconSuite(&iconSuite, resourceID, svAllAvailableData) == noErr) {
         PlotIconSuite(&iconBounds, CLASSIC_ICON_ALIGNMENT_NONE, kTransformNone, iconSuite);
         DisposeIconSuite(iconSuite, true);
@@ -687,21 +1159,41 @@ static void draw_application_finder_icon(short applicationIndex, short x, short 
     UseResFile(previousResourceFile);
 }
 
-static void draw_application_card(short visibleApplicationSlot, short cardLeft, short cardTop)
+/* Divide the entire width between the left margin and scrollbar among
+ * exactly five cards. Integer edge division distributes spare pixels without
+ * leaving an unused strip on the right at arbitrary window sizes. Rendering
+ * and mouse hit testing must use this same geometry. */
+static void game_card_column_bounds(short column, short *cardLeft, short *cardWidth)
+{
+    short totalCardWidth = (short)(g_gamesReportWidth - REPORT_SIDE_MARGIN * 2
+        - CLASSIC_SCROLLBAR_WIDTH - (REPORT_COLUMN_COUNT - 1) * CARD_SPACING);
+    short left = (short)(REPORT_SIDE_MARGIN + column * CARD_SPACING
+        + (totalCardWidth * column) / REPORT_COLUMN_COUNT);
+    short right = (short)(REPORT_SIDE_MARGIN + column * CARD_SPACING
+        + (totalCardWidth * (column + 1)) / REPORT_COLUMN_COUNT);
+    *cardLeft = left;
+    *cardWidth = (short)(right - left);
+}
+
+static void draw_application_card(short visibleApplicationSlot, short cardLeft,
+                                  short cardTop, short cardWidth)
 {
     Rect cardBounds;
     short applicationIndex = g_visibleApplicationIndices[visibleApplicationSlot];
-    char finderName[64], displayName[25];
-    SetRect(&cardBounds, cardLeft, cardTop, cardLeft + CARD_WIDTH, cardTop + CARD_HEIGHT);
+    char finderName[64];
+    SetRect(&cardBounds, cardLeft, cardTop, cardLeft + cardWidth, cardTop + CARD_HEIGHT);
     draw_game_card_background(&cardBounds);
-    draw_application_finder_icon(applicationIndex, (short)(cardLeft + 52), (short)(cardTop + 65));
-    copy_pascal_string_to_c(g_discoveredApplications[applicationIndex].finderName, finderName, sizeof(finderName));
-    strncpy(displayName, finderName, 20);
-    displayName[20] = 0;
-    if (strlen(finderName) > 20) strcpy(displayName + 17, "...");
-    draw_centered_text(displayName, cardLeft + 8, cardTop + 169, CARD_WIDTH - 16, 11);
-    draw_centered_text("Infinite HD", cardLeft + 7, cardTop + 191, CARD_WIDTH - 14, 10);
-    draw_centered_text("OPEN", cardLeft + 7, cardTop + 214, CARD_WIDTH - 14, 11);
+    /* Center real Finder icons and labels inside the horizontally stretched
+     * card. Keep the full Finder name in the catalog when it truncates here. */
+    draw_application_finder_icon(applicationIndex,
+                                 (short)(cardLeft + (cardWidth - 26) / 2),
+                                 (short)(cardTop + 43), 26);
+    copy_pascal_string_to_c(g_discoveredApplications[applicationIndex].finderName,
+                            finderName, sizeof(finderName));
+    draw_centered_text(finderName, cardLeft + 4, cardTop + 109, cardWidth - 8, 9);
+    draw_centered_text(g_discoveredApplications[applicationIndex].shortName,
+                       cardLeft + 4, cardTop + 124, cardWidth - 8, 9);
+    draw_centered_text("OPEN", cardLeft + 4, cardTop + 139, cardWidth - 8, 9);
     if (applicationIndex == g_selectedApplicationIndex) {
         PenSize(2, 2);
         FrameRect(&cardBounds);
@@ -711,21 +1203,54 @@ static void draw_application_card(short visibleApplicationSlot, short cardLeft, 
 
 static short visible_game_card_row_count(void)
 {
-    short availableHeight = g_gamesReportHeight - REPORT_HEADER_HEIGHT - REPORT_FOOTER_HEIGHT - 16;
+    short height = g_gamesReportWindow ? g_gamesReportWindow->portRect.bottom : g_gamesReportHeight;
+    short availableHeight = height - REPORT_HEADER_HEIGHT - REPORT_FOOTER_HEIGHT - 16;
     if (availableHeight < CARD_HEIGHT) return 1;
     return (short)(availableHeight / (CARD_HEIGHT + CARD_SPACING));
+}
+
+static short report_maximum_scroll_row(void)
+{
+    short columns = REPORT_COLUMN_COUNT;
+    short rows = (short)((g_visibleApplicationCount + columns - 1) / columns);
+    short maximum = (short)(rows - visible_game_card_row_count());
+    return maximum > 0 ? maximum : 0;
+}
+
+static void update_games_report_scrollbar(void)
+{
+    short maxRow = report_maximum_scroll_row();
+    if (g_reportFirstRow > maxRow) g_reportFirstRow = maxRow;
+    if (g_gamesReportScrollBar) {
+        SetControlMaximum(g_gamesReportScrollBar, maxRow);
+        SetControlValue(g_gamesReportScrollBar, g_reportFirstRow);
+    }
+}
+
+static void position_games_report_scrollbar(void)
+{
+    Rect bounds;
+    if (!g_gamesReportWindow || !g_gamesReportScrollBar) return;
+    bounds = g_gamesReportWindow->portRect;
+    MoveControl(g_gamesReportScrollBar, (short)(bounds.right - CLASSIC_SCROLLBAR_WIDTH),
+                REPORT_HEADER_HEIGHT);
+    SizeControl(g_gamesReportScrollBar, CLASSIC_SCROLLBAR_WIDTH,
+                (short)(bounds.bottom - REPORT_HEADER_HEIGHT - REPORT_FOOTER_HEIGHT));
+    update_games_report_scrollbar();
 }
 
 static void draw_games_report_window(void)
 {
     short visibleSlot, columnCount, visibleRows, firstVisibleIndex, visibleSlots;
-    Rect windowBounds, headerBounds, footerBounds, headerDivider;
+    Rect windowBounds, headerBounds, footerBounds, headerDivider, cardClip;
+    RgnHandle oldClip = NULL;
     RGBColor white = {0xffff, 0xffff, 0xffff};
     RGBColor black = {0, 0, 0};
-    char countLabel[64];
     if (!g_gamesReportWindow) return;
     SetPort(g_gamesReportWindow);
     windowBounds = g_gamesReportWindow->portRect;
+    g_gamesReportWidth = windowBounds.right;
+    g_gamesReportHeight = windowBounds.bottom;
     RGBBackColor(&white);
     RGBForeColor(&black);
     EraseRect(&windowBounds);
@@ -736,53 +1261,63 @@ static void draw_games_report_window(void)
     PaintRect(&headerDivider);
     draw_text("CinterForge Games", 62, 28, 1, 20);
     draw_text("Games on this Macintosh", 62, 48, 0, 12);
-    draw_text("Applications on Infinite HD", 62, 64, 0, 10);
-    /* The app's authored CinterForge icon is a native icon resource. */
+    draw_text("Games on Infinite HD", 62, 64, 0, 10);
+    /* Full-colour authored logo. Finder's indexed icon resources can be drawn
+     * as monochrome by a guest; QuickDraw RGB555 preserves blue and orange. */
     {
-        Handle logoIconSuite;
         Rect logoRect;
-        SetRect(&logoRect, 12, 9, 53, 50);
-        if (GetIconSuite(&logoIconSuite, APPLICATION_ICON_RESOURCE_ID,
-                         svAllAvailableData) == noErr) {
-            PlotIconSuite(&logoRect, CLASSIC_ICON_ALIGNMENT_NONE, kTransformNone, logoIconSuite);
-            DisposeIconSuite(logoIconSuite, true);
+        SetRect(&logoRect, 12, 9, 52, 49);
+        if (!g_logoArtworkReady) load_cinterforge_logo_artwork();
+        if (g_logoArtworkReady) {
+            CopyBits((BitMap *)&g_logoPixelMap, &g_gamesReportWindow->portBits,
+                     &g_logoPixelMap.bounds, &logoRect, srcCopy, NULL);
+        } else {
+            Handle logoIconSuite;
+            if (GetIconSuite(&logoIconSuite, APPLICATION_ICON_RESOURCE_ID,
+                             svAllAvailableData) == noErr) {
+                PlotIconSuite(&logoRect, CLASSIC_ICON_ALIGNMENT_NONE,
+                              kTransformNone, logoIconSuite);
+                DisposeIconSuite(logoIconSuite, true);
+            }
         }
     }
     SetRect(&g_searchFieldBounds, g_gamesReportWidth-230, 11, g_gamesReportWidth-18, 35);
     FrameRect(&g_searchFieldBounds);
-    draw_text(g_applicationNameFilter[0] ? g_applicationNameFilter : "Type to filter apps...",
+    draw_text(g_applicationNameFilter[0] ? g_applicationNameFilter : "Type to filter games...",
                 (short)(g_searchFieldBounds.left+6), (short)(g_searchFieldBounds.top+17), 0, 11);
-    sprintf(countLabel, "%d found%s", (int)g_discoveredApplicationCount, g_catalogScanActive ? " (scanning)" : "");
-    draw_text(countLabel, g_gamesReportWidth-224, 53, 0, 10);
-    columnCount = (short)((g_gamesReportWidth - REPORT_SIDE_MARGIN * 2 + CARD_SPACING) / (CARD_WIDTH + CARD_SPACING));
-    if (columnCount < 1) columnCount = 1;
-    g_reportColumnCount = columnCount;
+    /* Report deliberately omits catalog counts, like the other platforms. */
+    columnCount = REPORT_COLUMN_COUNT;
+    update_games_report_scrollbar();
     visibleRows = visible_game_card_row_count();
     firstVisibleIndex = (short)(g_reportFirstRow * columnCount);
     visibleSlots = (short)(visibleRows * columnCount);
+    SetRect(&cardClip, 0, REPORT_HEADER_HEIGHT,
+            (short)(windowBounds.right - CLASSIC_SCROLLBAR_WIDTH),
+            (short)(windowBounds.bottom - REPORT_FOOTER_HEIGHT));
+    oldClip = NewRgn();
+    if (oldClip) { GetClip(oldClip); ClipRect(&cardClip); }
     for (visibleSlot = 0;
          visibleSlot < visibleSlots && firstVisibleIndex + visibleSlot < g_visibleApplicationCount;
          ++visibleSlot) {
-        short cardLeft = (short)(REPORT_SIDE_MARGIN + (visibleSlot % columnCount) * (CARD_WIDTH + CARD_SPACING));
+        short cardLeft, cardWidth;
         short cardTop = (short)(REPORT_HEADER_HEIGHT + 5 + (visibleSlot / columnCount) * (CARD_HEIGHT + CARD_SPACING));
-        draw_application_card((short)(firstVisibleIndex+visibleSlot), cardLeft, cardTop);
+        game_card_column_bounds((short)(visibleSlot % columnCount), &cardLeft, &cardWidth);
+        draw_application_card((short)(firstVisibleIndex+visibleSlot), cardLeft, cardTop, cardWidth);
     }
+    if (oldClip) { SetClip(oldClip); DisposeRgn(oldClip); }
     if (!g_infiniteHdVolumeRef && !g_catalogScanActive)
         draw_text("Infinite HD is not mounted on this Macintosh.", 20, REPORT_HEADER_HEIGHT+38, 0, 12);
     else if (!g_visibleApplicationCount && !g_catalogScanActive)
-        draw_text("No matching Macintosh applications.", 20, REPORT_HEADER_HEIGHT+38, 0, 12);
+        draw_text("No matching Macintosh games.", 20, REPORT_HEADER_HEIGHT+38, 0, 12);
     FrameRect(&footerBounds);
     draw_text(g_gamesReportStatus, 11, g_gamesReportHeight-7, 0, 10);
-    if (g_visibleApplicationCount > visibleSlots) {
-        draw_text("Page Up / Down", (short)(g_gamesReportWidth-98),
-                    (short)(REPORT_HEADER_HEIGHT+14), 0, 9);
-    }
+    DrawControls(g_gamesReportWindow);
 }
 
 static void scroll_games_report_by_rows(short rowOffset)
 {
     short visibleRows = visible_game_card_row_count();
-    short totalRows = (short)((g_visibleApplicationCount + g_reportColumnCount-1) / g_reportColumnCount);
+    short totalRows = (short)((g_visibleApplicationCount + REPORT_COLUMN_COUNT-1) / REPORT_COLUMN_COUNT);
     short lastPageRow = totalRows - visibleRows;
     short newFirstRow = g_reportFirstRow + rowOffset;
     if (lastPageRow < 0) lastPageRow = 0;
@@ -790,6 +1325,7 @@ static void scroll_games_report_by_rows(short rowOffset)
     if (newFirstRow > lastPageRow) newFirstRow = lastPageRow;
     if (g_reportFirstRow != newFirstRow) {
         g_reportFirstRow = newFirstRow;
+        update_games_report_scrollbar();
         InvalRect(&g_gamesReportWindow->portRect);
     }
 }
@@ -798,17 +1334,22 @@ static void handle_game_card_click(Point localMousePosition, UInt32 clickTime)
 {
     static short lastClickedIndex = -1;
     static UInt32 lastClickTime = 0;
-    short cardAreaX = localMousePosition.h - REPORT_SIDE_MARGIN;
     short cardAreaY = localMousePosition.v - REPORT_HEADER_HEIGHT - 5;
     short columnIndex, rowIndex, visibleSlot, applicationIndex;
     if (PtInRect(localMousePosition, &g_searchFieldBounds)) return;
-    if (cardAreaX < 0 || cardAreaY < 0) return;
-    columnIndex = cardAreaX / (CARD_WIDTH + CARD_SPACING);
+    if (cardAreaY < 0 || localMousePosition.v >= g_gamesReportHeight - REPORT_FOOTER_HEIGHT) return;
+    /* Check each drawn column using its exact dynamically stretched bounds. */
+    for (columnIndex = 0; columnIndex < REPORT_COLUMN_COUNT; ++columnIndex) {
+        short cardLeft, cardWidth;
+        game_card_column_bounds(columnIndex, &cardLeft, &cardWidth);
+        if (localMousePosition.h >= cardLeft && localMousePosition.h < cardLeft + cardWidth)
+            break;
+    }
+    if (columnIndex == REPORT_COLUMN_COUNT) return;
     rowIndex = cardAreaY / (CARD_HEIGHT + CARD_SPACING);
-    if (columnIndex >= g_reportColumnCount || columnIndex < 0 || rowIndex >= visible_game_card_row_count()) return;
-    if (cardAreaX % (CARD_WIDTH + CARD_SPACING) >= CARD_WIDTH ||
+    if (rowIndex >= visible_game_card_row_count() ||
         cardAreaY % (CARD_HEIGHT + CARD_SPACING) >= CARD_HEIGHT) return;
-    visibleSlot = (short)((g_reportFirstRow + rowIndex) * g_reportColumnCount + columnIndex);
+    visibleSlot = (short)((g_reportFirstRow + rowIndex) * REPORT_COLUMN_COUNT + columnIndex);
     if (visibleSlot < 0 || visibleSlot >= g_visibleApplicationCount) return;
     applicationIndex = g_visibleApplicationIndices[visibleSlot];
     if (g_selectedApplicationIndex == applicationIndex && lastClickedIndex == applicationIndex &&
@@ -817,7 +1358,14 @@ static void handle_game_card_click(Point localMousePosition, UInt32 clickTime)
     } else if (cardAreaY % (CARD_HEIGHT + CARD_SPACING) >= CARD_OPEN_BUTTON_OFFSET_Y) {
         launch_discovered_application(applicationIndex); /* "OPEN" panel of the actual Game Card */
     } else {
+        char selectedName[64];
+        char selectedDescription[128];
         g_selectedApplicationIndex = applicationIndex;
+        copy_pascal_string_to_c(g_discoveredApplications[applicationIndex].finderName,
+                                selectedName, sizeof(selectedName));
+        snprintf(selectedDescription, sizeof(selectedDescription), "%s (command: %s)",
+                 selectedName, g_discoveredApplications[applicationIndex].shortName);
+        set_games_report_status(selectedDescription);
         InvalRect(&g_gamesReportWindow->portRect);
     }
     lastClickedIndex = applicationIndex;
@@ -832,10 +1380,15 @@ static void handle_games_report_key(EventRecord *keyboardEvent)
     if (keyboardEvent->modifiers & cmdKey) {
         if (typedCharacter == 'q' || typedCharacter == 'Q') {
             g_applicationIsRunning = false;
+        } else if (typedCharacter == 'w' || typedCharacter == 'W') {
+            HideWindow(g_gamesReportWindow);
+            SelectWindow(g_terminalWindow);
         } else if (typedCharacter == 'r' || typedCharacter == 'R') {
             start_infinite_hd_catalog_scan();
         } else if (typedCharacter == 'o' || typedCharacter == 'O') {
             launch_discovered_application(g_selectedApplicationIndex);
+        } else if (typedCharacter == 'c' || typedCharacter == 'C') {
+            copy_game_list_to_mac_clipboard();
         }
         return;
     }
@@ -888,10 +1441,196 @@ static void open_games_report_window(void)
                              documentProc, (WindowPtr)-1, true, 0);
         if (!g_gamesReportWindow) { SysBeep(1); append_terminal_history_line("Could not open Games Report window."); return; }
         load_game_card_artwork();
+        {
+            Rect scrollbarBounds = g_gamesReportWindow->portRect;
+            SetRect(&scrollbarBounds,
+                    (short)(scrollbarBounds.right - CLASSIC_SCROLLBAR_WIDTH),
+                    REPORT_HEADER_HEIGHT, scrollbarBounds.right,
+                    (short)(scrollbarBounds.bottom - REPORT_FOOTER_HEIGHT));
+            g_gamesReportScrollBar = NewControl(g_gamesReportWindow, &scrollbarBounds,
+                                               "\p", true, 0, 0, 0, scrollBarProc, 0);
+            position_games_report_scrollbar();
+        }
     }
     ShowWindow(g_gamesReportWindow);
     SelectWindow(g_gamesReportWindow);
     InvalRect(&g_gamesReportWindow->portRect);
+}
+
+/* -------------------------------------------------------------------------
+ * Game-list exchange: classic Scrap Manager and Infinite Mac's Outside World
+ * ------------------------------------------------------------------------- */
+
+/* PutScrap and GetScrap are system traps on the System 7 guests we support.
+ * Declare the trap entry points explicitly; this avoids relying on absent
+ * compatibility headers or Retro68 linker aliases. */
+static pascal long clear_mac_clipboard(void) M68K_INLINE(0xA9FC);
+static pascal long write_mac_clipboard(long length, ResType kind,
+                                     const void *source) M68K_INLINE(0xA9FE);
+static pascal long read_mac_clipboard(Handle destination, ResType kind,
+                                    long *offset) M68K_INLINE(0xA9FD);
+
+/* All exports use the *actual* filtered catalog.  Tab-separated columns give
+ * the short command followed by the full Finder name; MacRoman/CR line endings
+ * are natural for System 7's SimpleText and the Scrap Manager. */
+static Ptr make_game_list_text(long *textLength)
+{
+    long capacity, used = 0;
+    Ptr output;
+    short gameIndex;
+
+    *textLength = 0;
+    if (g_catalogScanActive || g_discoveredApplicationCount <= 0) return NULL;
+    capacity = (long)g_discoveredApplicationCount * 128L + 1L;
+    output = NewPtr(capacity);
+    if (!output) return NULL;
+
+    for (gameIndex = 0; gameIndex < g_discoveredApplicationCount; ++gameIndex) {
+        char title[64];
+        char row[128];
+        size_t rowLength;
+        copy_pascal_string_to_c(g_discoveredApplications[gameIndex].finderName,
+                                title, sizeof(title));
+        snprintf(row, sizeof(row), "%s\t%s\r",
+                 g_discoveredApplications[gameIndex].shortName, title);
+        rowLength = strlen(row);
+        if (used + (long)rowLength > capacity) {
+            DisposePtr(output);
+            return NULL;
+        }
+        memcpy(output + used, row, rowLength);
+        used += (long)rowLength;
+    }
+    *textLength = used;
+    return output;
+}
+
+static void notify_game_list_operation(const char *message)
+{
+    append_terminal_history_line(message);
+    set_games_report_status(message);
+    if (g_gamesReportWindow) InvalRect(&g_gamesReportWindow->portRect);
+}
+
+static void copy_game_list_to_mac_clipboard(void)
+{
+    long length;
+    Ptr text = make_game_list_text(&length);
+    if (!text) {
+        notify_game_list_operation(g_catalogScanActive ?
+            "Games scan is running; copy after it finishes." :
+            "No games available to copy, or insufficient memory.");
+        return;
+    }
+    if (clear_mac_clipboard() < 0 ||
+        write_mac_clipboard(length, 'TEXT', text) < 0) {
+        notify_game_list_operation("Macintosh clipboard copy failed.");
+    } else {
+        notify_game_list_operation("Game list copied to Macintosh clipboard.");
+    }
+    DisposePtr(text);
+}
+
+/* A guest clipboard is not automatically the host macOS clipboard.  Infinite
+ * Mac exposes the special 'The Outside World:Uploads' directory for genuine
+ * guest-to-host downloads, so export directly there instead of claiming that
+ * Command-C alone sends text across a cross-origin iframe. */
+static short find_outside_world_volume(void)
+{
+    short volumeIndex;
+    for (volumeIndex = 1; volumeIndex <= 64; ++volumeIndex) {
+        HParamBlockRec volumeInfo;
+        Str255 name;
+        char decodedName[256];
+        memset(&volumeInfo, 0, sizeof(volumeInfo));
+        volumeInfo.volumeParam.ioNamePtr = name;
+        volumeInfo.volumeParam.ioVolIndex = volumeIndex;
+        if (PBHGetVInfoSync(&volumeInfo) != noErr) break;
+        copy_pascal_string_to_c(name, decodedName, sizeof(decodedName));
+        if (names_match_ignoring_case(decodedName, "The Outside World"))
+            return volumeInfo.volumeParam.ioVRefNum;
+    }
+    return 0;
+}
+
+static void export_game_list_to_host(void)
+{
+    short outsideWorld = find_outside_world_volume();
+    CInfoPBRec folderInfo;
+    Str255 folderName = "\pUploads";
+    FSSpec destination;
+    OSErr error;
+    short fileRef = 0;
+    long bytesToWrite;
+    Ptr text;
+
+    if (!outsideWorld) {
+        notify_game_list_operation("The Outside World disk is not mounted.");
+        return;
+    }
+    memset(&folderInfo, 0, sizeof(folderInfo));
+    folderInfo.dirInfo.ioNamePtr = folderName;
+    folderInfo.dirInfo.ioVRefNum = outsideWorld;
+    folderInfo.dirInfo.ioFDirIndex = 0;
+    folderInfo.dirInfo.ioDrDirID = HFS_ROOT_DIRECTORY_ID;
+    if (PBGetCatInfoSync(&folderInfo) != noErr ||
+        !(folderInfo.hFileInfo.ioFlAttrib & ioDirMask)) {
+        notify_game_list_operation("Outside World:Uploads folder unavailable.");
+        return;
+    }
+
+    text = make_game_list_text(&bytesToWrite);
+    if (!text) {
+        notify_game_list_operation(g_catalogScanActive ?
+            "Games scan is running; export after it finishes." :
+            "No game list to export, or insufficient memory.");
+        return;
+    }
+    error = FSMakeFSSpec(outsideWorld, folderInfo.dirInfo.ioDrDirID,
+                           "\pCinterForge Games.txt", &destination);
+    if (error == fnfErr) {
+        error = FSpCreate(&destination, 'ttxt', 'TEXT', 0);
+    }
+    if (error == noErr) error = FSpOpenDF(&destination, fsRdWrPerm, &fileRef);
+    if (error == noErr) {
+        error = SetEOF(fileRef, 0);
+        if (error == noErr) error = FSWrite(fileRef, &bytesToWrite, text);
+        FSClose(fileRef);
+    }
+    DisposePtr(text);
+    if (error == noErr)
+        notify_game_list_operation("Exported to The Outside World:Uploads for host download.");
+    else
+        notify_game_list_operation("Could not write the game list to Outside World:Uploads.");
+}
+
+/* Paste ordinary text into the Terminal command prompt.  The Terminal accepts
+ * a single command, so line endings end the paste rather than feeding an
+ * arbitrary multi-line clipboard as executable commands. */
+static void paste_mac_clipboard_into_terminal(void)
+{
+    Handle text = NewHandle(0);
+    long scrapOffset = 0;
+    long length;
+    size_t inputLength;
+    long byteIndex;
+    if (!text) return;
+    length = read_mac_clipboard(text, 'TEXT', &scrapOffset);
+    if (length > 0) {
+        HLock(text);
+        inputLength = strlen(g_terminalInput);
+        for (byteIndex = 0; byteIndex < length &&
+             inputLength < sizeof(g_terminalInput)-1; ++byteIndex) {
+            unsigned char character = (unsigned char)(*text)[byteIndex];
+            if (character == '\r' || character == '\n') break;
+            if (character >= 32 && character <= 126)
+                g_terminalInput[inputLength++] = character;
+        }
+        g_terminalInput[inputLength] = 0;
+        HUnlock(text);
+        invalidate_terminal_window();
+    }
+    DisposeHandle(text);
 }
 
 /* -------------------------------------------------------------------------
@@ -911,13 +1650,15 @@ static void list_discovered_games_in_terminal(void)
         append_terminal_history_line("Infinite HD is not mounted.");
         return;
     }
-    snprintf(outputLine, sizeof(outputLine), "%d Macintosh applications:", (int)g_visibleApplicationCount);
+    snprintf(outputLine, sizeof(outputLine), "Games:");
     append_terminal_history_line(outputLine);
-    for (visibleIndex = 0; visibleIndex < g_visibleApplicationCount; ++visibleIndex) {
+    for (visibleIndex = 0; visibleIndex < g_discoveredApplicationCount; ++visibleIndex) {
         copy_pascal_string_to_c(
-            g_discoveredApplications[g_visibleApplicationIndices[visibleIndex]].finderName,
+            g_discoveredApplications[visibleIndex].finderName,
             applicationName, sizeof(applicationName));
-        snprintf(outputLine, sizeof(outputLine), "%3d  %s", (int)(visibleIndex+1), applicationName);
+        snprintf(outputLine, sizeof(outputLine), "  %-27s %s",
+                 g_discoveredApplications[visibleIndex].shortName,
+                 applicationName);
         append_terminal_history_line(outputLine);
     }
     append_terminal_history_line("Type 'games report' for application cards.");
@@ -959,11 +1700,13 @@ static void launch_game_by_finder_name(const char *requestedName)
          ++applicationIndex) {
         copy_pascal_string_to_c(g_discoveredApplications[applicationIndex].finderName,
                                 finderName, sizeof(finderName));
-        if (strlen(finderName) == requestedNameLength) {
-            char requestedFinderName[64];
-            memcpy(requestedFinderName, requestedName, requestedNameLength);
-            requestedFinderName[requestedNameLength] = 0;
-            if (!names_match_ignoring_case(finderName, requestedFinderName)) continue;
+        {
+            char inputName[64];
+            memcpy(inputName, requestedName, requestedNameLength);
+            inputName[requestedNameLength] = 0;
+            if (!names_match_ignoring_case(finderName, inputName) &&
+                    !names_match_ignoring_case(g_discoveredApplications[applicationIndex].shortName, inputName))
+                continue;
             matchingIndex = applicationIndex;
             ++matchCount;
         }
@@ -1001,14 +1744,20 @@ static void execute_terminal_command(char *commandLine)
     if (!*commandText) return;
 
     if (names_match_ignoring_case(commandText, "help")) {
-        append_terminal_history_line("games             List applications on Infinite HD");
-        append_terminal_history_line("games report      Open Games Report in another window");
-        append_terminal_history_line("play \"name\"      Launch a game (play is optional)");
+        append_terminal_history_line("games                         List of playable games");
+        append_terminal_history_line("play <title>                  Launch a game (play is optional)");
+        append_terminal_history_line("games report                  Open Games Report");
+        append_terminal_history_line("games copy                    Copy all games to Mac clipboard");
+        append_terminal_history_line("games export                  Download list via The Outside World");
         append_terminal_history_line("\"name\"            Launch a game by Finder name");
     } else if (names_match_ignoring_case(commandText, "games")) {
         list_discovered_games_in_terminal();
     } else if (names_match_ignoring_case(commandText, "games report")) {
         open_games_report_window();
+    } else if (names_match_ignoring_case(commandText, "games copy")) {
+        copy_game_list_to_mac_clipboard();
+    } else if (names_match_ignoring_case(commandText, "games export")) {
+        export_game_list_to_host();
     } else if (names_match_ignoring_case(commandText, "quit") ||
                names_match_ignoring_case(commandText, "exit")) {
         g_applicationIsRunning = false;
@@ -1024,6 +1773,112 @@ static void execute_terminal_command(char *commandLine)
     }
 }
 
+/* Clipboard command pipe. Each guest observes the same protocol but handles
+ * only cinter:<its OS>:<command>. This is ordinary System 7 Scrap Manager
+ * text, not a network listener, shell, or second app. The host serializes
+ * HELLO handshakes when multiple guests boot concurrently. */
+static const char *cinter_clipboard_os(void)
+{
+    if (g_runningGameOS == GAME_OS_SYSTEM_71) return "7.1";
+    if (g_runningGameOS == GAME_OS_MAC_76) return "7.6";
+    if (g_runningGameOS == GAME_OS_MAC_81) return "8.1";
+    return NULL;
+}
+
+static Boolean write_cinter_clipboard_reply(const char *verb, const char *detail)
+{
+    const char *os = cinter_clipboard_os();
+    char reply[192];
+    if (!os || !detail || strlen(detail) > 125) return false;
+    snprintf(reply, sizeof(reply), "cinter:%s:%s %s", os, verb, detail);
+    return clear_mac_clipboard() >= 0 &&
+           write_mac_clipboard((long)strlen(reply), 'TEXT', reply) >= 0;
+}
+
+/* Copy only bounded single-line ASCII from the Scrap Manager. The same traps
+ * already back `games copy` and the native Paste command. */
+static Boolean read_cinter_clipboard_message(char *output, size_t capacity)
+{
+    /* Reuse a single handle; allocating and disposing one every second
+     * needlessly fragments the small System 7 application heap. */
+    static Handle text = NULL;
+    long length, offset = 0, i;
+    if (!capacity) return false;
+    if (!text) text = NewHandle(0);
+    if (!text) return false;
+    length = read_mac_clipboard(text, 'TEXT', &offset);
+    if (length <= 0 || (unsigned long)length >= capacity ||
+        GetHandleSize(text) < length) return false;
+    HLock(text);
+    for (i = 0; i < length; ++i) {
+        unsigned char byte = (unsigned char)(*text)[i];
+        if (byte < 32 || byte > 126) break;
+        output[i] = (char)byte;
+    }
+    output[i] = 0;
+    HUnlock(text);
+    return i == length;
+}
+
+/* An addressable command may arrive while the incremental Infinite HD scan
+ * is running. Defer one command until discovery completes instead of claiming
+ * execution when the game is not yet resolvable. */
+static void dispatch_cinter_clipboard_command(const char *command)
+{
+    char mutableCommand[128];
+    if (!command[0] || strlen(command) >= sizeof(mutableCommand)) return;
+    /* Preserve the existing normal Terminal command grammar. Do not accept
+     * remote quit, scrap copy/export or implicit bare-name launches, which
+     * could otherwise execute accidental/untrusted clipboard text. */
+    if (strncmp(command, "play ", 5) != 0 &&
+        !names_match_ignoring_case(command, "help") &&
+        !names_match_ignoring_case(command, "games") &&
+        !names_match_ignoring_case(command, "games report") &&
+        !names_match_ignoring_case(command, "games rescan")) return;
+    if (g_catalogScanActive && strncmp(command, "play ", 5) == 0) {
+        strcpy(g_pendingClipboardCommand, command);
+        return;
+    }
+    strcpy(mutableCommand, command);
+    execute_terminal_command(mutableCommand);
+    /* This acknowledges handling, not guaranteed success of the launched
+     * game's own initialization. Never exit the Terminal on game launch. */
+    write_cinter_clipboard_reply("ack", command);
+}
+
+static void poll_cinter_clipboard(void)
+{
+    char text[192];
+    char prefix[24];
+    const char *os = cinter_clipboard_os();
+    char *command;
+    UInt32 now = TickCount();
+    size_t i;
+    if (!os || !g_terminalHasDrawn ||
+        (SInt32)(now - g_nextClipboardPollTick) < 0) return;
+    g_nextClipboardPollTick = now + CINTER_CLIPBOARD_POLL_TICKS;
+    if (!read_cinter_clipboard_message(text, sizeof(text))) return;
+    if (!strcmp(text, g_lastClipboardMessage)) return;
+    strcpy(g_lastClipboardMessage, text);
+    snprintf(prefix, sizeof(prefix), "cinter:%s:", os);
+    if (strncmp(text, prefix, strlen(prefix)) != 0) return;
+    command = text + strlen(prefix);
+    if (strncmp(command, "hello ", 6) == 0) {
+        const char *token = command + 6;
+        size_t tokenLength = strlen(token);
+        if (tokenLength < 8 || tokenLength > 32) return;
+        for (i = 0; i < tokenLength; ++i)
+            if (!isxdigit((unsigned char)token[i])) return;
+        write_cinter_clipboard_reply("ready", token);
+    } else if (strncmp(command, "play ", 5) == 0 ||
+               names_match_ignoring_case(command, "games") ||
+               names_match_ignoring_case(command, "games report") ||
+               names_match_ignoring_case(command, "games rescan") ||
+               names_match_ignoring_case(command, "help")) {
+        dispatch_cinter_clipboard_command(command);
+    }
+}
+
 static void handle_terminal_key(EventRecord *keyboardEvent)
 {
     unsigned char typedCharacter =
@@ -1033,8 +1888,15 @@ static void handle_terminal_key(EventRecord *keyboardEvent)
     if (keyboardEvent->modifiers & cmdKey) {
         if (typedCharacter == 'q' || typedCharacter == 'Q') {
             g_applicationIsRunning = false;
+        } else if (typedCharacter == 'w' || typedCharacter == 'W') {
+            /* The Terminal is our primary window, so Close exits. */
+            g_applicationIsRunning = false;
         } else if (typedCharacter == 'o' || typedCharacter == 'O') {
             open_games_report_window();
+        } else if (typedCharacter == 'c' || typedCharacter == 'C') {
+            copy_game_list_to_mac_clipboard();
+        } else if (typedCharacter == 'v' || typedCharacter == 'V') {
+            paste_mac_clipboard_into_terminal();
         } else if (typedCharacter == 'g' || typedCharacter == 'G') {
             launch_game_from_config_file();
         }
@@ -1052,7 +1914,7 @@ static void handle_terminal_key(EventRecord *keyboardEvent)
     if (typedCharacter == 0x0d || typedCharacter == 0x03) {
         char enteredCommandLine[TERMINAL_OUTPUT_LINE_SIZE];
         snprintf(enteredCommandLine, sizeof(enteredCommandLine),
-                 "CinterForgeTerminal> %.85s", g_terminalInput);
+                 "CinterForge Terminal> %.85s", g_terminalInput);
         append_terminal_history_line(enteredCommandLine);
         execute_terminal_command(g_terminalInput);
         g_terminalInput[0] = 0;
@@ -1090,12 +1952,11 @@ static void resize_classic_window(WindowPtr window, Point mousePosition)
     if (window == g_gamesReportWindow) {
         g_gamesReportWidth = newWidth;
         g_gamesReportHeight = newHeight;
-        g_reportFirstRow = 0;
+        position_games_report_scrollbar();
     } else if (window == g_terminalWindow) {
         g_terminalWindowWidth = newWidth;
         g_terminalWindowHeight = newHeight;
-        g_terminalFirstVisibleLine = g_terminalHistoryCount > terminal_visible_line_count()
-            ? (short)(g_terminalHistoryCount - terminal_visible_line_count()) : 0;
+        position_terminal_scrollbar();
     }
 
     InvalRect(&window->portRect);
@@ -1109,7 +1970,17 @@ static void handle_menu_selection(Point mousePosition)
     short selectedItem = LoWord(menuSelection);
 
     if (selectedMenuId == FILE_MENU_ID && selectedItem == 1) {
+        if (FrontWindow() == g_gamesReportWindow) {
+            HideWindow(g_gamesReportWindow);
+            SelectWindow(g_terminalWindow);
+        } else g_applicationIsRunning = false;
+    } else if (selectedMenuId == FILE_MENU_ID && selectedItem == 2) {
         g_applicationIsRunning = false;
+    } else if (selectedMenuId == EDIT_MENU_ID) {
+        if (selectedItem == 1) copy_game_list_to_mac_clipboard();
+        else if (selectedItem == 2 && FrontWindow() == g_terminalWindow)
+            paste_mac_clipboard_into_terminal();
+        else if (selectedItem == 3) export_game_list_to_host();
     } else if (selectedMenuId == GAMES_MENU_ID) {
         switch (selectedItem) {
             case 1: open_games_report_window(); break;
@@ -1122,18 +1993,51 @@ static void handle_menu_selection(Point mousePosition)
     HiliteMenu(0);
 }
 
+/* Native controls own their scroll thumb, arrows, and page areas. */
+static Boolean handle_window_scrollbar_click(WindowPtr window, Point location)
+{
+    ControlHandle selectedControl = NULL;
+    ControlHandle expectedControl = (window == g_gamesReportWindow)
+        ? g_gamesReportScrollBar : g_terminalScrollBar;
+    short part, result;
+    short pageSize;
+    if (!expectedControl) return false;
+    part = FindControl(location, window, &selectedControl);
+    if (!part || selectedControl != expectedControl) return false;
+    result = TrackControl(selectedControl, location, NULL);
+    pageSize = (window == g_gamesReportWindow)
+        ? visible_game_card_row_count() : terminal_visible_line_count();
+    if (result == inThumb) {
+        if (window == g_gamesReportWindow) {
+            g_reportFirstRow = GetControlValue(selectedControl);
+            update_games_report_scrollbar();
+            InvalRect(&window->portRect);
+        } else {
+            g_terminalFirstVisibleLine = GetControlValue(selectedControl);
+            update_terminal_scrollbar();
+            invalidate_terminal_window();
+        }
+    } else if (result) {
+        short delta = (result == inUpButton) ? -1 :
+                      (result == inDownButton) ? 1 :
+                      (result == inPageUp) ? (short)-pageSize :
+                      (result == inPageDown) ? pageSize : 0;
+        if (window == g_gamesReportWindow) scroll_games_report_by_rows(delta);
+        else scroll_terminal_history(delta);
+    }
+    return true;
+}
+
 /* Convert global mouse coordinates before hit-testing cards in the report. */
 static void handle_window_content_click(WindowPtr window, EventRecord *mouseEvent)
 {
     Point localMousePosition;
-
     if (window != FrontWindow()) SelectWindow(window);
-    if (window != g_gamesReportWindow) return;
-
     localMousePosition = mouseEvent->where;
     SetPort(window);
     GlobalToLocal(&localMousePosition);
-    handle_game_card_click(localMousePosition, mouseEvent->when);
+    if (handle_window_scrollbar_click(window, localMousePosition)) return;
+    if (window == g_gamesReportWindow) handle_game_card_click(localMousePosition, mouseEvent->when);
 }
 
 static void handle_mouse_down(EventRecord *mouseEvent)
@@ -1175,6 +2079,8 @@ static void handle_window_update(WindowPtr window)
 {
     if (window != g_gamesReportWindow && window != g_terminalWindow) return;
 
+    if (window == g_terminalWindow && !g_traceFirstUpdate)
+        trace_checkpoint("event: first terminal redraw begin");
     BeginUpdate(window);
     if (window == g_gamesReportWindow) {
         draw_games_report_window();
@@ -1182,6 +2088,13 @@ static void handle_window_update(WindowPtr window)
         draw_terminal_window();
     }
     EndUpdate(window);
+    if (window == g_terminalWindow) {
+        g_terminalHasDrawn = true;
+        if (!g_traceFirstUpdate) {
+            g_traceFirstUpdate = true;
+            trace_checkpoint("event: first terminal redraw complete");
+        }
+    }
 }
 
 /* The event loop remains responsive while catalog scanning progresses. */
@@ -1227,46 +2140,146 @@ static void initialize_terminal_interface(void)
     if (g_terminalWindowHeight > 475) g_terminalWindowHeight = 475;
     if (g_terminalWindowHeight < 250) g_terminalWindowHeight = 250;
     SetRect(&windowBounds, 10, 43, 10 + g_terminalWindowWidth, 43 + g_terminalWindowHeight);
-    g_terminalWindow = NewWindow(NULL, &windowBounds, "\pCinterForgeTerminal", true,
+    trace_heap_checkpoint("before NewWindow");
+    trace_checkpoint("ui: before NewWindow");
+    g_terminalWindow = NewWindow(NULL, &windowBounds, "\pCinterForge Terminal", true,
                            documentProc, (WindowPtr)-1, true, 0);
-    if (!g_terminalWindow) ExitToShell();
+    if (!g_terminalWindow) { trace_checkpoint("ui: NewWindow returned NULL"); ExitToShell(); }
+    trace_checkpoint("ui: NewWindow completed");
     menu = NewMenu(FILE_MENU_ID, "\pFile");
-    AppendMenu(menu, "\pQuit/Q");
+    AppendMenu(menu, "\pClose/W;Quit/Q");
+    InsertMenu(menu, 0);
+    menu = NewMenu(EDIT_MENU_ID, "\pEdit");
+    AppendMenu(menu, "\pCopy Game List/C;Paste/V;Export Game List...");
     InsertMenu(menu, 0);
     menu = NewMenu(GAMES_MENU_ID, "\pGames");
     AppendMenu(menu, "\pGames Report/O;Rescan/R;Run Game.txt/G");
     InsertMenu(menu, 0);
+    trace_checkpoint("ui: before DrawMenuBar");
     DrawMenuBar();
+    trace_checkpoint("ui: DrawMenuBar completed");
+    {
+        Rect scrollbarBounds = g_terminalWindow->portRect;
+        SetRect(&scrollbarBounds,
+                (short)(scrollbarBounds.right - CLASSIC_SCROLLBAR_WIDTH), 1,
+                scrollbarBounds.right,
+                (short)(scrollbarBounds.bottom - TERMINAL_PROMPT_AREA_HEIGHT));
+        trace_checkpoint("ui: before NewControl scrollbar");
+        g_terminalScrollBar = NewControl(g_terminalWindow, &scrollbarBounds,
+                                        "\p", true, 0, 0, 0, scrollBarProc, 0);
+        trace_checkpoint("ui: NewControl completed");
+        position_terminal_scrollbar();
+        trace_checkpoint("ui: scrollbar positioned");
+    }
+    trace_checkpoint("ui: before ShowWindow");
     ShowWindow(g_terminalWindow);
     SelectWindow(g_terminalWindow);
-    append_terminal_history_line("Welcome to CinterForge.");
-    append_terminal_history_line("SHALL WE PLAY A GAME?");
-    append_terminal_history_line("");
-    append_terminal_history_line("Type 'help' for instructions.");
-    append_terminal_history_line("Type 'games' for applications on Infinite HD.");
-    append_terminal_history_line("Type 'games report' for Game Cards.");
-    append_terminal_history_line("");
+    trace_checkpoint("ui: window selected");
+    trace_heap_checkpoint("after window selected");
+    /* Exact established opening text; do not add an alternate greeting. */
+    trace_heap_checkpoint("before welcome append");
+    trace_checkpoint("ui: before first welcome append");
+    append_terminal_history_line("Welcome to CinterForge. SHALL WE PLAY A GAME?");
+    trace_checkpoint("ui: first welcome append returned");
+    trace_heap_checkpoint("after welcome append");
+    append_terminal_history_line("Commands:");
+    append_terminal_history_line("  games                         List of playable games");
+    append_terminal_history_line("  play <title>                  Launch a game (play is optional)");
+    trace_checkpoint("ui: terminal interface complete");
 }
 
 int main(void)
 {
     EventRecord eventRecord;
+    Boolean tracedFirstEvent = false;
+    Boolean tracedFirstBatch = false;
+    Boolean tracedFirstPoll = false;
+    long scannedMilestone = 0;
+    trace_checkpoint("main: entered (before InitGraf)");
     InitGraf(&qd.thePort);
+    trace_checkpoint("main: InitGraf done");
     InitFonts();
+    trace_checkpoint("main: InitFonts done");
     InitWindows();
+    trace_checkpoint("main: InitWindows done");
     InitMenus();
+    trace_checkpoint("main: InitMenus done");
     TEInit();
+    trace_checkpoint("main: TEInit done");
     InitDialogs(NULL);
+    trace_checkpoint("main: InitDialogs done");
     InitCursor();
+    trace_checkpoint("main: InitCursor done");
     MaxApplZone();
+    trace_checkpoint("main: MaxApplZone done");
+    trace_heap_checkpoint("after MaxApplZone");
+    trace_checkpoint("main: before initialize_terminal_interface");
     initialize_terminal_interface();
-    read_game_name_from_config();
-    start_infinite_hd_catalog_scan();
+    trace_checkpoint("main: initialize_terminal_interface done");
+    g_nextClipboardPollTick = TickCount() + 120U;
+    trace_checkpoint("main: event loop started");
     while (g_applicationIsRunning) {
-        if (WaitNextEvent(everyEvent, &eventRecord, 2, NULL)) handle_classic_mac_event(&eventRecord);
-        if (g_catalogScanActive) scan_next_catalog_batch();
-        if (!g_catalogScanActive) auto_launch_requested_game_if_ready();
+        if (WaitNextEvent(everyEvent, &eventRecord, 2, NULL)) {
+            if (!tracedFirstEvent) {
+                trace_checkpoint("event: first event received");
+                tracedFirstEvent = true;
+            }
+            handle_classic_mac_event(&eventRecord);
+        }
+        if (g_startupTasksPending && g_terminalHasDrawn) {
+            g_startupTasksPending = false;
+            /* Machine cards start Terminal only. The host speaks its existing
+             * greeting only after a matching clipboard READY arrives. */
+            trace_checkpoint("catalog: before start_infinite_hd_catalog_scan");
+            start_infinite_hd_catalog_scan();
+            trace_checkpoint("catalog: scan setup returned");
+        }
+        if (g_catalogScanActive) {
+            if (!tracedFirstBatch) trace_checkpoint("catalog: first batch begin");
+            scan_next_catalog_batch();
+            if (!tracedFirstBatch) {
+                trace_checkpoint("catalog: first batch complete");
+                tracedFirstBatch = true;
+            }
+            if (g_catalogEntriesScanned / 500L > scannedMilestone) {
+                char progress[96];
+                scannedMilestone = g_catalogEntriesScanned / 500L;
+                snprintf(progress, sizeof(progress), "catalog: scanned %ld entries",
+                         g_catalogEntriesScanned);
+                trace_checkpoint(progress);
+            }
+            if (!g_catalogScanActive) trace_checkpoint("catalog: scan complete");
+        }
+        /* The optional Game.txt is explicit-only. Clipboard commands use the
+         * same discovered catalog and keep Terminal running in the background. */
+        if (!g_catalogScanActive && g_requestedFinderName[0]) {
+            trace_checkpoint("launcher: requested game begin");
+            auto_launch_requested_game_if_ready();
+            trace_checkpoint("launcher: requested game returned");
+        }
+        if (!g_catalogScanActive && g_pendingClipboardCommand[0]) {
+            char pending[sizeof(g_pendingClipboardCommand)];
+            strcpy(pending, g_pendingClipboardCommand);
+            g_pendingClipboardCommand[0] = 0;
+            trace_checkpoint("clipboard: pending command begin");
+            dispatch_cinter_clipboard_command(pending);
+            trace_checkpoint("clipboard: pending command returned");
+        }
+        /* Poll for cinter:<os>:hello and subsequent commands only once the
+         * first redraw and game scan have completed. The host emits speech on
+         * the matching READY reply; no guest speech traps are called. */
+        if (g_terminalHasDrawn && !g_startupTasksPending &&
+            !g_catalogScanActive) {
+            if (!tracedFirstPoll) trace_checkpoint("clipboard: first poll begin");
+            poll_cinter_clipboard();
+            if (!tracedFirstPoll) {
+                trace_checkpoint("clipboard: first poll complete");
+                tracedFirstPoll = true;
+            }
+        }
     }
+    trace_checkpoint("main: normal shutdown");
     if (g_cardPixelBuffer) DisposePtr(g_cardPixelBuffer);
+    if (g_logoPixelBuffer) DisposePtr(g_logoPixelBuffer);
     return 0;
 }

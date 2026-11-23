@@ -351,24 +351,46 @@ the public Internet.
 ## CinterForgeTerminal inside classic Macintosh emulators
 
 After `./Cinter all 68k publish beta` uploads the staged
-`CinterForgeTerminal.68k.img` application disk, a compatible System 7–9 Infinite Mac Session mounts that disposable
+`CinterForgeTerminal.68k.img` application disk, **only System 7.1, Mac OS
+7.6 and Mac OS 8.1** ordinary Infinite Mac Sessions mount that disposable
 volume beside the guest system disk and supported **Infinite HD**. The
+Lagomorph-specific Quadra 650 session retains its separate disk and is not
+changed; normal Mac OS 7.6 game sessions still mount the CinterForge Terminal disk. The
 original macOS, Windows and Linux Terminal Session UI, startup words and
 commands are unchanged. This additional interface exists **inside the
 emulated classic Mac** only, and uses classic Macintosh windows, menus,
 scrollbars and monochrome controls rather than a modern black terminal skin.
 
-In Finder, open **CinterForge HD** and double-click **CinterForgeTerminal**.
+In Finder, open **CinterForge Terminal** and double-click **CinterForge Terminal**.
 `games` lists applications actually detected on Infinite HD; `games report`
 opens its Game Card browser in an independent Macintosh window. Cards contain
 real Finder application icons and names, not alphabetical placeholders.
 `play "name"` or `"name"` launches an exact application name. The Games Report
 window can be closed without closing the terminal window.
 
+The Games Report displays exactly five Game Cards per row. Cards stretch
+horizontally to fill the window's content width as you resize it; their icons,
+labels and Open regions stay aligned with their clickable bounds.
+
+The discovered native list contains only `APPL` executables that match the
+curated, OS-specific game assignments in [Game Catalog](Game%20Catalog.md).
+This currently means up to 50 scanned entries on System 7.1, 25 on Mac OS
+7.6 and 8 on Mac OS 8.1, counting duplicates/versions. Editors, helpers,
+installers, documentation, unknown APPLs and games assigned to **another OS**
+are excluded from both the Terminal list and Games Report. Copy/export and
+`play`/`Game.txt` launch resolution use that same per-OS catalog. These OS
+assignments are initial recommendations pending guest compatibility testing. The Mac OS
+of this already-running Macintosh does not change when you type `play`; it
+launches the game in this guest. For the separately exposed host Terminal
+classic-Mac game commands, the authored game catalog chooses an existing
+historical Macintosh emulator profile (System 7.1, Mac OS 7.6, Mac OS 8.1,
+or Mac OS X 10.3, as applicable) before boot. These choices are provisional,
+not evidence the game has been successfully launched.
+
 For manual discovery, open `Game.txt` in SimpleText, enter an application's
 Finder name on one line, and Save. Choose **Games → Run Game.txt** to try it
-without rebooting the machine. Alternatively quit CinterForgeTerminal and
-open it again; a nonempty `Game.txt` triggers automatic launch. If a match
+without rebooting the machine. The Terminal stays resident after an explicit game launch; no game
+automatically launches when the emulator boots. If a match
 is missing or ambiguous, the Terminal reports the issue. These changes are
 writable only within that emulator session; the Cloudflare master is immutable.
 If the CinterForge volume is absent, use
