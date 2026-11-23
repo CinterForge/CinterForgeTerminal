@@ -56,6 +56,18 @@ Scrap Manager clipboard and the native macOS clipboard. Server log entries
 for launch attempts and waiting-for-READY are diagnostic, not success markers.
 No host Game Cards have been implemented yet.
 
+## 68K Games Launcher icon folder
+
+From the existing System 7.1 or Mac OS 7.6 68K Terminal, choose **Games → Games
+Launcher** or enter `games launcher`. This opens a third, independent classic
+Macintosh window, using the discovered Finder applications and their actual
+resource-fork icons. The fixed **8×8** (System 7.1, up to 50 games) or **6×6**
+(Mac OS 7.6, up to 32 games) folder layout leaves unused cells blank to make
+screenshots consistently sliceable. Finder names appear below the icons; one
+click on a populated cell launches that exact application, as in Games Report.
+The original Terminal window, Game Card report and emulator boot behavior do
+not change. This view does not require or export an icon ZIP.
+
 ## Classic Macintosh games — direct commands
 
 `infinitemac` opens the 20-OS-version emulator gallery; individual classic Macintosh game aliases remain available as direct commands but are not separate `games` entries. The catalog is based on the [Infinite Mac](https://infinitemac.org/) game library; titles use their command aliases rather than arbitrary file paths. Infinite Mac's browser runtime and game media may require network access, and each game's appropriate Mac profile/software media must be respected.

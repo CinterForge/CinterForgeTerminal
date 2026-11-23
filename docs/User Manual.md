@@ -372,6 +372,16 @@ The Games Report displays exactly five Game Cards per row. Cards stretch
 horizontally to fill the window's content width as you resize it; their icons,
 labels and Open regions stay aligned with their clickable bounds.
 
+**Games Launcher** is a separate, screenshot-friendly Finder-style icon view.
+Choose **Games → Games Launcher**, press Command-L, or type `games launcher`
+inside the 68K Terminal. On System 7.1 it uses exactly 8 columns by 8 rows
+(50 available game entries, remaining cells blank); on Mac OS 7.6 it uses
+6 columns by 6 rows (32 entries, remaining cells blank). Each cell contains
+an actual application icon from the mounted Infinite HD and its Finder name
+beneath it. Click a populated cell once to launch that application's real
+FSSpec with the existing Process Manager launcher. It does not replace
+Games Report, open during startup, export images, or change the host emulator.
+
 The discovered native list contains only `APPL` executables that match the
 curated, OS-specific game assignments in [Game Catalog](Game%20Catalog.md).
 This currently means up to 50 scanned entries on System 7.1 and 32 on Mac OS

@@ -2,10 +2,12 @@
  * CinterForge Terminal for classic Macintosh (Motorola 68000 / System 7+).
  *
  * This is a real Macintosh application, not the modern Terminal WebView.
- * It has two ordinary Mac OS windows:
+ * It has three ordinary Mac OS windows (the last two open on demand):
  *   - Terminal: the classic Mac command window. Its existing text and commands
  *               must stay aligned with the other CinterForge terminals.
  *   - Games Report: the separate, scrollable Game Card browser.
+ *   - Games Launcher: a separate Finder-style icon folder for screenshots
+ *     and direct game launches (8x8 on 7.1, 6x6 on 7.6).
  *
  * Games are discovered from actual APPL files on the mounted Infinite HD.
  * Their Finder names and native icon resources are read from those files.
@@ -46,6 +48,9 @@
 #define CARD_HEIGHT 144
 #define CARD_SPACING 7
 #define REPORT_COLUMN_COUNT 5
+#define LAUNCHER_ICON_SIZE 32
+#define LAUNCHER_LABEL_SIZE 9
+#define LAUNCHER_CONTENT_HEIGHT 51
 #define REPORT_HEADER_HEIGHT 98
 #define REPORT_FOOTER_HEIGHT 23
 #define REPORT_SIDE_MARGIN 8
@@ -145,9 +150,13 @@ static char g_applicationNameFilter[64] = "";
 static char g_gamesReportStatus[128] = "Searching Infinite HD:Games...";
 static short g_visibleApplicationIndices[MAX_DISCOVERED_APPLICATIONS];
 static short g_visibleApplicationCount = 0;
+/* Sorted independently of the Games Report search filter. */
+static short g_launcherApplicationIndices[MAX_DISCOVERED_APPLICATIONS];
+static short g_launcherApplicationCount = 0;
 static short g_reportFirstRow = 0;
 static short g_selectedApplicationIndex = -1;
 static WindowPtr g_gamesReportWindow = NULL; /* Games Report, created on demand. */
+static WindowPtr g_gamesLauncherWindow = NULL; /* Finder-style, created on demand. */
 static ControlHandle g_gamesReportScrollBar = NULL;
 /* The Terminal window and its bounded, scrollable text history. */
 static WindowPtr g_terminalWindow = NULL;
@@ -565,6 +574,18 @@ static void invalidate_games_report_window(void)
         SetPort(previousPort);
 }
 
+/* Never leave a different window selected as the current drawing port. */
+static void invalidate_games_launcher_window(void)
+{
+    GrafPtr previousPort = NULL;
+    if (!g_gamesLauncherWindow) return;
+    GetPort(&previousPort);
+    SetPort(g_gamesLauncherWindow);
+    InvalRect(&g_gamesLauncherWindow->portRect);
+    if (previousPort && previousPort != (GrafPtr)g_gamesLauncherWindow)
+        SetPort(previousPort);
+}
+
 /* Keep a reader's place when output arrives. Follow new lines automatically
  * only when the reader was already looking at the end of the transcript. */
 static void append_terminal_history_line(const char *value)
@@ -709,6 +730,7 @@ static short compare_application_names(short leftIndex, short rightIndex)
 }
 
 static void update_games_report_scrollbar(void);
+static void rebuild_launcher_application_list(void);
 
 static void rebuild_visible_application_list(void)
 {
@@ -738,6 +760,26 @@ static void rebuild_visible_application_list(void)
     g_selectedApplicationIndex = -1;
     update_games_report_scrollbar();
     invalidate_games_report_window();
+    rebuild_launcher_application_list();
+}
+
+static void rebuild_launcher_application_list(void)
+{
+    short i, insert;
+    g_launcherApplicationCount = g_discoveredApplicationCount;
+    for (i = 0; i < g_launcherApplicationCount; ++i)
+        g_launcherApplicationIndices[i] = i;
+    for (i = 1; i < g_launcherApplicationCount; ++i) {
+        short toInsert = g_launcherApplicationIndices[i];
+        insert = i;
+        while (insert > 0 &&
+               compare_application_names(toInsert, g_launcherApplicationIndices[insert-1]) < 0) {
+            g_launcherApplicationIndices[insert] = g_launcherApplicationIndices[insert-1];
+            --insert;
+        }
+        g_launcherApplicationIndices[insert] = toInsert;
+    }
+    invalidate_games_launcher_window();
 }
 
 static short find_infinite_hd_volume(void)
@@ -764,6 +806,8 @@ static void start_infinite_hd_catalog_scan(void)
 {
     g_discoveredApplicationCount = 0;
     g_visibleApplicationCount = 0;
+    g_launcherApplicationCount = 0;
+    invalidate_games_launcher_window();
     g_reportFirstRow = 0;
     g_catalogFolderDepth = 0;
     g_catalogEntriesScanned = 0;
@@ -1515,6 +1559,168 @@ static void open_games_report_window(void)
 }
 
 /* -------------------------------------------------------------------------
+ * Games Launcher: separate Finder-style icon folder; no card images or export.
+ * All icons and names come from the same real APPL entries as Games Report.
+ * The exact 8x8 / 6x6 cells remain fixed even when fewer games are mounted,
+ * so each screenshot can later be sliced on deterministic cell boundaries.
+ * ------------------------------------------------------------------------- */
+
+static short launcher_column_count(void)
+{
+    return g_runningGameOS == GAME_OS_MAC_76 ? 6 : 8;
+}
+
+static short launcher_row_count(void)
+{
+    return g_runningGameOS == GAME_OS_MAC_76 ? 6 : 8;
+}
+
+/* Finder-style two-line names, rather than a single card-width truncation.
+ * Split on the last space that fits; long unspaced names split by width.
+ * The full Finder name still stays in the unchanged catalog and FSSpec. */
+static void draw_launcher_name(short applicationIndex, short left,
+                               short baseline, short width)
+{
+    char name[64], first[64], second[64];
+    Str255 measured;
+    short length, fit, split = 0, i;
+    copy_pascal_string_to_c(g_discoveredApplications[applicationIndex].finderName,
+                            name, sizeof(name));
+    TextFont(0);
+    TextFace(normal);
+    TextSize(LAUNCHER_LABEL_SIZE);
+    length = (short)strlen(name);
+    for (fit = 1; fit <= length; ++fit) {
+        char saved = name[fit];
+        name[fit] = 0;
+        copy_c_string_to_pascal(name, measured);
+        name[fit] = saved;
+        if (StringWidth(measured) > width - 4) break;
+    }
+    if (fit > length) {
+        draw_centered_text(name, left, baseline, width, LAUNCHER_LABEL_SIZE);
+        return;
+    }
+    for (i = 1; i < fit; ++i)
+        if (name[i] == ' ') split = i;
+    if (!split) split = (short)(fit - 1);
+    if (split < 1) split = 1;
+    memcpy(first, name, (size_t)split);
+    first[split] = 0;
+    i = split;
+    while (name[i] == ' ') ++i;
+    strcpy(second, name + i);
+    draw_centered_text(first, left, baseline, width, LAUNCHER_LABEL_SIZE);
+    draw_centered_text(second, left, (short)(baseline + 9), width,
+                       LAUNCHER_LABEL_SIZE);
+}
+
+static void draw_games_launcher_window(void)
+{
+    Rect bounds;
+    RGBColor white = {0xffff, 0xffff, 0xffff};
+    RGBColor black = {0, 0, 0};
+    short columns = launcher_column_count(), rows = launcher_row_count();
+    short slot, capacity = (short)(columns * rows);
+    if (!g_gamesLauncherWindow) return;
+    SetPort(g_gamesLauncherWindow);
+    bounds = g_gamesLauncherWindow->portRect;
+    RGBBackColor(&white);
+    RGBForeColor(&black);
+    EraseRect(&bounds);
+    if (!g_launcherApplicationCount) {
+        if (!g_catalogScanActive)
+            draw_text("No games found on Infinite HD.", 12, 23, 0, 12);
+        return;
+    }
+    for (slot = 0; slot < g_launcherApplicationCount && slot < capacity; ++slot) {
+        short column = (short)(slot % columns);
+        short row = (short)(slot / columns);
+        short left = (short)((long)column * bounds.right / columns);
+        short right = (short)((long)(column + 1) * bounds.right / columns);
+        short top = (short)((long)row * bounds.bottom / rows);
+        short bottom = (short)((long)(row + 1) * bounds.bottom / rows);
+        short cellWidth = (short)(right - left);
+        short cellHeight = (short)(bottom - top);
+        short contentTop = (short)(top + (cellHeight > LAUNCHER_CONTENT_HEIGHT
+                                   ? (cellHeight - LAUNCHER_CONTENT_HEIGHT)/2 : 0));
+        short applicationIndex = g_launcherApplicationIndices[slot];
+        draw_application_finder_icon(applicationIndex,
+                                     (short)(left + (cellWidth - LAUNCHER_ICON_SIZE)/2),
+                                     contentTop, LAUNCHER_ICON_SIZE);
+        draw_launcher_name(applicationIndex, left + 2,
+                           (short)(contentTop + 39), cellWidth - 4);
+    }
+}
+
+/* One click opens the real application; suppress the second physical press of
+ * a double-click, just as Games Report does. No extra launcher protocol. */
+static void handle_games_launcher_click(Point point, UInt32 clickTime)
+{
+    static short previousIndex = -1;
+    static UInt32 previousClick = 0;
+    Rect bounds;
+    short columns = launcher_column_count(), rows = launcher_row_count();
+    short column, row, slot, applicationIndex;
+    if (!g_gamesLauncherWindow) return;
+    bounds = g_gamesLauncherWindow->portRect;
+    if (point.h < 0 || point.v < 0 || point.h >= bounds.right ||
+        point.v >= bounds.bottom || !bounds.right || !bounds.bottom) return;
+    column = (short)((long)point.h * columns / bounds.right);
+    row = (short)((long)point.v * rows / bounds.bottom);
+    slot = (short)(row * columns + column);
+    if (slot >= g_launcherApplicationCount) return;
+    applicationIndex = g_launcherApplicationIndices[slot];
+    if (applicationIndex == previousIndex && clickTime >= previousClick &&
+        clickTime - previousClick < mac_double_click_interval_in_ticks()) return;
+    previousIndex = applicationIndex;
+    previousClick = clickTime;
+    launch_discovered_application(applicationIndex);
+}
+
+static void open_games_launcher_window(void)
+{
+    Rect screenBounds, bounds;
+    short width, height;
+    if (!g_gamesLauncherWindow) {
+        screenBounds = qd.screenBits.bounds;
+        width = (short)(screenBounds.right - screenBounds.left - 22);
+        height = (short)(screenBounds.bottom - screenBounds.top - 72);
+        if (width > 1000) width = 1000;
+        if (height > 730) height = 730;
+        if (width < 400) width = 400;
+        if (height < 350) height = 350;
+        SetRect(&bounds, 11, 43, (short)(11 + width), (short)(43 + height));
+        /* Color GrafPort is necessary to render the actual 'icl4'/'icl8'
+         * resources through the already-used draw_application_finder_icon. */
+        g_gamesLauncherWindow = (WindowPtr)NewCWindow(NULL, &bounds,
+                                "\pGames Launcher", false,
+                                documentProc, (WindowPtr)-1, true, 0);
+        if (!g_gamesLauncherWindow) {
+            SysBeep(1);
+            append_terminal_history_line("Could not open Games Launcher window.");
+            return;
+        }
+    }
+    ShowWindow(g_gamesLauncherWindow);
+    SelectWindow(g_gamesLauncherWindow);
+    invalidate_games_launcher_window();
+}
+
+static void handle_games_launcher_key(EventRecord *event)
+{
+    unsigned char key = (unsigned char)(event->message & charCodeMask);
+    if (event->modifiers & cmdKey) {
+        if (key == 'q' || key == 'Q') g_applicationIsRunning = false;
+        else if (key == 'w' || key == 'W') {
+            HideWindow(g_gamesLauncherWindow);
+            SelectWindow(g_terminalWindow);
+        } else if (key == 'r' || key == 'R') start_infinite_hd_catalog_scan();
+        else if (key == 'o' || key == 'O') open_games_report_window();
+    }
+}
+
+/* -------------------------------------------------------------------------
  * Game-list exchange: classic Scrap Manager and Infinite Mac's Outside World
  * ------------------------------------------------------------------------- */
 
@@ -1804,6 +2010,7 @@ static void execute_terminal_command(char *commandLine)
         append_terminal_history_line("games                         List of playable games");
         append_terminal_history_line("play <title>                  Launch a game (play is optional)");
         append_terminal_history_line("games report                  Open Games Report");
+        append_terminal_history_line("games launcher                Open Finder-style icon grid");
         append_terminal_history_line("games copy                    Copy all games to Mac clipboard");
         append_terminal_history_line("games export                  Download list via The Outside World");
         append_terminal_history_line("\"name\"            Launch a game by Finder name");
@@ -1812,6 +2019,8 @@ static void execute_terminal_command(char *commandLine)
     } else if (names_match_ignoring_case(commandText, "games report")) {
         trace_checkpoint("report: opened by terminal command");
         open_games_report_window();
+    } else if (names_match_ignoring_case(commandText, "games launcher")) {
+        open_games_launcher_window();
     } else if (names_match_ignoring_case(commandText, "games copy")) {
         copy_game_list_to_mac_clipboard();
     } else if (names_match_ignoring_case(commandText, "games export")) {
@@ -1992,6 +2201,8 @@ static void handle_terminal_key(EventRecord *keyboardEvent)
         } else if (typedCharacter == 'o' || typedCharacter == 'O') {
             trace_checkpoint("report: opened by terminal Command-O");
             open_games_report_window();
+        } else if (typedCharacter == 'l' || typedCharacter == 'L') {
+            open_games_launcher_window();
         } else if (typedCharacter == 'c' || typedCharacter == 'C') {
             copy_game_list_to_mac_clipboard();
         } else if (typedCharacter == 'v' || typedCharacter == 'V') {
@@ -2037,6 +2248,8 @@ static void resize_classic_window(WindowPtr window, Point mousePosition)
 
     if (window == g_gamesReportWindow) {
         SetRect(&allowedSizes, 365, 315, 1100, 850);
+    } else if (window == g_gamesLauncherWindow) {
+        SetRect(&allowedSizes, 400, 350, 1100, 850);
     } else {
         SetRect(&allowedSizes, 360, 250, 1100, 850);
     }
@@ -2059,6 +2272,7 @@ static void resize_classic_window(WindowPtr window, Point mousePosition)
     }
 
     if (window == g_gamesReportWindow) invalidate_games_report_window();
+    else if (window == g_gamesLauncherWindow) invalidate_games_launcher_window();
     else invalidate_terminal_window();
 }
 
@@ -2073,6 +2287,9 @@ static void handle_menu_selection(Point mousePosition)
         if (FrontWindow() == g_gamesReportWindow) {
             HideWindow(g_gamesReportWindow);
             SelectWindow(g_terminalWindow);
+        } else if (FrontWindow() == g_gamesLauncherWindow) {
+            HideWindow(g_gamesLauncherWindow);
+            SelectWindow(g_terminalWindow);
         } else g_applicationIsRunning = false;
     } else if (selectedMenuId == FILE_MENU_ID && selectedItem == 2) {
         g_applicationIsRunning = false;
@@ -2085,8 +2302,9 @@ static void handle_menu_selection(Point mousePosition)
         switch (selectedItem) {
             case 1: trace_checkpoint("report: opened by Games menu");
                     open_games_report_window(); break;
-            case 2: start_infinite_hd_catalog_scan(); break;
-            case 3: launch_game_from_config_file(); break;
+            case 2: open_games_launcher_window(); break;
+            case 3: start_infinite_hd_catalog_scan(); break;
+            case 4: launch_game_from_config_file(); break;
             default: break;
         }
     }
@@ -2139,6 +2357,7 @@ static void handle_window_content_click(WindowPtr window, EventRecord *mouseEven
     GlobalToLocal(&localMousePosition);
     if (handle_window_scrollbar_click(window, localMousePosition)) return;
     if (window == g_gamesReportWindow) handle_game_card_click(localMousePosition, mouseEvent->when);
+    else if (window == g_gamesLauncherWindow) handle_games_launcher_click(localMousePosition, mouseEvent->when);
 }
 
 static void handle_mouse_down(EventRecord *mouseEvent)
@@ -2166,6 +2385,8 @@ static void handle_mouse_down(EventRecord *mouseEvent)
             if (clickedWindow && TrackGoAway(clickedWindow, mouseEvent->where)) {
                 if (clickedWindow == g_gamesReportWindow) {
                     HideWindow(g_gamesReportWindow);
+                } else if (clickedWindow == g_gamesLauncherWindow) {
+                    HideWindow(g_gamesLauncherWindow);
                 } else if (clickedWindow == g_terminalWindow) {
                     g_applicationIsRunning = false;
                 }
@@ -2182,13 +2403,16 @@ static void handle_mouse_down(EventRecord *mouseEvent)
 /* Redraw only the window that Mac OS reports as needing an update. */
 static void handle_window_update(WindowPtr window)
 {
-    if (window != g_gamesReportWindow && window != g_terminalWindow) return;
+    if (window != g_gamesReportWindow && window != g_gamesLauncherWindow &&
+        window != g_terminalWindow) return;
 
     if (window == g_terminalWindow && !g_traceFirstUpdate)
         trace_checkpoint("event: first terminal redraw begin");
     BeginUpdate(window);
     if (window == g_gamesReportWindow) {
         draw_games_report_window();
+    } else if (window == g_gamesLauncherWindow) {
+        draw_games_launcher_window();
     } else {
         draw_terminal_window();
     }
@@ -2213,6 +2437,8 @@ static void handle_classic_mac_event(EventRecord *event)
         case autoKey:
             if (FrontWindow() == g_gamesReportWindow) {
                 handle_games_report_key(event);
+            } else if (FrontWindow() == g_gamesLauncherWindow) {
+                handle_games_launcher_key(event);
             } else {
                 handle_terminal_key(event);
             }
@@ -2222,6 +2448,7 @@ static void handle_classic_mac_event(EventRecord *event)
             break;
         case activateEvt:
             invalidate_games_report_window();
+            invalidate_games_launcher_window();
             invalidate_terminal_window();
             break;
         default:
@@ -2258,7 +2485,7 @@ static void initialize_terminal_interface(void)
     AppendMenu(menu, "\pCopy Game List/C;Paste/V;Export Game List...");
     InsertMenu(menu, 0);
     menu = NewMenu(GAMES_MENU_ID, "\pGames");
-    AppendMenu(menu, "\pGames Report/O;Rescan/R;Run Game.txt/G");
+    AppendMenu(menu, "\pGames Report/O;Games Launcher/L;Rescan/R;Run Game.txt/G");
     InsertMenu(menu, 0);
     trace_checkpoint("ui: before DrawMenuBar");
     DrawMenuBar();
