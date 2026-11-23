@@ -792,6 +792,7 @@ def _devtools_assets(builds: Path) -> dict[str, Path | bytes]:
         'Toolchains/Windows/MSYS2',
         'Toolchains/WebView',
         'Toolchains/WebView2',
+        'Toolchains/Retro68',
     )
     assets: dict[str, Path | bytes] = {}
     for rel in required:
@@ -803,6 +804,26 @@ def _devtools_assets(builds: Path) -> dict[str, Path | bytes]:
         omit = frozenset({'mamba-cache'}) if rel == 'Toolchains/mac' else frozenset()
         assets.update(_files_under(builds / rel, 'DevTools/Builds/' + rel,
                                    exclude_top_level=omit))
+    # The optional classic Mac compiler is a real offline OCI image, not a
+    # Docker daemon cache. Verify the exact sealed member set before making it
+    # part of the unified SDK and publishing its large archive.
+    from host.devtools.devtooling import RETRO68_SCHEMA, RETRO68_IMAGE, RETRO68_SOURCE
+    retro_root = builds / 'Toolchains/Retro68'
+    retro_receipt = retro_root / 'retro68-image.json'
+    retro_archive = retro_root / 'retro68-amd64.tar'
+    if (retro_root.is_symlink() or retro_receipt.is_symlink() or retro_archive.is_symlink() or
+            not retro_receipt.is_file() or not retro_archive.is_file()):
+        raise RuntimeError('Retro68 DevTools archive/receipt is missing or unsafe; run Setup')
+    members = {p.name for p in retro_root.iterdir()}
+    if members != {'retro68-image.json', 'retro68-amd64.tar'}:
+        raise RuntimeError('Retro68 DevTools contains unexpected files: ' + str(sorted(members)))
+    data = json.loads(retro_receipt.read_text(encoding='utf-8'))
+    if (data.get('schema') != RETRO68_SCHEMA or data.get('source') != RETRO68_SOURCE or
+            data.get('image') != RETRO68_IMAGE or data.get('platform') != 'linux/amd64' or
+            not re.fullmatch(r'sha256:[0-9a-f]{64}', data.get('registry_digest', '')) or
+            data.get('archive_sha256') != _hash(retro_archive) or
+            data.get('archive_bytes') != retro_archive.stat().st_size):
+        raise RuntimeError('Retro68 DevTools archive/receipt failed SHA-256 validation')
     # More than one historical OCI receipt can remain in developer Builds.
     # They all have valid hashes, but only the image for THIS authored Setup
     # recipe is the GUI/Win cross toolchain. Stage an explicit selection and
@@ -852,6 +873,8 @@ def _devtools_assets(builds: Path) -> dict[str, Path | bytes]:
         'CinterForgeTerminal optional unified development tools for macOS, Linux and Windows.\n'
         'The macOS platform compiler is supplied by Xcode on macOS; it cannot be redistributed.\n'
         'Toolchain containers are immutable archives. Do not import running Colima/Lima disk state.\n'
+        'Classic Macintosh 68K/PPC compilers are in Toolchains/Retro68/retro68-amd64.tar.\n'
+        'Use docker load on the verified image archive inside the managed t guest; no ROM is included.\n'
         'DevTools install/update populates the shared Builds/Toolchains; Stage copies apps only.\n').encode()
     return assets
 
@@ -2255,6 +2278,31 @@ def _verify_public_lagomorph_range(url: str, expected_size: int) -> None:
     print(f'[TERMINAL PUBLISH] public Lagomorph range/CORS verified: {url}', flush=True)
 
 
+def _verify_public_68k_hfs_range(url: str, expected_size: int) -> None:
+    """Verify the raw 68K image is usable by Infinite Mac from the public CDN.
+
+    A successful authenticated R2 round-trip alone is not sufficient: the
+    browser requires CORS-enabled HTTP 206 ranges, and HFS Standard's MDB
+    signature must occur at exact byte offset 1024.
+    """
+    import urllib.request
+    request = urllib.request.Request(url, headers={
+        'Origin': 'https://infinitemac.org', 'Range': 'bytes=1024-1025',
+        'User-Agent': 'CinterForgeTerminal-68K-check/1',
+    })
+    with urllib.request.urlopen(request, timeout=30) as response:
+        status = getattr(response, 'status', response.getcode())
+        header = response.headers
+        signature = response.read(3)
+    if (status != 206 or
+            header.get('Content-Range') != f'bytes 1024-1025/{expected_size}' or
+            header.get('Access-Control-Allow-Origin', '') not in
+            ('*', 'https://infinitemac.org') or signature != b'BD'):
+        raise RuntimeError('Published CinterForgeTerminal.68k.img must expose '
+                           'HFS Standard byte 1024, HTTP 206 ranges and Infinite Mac CORS: ' + url)
+    print('[TERMINAL PUBLISH] 68K raw HFS range/CORS VERIFIED: ' + url, flush=True)
+
+
 def _release_public_urls(release: str, *, include_lagomorph: bool = False,
                          include_windows_msi: bool = False,
                          prefix: str = CLOUDFLARE_OBJECT_ROOT) -> dict[str, str]:
@@ -2394,6 +2442,9 @@ def _public_http_attempt(label: str, url: str, expected_size: int,
         return
     if label == 'lagomorph':
         _verify_public_lagomorph_range(url, expected_size)
+        return
+    if label == 'CinterForgeTerminal.68k.img':
+        _verify_public_68k_hfs_range(url, expected_size)
         return
     headers['Range'] = 'bytes=0-0'
     request = urllib.request.Request(url, headers=headers)

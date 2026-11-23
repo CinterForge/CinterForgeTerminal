@@ -423,6 +423,7 @@ a {
 }
 
 .computer-view {
+   position: relative;
    flex: 1;
    min-height: 0;
    background: #05070b;
@@ -438,6 +439,21 @@ a {
    height: 100%;
    border: 0;
    background: #05070b
+}
+
+/* One persistent iframe and one pointer relay belong to each emulator tab.
+   A hidden frame must stay in the DOM so switching tabs never restarts a Mac. */
+.computer-view .infinitemac-session-frame[hidden],
+.computer-view .infinitemac-pointer-relay[hidden] {
+   display: none;
+}
+
+.computer-view .infinitemac-pointer-relay {
+   position: absolute;
+   inset: 0;
+   z-index: 1;
+   touch-action: none;
+   cursor: default;
 }
 
 .terminal-overlay[data-profile="commodore-64"] {

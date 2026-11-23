@@ -192,3 +192,27 @@ paths intentionally remain the existing developer `Builds/CFTVM/T` location.
 Code-OSS source acquisition/staging lives in `host/codeoss` while its authored
 browser extension remains in `webapp/codeoss/extension`. Future changes to
 VM locations can be made in either layer without runtime/lifecycle imports.
+
+## Classic Macintosh 68K companion
+
+`app/68k/` owns a separate native **classic Mac OS** application named
+`CinterForgeTerminal`, built in the established Setup-provisioned Retro68
+DevTools OCI by the regular `Cinter build 68k/all` lifecycle. Its File Manager
+scans the actual `Infinite HD` HFS catalog for `APPL` files, the Resource and
+Icon Managers render their real classic Finder icon resources over an authored
+Game Card image, and the Process Manager opens a chosen application. It owns
+an authentic classic-Mac Terminal window and an independently closable
+Games Report window. It never replaces the modern three-platform Terminal UI.
+
+`host/infinitemac/launcher_setup.py` owns the HFS image builder and Build/Stage
+integrity receipt; Build writes the raw `CinterForgeTerminal.68k.img` to
+`Builds/CinterForgeTerminal/Build/68k/`, and Stage puts the verified disk next
+to other apps in `Builds/CinterForgeTerminal/Distribution/`. The existing
+application publisher uploads this raw disk (never an Assets pack or ZIP) to
+public beta, and the authorized
+Terminal runtime endpoint `/api/infinitemac/media` checks its HFS signature,
+HTTPS range response and Infinite Mac CORS before `CinterForgeEmulators.js`
+adds the `disk_url` query parameter to eligible System 7–9 profiles. All
+emulator profiles continue to request Infinite HD. The provider owns actual
+machine compatibility and disposable guest-side disk writes. Lagomorph's
+hard-coded two-floppy boot path remains unchanged.

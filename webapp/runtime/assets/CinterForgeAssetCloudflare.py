@@ -183,10 +183,12 @@ def _fetch_index(r2, cfg: dict, prefix: str, objects: dict[str, dict]) -> dict |
 
 
 # The established pack/gallery outputs are part of the published website,
-# even though they are not individual UCI asset folders. These names are
+# even though they are not individual UCI asset folders. InfiniteMac owns
+# the opt-in public HFS launcher media; never include arbitrary raw downloads.
+# These names are
 # already owned by the existing CinterForge Asset/ContentPack workflow.
 PUBLISHED_ASSET_FILES = frozenset(('AssetGallery.html', 'ContentPacks.csv', 'index.html'))
-PUBLISHED_ASSET_DIRS = frozenset(('ContentPacks', 'MCAddons', '_viewer'))
+PUBLISHED_ASSET_DIRS = frozenset(('ContentPacks', 'MCAddons', '_viewer', 'InfiniteMac'))
 PUBLISHED_UCI_CATEGORIES = frozenset(('Images', 'Objects', 'Animated', 'Animations'))
 
 

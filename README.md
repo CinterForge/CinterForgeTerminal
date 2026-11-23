@@ -35,6 +35,16 @@ CinterForge Terminal brings games, historical computers, Minecraft server manage
 
 Type `games` to explore the catalog. `wargames` opens **JOSHUA**, the WarGames-inspired experience; the other 67 game entries point to classic Macintosh titles such as **SimCity**, **Loom**, **Marathon** and **Prince of Persia**, using their appropriate player or emulator. Type `stories` to discover **16** separate interactive-fiction titles. 
 
+### Explore classic Mac games from inside the emulator
+
+On supported System 7–9 Infinite Mac profiles, the separately published
+**CinterForge HD** volume contains a genuine 68K `CinterForgeTerminal`
+application. The native old-school Macintosh Terminal lists real programs on
+Infinite HD; `games report` opens a separate Games Report window using our
+Game Card design and real Finder icons. The Retro68 compiler is in optional
+DevTools; the browser emulator only needs the published HFS image. See
+[Game Catalog](docs/Game%20Catalog.md) and [Build and Release](docs/Build%20and%20Release.md).
+
 ### Explore classic computers
 
 Browse **48 classic Macintosh emulator configurations** and **19 visual terminal styles** in the configured history collection. Discover the look and feel of systems such as **Apple II**, **VT100**, **IBM PC**, **BeOS**, **NeXTSTEP** and classic Macintosh models. Terminal styles recreate a visual experience; a bootable emulator uses its actual machine runtime and available media. They are not interchangeable.

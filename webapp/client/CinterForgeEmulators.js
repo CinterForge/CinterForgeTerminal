@@ -274,8 +274,35 @@
       const url = new URL('https://infinitemac.org/embed');
       url.searchParams.set('machine', profile.machine);
       url.searchParams.set('disk', profile.disk);
-      if (profile.macGame) {
+      // Every System 7+ classic Mac requests its matching Infinite HD, and
+      // the existing direct-game path retains its original Infinite HD option.
+      // Keep Lagomorph's fixed-media profile untouched: adding Infinite HD
+      // would rearrange the Finder icons its calibrated launch clicks use.
+      const classicMac = /^(?:System 7\.|Mac OS (?:7\.|8\.|9\.))/.test(profile.disk || '');
+      if (profile.macGame || (classicMac && !profile.lagomorph))
         url.searchParams.set('infinite_hd', 'true');
+      // System 7/8/9 Macs mount BOTH the emulator's native Infinite HD and
+      // our published raw CinterForgeTerminal.68k.img. This uses the same
+      // Infinite Mac disk_url mechanism already proven by Lagomorph; do not override the
+      // system disk, game library_url or Lagomorph's fixed floppy mounts.
+      // System 6 and older, NeXT, BeOS and OS X do not mount the 68K disk.
+      if (classicMac && !profile.lagomorph) {
+        try {
+          const media = await CinterForgeState.api('/api/infinitemac/media');
+          if (media.configured && media.url) {
+            const image = new URL(media.url);
+            if (image.protocol === 'https:' && image.hostname === 'cinterforge.ucreg.io' &&
+                !image.username && !image.password)
+              url.searchParams.append('disk_url', image.toString());
+          } else {
+            CinterForgeState.notice(media.reason ||
+              'CinterForge 68K application disk is not published yet. Run ./Cinter all 68k publish beta.');
+          }
+        } catch (e) {
+          CinterForgeState.notice('CinterForge HD unavailable: ' + e.message);
+        }
+      }
+      if (profile.macGame) {
         // Import only the exact authored URL selected by the live server.
         // A library catalog filename is never converted into a guessed URL.
         if (profile.gameAttemptUrl) {

@@ -514,3 +514,62 @@ Apple notarization to reject a release. The final signing and notarization
 still must succeed; the Beta is not considered verified until the actual
 signed customer artifact passes the existing release checks. Never ship this
 broad-exception signing policy in production.
+
+## Classic Macintosh 68K application (System 7+)
+
+The `app/68k/` target compiles a genuine classic Macintosh
+`CinterForgeTerminal` APPL using the offline, Setup-provisioned Retro68 toolchain.
+Build generates classic Finder icons from `app/build/resources/AppIcon.png`,
+Game Card pixels from `webapp/cards/GameCard.png`, and a raw **8 MiB HFS
+Standard** disk with Finder volume name **CinterForge HD**. It reuses
+Lagomorph's proven HFS formatter, MacBinary resource-fork handling and
+root-level `APPL` packaging, while placing the editable `Game.txt` at the
+root and extra resources under `Support Files`. Neither the
+compiler nor Docker is required by the running Mac emulator.
+
+This is a **fourth CinterForge Terminal application platform**, independent of
+Assets/content packs. The immutable raw application artifact is named
+**`CinterForgeTerminal.68k.img`** (no ZIP). Build owns
+`Builds/CinterForgeTerminal/Build/68k/CinterForgeTerminal.68k.img`;
+Stage copies the verified image into
+`Builds/CinterForgeTerminal/Distribution/CinterForgeTerminal.68k.img`,
+next to the Mac DMG, Windows ZIP and Linux ZIP created during Publish.
+Build and Stage receipts remain under
+`Builds/Intermediates/CinterForgeTerminal/InfiniteMac/`.
+
+To run only the 68K application lifecycle, with a fast, **offline** toolchain
+check rather than full Setup:
+
+```sh
+./Cinter all 68k publish beta
+```
+
+This executes the 68K Setup check, Build, Stage, and Publish without
+reprovisioning or rebuilding Mac, Windows, Linux, Bedrock, CraftMaster or
+Lagomorph. You can also run each phase independently:
+
+```sh
+./Cinter setup 68k
+./Cinter build 68k
+./Cinter stage 68k
+./Cinter test 68k
+./Cinter publish cfterminal 68k beta
+```
+
+Supported publication channels are `internal`, `beta`, and `public`
+(`release` remains a compatible alias). `all all publish beta` now includes
+the 68K image as well as the existing application/DevTools outputs. The
+publisher uploads only the selected 68K disk plus its scoped integrity
+manifest and checks Cloudflare's authenticated SHA-256 round trip. Public
+beta/release additionally require **HTTP 206**, HFS signature `BD` at byte
+1024, and CORS for `https://infinitemac.org`. A failed public range check is
+not a successful publication.
+
+Supported **System 7, Mac OS 7, Mac OS 8 and Mac OS 9** emulator profiles mount
+this image using Infinite Mac's `disk_url`, alongside the existing system disk
+and `infinite_hd=true` software disk request. System 6 and earlier are
+excluded. The existing fixed-media Lagomorph launch is not changed. Infinite
+Mac manages the writable per-session overlay: neither edits to `Game.txt` nor
+user files modify the published master. Real guest boot and game launching
+still require acceptance in a supported emulator; source and HFS checks do
+not establish guest acceptance.

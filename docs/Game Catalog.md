@@ -100,7 +100,7 @@ The game commands are:
 | `zork2` | Zork II: The Wizard of Frobozz |
 | `zork3` | Zork III: The Dungeon Master |
 | `library` | The Library of Horror |
-| `404` | 404- Life not Found (Beta) |
+| `fourofour` | 404- Life not Found (Beta) |
 | `bed` | Bed Time |
 | `muffin` | The Quest for The Magic Muffin |
 | `elephants` | When I Was Shot By Elephants III |
@@ -126,3 +126,39 @@ The **`lagomorph`** command is a preserved, dedicated easter egg, not an ordinar
 A game catalog or WarGames integration **dispatches to the existing Lagomorph launcher**. It must not rebuild the user experience as a generic page or silently rename the original media and launch paths. The classic-media package must remain independently licensed and verifiable.
 
 Lagomorph-specific media and other third-party game/system images have independent publication and licensing requirements. They are not automatically part of every public game download.
+
+## Infinite HD and the native 68K Games Report
+
+Compatible classic Macintosh System 7, Mac OS 7/8 and Mac OS 9 emulator
+profiles request **Infinite HD** using Infinite Mac's `infinite_hd=true`
+argument. Once the `CinterForgeTerminal.68k.img` application beta artifact is published
+and its HTTPS range/CORS headers are verified, they additionally mount **CinterForge HD**
+using `disk_url`. NeXTSTEP, BeOS, System 1–6, Mac OS X and Lagomorph's
+separately calibrated floppy launch do not receive this 68K-only app disk.
+Infinite Mac remains responsible for determining which profiles support
+Infinite HD; `infinite_hd=true` is a request, not a guarantee.
+
+On CinterForge HD, double-click the genuine classic-Mac **CinterForgeTerminal**
+application. The HFS Standard disk uses Lagomorph's established disk-assembly
+and resource-fork path: the `CinterForgeTerminal` APPL and editable `Game.txt`
+are at the root, with its README and card artwork inside `Support Files`.
+The application opens a native, white-background old-style Mac terminal window.
+`games` enumerates real `APPL` files on the mounted Infinite HD, while
+`games report` opens **a separate Macintosh window** with Game Cards from
+the authored `GameCard.png` and discovered application icon resources.
+Double-click a card, click its Open region, type `play "Finder name"`, or type
+the exact Finder application name to launch that application. The Terminal
+window is retained when the Games Report window is closed.
+
+To discover launch names, open and edit `Game.txt` on CinterForge HD in
+SimpleText, save, and use **Games → Run Game.txt** in CinterForgeTerminal;
+this does not restart the emulated machine. Reopening the application with
+`Game.txt` populated also performs automatic launch after discovery. Empty
+`Game.txt` leaves the terminal available. The disk's guest-side edits are
+**session-only** and do not alter the published master.
+
+Game names and icons are discovered from the real guest filesystem—no
+hardcoded games or synthetic initial-letter icons. When a name is ambiguous,
+the launcher reports it and lets the user choose a card. Support is subject
+to the chosen machine's Mac OS version and each application's requirements;
+actual game functionality must be recorded during guest testing.

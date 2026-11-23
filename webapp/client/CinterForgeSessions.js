@@ -83,6 +83,7 @@ CinterForgeState.activateTab = async function activateTab(tab) {
       CinterForgeState.activeTab.display.target = CinterForgeState.activeTab.buffer;
       CinterForgeState.activeTab.display.render();
     }
+    CinterForgeState.hideEmulatorFrames?.();
     CinterForgeState.activeTab = tab;
     if (tab.kind !== 'bedrock')
       CinterForgeState.$('terminal-output').removeAttribute('data-bedrock-echo');
@@ -190,7 +191,7 @@ CinterForgeState.activateTab = async function activateTab(tab) {
         CinterForgeState.terminalSocketCommand(tab, {type:'resize', ...size});
       }
     } else {
-      await CinterForgeState.showComputer(profile);
+      await CinterForgeState.showComputer(profile, tab);
       CinterForgeState.updateCodeMenuMode();
       CinterForgeState.$('terminal-overlay').dataset.profile = profile.id;
       CinterForgeState.$('terminal-machine-title').textContent = profile.name.toUpperCase();
@@ -221,6 +222,7 @@ CinterForgeState.closeTab = async function closeTab(tab) {
         catch (e) { console.error('Code-OSS PTY cleanup:', e); }
       }
     }
+    CinterForgeState.removeEmulatorFrame?.(tab);
     if (tab.kind === 'asset-view') tab.mapFrame?.remove();
     if (tab.kind === 'craftmaster-map') {
       tab.mapFrame?.remove();

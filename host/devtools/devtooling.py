@@ -31,10 +31,12 @@ All evidence and generated content live in sibling Builds.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import os
 import platform
+import re
 import shutil
 import subprocess
 import time
@@ -278,6 +280,143 @@ def _windows(executor: WindowsCrossEnvironment | None, root: Path, rel: str,
             'check': 'executed-on-native-windows'}
 
 
+# Retro68's publisher distributes a ready-to-run toolchain OCI image. Freeze
+# the registry digest and the offline archive in Setup's Builds rather than
+# compiling GCC/binutils or requiring a second Docker daemon. `latest` is
+# resolved only on the first acquisition: subsequent Setups reuse the sealed
+# image, and Build/Stage/Publish never query the registry.
+RETRO68_SOURCE = 'ghcr.io/autc04/retro68:latest'
+RETRO68_IMAGE = 'cinterforge-retro68:setup'
+RETRO68_SCHEMA = 'cinterforge.terminal.retro68-oci.v1'
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as source:
+        for block in iter(lambda: source.read(4 * 1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _retro68_probe(builds: Path, docker: str) -> dict:
+    """Setup-only installation and executable proof for both classic Mac ABIs.
+
+    The *prebuilt* AMD64 OCI image is an offline DevTools member. It runs on the
+    existing owned t Docker daemon; there is no container at Terminal runtime.
+    """
+    if platform.system() != 'Darwin':
+        raise RuntimeError('Retro68 OCI acquisition belongs to macOS Setup')
+    root = builds / 'Toolchains/Retro68'
+    archive = root / 'retro68-amd64.tar'
+    receipt = root / 'retro68-image.json'
+    if root.is_symlink() or archive.is_symlink() or receipt.is_symlink():
+        raise RuntimeError('Unsafe symlink in Retro68 DevTools stage')
+    root.mkdir(parents=True, exist_ok=True)
+    saved = None
+    if receipt.exists():
+        saved = json.loads(receipt.read_text(encoding='utf-8'))
+        if (not isinstance(saved, dict) or saved.get('schema') != RETRO68_SCHEMA or
+                saved.get('source') != RETRO68_SOURCE or saved.get('image') != RETRO68_IMAGE or
+                saved.get('platform') != 'linux/amd64' or
+                not re.fullmatch(r'sha256:[0-9a-f]{64}', saved.get('registry_digest', '')) or
+                not re.fullmatch(r'[0-9a-f]{64}', saved.get('archive_sha256', ''))):
+            raise RuntimeError('Invalid sealed Retro68 DevTools receipt: ' + str(receipt))
+        if not archive.is_file() or not archive.stat().st_size:
+            raise RuntimeError('Sealed Retro68 archive missing: ' + str(archive))
+        if _sha256(archive) != saved['archive_sha256']:
+            raise RuntimeError('Retro68 DevTools archive SHA-256 mismatch: ' + str(archive))
+        print('[RETRO68 SETUP] Reusing sealed prebuilt 68K/PPC image: ' +
+              saved['registry_digest'], flush=True)
+    elif archive.exists():
+        raise RuntimeError('Unverified Retro68 archive exists without a receipt: ' + str(archive))
+    else:
+        skopeo = builds / 'Toolchains/mac/env/bin/skopeo'
+        if not skopeo.is_file() or skopeo.is_symlink():
+            raise RuntimeError('Setup-managed native macOS skopeo is required for Retro68')
+        registry_config = builds / 'Intermediates/CinterForgeTerminal/RegistryInputs/registries-v2.conf'
+        registry_config.parent.mkdir(parents=True, exist_ok=True)
+        if registry_config.is_symlink():
+            raise RuntimeError('Unsafe Retro68 registry configuration link')
+        registry_config.write_text('unqualified-search-registries = []\n', encoding='utf-8')
+        base = [str(skopeo), '--registries-conf', str(registry_config),
+                '--override-os', 'linux', '--override-arch', 'amd64']
+        print('[RETRO68 SETUP] Resolving immutable registry digest for ' + RETRO68_SOURCE,
+              flush=True)
+        version = subprocess.run([*base, 'inspect', '--format', '{{.Digest}}',
+                                  'docker://' + RETRO68_SOURCE], capture_output=True,
+                                 text=True, timeout=180, check=False)
+        digest = version.stdout.strip()
+        if version.returncode or not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
+            raise RuntimeError('Cannot resolve Retro68 image digest: ' +
+                               (version.stderr or version.stdout)[-1200:])
+        temp = root / 'retro68-amd64.tar.part'
+        if temp.exists() or temp.is_symlink():
+            raise RuntimeError('Existing partial Retro68 archive; remove only that incomplete '
+                               'Builds/Toolchains/Retro68/*.part file before retrying')
+        print('[RETRO68 SETUP] Downloading prebuilt Linux/amd64 toolchain ' + digest,
+              flush=True)
+        try:
+            # Native macOS HTTPS avoids QEMU TLS failures. The OCI image
+            # remains offline and relocatable as a DevTools ZIP member.
+            subprocess.run([*base, 'copy', 'docker://' + RETRO68_SOURCE.split(':latest')[0] +
+                            '@' + digest, 'docker-archive:' + str(temp) + ':' + RETRO68_IMAGE],
+                           timeout=3600, check=True)
+            if not temp.is_file() or not temp.stat().st_size:
+                raise RuntimeError('Downloaded Retro68 OCI archive is empty')
+            checksum = _sha256(temp)
+            temp.replace(archive)
+            saved = {'schema': RETRO68_SCHEMA, 'source': RETRO68_SOURCE,
+                     'registry_digest': digest, 'image': RETRO68_IMAGE,
+                     'platform': 'linux/amd64', 'archive_sha256': checksum,
+                     'archive_bytes': archive.stat().st_size}
+            temporary_receipt = root / 'retro68-image.json.part'
+            temporary_receipt.write_text(json.dumps(saved, indent=2, sort_keys=True) + '\n',
+                                         encoding='utf-8')
+            temporary_receipt.replace(receipt)
+        finally:
+            temp.unlink(missing_ok=True)
+    if not docker:
+        raise RuntimeError('Retro68 acceptance requires the existing managed t Docker daemon')
+    # Always load from the sealed archive: a reused daemon might contain a
+    # different image under the same tag, so tag presence cannot prove identity.
+    print('[RETRO68 SETUP] Loading verified offline image into the existing t guest',
+          flush=True)
+    subprocess.run([docker, 'load', '--input', str(archive)], timeout=1800, check=True)
+    image_arch = subprocess.run([docker, 'image', 'inspect', '--format',
+                                 '{{.Architecture}}', RETRO68_IMAGE], capture_output=True,
+                                text=True, timeout=30, check=False)
+    if image_arch.returncode or image_arch.stdout.strip() != 'amd64':
+        raise RuntimeError('Loaded Retro68 image must be Linux/amd64: ' +
+                           (image_arch.stdout or image_arch.stderr)[-500:])
+    script = r"""set -eu
+BIN=/Retro68-build/toolchain/bin
+for compiler in m68k-apple-macos-gcc powerpc-apple-macos-gcc; do
+    test -x "$BIN/$compiler"
+    printf 'int main(void) { return 0; }\n' > /tmp/retro68-probe.c
+    "$BIN/$compiler" -c /tmp/retro68-probe.c -o "/tmp/$compiler.o"
+    test -s "/tmp/$compiler.o"
+done
+test -x "$BIN/Rez"
+"$BIN/m68k-apple-macos-gcc" --version | head -n 1
+stat -Lc %s "$BIN/m68k-apple-macos-gcc"
+"""
+    probe = subprocess.run([docker, 'run', '--rm', '--platform', 'linux/amd64',
+                            '--network', 'none', '--read-only', '--tmpfs', '/tmp:rw,exec',
+                            RETRO68_IMAGE, 'bash', '-c', script],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True, timeout=240, check=False)
+    lines = (probe.stdout or '').strip().splitlines()
+    if probe.returncode or len(lines) < 2 or not lines[-1].isdigit():
+        raise RuntimeError('Retro68 68K/PPC compiler smoke failed: ' +
+                           (probe.stdout or '<no output>')[-2000:])
+    print('[RETRO68 SETUP] PASS: 68K and PowerPC GCC compile, Rez is installed; '
+          'image=' + saved['registry_digest'], flush=True)
+    return {'version': lines[-2][:180], 'size': int(lines[-1]),
+            'path': str(archive), 'check': '68K/PPC object compilation in offline OCI',
+            'registry_digest': saved['registry_digest'],
+            'archive_bytes': archive.stat().st_size}
+
+
 def _write_report(destination: Path, rows: list[dict]) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -371,6 +510,9 @@ def ensure(builds: Path) -> Path:
                 return _guest(lambda command, cwd: cross.execute(command, cwd=cwd, timeout=90),
                               n, b, a, cwd=builds)
             check('Linux amd64 (Windows cross)', name, cross_probe)
+        if host == 'Darwin':
+            check('Classic Macintosh (68K/PPC)', 'Retro68 prebuilt GCC + Rez',
+                  lambda: _retro68_probe(builds, cross.docker if cross is not None else ''))
         # The native Linux WebView build uses its own retained Linux image.
         print('[DEVTOOLING] verifying Linux WebKitGTK build environment ...', flush=True)
         from host.lifecycle.three_samples import _docker_image

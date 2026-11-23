@@ -31,7 +31,7 @@ import tempfile
 from zipfile import BadZipFile, ZIP_STORED, ZipFile
 
 SCHEMA = 'cinterforge.terminal.scoped-distribution.v1'
-TARGETS = ('mac', 'linux', 'win')
+TARGETS = ('mac', 'linux', 'win', '68k')
 MSI_NAME = 'CinterForgeTerminal-win.msi'
 MSI_ZIP_NAME = 'CinterForgeTerminal-win-msi.zip'
 
@@ -199,13 +199,26 @@ def _publish_files(builds: Path, *, channel: str, target: str, files: dict[str, 
 
 def publish(builds: Path, *, target: str, channel: str = 'dryrun',
             release: str | None = None, config: Path | None = None) -> dict:
-    """Prepare/publish one app; Windows also publishes its verified MSI ZIP."""
+    """Publish one staged application target; 68K is a raw HFS disk, not a ZIP."""
     from host.lifecycle import universal_package as up
     from host.lifecycle.unpacked_release import _load, prepare_publish_packages
     if target not in TARGETS:
-        raise ValueError('Expected mac|win|linux scoped Publish')
+        raise ValueError('Expected mac|win|linux|68k scoped Publish')
     builds = builds.resolve(strict=True)
     release = release or up.HOST_RELEASE
+    if target == '68k':
+        # The native 68K APPL lives inside this directly mountable HFS disk.
+        # It is *not* an Assets pack, DevTools archive or compressed ZIP.
+        from host.infinitemac.launcher_setup import IMAGE_NAME, verify_staged
+        staged = verify_staged(builds)
+        image = Path(staged['image'])
+        artifacts = {IMAGE_NAME: {'sha256': staged['sha256'],
+                                  'bytes': staged['bytes'],
+                                  'source_sha256': staged['source_sha256']}}
+        return _publish_files(builds, channel=channel, target=target,
+                              files={IMAGE_NAME: image},
+                              document={'release': release, 'target': target,
+                                        'artifacts': artifacts}, config=config)
     # Public Mac signing must fail before a 1GB Windows/SDK archive is built.
     if target == 'mac' and channel in ('beta', 'release'):
         identity = os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip()

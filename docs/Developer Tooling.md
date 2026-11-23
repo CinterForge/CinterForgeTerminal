@@ -143,3 +143,21 @@ Skopeo invocation explicitly selects a Setup-generated v2-format
 `registries.conf` under `Builds/Intermediates/CinterForgeTerminal/RegistryInputs`;
 Conda's packaged legacy v1 configuration is left untouched. This avoids
 registry configuration errors without disabling certificate verification.
+
+## Classic Macintosh cross-compiler (Retro68)
+
+The optional unified DevTools package contains a sealed **prebuilt**
+`ghcr.io/autc04/retro68` Linux/amd64 OCI archive in
+`Builds/Toolchains/Retro68/`. Setup downloads it once, records the registry
+digest and SHA-256, and tests the 68K and PowerPC compilers plus `Rez` in the
+existing managed Docker guest. No Retro68 compiler is built from source and
+no extra resident virtual machine is introduced. It is **not** a dependency
+of the lightweight native Terminal or its installed classic-Mac guest.
+
+The `app/68k/` authored source builds into `CinterForgeTerminal` for classic
+System 7–9 using `./Cinter build 68k` (or `./Cinter build all`). The resulting
+HFS disk is verified by `./Cinter stage 68k` (or `./Cinter stage all`) and
+published as `CinterForgeTerminal.68k.img` alongside other application
+releases using `./Cinter all 68k publish beta` (or the scoped Publish command).
+The 68K-only Setup check is offline and never reprovisions other toolchains. Retro68 is strictly a development
+compiler, not a runtime service.

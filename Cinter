@@ -518,6 +518,8 @@ def main(argv: list[str]) -> int:
             invoke(sys.executable, '-B', str(REPO / 'host/codeoss/setup.py'),
                    '--workspace', str(REPO.parent))
             invoke(sys.executable, '-B', '-m', 'host.lagomorph.lagomorph_setup', '--builds', str(BUILDS))
+            # Setup provisions the sealed Retro68 DevTools toolchain only;
+            # the classic APPL and public HFS master are built during Build.
             if platform.system() == 'Darwin':
                 # Release the single Setup-owned c producer before accepting t.
                 # No build VM may remain alongside the installed Terminal runtime.
@@ -565,10 +567,27 @@ def main(argv: list[str]) -> int:
             build_terminal(BUILDS, docker=docker,
                            logfile=BUILDS / 'Logs/CinterForgeTerminal/linux-native-build.log')
             build_craftmaster(BUILDS, targets=('linux', 'win'), docker=docker)
+            from host.infinitemac.launcher_setup import build as build_infinitemac_hd
+            build_infinitemac_hd(BUILDS)
         from host.lifecycle.universal_package import build_four
         report = build_four(BUILDS)
         if set(report['artifacts']) != {'mac', 'linux', 'win', 'devtools'}:
             raise RuntimeError('Build did not capture exactly four unpacked outputs')
+        return 0
+    if argv == ['build', '68k']:
+        if platform.system() != 'Darwin':
+            raise RuntimeError('68K cross compilation requires the macOS-owned Setup toolchain')
+        from host.mac.mac_bootstrap import managed_environment
+        from host.lifecycle.amd64_backend import managed_amd64_backend
+        os.environ.pop('DOCKER_CONTEXT', None)
+        os.environ.update(managed_environment(BUILDS))
+        with managed_amd64_backend(BUILDS, setup=False):
+            from host.infinitemac.launcher_setup import build as build_infinitemac_hd
+            build_infinitemac_hd(BUILDS)
+        return 0
+    if argv == ['stage', '68k']:
+        from host.infinitemac.launcher_setup import stage as stage_infinitemac_hd
+        stage_infinitemac_hd(BUILDS)
         return 0
     if argv == ['status', 'all']:
         # Read-only: useful even when a previous Build/Stage stopped midway.
@@ -585,6 +604,8 @@ def main(argv: list[str]) -> int:
             raise RuntimeError('No Setup/Build outputs to stage; run ./Cinter all all')
         from host.lifecycle.universal_package import stage_four
         stage_four(BUILDS)
+        from host.infinitemac.launcher_setup import stage as stage_infinitemac_hd
+        stage_infinitemac_hd(BUILDS)
         return 0
     if (len(argv) in (2, 3, 4) and argv[0] == 'all' and
             argv[1] in ('mac', 'win', 'linux', 'all') and
@@ -675,6 +696,30 @@ def main(argv: list[str]) -> int:
         from host.lifecycle.unpacked_release import build_four
         build_four(BUILDS, targets=(target,))
         return 0
+    if argv == ['setup', '68k']:
+        # Very fast, offline receipt/toolchain presence check; never run the
+        # normal multi-platform Setup or contact the Retro68 registry.
+        from host.infinitemac.launcher_setup import setup_check
+        setup_check(BUILDS)
+        return 0
+    if (len(argv) in (2, 3, 4) and argv[:2] == ['all', '68k'] and
+            (len(argv) == 2 or (len(argv) >= 3 and argv[2] == 'publish' and
+             (len(argv) == 3 or argv[3] in ('dryrun', 'internal', 'beta', 'public', 'release'))))):
+        # Scoped 68K lifecycle: no Lagomorph pull, Bedrock, CraftMaster,
+        # Windows/macOS/Linux app build, signing or notarization.
+        channel = argv[3] if len(argv) == 4 else 'dryrun' if len(argv) == 3 else None
+        for action in ('setup', 'build', 'stage'):
+            invoke(sys.executable, '-B', str(REPO / 'Cinter'), action, '68k')
+        if channel is not None:
+            invoke(sys.executable, '-B', str(REPO / 'Cinter'),
+                   'publish', 'cfterminal', '68k', channel)
+        return 0
+    if argv == ['test', '68k']:
+        from host.infinitemac.launcher_setup import verify_staged
+        staged = verify_staged(BUILDS)
+        print('[Cinter test] PASS 68k: sealed staged HFS application disk ' +
+              staged['sha256'], flush=True)
+        return 0
     if argv == ['windows', 'cross-test']:
         # Windows PE compilation and CLI execution under Wine. WebView2 GUI
         # acceptance is deferred to native Windows; require the staged t VM.
@@ -733,13 +778,13 @@ def main(argv: list[str]) -> int:
         if options and options[0] == 'cfterminal':
             options = options[1:]
         target = 'all'
-        if options and options[0] in ('mac', 'win', 'linux', 'all'):
+        if options and options[0] in ('mac', 'win', 'linux', '68k', 'all'):
             target, options = options[0], options[1:]
         if len(options) > 1:
-            raise ValueError('Usage: ./Cinter publish cfterminal [mac|win|linux|all] [dryrun|internal|beta|release]')
+            raise ValueError('Usage: ./Cinter publish cfterminal [mac|win|linux|68k|all] [dryrun|internal|beta|public]')
         selected = {'public': 'release'}.get(options[0], options[0]) if options else 'dryrun'
         if selected not in ('dryrun', 'internal', 'beta', 'release'):
-            raise ValueError('Usage: ./Cinter publish cfterminal [mac|win|linux|all] [dryrun|internal|beta|release]')
+            raise ValueError('Usage: ./Cinter publish cfterminal [mac|win|linux|68k|all] [dryrun|internal|beta|public]')
         # No beta-specific signing override: both public channels package the
         # already-built Developer ID signed Mac app with identical entitlements.
         if selected in ('release', 'beta') and target in ('all', 'mac') and platform.system() == 'Darwin':
@@ -753,6 +798,10 @@ def main(argv: list[str]) -> int:
             from host.mac.xcode_signing import ensure_public_notary_profile
             ensure_public_notary_profile(BUILDS)
         if target == 'all':
+            # A complete multi-platform Publish must not silently omit the
+            # System 7+ application. Fail early if 68K was not Build/Stage'd.
+            from host.infinitemac.launcher_setup import verify_staged
+            verify_staged(BUILDS)
             if selected in ('beta', 'release') and not os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip():
                 raise RuntimeError('BUILDER has no usable Developer ID Application signing identity/private key. '
                                    'Import the matching .p12 into its Keychain before public Mac Release; '
@@ -762,6 +811,13 @@ def main(argv: list[str]) -> int:
             # Publish first prepares all four artifacts (including MSI-only
             # Windows ZIP) before any Cloudflare upload.
             report = publish_four(BUILDS, channel=channel)
+            # The legacy four-artifacts.json format remains intact. Publish
+            # the 68K raw HFS image as a fifth, independently sealed target in
+            # the *same* Distribution prefix (never via Assets/content packs).
+            from host.lifecycle.target_publish import publish as publish_target
+            published_68k = publish_target(BUILDS, target='68k', channel=selected)
+            print('[CinterForgeTerminal] 68K application publication: ' +
+                  published_68k.get('prefix', 'dryrun'), flush=True)
             if selected == 'release':
                 from host.lifecycle.universal_package import update_readme_public_downloads
                 changed = update_readme_public_downloads(REPO / 'README.md', report)
@@ -835,6 +891,7 @@ def main(argv: list[str]) -> int:
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'mac')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'linux')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'win')
+        invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', '68k')
         from host.lifecycle.unpacked_release import status_four
         from host.lifecycle.universal_package import _steam_release_path, steamapps_root, APP_ROOTS, HOST_RELEASE
         from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
@@ -863,11 +920,13 @@ def main(argv: list[str]) -> int:
                      '       ./Cinter status all # unpacked Build/Stage receipts (read-only)\n'
                      '       ./Cinter all mac    # setup, build/stage/test Mac only; no publish\n'
                      '       ./Cinter all all    # setup, build, stage, native Mac test; no publish\n'
-                     '       ./Cinter all mac|win|linux|all publish [internal|beta|release] # omitted mode = dryrun\n'
-                     '       ./Cinter build mac|linux|win\n'
+                     '       ./Cinter all mac|win|linux|68k|all publish [internal|beta|public] # omitted mode = dryrun\n'
+                     '       ./Cinter setup 68k # fast offline check of installed Retro68/HFS inputs\n'
+                     '       ./Cinter build mac|linux|win|68k\n'
+                     '       ./Cinter stage|test 68k # verify raw HFS app disk, no ZIP\n'
                      '       ./Cinter stage|test|launch|all mac\n'
                      '       ./Cinter windows cross-test\n'
-                     '       ./Cinter publish cfterminal [mac|win|linux|all] [dryrun|internal|beta|release] # default dryrun\n'
+                     '       ./Cinter publish cfterminal [mac|win|linux|68k|all] [dryrun|internal|beta|public] # default dryrun\n'
                      '       ./Cinter verify beta|public # retry unsigned HTTP; no archive re-upload\n'
                      '       ./Cinter publish lagomorph public # public HFS media + private Builds/Lagomorph to internal CDN\n'
                      '       ./Cinter pull lagomorph source # required internal folder pull (also in setup/all)\n'

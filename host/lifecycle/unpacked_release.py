@@ -383,7 +383,8 @@ def _activate_staged_setup_devtools(builds: Path, steam: Path) -> None:
     try:
         record = json.loads(setup_receipt.read_text(encoding='utf-8'))
         required = ('Toolchains/mac', 'Toolchains/WindowsCross', 'Toolchains/Windows',
-                    'Toolchains/WebView', 'Toolchains/WebView2')
+                    'Toolchains/WebView', 'Toolchains/WebView2',
+                    'Toolchains/Retro68')
         outputs = record.get('outputs')
         if (record.get('schema') != 'cinterforge.terminal.setup-dirty.v1' or
                 record.get('scope') != 'all' or

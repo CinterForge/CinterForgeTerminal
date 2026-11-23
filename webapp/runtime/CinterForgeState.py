@@ -122,6 +122,21 @@ def _verified_public_hfs_floppy(url: str) -> bool:
         return False
 
 
+def _infinitemac_media_url() -> dict:
+    """Return the beta app disk with the same trusted HTTPS mount path as Lagomorph.
+
+    Publish owns the authenticated R2 read-back, public HFS signature, byte
+    ranges and CORS checks. Do not make every emulator launch depend on a
+    second host-side CDN request: Lagomorph supplies its validated HTTPS URL
+    directly to Infinite Mac's disk_url mount as well.
+    """
+    return {
+        'configured': True,
+        'url': ('https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/'
+                'beta/CinterForgeTerminal.68k.img'),
+    }
+
+
 def _if_catalog() -> dict:
     from runtime import CinterForgeSettings as _CinterForgeSettings
     data = json.loads((_CinterForgeSettings.ASSETS / 'data/if_titles.json').read_text(encoding='utf-8'))

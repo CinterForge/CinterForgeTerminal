@@ -508,6 +508,12 @@ class CinterForgeHTTPRoutes:
                 return
             self._send(200,manual.read_bytes(),'application/pdf')
             return
+        if path == '/api/infinitemac/media':
+            if not self._authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            self._json(200, _CinterForgeIF._infinitemac_media_url())
+            return
         if path == '/api/lagomorph/media':
             if not self._authorized():
                 self._json(403, {'error': 'not authorized'})

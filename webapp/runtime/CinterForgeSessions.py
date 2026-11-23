@@ -140,8 +140,8 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     functions += '\n' + '\n'.join(
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
         for name in ('assets', 'discord') if name in permitted)
-    # These exact source filenames are the shell commands. Load the bundled
-    # Terminal manifest; no sibling WebApp source or story package is required.
+    # Use short manifest commands and safe legacy filename aliases in the shell.
+    # No sibling WebApp source or story package is required.
     catalog = json.loads((_CinterForgeSettings.ASSETS / 'data/if_titles.json').read_text(encoding='utf-8'))
     if len(catalog.get('titles', [])) != 16:
         raise RuntimeError('Incomplete staged external IF catalog')
@@ -155,7 +155,11 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
         if not isinstance(short, str) or not __import__('re').fullmatch(r'[a-z0-9]+', short):
             raise RuntimeError('Invalid short IF command for ' + stem)
         short_names.append(short)
-        story_names.extend((short, stem))  # Keep the original stem as a working alias.
+        # Only legal Bash identifiers may be registered as bare commands.
+        # The original filename remains usable through `play <filename stem>`.
+        story_names.append(short)
+        if __import__('re').fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', stem):
+            story_names.append(stem)
     if len(set(short_names)) != 16:
         raise RuntimeError('Duplicate short IF commands')
     story_names = list(dict.fromkeys(story_names))
