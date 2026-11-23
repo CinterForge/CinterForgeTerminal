@@ -203,10 +203,10 @@ static Boolean names_match_ignoring_case(const char *leftName, const char *right
     return *leftName == 0 && *rightName == 0;
 }
 
-/* Crash-trace build 004. Every checkpoint is written and closed immediately.
+/* Crash-trace build 005. Every checkpoint is written and closed immediately.
  * Try guest-to-host The Outside World:Uploads first; fall back to the writable
  * CinterForge Terminal HFS disk. Logging never changes the terminal UI. */
-#define TRACE68K_VERSION "004"
+#define TRACE68K_VERSION "005"
 #define TRACE68K_FILE "\pCinterForgeTerminal.log"
 static Boolean g_traceSelected = false;
 static short g_traceVolume = 0;
@@ -538,6 +538,36 @@ static void invalidate_terminal_window(void)
     }
 }
 
+/* Keyboard input changes only the fixed prompt, not the scrollback or title.
+ * Invalidate that small region rather than flashing the complete Window on
+ * every key press on slower System 7.1 guests.  BeginUpdate clips the redraw. */
+static void invalidate_terminal_prompt(void)
+{
+    GrafPtr previousPort = NULL;
+    Rect prompt;
+    if (!g_terminalWindow) return;
+    GetPort(&previousPort);
+    SetPort(g_terminalWindow);
+    prompt = g_terminalWindow->portRect;
+    prompt.top = (short)(prompt.bottom - TERMINAL_PROMPT_AREA_HEIGHT + 5);
+    prompt.right -= CLASSIC_SCROLLBAR_WIDTH;
+    InvalRect(&prompt);
+    if (previousPort && previousPort != (GrafPtr)g_terminalWindow)
+        SetPort(previousPort);
+}
+
+/* The same QuickDraw current-port rule applies to the Games Report. */
+static void invalidate_games_report_window(void)
+{
+    GrafPtr previousPort = NULL;
+    if (!g_gamesReportWindow) return;
+    GetPort(&previousPort);
+    SetPort(g_gamesReportWindow);
+    InvalRect(&g_gamesReportWindow->portRect);
+    if (previousPort && previousPort != (GrafPtr)g_gamesReportWindow)
+        SetPort(previousPort);
+}
+
 /* Keep a reader's place when output arrives. Follow new lines automatically
  * only when the reader was already looking at the end of the transcript. */
 static void append_terminal_history_line(const char *value)
@@ -710,7 +740,7 @@ static void rebuild_visible_application_list(void)
     g_reportFirstRow = 0;
     g_selectedApplicationIndex = -1;
     update_games_report_scrollbar();
-    if (g_gamesReportWindow) InvalRect(&g_gamesReportWindow->portRect);
+    invalidate_games_report_window();
 }
 
 static short find_infinite_hd_volume(void)
@@ -925,7 +955,13 @@ static OSErr launch_discovered_application(short applicationIndex)
      * headers define launchContinue but not Apple's launchNoFileFlags. */
     launchParameters.launchControlFlags = launchContinue;
     launchParameters.launchAppSpec = &g_discoveredApplications[applicationIndex].spec;
+    copy_pascal_string_to_c(g_discoveredApplications[applicationIndex].finderName,
+                            applicationName, sizeof(applicationName));
+    snprintf(message, sizeof(message), "launch: requested %.64s", applicationName);
+    trace_checkpoint(message);
     launchError = LaunchApplication(&launchParameters);
+    snprintf(message, sizeof(message), "launch: returned Mac OS error %d", (int)launchError);
+    trace_checkpoint(message);
     if (launchError == noErr) {
         /* Keep the Terminal resident so it can accept the next clipboard
          * command when the separate game application eventually exits. */
@@ -934,7 +970,7 @@ static OSErr launch_discovered_application(short applicationIndex)
     copy_pascal_string_to_c(g_discoveredApplications[applicationIndex].finderName, applicationName, sizeof(applicationName));
     sprintf(message, "Could not launch %.60s (Mac OS error %d)", applicationName, (int)launchError);
     set_games_report_status(message);
-    if (g_gamesReportWindow) InvalRect(&g_gamesReportWindow->portRect);
+    invalidate_games_report_window();
     append_terminal_history_line(message);
     SysBeep(1);
     return launchError;
@@ -1326,19 +1362,22 @@ static void scroll_games_report_by_rows(short rowOffset)
     if (g_reportFirstRow != newFirstRow) {
         g_reportFirstRow = newFirstRow;
         update_games_report_scrollbar();
-        InvalRect(&g_gamesReportWindow->portRect);
+        invalidate_games_report_window();
     }
 }
 
+/* One deliberate click anywhere on a card launches its real FSSpec.
+ * Ignore the second press of a physical double-click to avoid spawning two
+ * game processes before the first finishes switching to the foreground. */
 static void handle_game_card_click(Point localMousePosition, UInt32 clickTime)
 {
-    static short lastClickedIndex = -1;
-    static UInt32 lastClickTime = 0;
+    static short lastLaunchedIndex = -1;
+    static UInt32 lastLaunchClickTime = 0;
     short cardAreaY = localMousePosition.v - REPORT_HEADER_HEIGHT - 5;
     short columnIndex, rowIndex, visibleSlot, applicationIndex;
+    char clickMessage[100];
     if (PtInRect(localMousePosition, &g_searchFieldBounds)) return;
     if (cardAreaY < 0 || localMousePosition.v >= g_gamesReportHeight - REPORT_FOOTER_HEIGHT) return;
-    /* Check each drawn column using its exact dynamically stretched bounds. */
     for (columnIndex = 0; columnIndex < REPORT_COLUMN_COUNT; ++columnIndex) {
         short cardLeft, cardWidth;
         game_card_column_bounds(columnIndex, &cardLeft, &cardWidth);
@@ -1352,24 +1391,17 @@ static void handle_game_card_click(Point localMousePosition, UInt32 clickTime)
     visibleSlot = (short)((g_reportFirstRow + rowIndex) * REPORT_COLUMN_COUNT + columnIndex);
     if (visibleSlot < 0 || visibleSlot >= g_visibleApplicationCount) return;
     applicationIndex = g_visibleApplicationIndices[visibleSlot];
-    if (g_selectedApplicationIndex == applicationIndex && lastClickedIndex == applicationIndex &&
-        clickTime >= lastClickTime && clickTime - lastClickTime < mac_double_click_interval_in_ticks()) {
-        launch_discovered_application(applicationIndex);
-    } else if (cardAreaY % (CARD_HEIGHT + CARD_SPACING) >= CARD_OPEN_BUTTON_OFFSET_Y) {
-        launch_discovered_application(applicationIndex); /* "OPEN" panel of the actual Game Card */
-    } else {
-        char selectedName[64];
-        char selectedDescription[128];
-        g_selectedApplicationIndex = applicationIndex;
-        copy_pascal_string_to_c(g_discoveredApplications[applicationIndex].finderName,
-                                selectedName, sizeof(selectedName));
-        snprintf(selectedDescription, sizeof(selectedDescription), "%s (command: %s)",
-                 selectedName, g_discoveredApplications[applicationIndex].shortName);
-        set_games_report_status(selectedDescription);
-        InvalRect(&g_gamesReportWindow->portRect);
-    }
-    lastClickedIndex = applicationIndex;
-    lastClickTime = clickTime;
+    snprintf(clickMessage, sizeof(clickMessage),
+             "report: card click x=%d y=%d col=%d row=%d app=%d",
+             (int)localMousePosition.h, (int)localMousePosition.v,
+             (int)columnIndex, (int)rowIndex, (int)applicationIndex);
+    trace_checkpoint(clickMessage);
+    if (lastLaunchedIndex == applicationIndex && clickTime >= lastLaunchClickTime &&
+        clickTime - lastLaunchClickTime < mac_double_click_interval_in_ticks()) return;
+    g_selectedApplicationIndex = applicationIndex;
+    lastLaunchedIndex = applicationIndex;
+    lastLaunchClickTime = clickTime;
+    launch_discovered_application(applicationIndex);
 }
 
 static void handle_games_report_key(EventRecord *keyboardEvent)
@@ -1428,6 +1460,7 @@ static void handle_games_report_key(EventRecord *keyboardEvent)
 static void open_games_report_window(void)
 {
     Rect windowBounds, screenBounds;
+    trace_checkpoint("report: opening window");
     if (!g_gamesReportWindow) {
         screenBounds = qd.screenBits.bounds;
         g_gamesReportWidth = (short)(screenBounds.right - screenBounds.left - 25);
@@ -1454,7 +1487,8 @@ static void open_games_report_window(void)
     }
     ShowWindow(g_gamesReportWindow);
     SelectWindow(g_gamesReportWindow);
-    InvalRect(&g_gamesReportWindow->portRect);
+    invalidate_games_report_window();
+    trace_checkpoint("report: window visible");
 }
 
 /* -------------------------------------------------------------------------
@@ -1509,7 +1543,7 @@ static void notify_game_list_operation(const char *message)
 {
     append_terminal_history_line(message);
     set_games_report_status(message);
-    if (g_gamesReportWindow) InvalRect(&g_gamesReportWindow->portRect);
+    invalidate_games_report_window();
 }
 
 static void copy_game_list_to_mac_clipboard(void)
@@ -1628,7 +1662,7 @@ static void paste_mac_clipboard_into_terminal(void)
         }
         g_terminalInput[inputLength] = 0;
         HUnlock(text);
-        invalidate_terminal_window();
+        invalidate_terminal_prompt();
     }
     DisposeHandle(text);
 }
@@ -1753,6 +1787,7 @@ static void execute_terminal_command(char *commandLine)
     } else if (names_match_ignoring_case(commandText, "games")) {
         list_discovered_games_in_terminal();
     } else if (names_match_ignoring_case(commandText, "games report")) {
+        trace_checkpoint("report: opened by terminal command");
         open_games_report_window();
     } else if (names_match_ignoring_case(commandText, "games copy")) {
         copy_game_list_to_mac_clipboard();
@@ -1839,6 +1874,8 @@ static void dispatch_cinter_clipboard_command(const char *command)
         strcpy(g_pendingClipboardCommand, command);
         return;
     }
+    if (names_match_ignoring_case(command, "games report"))
+        trace_checkpoint("report: request arrived via clipboard");
     strcpy(mutableCommand, command);
     execute_terminal_command(mutableCommand);
     /* This acknowledges handling, not guaranteed success of the launched
@@ -1892,6 +1929,7 @@ static void handle_terminal_key(EventRecord *keyboardEvent)
             /* The Terminal is our primary window, so Close exits. */
             g_applicationIsRunning = false;
         } else if (typedCharacter == 'o' || typedCharacter == 'O') {
+            trace_checkpoint("report: opened by terminal Command-O");
             open_games_report_window();
         } else if (typedCharacter == 'c' || typedCharacter == 'C') {
             copy_game_list_to_mac_clipboard();
@@ -1926,7 +1964,7 @@ static void handle_terminal_key(EventRecord *keyboardEvent)
         g_terminalInput[inputLength + 1] = 0;
     }
 
-    invalidate_terminal_window();
+    invalidate_terminal_prompt();
 }
 
 static void resize_classic_window(WindowPtr window, Point mousePosition)
@@ -1959,7 +1997,8 @@ static void resize_classic_window(WindowPtr window, Point mousePosition)
         position_terminal_scrollbar();
     }
 
-    InvalRect(&window->portRect);
+    if (window == g_gamesReportWindow) invalidate_games_report_window();
+    else invalidate_terminal_window();
 }
 
 /* A menu selection is a classic Menu Manager pair: menu ID and item number. */
@@ -1983,7 +2022,8 @@ static void handle_menu_selection(Point mousePosition)
         else if (selectedItem == 3) export_game_list_to_host();
     } else if (selectedMenuId == GAMES_MENU_ID) {
         switch (selectedItem) {
-            case 1: open_games_report_window(); break;
+            case 1: trace_checkpoint("report: opened by Games menu");
+                    open_games_report_window(); break;
             case 2: start_infinite_hd_catalog_scan(); break;
             case 3: launch_game_from_config_file(); break;
             default: break;
@@ -2011,7 +2051,7 @@ static Boolean handle_window_scrollbar_click(WindowPtr window, Point location)
         if (window == g_gamesReportWindow) {
             g_reportFirstRow = GetControlValue(selectedControl);
             update_games_report_scrollbar();
-            InvalRect(&window->portRect);
+            invalidate_games_report_window();
         } else {
             g_terminalFirstVisibleLine = GetControlValue(selectedControl);
             update_terminal_scrollbar();
@@ -2044,6 +2084,10 @@ static void handle_mouse_down(EventRecord *mouseEvent)
 {
     WindowPtr clickedWindow = NULL;
     short windowPart = FindWindow(mouseEvent->where, &clickedWindow);
+    char mouseMessage[95];
+    snprintf(mouseMessage, sizeof(mouseMessage), "mouse: global x=%d y=%d part=%d",
+             (int)mouseEvent->where.h, (int)mouseEvent->where.v, (int)windowPart);
+    trace_checkpoint(mouseMessage);
 
     switch (windowPart) {
         case inMenuBar:
@@ -2116,7 +2160,7 @@ static void handle_classic_mac_event(EventRecord *event)
             handle_window_update((WindowPtr)event->message);
             break;
         case activateEvt:
-            if (g_gamesReportWindow) InvalRect(&g_gamesReportWindow->portRect);
+            invalidate_games_report_window();
             invalidate_terminal_window();
             break;
         default:

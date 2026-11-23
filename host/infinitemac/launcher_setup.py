@@ -144,11 +144,21 @@ def _rgb555_artwork(source_png: Path, destination: Path, width: int, height: int
 def _icon_resources(source_png: Path, destination: Path) -> None:
     width, height, rgb = _png_rgb(source_png)
     rgb = _resized_rgb(width, height, rgb, 32, 32)
-    # Classic 4-bit Macintosh icon palette, with 1-bit masks for older Macs.
-    palette = ((255,255,255), (255,255,0), (255,0,255), (255,0,0),
-               (0,255,255), (0,255,0), (0,0,255), (0,0,0),
-               (187,187,187), (127,127,0), (127,0,127), (127,0,0),
-               (0,127,127), (0,127,0), (0,0,127), (85,85,85))
+    # Icon pixels are indices into Apple's fixed classic system palettes,
+    # NOT grayscale intensities or arbitrary RGB byte values. A wrong icl8
+    # index is displayed as the ROM palette's unrelated magenta/green/cyan.
+    palette4 = ((255,255,255), (252,243,5), (255,100,2), (221,8,6),
+                (242,8,132), (70,0,165), (0,0,212), (2,171,234),
+                (31,183,20), (0,100,17), (86,44,5), (144,113,58),
+                (192,192,192), (128,128,128), (64,64,64), (0,0,0))
+    levels = (255, 204, 153, 102, 51, 0)
+    palette8 = [(r, g, b) for r in levels for g in levels for b in levels]
+    ramps = (238, 221, 187, 170, 136, 119, 85, 68, 34, 17)
+    palette8.extend((v, 0, 0) for v in ramps)
+    palette8.extend((0, v, 0) for v in ramps)
+    palette8.extend((0, 0, v) for v in ramps)
+    palette8.extend((v, v, v) for v in ramps)
+    assert len(palette4) == 16 and len(palette8) == 256
     icon4 = bytearray()
     icon8 = bytearray()
     mono = bytearray(128)
@@ -163,14 +173,15 @@ def _icon_resources(source_png: Path, destination: Path) -> None:
         for x in range(32):
             offset = (y*32+x)*3
             pixel = tuple(rgb[offset:offset+3])
-            index = min(range(16), key=lambda k: sum((pixel[c]-palette[k][c])**2 for c in range(3)))
+            index4 = min(range(16), key=lambda k:
+                         sum((pixel[c] - palette4[k][c])**2 for c in range(3)))
             if x % 2 == 0:
-                icon4.append(index << 4)
+                icon4.append(index4 << 4)
             else:
-                icon4[-1] |= index
-            # The 8-bit icon table is intentionally grayscale-stable, while
-            # the 4-bit icon carries recognizable orange/blue CinterForge colors.
-            icon8.append(255 - ((pixel[0]*30 + pixel[1]*59 + pixel[2]*11)//100))
+                icon4[-1] |= index4
+            index8 = min(range(256), key=lambda k:
+                         sum((pixel[c] - palette8[k][c])**2 for c in range(3)))
+            icon8.append(index8)
             if pixel != (255,255,255) or not has_alpha:
                 byte = y*4+x//8
                 mask[byte] |= 1 << (7-x%8)
