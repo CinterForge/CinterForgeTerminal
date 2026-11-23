@@ -37,7 +37,7 @@ Type `games` to explore the catalog. `wargames` opens **JOSHUA**, the WarGames-i
 
 ### Explore classic Mac games from inside the emulator
 
-On supported System 7–9 Infinite Mac profiles, the separately published
+On supported System 7.1 and Mac OS 7.6 Infinite Mac profiles, the separately published
 **CinterForge HD** volume contains a genuine 68K `CinterForgeTerminal`
 application. The native old-school Macintosh Terminal lists real programs on
 Infinite HD; `games report` opens a separate Games Report window using our

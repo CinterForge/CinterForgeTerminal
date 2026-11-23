@@ -76,7 +76,8 @@ def _webapp_static_file(root: Path, url_path: str) -> Path | None:
     if ('\\' in relative or '\x00' in relative or
             any(not member or member in ('.', '..') or member.startswith('.') for member in members) or
             (members[0] == 'runtime' or (members[0] == 'codeoss' and relative != 'codeoss/CinterForgeCodeOSS.js')) or
-            Path(members[-1]).suffix.lower() not in _BROWSER_ASSET_EXTENSIONS):
+            (Path(members[-1]).suffix.lower() not in _BROWSER_ASSET_EXTENSIONS and
+             relative != 'ocr/eng.traineddata.gz')):
         return None
     if not root.is_dir() or root.is_symlink():
         return None

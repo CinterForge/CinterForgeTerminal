@@ -351,8 +351,8 @@ the public Internet.
 ## CinterForgeTerminal inside classic Macintosh emulators
 
 After `./Cinter all 68k publish beta` uploads the staged
-`CinterForgeTerminal.68k.img` application disk, **only System 7.1, Mac OS
-7.6 and Mac OS 8.1** ordinary Infinite Mac Sessions mount that disposable
+`CinterForgeTerminal.68k.img` application disk, **only System 7.1 and Mac OS
+7.6** ordinary Infinite Mac Sessions mount that disposable
 volume beside the guest system disk and supported **Infinite HD**. The
 Lagomorph-specific Quadra 650 session retains its separate disk and is not
 changed; normal Mac OS 7.6 game sessions still mount the CinterForge Terminal disk. The
@@ -374,8 +374,8 @@ labels and Open regions stay aligned with their clickable bounds.
 
 The discovered native list contains only `APPL` executables that match the
 curated, OS-specific game assignments in [Game Catalog](Game%20Catalog.md).
-This currently means up to 50 scanned entries on System 7.1, 25 on Mac OS
-7.6 and 8 on Mac OS 8.1, counting duplicates/versions. Editors, helpers,
+This currently means up to 50 scanned entries on System 7.1 and 32 on Mac OS
+7.6, counting duplicates/versions. Loom PPC is excluded. Editors, helpers,
 installers, documentation, unknown APPLs and games assigned to **another OS**
 are excluded from both the Terminal list and Games Report. Copy/export and
 `play`/`Game.txt` launch resolution use that same per-OS catalog. These OS
@@ -383,7 +383,7 @@ assignments are initial recommendations pending guest compatibility testing. The
 of this already-running Macintosh does not change when you type `play`; it
 launches the game in this guest. For the separately exposed host Terminal
 classic-Mac game commands, the authored game catalog chooses an existing
-historical Macintosh emulator profile (System 7.1, Mac OS 7.6, Mac OS 8.1,
+historical Macintosh emulator profile (System 7.1, Mac OS 7.6,
 or Mac OS X 10.3, as applicable) before boot. These choices are provisional,
 not evidence the game has been successfully launched.
 

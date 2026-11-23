@@ -150,7 +150,7 @@ class CinterForgeHTTPAuthorization:
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('X-Frame-Options', 'SAMEORIGIN' if same_origin_frame else 'DENY')
         self.send_header('Referrer-Policy', 'no-referrer')
-        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://*:20303; frame-src 'self' https://infinitemac.org; object-src 'none'; base-uri 'none'; frame-ancestors " + ("'self'" if same_origin_frame else "'none'"))
+        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://*:20303; frame-src 'self' https://infinitemac.org; object-src 'none'; base-uri 'none'; frame-ancestors " + ("'self'" if same_origin_frame else "'none'"))
         self.end_headers()
         try:
             self.wfile.write(body)

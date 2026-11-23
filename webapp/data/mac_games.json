@@ -24,7 +24,7 @@
       "title": "Abuse",
       "library_path": "Library/Games/Bungie/Abuse.json",
       "format": "json",
-      "emulator_profile": "power-macintosh-7500"
+      "emulator_profile": "quadra-650"
     },
     {
       "command": "anotherworld",
@@ -88,7 +88,7 @@
       "library_path": "Library/Games/BOOM.json",
       "format": "json",
       "needs_system_7": true,
-      "emulator_profile": "power-macintosh-7500"
+      "emulator_profile": "quadra-650"
     },
     {
       "command": "bubbletrouble",
@@ -231,7 +231,7 @@
       "title": "Marathon Infinity",
       "library_path": "Library/Games/Bungie/Marathon Infinity.zip",
       "format": "zip",
-      "emulator_profile": "power-macintosh-7500"
+      "emulator_profile": "quadra-650"
     },
     {
       "command": "minotaur",
@@ -464,7 +464,7 @@
       "library_path": "Library/Games/Ultimate Doom.json",
       "format": "json",
       "needs_system_7": true,
-      "emulator_profile": "power-macintosh-7500"
+      "emulator_profile": "quadra-650"
     },
     {
       "command": "warcraftorcshumans",
@@ -472,7 +472,7 @@
       "library_path": "Library/Games/Warcraft - Orcs & Humans.json",
       "format": "json",
       "needs_system_7": true,
-      "emulator_profile": "power-macintosh-7500"
+      "emulator_profile": "quadra-650"
     },
     {
       "command": "warcraftiitidesofdarkness",
@@ -480,7 +480,7 @@
       "library_path": "Library/Games/Warcraft II - Tides of Darkness.json",
       "format": "json",
       "needs_system_7": true,
-      "emulator_profile": "power-macintosh-7500"
+      "emulator_profile": "quadra-650"
     },
     {
       "command": "wesleyantetris",

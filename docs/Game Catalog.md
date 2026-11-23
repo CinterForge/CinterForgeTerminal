@@ -12,7 +12,7 @@ The JOSHUA source has its own attribution and **AGPL-3.0-only** license obligati
 
 ## Infinite Mac 68K clipboard command pipe (startup integration)
 
-Only **System 7.1**, **Mac OS 7.6**, and **Mac OS 8.1** mount the
+Only **System 7.1** and **Mac OS 7.6** mount the
 CinterForge Terminal companion disk. Opening one of these **machine cards** starts
 its operating system and attempts to open **CinterForge Terminal only**.
 `Game.txt` does not auto-launch on boot; `run game.txt` remains an explicit
@@ -25,7 +25,7 @@ addressed to its OS, and dispatches supported existing commands:
 ```
 cinter:7.1:play tetris
 cinter:7.6:play escapevelocity
-cinter:8.1:play warcraft
+cinter:7.6:play warcraft
 ```
 
 The current message exchange is `cinter:<os>:hello <16-hex-token>` followed
@@ -44,9 +44,17 @@ The native macOS host clipboard is accessed through the already existing
 **Unattended host-to-guest clipboard synchronization across the Infinite Mac
 cross-origin iframe has not been verified.** Manual Copy/Paste working is not
 proof of unsolicited Scrap Manager synchronization. This integration must be
-accepted by live boot/READY and actual `play` testing in each emulator; the
-host caps Finder retries instead of clicking indefinitely if no acknowledgment
-arrives. No host Game Cards have been implemented yet.
+accepted by live boot/READY and actual `play` testing in both supported emulators; the
+host retries Finder launch with a 25-second recovery interval until a matching
+`READY` is received or the emulator tab is closed. One mouse-click sequence is
+never counted as confirmation. It does not keep clicking when the emulator tab
+is hidden, and it only closes the overlapping Infinite HD window on the first
+attempt. Unacknowledged HELLO messages rotate ownership after 110 seconds so a
+second guest is not blocked; the nonce is regenerated for each lease. This
+cannot guarantee READY unless Infinite Mac actually synchronizes the guest
+Scrap Manager clipboard and the native macOS clipboard. Server log entries
+for launch attempts and waiting-for-READY are diagnostic, not success markers.
+No host Game Cards have been implemented yet.
 
 ## Classic Macintosh games — direct commands
 
@@ -140,7 +148,6 @@ inside the guest is **not proven**.
 |---|---|---|
 | Mac II | System 7.1 | Earlier 68K/black-and-white classics; some may work better under System 6, where the 68K companion is not available |
 | Quadra 650 | Mac OS 7.6 | System 7-era colour games and 68040 titles |
-| Power Macintosh 7500 | Mac OS 8.1 | Faster/later or PowerPC-oriented classic games |
 | Power Macintosh G3 (Blue & White) | Mac OS 9.0.4 | Available as a fallback if a game demonstrably needs Mac OS 9; no game is assigned here without evidence |
 | Power Macintosh G4 (PCI Graphics) | Mac OS X 10.3 | Only the existing catalog entries explicitly marked as requiring Mac OS X |
 
@@ -148,7 +155,8 @@ inside the guest is **not proven**.
 
 The 2026-11-22 guest clipboard sample contains 111 `APPL` records.
 The curated filter excludes 28 identified tools, guides, installers and
-help viewers, leaving 83 *entries* (including versions and same-named
+help viewers, leaving 83 candidate entries before excluding the PowerPC-only
+Loom copy; the 68K guest now allowlists 82 *entries* (including versions and same-named
 copies). This table is the **curated allowlist for the actual guest filesystem
 scan**: the 68K app still resolves genuine executable FSSpecs and icons from
 Infinite HD, but includes an APPL only in the guest OS column assigned here.
@@ -157,7 +165,7 @@ The Terminal `games` list, `games report` cards, `games copy`, `games export`,
 catalog. Unknown APPLs remain hidden pending inspection. OS versions are first-test choices
 based on the title's era and expected architecture; they are **not
 verified to work**. A System 6 build may be better for some earliest games,
-but the 68K Terminal disk only targets the three OS versions above. Variants
+but the 68K Terminal disk only targets the two OS versions above. Variants
 not present in this allowlist remain hidden until identified and assigned.
 
 | Guest command from clipboard | Finder name | Starting OS candidate |
@@ -178,11 +186,11 @@ not present in this allowlist remain hidden until identified and assigned.
 | `battlechess` | Battle Chess | System 7.1 |
 | `blobbo102lite` | Blobbo 1.0.2 Lite | Mac OS 7.6 |
 | `bolo0997` | Bolo 0.99.7 | System 7.1 |
-| `boom10` | BOOM 1.0 | Mac OS 8.1 |
-| `abuse101` | Abuse 1.01 | Mac OS 8.1 |
+| `boom10` | BOOM 1.0 | Mac OS 7.6 |
+| `abuse101` | Abuse 1.01 | Mac OS 7.6 |
 | `marathonv12` | Marathon v1.2 | Mac OS 7.6 |
 | `marathon2` | Marathon 2 | Mac OS 7.6 |
-| `marathon15` | Marathon ∞ 1.5 | Mac OS 8.1 |
+| `marathon15` | Marathon ∞ 1.5 | Mac OS 7.6 |
 | `minotaur` | Minotaur | System 7.1 |
 | `minotaur2` | Minotaur | System 7.1 |
 | `minotaur3` | Minotaur | System 7.1 |
@@ -208,7 +216,6 @@ not present in this allowlist remain hidden until identified and assigned.
 | `fateofatlantisv15` | Fate of Atlantis v.1.5 | System 7.1 |
 | `indy` | Indy™ | System 7.1 |
 | `loom` | Loom™ | System 7.1 |
-| `loomppc` | Loom™ PPC | Mac OS 8.1 |
 | `pipedream` | Pipe Dream™ | System 7.1 |
 | `monkeyisland` | Monkey Island | System 7.1 |
 | `missilecommand30` | MissileCommand 3.0 | System 7.1 |
@@ -240,10 +247,10 @@ not present in this allowlist remain hidden until identified and assigned.
 | `tetriscolor` | TETRIS.color | System 7.1 |
 | `oregontrail` | OREGON TRAIL | System 7.1 |
 | `troubledsouls` | Troubled Souls | Mac OS 7.6 |
-| `ultimatedoomi` | Ultimate Doom I | Mac OS 8.1 |
-| `warcraft` | Warcraft | Mac OS 8.1 |
-| `warcraftii100k` | Warcraft II 100% [k] | Mac OS 8.1 (inspect) |
-| `warcraftiiv122` | Warcraft II v.1.22 | Mac OS 8.1 |
+| `ultimatedoomi` | Ultimate Doom I | Mac OS 7.6 |
+| `warcraft` | Warcraft | Mac OS 7.6 |
+| `warcraftii100k` | Warcraft II 100% [k] | Mac OS 7.6 (inspect) |
+| `warcraftiiv122` | Warcraft II v.1.22 | Mac OS 7.6 |
 | `wesleyantetris` | Wesleyan Tetris | System 7.1 |
 
 The three provisional entries marked **(inspect)** are included on their
@@ -307,7 +314,7 @@ Lagomorph-specific media and other third-party game/system images have independe
 Compatible classic Macintosh System 7, Mac OS 7/8 and Mac OS 9 emulator
 profiles request **Infinite HD** using Infinite Mac's `infinite_hd=true`
 argument. **CinterForge Terminal** (`CinterForgeTerminal.68k.img`, delivered by
-`disk_url`) mounts **only** on System 7.1, Mac OS 7.6 and Mac OS 8.1,
+`disk_url`) mounts **only** on System 7.1 and Mac OS 7.6,
 subject to published-media HTTPS range/CORS verification. Other System 7/8/9
 versions, System 1–6, Mac OS X, NeXTSTEP, BeOS and Lagomorph's separately
 calibrated floppy launch do **not** receive this 68K application disk.
@@ -316,15 +323,15 @@ Quadra 650 museum session remains unchanged.
 Infinite Mac remains responsible for determining which profiles support
 Infinite HD; `infinite_hd=true` is a request, not a guarantee.
 
-For **System 7.1, Mac OS 7.6, and Mac OS 8.1**, an ordinary machine
+For **System 7.1 and Mac OS 7.6**, an ordinary machine
 card mounts the CinterForge Terminal companion disk, boots the chosen OS,
 and never initiates a game launch. On Mac II (7.1) and Quadra 650 (7.6),
 the host makes one Finder double-click attempt after boot to open the
 **CinterForge Terminal** application. The 7.6 sequence first closes the
 obscuring Infinite HD Finder window, then activates the companion disk window.
-The 8.1 Power Macintosh 7500 currently requires a **manual double-click**:
-its DingusPPC relative pointer was regressed by the earlier automatic input
-layer, so speculative simulated clicks have not been restored.
+Mac OS 8.1 retains its historical emulator profile but receives no
+CinterForge Terminal companion disk, clipboard commands, or automatic Finder
+launch. Loom PPC is intentionally excluded from the 68K game catalog.
 
 The guest only becomes confirmed ready when the host receives a matching
 `cinter:<os>:ready <token>` clipboard response. A matching READY triggers
@@ -350,8 +357,8 @@ existing Lagomorph media and boot automation remain unchanged.
 The native 68K `games` command scans only the `Games` directory on Infinite HD
 (recursively through publisher and title subdirectories) and includes only
 files with Macintosh Finder type `APPL` **and the OS-scoped curated allowlist
-shown above**. System 7.1 currently maps 50 entries, Mac OS 7.6 maps 25,
-and Mac OS 8.1 maps 8; counts include duplicate installations/versions and
+shown above**. System 7.1 currently maps 50 entries and Mac OS 7.6 maps
+32 (including seven formerly assigned to 8.1); counts include duplicates/versions and
 are not guaranteed availability on a given Infinite HD snapshot. Non-game helpers whose Finder
 application names contain `manual`, `register`/`registration`,
 `documentation`, or `basics` are excluded case-insensitively at catalog
@@ -378,9 +385,11 @@ Without a verified clipboard round trip, the guest remains silent.
 
 `games report` opens **a separate Macintosh window** with Game Cards from
 the authored `GameCard.png` and discovered application icon resources.
-Double-click a card, click its Open region, type `play "Finder name"`, or type
-the exact Finder application name to launch that application. The Terminal
-window is retained when the Games Report window is closed.
+Single-click a card, type `play "Finder name"`, or type the exact Finder
+application name to launch that application. Each card shows the real Finder
+icon in color plus two lines of unscaled 12-point Macintosh system text;
+there is no redundant "OPEN" caption. The Terminal window remains resident
+when the Games Report window is closed.
 
 To discover launch names, open and edit `Game.txt` on CinterForge Terminal in
 SimpleText, save, and use **Games → Run Game.txt** in CinterForge Terminal;

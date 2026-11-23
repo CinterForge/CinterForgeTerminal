@@ -27,6 +27,13 @@ APPLICATION_NAME = 'CinterForgeTerminal'
 FINDER_APPLICATION_NAME = 'CinterForge Terminal'
 HFS_VOLUME_NAME = 'CinterForge Terminal'
 CAPACITY = 8 * 1024 * 1024
+
+# Classic HFS Master Directory Block (MDB) at offset 1024; the FinderInfo
+# open-folder CNID is its third 32-bit field. CNID 2 is the HFS volume root.
+# This is *Finder metadata*, not a boot flag or a host macOS DMG option.
+HFS_MDB_OFFSET = 1024
+HFS_FINDER_OPEN_FOLDER_OFFSET = 0x5C + 2 * 4
+HFS_ROOT_CNID = 2
 RECEIPT_SCHEMA = 'cinterforge.infinitemac.hfs-build.v4'
 STAGE_SCHEMA = 'cinterforge.infinitemac.hfs-stage.v1'
 CARD_WIDTH, CARD_HEIGHT = 145, 225
@@ -360,6 +367,61 @@ def setup_check(builds: Path) -> dict:
     return {'verified': True, 'offline': True}
 
 
+def _verify_terminal_root_auto_open(image: Path) -> None:
+    """The classic Finder should open this HFS volume's root when mounted."""
+    size = image.stat().st_size
+    if size < 4096 or size % 512:
+        raise RuntimeError('Invalid Classic Mac HFS image length')
+    with image.open('rb') as stream:
+        for offset in (HFS_MDB_OFFSET, size - 1024):
+            stream.seek(offset)
+            signature = stream.read(2)
+            # hfsutils may omit the optional alternate MDB; verify it when
+            # present. The primary MDB is mandatory.
+            if offset != HFS_MDB_OFFSET and signature != b'BD':
+                continue
+            if signature != b'BD':
+                raise RuntimeError('Invalid classic HFS MDB signature')
+            stream.seek(offset + HFS_FINDER_OPEN_FOLDER_OFFSET)
+            data = stream.read(4)
+            if len(data) != 4 or struct.unpack('>I', data)[0] != HFS_ROOT_CNID:
+                raise RuntimeError('Classic HFS image does not auto-open the '
+                                   'CinterForge Terminal root in Finder; '
+                                   'rebuild with ./Cinter build 68k')
+
+
+def _set_terminal_root_auto_open(image: Path) -> None:
+    """Set FinderInfo[2] to CNID 2 without changing other HFS metadata.
+
+    On both System 7.1 and 7.6 Finder this requests a root window on mount,
+    rather than relying on stale writable Desktop files or screen clicks.
+    The alternate MDB, if present, must agree with the primary MDB.
+    """
+    size = image.stat().st_size
+    if size < 4096 or size % 512:
+        raise RuntimeError('Invalid Classic Mac HFS image length')
+    offsets = [HFS_MDB_OFFSET]
+    with image.open('r+b') as stream:
+        stream.seek(HFS_MDB_OFFSET)
+        if stream.read(2) != b'BD':
+            raise RuntimeError('Cannot set Finder auto-open on non-HFS image')
+        stream.seek(size - 1024)
+        if stream.read(2) == b'BD':
+            offsets.append(size - 1024)
+        for offset in offsets:
+            stream.seek(offset + HFS_FINDER_OPEN_FOLDER_OFFSET)
+            raw = stream.read(4)
+            if len(raw) != 4 or struct.unpack('>I', raw)[0] not in (0, HFS_ROOT_CNID):
+                raise RuntimeError('Unexpected pre-existing Finder open-folder ID; '
+                                   'refusing to rewrite unrelated Finder metadata')
+        for offset in offsets:
+            stream.seek(offset + HFS_FINDER_OPEN_FOLDER_OFFSET)
+            stream.write(struct.pack('>I', HFS_ROOT_CNID))
+        stream.flush()
+        os.fsync(stream.fileno())
+    _verify_terminal_root_auto_open(image)
+
+
 def _read_build_receipt(builds: Path) -> tuple[Path, dict]:
     """Check the sealed Build artifact without modifying it."""
     from host.lagomorph.lagomorph_setup import _classic_hfs_signature
@@ -374,6 +436,7 @@ def _read_build_receipt(builds: Path) -> tuple[Path, dict]:
             data.get('bytes') != image.stat().st_size):
         raise RuntimeError('68K Build image does not match its verified receipt')
     _classic_hfs_signature(image)
+    _verify_terminal_root_auto_open(image)
     return image, data
 
 
@@ -451,6 +514,7 @@ def build(builds: Path) -> dict:
         _stage_hfs_linux(builds, scratch, [(contents, image, HFS_VOLUME_NAME, CAPACITY,
                                            ':' + FINDER_APPLICATION_NAME)])
         _classic_hfs_signature(image)
+        _set_terminal_root_auto_open(image)
         if output.exists() and _hash(output) != previous.get('image_sha256'):
             raise RuntimeError('68K Build image changed during compilation; preserving edits')
         os.replace(image, output)
@@ -535,5 +599,6 @@ def verify_staged(builds: Path) -> dict:
             _hash(staged_image) != built['image_sha256']):
         raise RuntimeError('68K staged artifact changed or is stale; run ./Cinter stage 68k')
     _classic_hfs_signature(staged_image)
+    _verify_terminal_root_auto_open(staged_image)
     return {'image': str(staged_image), 'sha256': built['image_sha256'],
             'bytes': built['bytes'], 'source_sha256': built['source_sha256']}

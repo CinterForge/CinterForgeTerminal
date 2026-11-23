@@ -1,6 +1,6 @@
 /*
  * CinterForgeEmulators.js — CinterForge Terminal browser owner
- * PURPOSE: Manages classic Macintosh emulators and Lagomorph guest interactions; preserves exact timed input sequence and emulator origins.
+ * PURPOSE: Manages classic Macintosh emulators and Lagomorph guest interactions; gates automated startup on Finder menu-bar OCR.
  * METHODS: Event handlers and per-tab state.
  * STARTUP: Loaded in original dependency order from index.html and Discord view.
  * SHUTDOWN: Only releases browser-owned sessions; host controls VM lifetime.
@@ -20,54 +20,36 @@
   CinterForgeState.emulatorFrames = new Map();
   CinterForgeState.activeEmulatorFrame = null;
 
-  // Mount and auto-open only the actual three CinterForge 68K game guests.
-  // emulator_loaded means the ROM started, not that Finder is ready.
-  const cinterForge68KBootDelay = Object.freeze({
-    'System 7.1': 12000,
-    'Mac OS 7.6': 16000,
-    'Mac OS 8.1': 20000
-  });
+  // Sample the actual emulator menu bar once per second. Boot readiness
+  // is recognized by Tesseract, not by timeouts or guessed pixel patterns.
+  const cinterForge68KScreenCheckMs = 1000;
   const cinterForgeOSAddress = Object.freeze({
-    'System 7.1': '7.1', 'Mac OS 7.6': '7.6', 'Mac OS 8.1': '8.1'
+    'System 7.1': '7.1', 'Mac OS 7.6': '7.6'
   });
-  // Guest framebuffer coordinates, never host-window positions. On the
-  // Quadra 650 the Infinite HD Finder window *covers* CinterForge HD. Its
-  // close box is (33, 62); simply clicking the exposed CinterForge title
-  // bar while Infinite HD is in front does not reliably expose the app icon.
-  // The Mac II and Power Macintosh 7500 already expose their app icons.
+  // Finder keeps desktop disk icons about 40 pixels from the right edge.
+  // Open the *CinterForge Terminal disk icon* (third mounted disk) explicitly
+  // on every retry. Merely clicking inside a supposed open Finder window
+  // can instead select Infinite HD, as the 7.6 guest demonstrated. The
+  // application icon is first in the CinterForge Terminal root window.
+  // All positions are guest framebuffer coordinates, not host viewport pixels.
   const cinterForge68KFinder = Object.freeze({
-    'System 7.1': Object.freeze({app: {x: 40, y: 98}}),
-    'Mac OS 7.6': Object.freeze({closeInfiniteHD: {x: 33, y: 62},
-      window: {x: 220, y: 36}, app: {x: 40, y: 98}}),
-    'Mac OS 8.1': Object.freeze({window: {x: 205, y: 35}, app: {x: 42, y: 102}})
+    'System 7.1': Object.freeze({diskRightInset: 40, diskY: 154,
+      app: {x: 40, y: 98}}),
+    'Mac OS 7.6': Object.freeze({diskRightInset: 40, diskY: 154,
+      app: {x: 40, y: 98}})
   });
-  const startupQueue = [];
-  let clipboardOwner = null;
-  let clipboardPoll = null;
-  let clipboardReading = false;
-  // Startup isolation: without a proven automatic guest-to-host READY bridge,
-  // a missing acknowledgment is not permission to double-click the app again.
-  // A second Finder open can disrupt a process that has already begun startup.
-  const maxFinderAttempts = 1;
+  // A retry is allowed only while Finder is recognized by OCR. No
+  // automatic clipboard challenge or clipboard success polling.
+  const finderRetryDelayMs = 2800;
 
   // DingusPPC (Power Macintosh 7500) accepts relative movement, unlike the
   // absolute-coordinate Mini vMac and Basilisk II emulators. All guests still
   // need the parent pointer relay in the embedded Terminal WebView.
   const relativeMouseMachines = new Set(['Power Macintosh 7500']);
 
-  const nativeClipboard = () => CinterForgeState.platform === 'mac' &&
-    typeof window.cinterClipboard === 'function';
-  const readClipboard = () => window.cinterClipboard({action: 'paste'});
-  const writeClipboard = text => window.cinterClipboard({action: 'copy', text});
-  const log68KEvent = (os, kind) => {
-    // The Python service writes the actual server log. Never treat a queued
-    // browser callback or a native copy result as proof of guest readiness.
-    void CinterForgeState.api('/api/infinitemac/clipboard-event', {os, kind})
-      .catch(error => console.error('CinterForge 68K event log:', error));
-  };
   const speak68KReadyGreeting = async () => {
     // The 68K app never invokes MacinTalk. Reuse the host's native Zarvox
-    // greeting, triggered only after the guest echoes this boot's HELLO token.
+    // greeting, triggered once after the Terminal becomes visually frontmost.
     if (CinterForgeState.platform !== 'mac') return;
     for (const part of ['welcome', 'question']) {
       try {
@@ -82,138 +64,181 @@
       }
     }
   };
+  // The Terminal bundles the supplied Tesseract.js 5.1.1, worker, embedded
+  // WASM core, and English language data under /ocr/. OCR is the ONLY startup
+  // detector. Do not fetch code or models from the network or fall back to
+  // fixed delays, pixel matching, or clipboard launch signals.
+  let ocrWorkerPromise = null;
+  let ocrStartupFailure = null;
+  const getOCRWorker = () => {
+    if (ocrStartupFailure) return Promise.reject(ocrStartupFailure);
+    if (ocrWorkerPromise) return ocrWorkerPromise;
+    ocrWorkerPromise = (async () => {
+      if (typeof window.Tesseract?.createWorker !== 'function')
+        throw new Error('Bundled /ocr/tesseract.min.js unavailable (OCR required)');
+      const root = new URL('/ocr/', window.location.href);
+      const worker = await window.Tesseract.createWorker('eng', 1, {
+        workerPath: new URL('worker.min.js', root).href,
+        workerBlobURL: false, // Load the bundled same-origin worker directly; CSP disallows Blob workers.
+        corePath: new URL('tesseract-core.wasm.js', root).href,
+        langPath: root.href.replace(/\/$/, ''),
+        cacheMethod: 'none',
+        gzip: true
+      });
+      await worker.setParameters({
+        tessedit_pageseg_mode: '6', // Classic menu bar is one text block.
+        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '
+      });
+      return worker;
+    })().catch(error => {
+      // Some worker failures reject with undefined rather than an Error.
+      // Preserve a useful failure message and fail closed: no click fallback.
+      const detail = error instanceof Error ? error.message :
+        (typeof error === 'string' && error ? error :
+         'worker failed without a diagnostic (check local OCR assets and CSP)');
+      ocrStartupFailure = new Error(`Local Tesseract initialization failed: ${detail}`);
+      throw ocrStartupFailure;
+    });
+    return ocrWorkerPromise;
+  };
+  const menuBarImage = ({width, height, data}) => {
+    // Only read the guest's native 22-pixel menu bar. Enlarge without
+    // smoothing so Chicago/bitmap glyphs remain sharp for Tesseract.
+    const left = 20, cropWidth = Math.min(width - left, 430), cropHeight = Math.min(height, 22);
+    const small = document.createElement('canvas');
+    small.width = cropWidth;
+    small.height = cropHeight;
+    const smallCtx = small.getContext('2d');
+    const pixels = smallCtx.createImageData(cropWidth, cropHeight);
+    for (let y = 0; y < cropHeight; ++y) {
+      const offset = (y * width + left) * 4;
+      pixels.data.set(data.subarray(offset, offset + cropWidth * 4), y * cropWidth * 4);
+    }
+    smallCtx.putImageData(pixels, 0, 0);
+    const large = document.createElement('canvas');
+    large.width = cropWidth * 4;
+    large.height = cropHeight * 4;
+    const ctx = large.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(small, 0, 0, large.width, large.height);
+    return large;
+  };
+  const classifyMenuText = text => {
+    const words = String(text || '').toLowerCase().replace(/[^a-z ]/g, ' ').split(/\s+/).filter(Boolean);
+    const has = name => words.includes(name);
+    if (has('file') && has('edit') && has('games')) return 'TERMINAL_RUNNING';
+    if (has('file') && has('edit') && has('label') && has('special')) return 'FINDER_VISIBLE';
+    return words.length ? 'OTHER_APP_OR_MENU' : 'BOOT_OR_BLANK';
+  };
   const liveStartup = frame => {
     const startup = frame?.cinterForge68KStartup;
     return startup && !startup.tab.closed &&
       CinterForgeState.emulatorFrames.get(startup.tab.key) === frame;
   };
-
-  const startNextHandshake = async () => {
-    if (clipboardOwner || !nativeClipboard()) return;
-    while (startupQueue.length) {
-      const frame = startupQueue.shift();
-      if (!liveStartup(frame) || frame.cinterForge68KStartup.ready) continue;
-      const startup = frame.cinterForge68KStartup;
-      clipboardOwner = frame; // Only one HELLO owns the shared clipboard.
-      startup.helloStarted = Date.now();
-      try {
-        const sent = await writeClipboard(`cinter:${startup.address}:hello ${startup.nonce}`);
-        if (sent !== true) throw new Error('Native clipboard rejected HELLO');
-        if (!clipboardPoll) clipboardPoll = setInterval(pollClipboard, 1000);
-      } catch (error) {
-        console.error('CinterForge 68K HELLO:', error);
-        clipboardOwner = null;
-        continue;
+  const visibleFrame = frame => {
+    const tab = frame?.cinterForge68KStartup?.tab || frame?.lagomorphWatch?.tab;
+    return tab && !tab.closed && CinterForgeState.activeTab === tab &&
+      CinterForgeState.emulatorFrames.get(tab.key) === frame &&
+      CinterForgeState.activeEmulatorFrame === frame &&
+      !CinterForgeState.computerView.hidden && !frame.hidden;
+  };
+  const stopScreenWatch = frame => {
+    if (!frame?.screenWatch) return;
+    clearInterval(frame.screenWatch.timer);
+    frame.screenWatch = null;
+  };
+  const checkScreen = async frame => {
+    const watch = frame?.screenWatch;
+    if (!watch || !visibleFrame(frame)) return;
+    const label = frame.lagomorphWatch ? 'Lagomorph' : `68K ${frame.cinterForge68KStartup.address}`;
+    const check = ++watch.checks;
+    if (watch.busy) {
+      console.info(`[${label}] OCR check ${check}: OCR_BUSY`);
+      return;
+    }
+    if (!frame.cinterForgeScreen) {
+      console.info(`[${label}] OCR check ${check}: WAITING_FOR_FRAME`);
+      return;
+    }
+    watch.busy = true;
+    let result = 'OCR_UNAVAILABLE', recognized = '';
+    try {
+      const worker = await getOCRWorker();
+      const image = menuBarImage(frame.cinterForgeScreen);
+      const answer = await worker.recognize(image);
+      recognized = String(answer?.data?.text || '').replace(/\s+/g, ' ').trim();
+      result = classifyMenuText(recognized);
+    } catch (error) {
+      result = 'OCR_FAILED';
+      if (!watch.ocrFailureReported) {
+        console.error(`[${label}] OCR cannot initialize; automated clicks disabled:`, error);
+        watch.ocrFailureReported = true;
+      }
+    } finally {
+      watch.busy = false;
+    }
+    if (!visibleFrame(frame) || frame.screenWatch !== watch) return;
+    console.info(`[${label}] OCR check ${check}: ${result}; menu=\"${recognized}\"`);
+    watch.finderMatches = result === 'FINDER_VISIBLE' ? watch.finderMatches + 1 : 0;
+    if (frame.lagomorphWatch) {
+      const lag = frame.lagomorphWatch;
+      if (lag.loaded && watch.finderMatches >= 2 && !lag.started) {
+        lag.started = true;
+        stopScreenWatch(frame);
+        console.info('[Lagomorph] Finder detected; starting guest controls');
+        void CinterForgeState.lagomorphBootControls(lag.stamp, frame.contentWindow)
+          .catch(error => console.error('Lagomorph guest controls:', error));
       }
       return;
     }
-
-    // The host keeps polling while any 68K guest is open, including after
-    // READY, so unsolicited guest messages remain observable.
-  };
-  const releaseHandshake = frame => {
-    if (clipboardOwner === frame) {
-      clipboardOwner = null;
-      void startNextHandshake();
-    } else {
-      const index = startupQueue.indexOf(frame);
-      if (index >= 0) startupQueue.splice(index, 1);
+    const startup = frame.cinterForge68KStartup;
+    if (!startup) return;
+    startup.screenState = result;
+    if (result === 'TERMINAL_RUNNING') {
+      startup.ready = true;
+      stopScreenWatch(frame);
+      console.info(`[68K ${startup.address}] Terminal menu detected; Finder automation complete`);
+      void speak68KReadyGreeting();
+    } else if (startup.loaded && watch.finderMatches >= 2) {
+      CinterForgeState.schedule68KAppOpen(frame);
     }
   };
-  const pollClipboard = async () => {
-    if (clipboardReading || !nativeClipboard()) return;
-    clipboardReading = true;
-    try {
-      const value = await readClipboard();
-      if (typeof value !== 'string' || value.length > 192) return;
-      const frame = clipboardOwner;
-      if (liveStartup(frame)) {
-        const startup = frame.cinterForge68KStartup;
-        if (!startup.ready && value ===
-            `cinter:${startup.address}:ready ${startup.nonce}`) {
-          startup.ready = true;
-          if (startup.timer) clearTimeout(startup.timer);
-          startup.timer = null;
-          console.info(`CINTERFORGE_READY ${startup.address}: clipboard round trip`);
-          log68KEvent(startup.address, 'ready');
-          releaseHandshake(frame);
-          void speak68KReadyGreeting();
-        } else if (Date.now() - startup.helloStarted > 110000) {
-          // An unproven clipboard bridge must not retry clicks indefinitely.
-          console.error(`CinterForge 68K ${startup.address}: no clipboard READY`);
-          releaseHandshake(frame);
-        }
-      }
-      for (const candidate of CinterForgeState.emulatorFrames.values()) {
-        const startup = candidate.cinterForge68KStartup;
-        if (startup?.pendingCommand &&
-            value === `cinter:${startup.address}:ack ${startup.pendingCommand}`) {
-          startup.pendingCommand = null;
-          log68KEvent(startup.address, 'ack');
-        }
-      }
-    } catch (error) {
-      console.error('CinterForge 68K clipboard poll:', error);
-    } finally {
-      clipboardReading = false;
-    }
+  const beginScreenWatch = frame => {
+    if (!frame || frame.screenWatch || !visibleFrame(frame)) return;
+    frame.screenWatch = {timer: null, checks: 0, busy: false, finderMatches: 0, ocrFailureReported: false};
+    frame.screenWatch.timer = setInterval(() => { void checkScreen(frame); },
+      cinterForge68KScreenCheckMs);
+    void checkScreen(frame);
   };
 
-  // Prepared before setting the iframe src, so HELLO precedes guest boot.
-  CinterForgeState.arm68KClipboard = async frame => {
-    if (!liveStartup(frame)) return;
-    startupQueue.push(frame);
-    await startNextHandshake();
-  };
-
-  // Future host Game Cards may call this same pipe. A machine card never
-  // invokes PLAY: it only starts the OS with the Terminal companion disk.
-  CinterForgeState.send68KCommand = async (os, command) => {
-    if (!['7.1', '7.6', '8.1'].includes(os) ||
-        !/^(play [a-zA-Z0-9 .!'-]{1,63}|games|games report|games rescan|help)$/.test(command))
-      throw new Error('Invalid OS-targeted CinterForge command');
-    if (!nativeClipboard() || clipboardOwner)
-      throw new Error('CinterForge clipboard pipe is unavailable or handshaking');
-    const matches = [...CinterForgeState.emulatorFrames.values()].filter(frame =>
-      liveStartup(frame) && frame.cinterForge68KStartup.address === os &&
-      frame.cinterForge68KStartup.ready);
-    if (matches.length !== 1) throw new Error('Exactly one ready CinterForge guest is required');
-    const startup = matches[0].cinterForge68KStartup;
-    if (startup.pendingCommand) throw new Error('Previous CinterForge command not acknowledged');
-    startup.pendingCommand = command;
-    try {
-      if (await writeClipboard(`cinter:${os}:${command}`) !== true)
-        throw new Error('Native clipboard rejected command');
-      if (!clipboardPoll) clipboardPoll = setInterval(pollClipboard, 1000);
-    } catch (error) {
-      startup.pendingCommand = null;
-      throw error;
-    }
-  };
-
-  // Retry a physical Finder open while the guest is the selected tab. Do not
-  // flag success just because mouse events were sent: READY is the evidence.
+  // Click only after repeated OCR recognition of the Finder menu. A new
+  // attempt requires another OCR observation; no blind timer-based retries.
   CinterForgeState.schedule68KAppOpen = frame => {
     const startup = frame?.cinterForge68KStartup;
-    if (!startup?.loaded || startup.ready || startup.timer ||
-        startup.attempts >= maxFinderAttempts || !liveStartup(frame)) return;
+    if (!startup?.loaded || startup.ready || startup.launching ||
+        !liveStartup(frame) || startup.screenState !== 'FINDER_VISIBLE' ||
+        frame.screenWatch?.finderMatches < 2 ||
+        Date.now() - startup.lastAttemptAt < finderRetryDelayMs) return;
     // Until DingusPPC pointer alignment is proven in a live guest, do not
     // inject blind Finder clicks that can hold up the guest mouse. Manual
     // mouse control must work independently of startup automation.
     if (frame.relativeMouse) return;
     const finder = cinterForge68KFinder[startup.os];
     if (!finder) return;
-    const active = () => liveStartup(frame) &&
-      CinterForgeState.activeTab === startup.tab &&
-      CinterForgeState.activeEmulatorFrame === frame &&
-      !CinterForgeState.computerView.hidden && !frame.hidden;
+    // The OCR framebuffer supplies the authoritative guest width.
+    // If no screen is available, do not inject a guessed mouse position.
+    const diskPosition = () => {
+      const width = frame.cinterForgeScreen?.width;
+      if (!Number.isInteger(width) || width < 320)
+        throw new Error('68K Finder OCR has no valid guest framebuffer width');
+      return {x: width - finder.diskRightInset, y: finder.diskY};
+    };
+    const active = () => visibleFrame(frame);
     if (!active()) return; // Resume on tab activation; never click another tab.
-    // Attempt Finder launch only once per guest boot. The clipboard may not
-    // synchronize automatically, so no READY cannot trigger another launch.
-    const deadline = startup.readyAt;
-    startup.timer = setTimeout(async () => {
-      startup.timer = null;
-      if (!active() || startup.ready) return;
+    // Do not click during boot or when another app is frontmost. Both
+    // actions and classification use guest-framebuffer coordinates.
+    void (async () => {
+      if (!active() || startup.ready || startup.screenState !== 'FINDER_VISIBLE') return;
       const target = frame.contentWindow;
       if (!target) return;
       const send = data => target.postMessage(data, 'https://infinitemac.org');
@@ -227,16 +252,6 @@
         if (!pressed) return;
         send({type: 'emulator_mouse_up', button: 0});
         pressed = false;
-      };
-      const click = async position => {
-        if (!active() || startup.ready) return false;
-        move(position);
-        await pause(delays.clickPointerSettle);
-        if (!active() || startup.ready) return false;
-        down();
-        await pause(delays.clickPress);
-        up();
-        return active();
       };
       const doubleClick = async position => {
         if (!active() || startup.ready) return false;
@@ -254,23 +269,24 @@
         return active();
       };
       startup.attempts++;
+      startup.lastAttemptAt = Date.now();
+      startup.launching = true;
+      console.info(`CinterForge 68K ${startup.address}: Finder launch attempt ${startup.attempts}`);
       // Ignore simultaneous host pointer moves during the scripted click.
       // A moving real cursor must not steal the guest pointer between presses.
       frame.cinterForgeAutomationClicking = true;
       try {
         frame.focus();
-        if (finder.closeInfiniteHD) {
-          // Close the foreground Infinite HD Finder window (not its desktop
-          // disk icon) before targeting the CinterForge Terminal application.
-          if (!await click(finder.closeInfiniteHD)) return;
-          await pause(400);
-          if (!active() || startup.ready) return;
-        }
-        if (finder.window) {
-          if (!await click(finder.window)) return;
-          await pause(400);
-          if (!active() || startup.ready) return;
-        }
+        // Opening the desktop disk icon also brings its Finder window to
+        // the front when already open. This avoids any assumptions about
+        // an HFS auto-open hint or stale window positions. Never close an
+        // arbitrary window (including Infinite HD) at fixed coordinates.
+        const disk = diskPosition();
+        console.info(`CinterForge 68K ${startup.address}: open Terminal disk at (${disk.x}, ${disk.y})`);
+        if (!await doubleClick(disk)) return;
+        await pause(650); // Give Finder time to display the root directory.
+        if (!active() || startup.ready) return;
+        console.info(`CinterForge 68K ${startup.address}: open Terminal application at (${finder.app.x}, ${finder.app.y})`);
         await doubleClick(finder.app);
       } catch (error) {
         console.error('CinterForge 68K Finder launch:', error);
@@ -278,13 +294,10 @@
         up();
         frame.cinterForgeAutomationClicking = false;
         frame.resetPointerRelay?.();
-        if (active() && !startup.ready) {
-          // Absence of READY does not mean failure: the guest may already
-          // be running, and unattended scrap synchronization is unverified.
-          console.info(`CinterForgeTerminal ${startup.address}: Finder open attempted; guest readiness unverified`);
-        }
+        startup.launching = false;
+        // Screen OCR on the next tick decides whether a retry is warranted.
       }
-    }, Math.max(0, deadline - Date.now()));
+    })();
   };
 
   window.addEventListener('message', event => {
@@ -292,12 +305,9 @@
         event.data?.type !== 'emulator_loaded') return;
     for (const frame of CinterForgeState.emulatorFrames.values()) {
       if (event.source !== frame.contentWindow) continue;
-      const startup = frame.cinterForge68KStartup;
-      if (startup && !startup.loaded) {
-        startup.loaded = true;
-        startup.readyAt = Date.now() + cinterForge68KBootDelay[startup.os];
-        CinterForgeState.schedule68KAppOpen(frame);
-      }
+      if (frame.cinterForge68KStartup) frame.cinterForge68KStartup.loaded = true;
+      if (frame.lagomorphWatch) frame.lagomorphWatch.loaded = true;
+      beginScreenWatch(frame);
       break;
     }
   });
@@ -330,6 +340,7 @@
     for (const frame of CinterForgeState.emulatorFrames.values()) {
       // Release a held mouse button while the guest is still addressable.
       if (!frame.hidden) frame.resetPointerRelay?.();
+      stopScreenWatch(frame);
       frame.hidden = true;
       if (frame.pointerRelay) frame.pointerRelay.hidden = true;
     }
@@ -340,14 +351,8 @@
     const frame = CinterForgeState.emulatorFrames.get(tab.key);
     if (!frame) return;
     // Releasing a tab is the only time we intentionally destroy its guest.
-    if (frame.cinterForge68KStartup?.timer)
-      clearTimeout(frame.cinterForge68KStartup.timer);
-    releaseHandshake(frame);
-    if (clipboardPoll && ![...CinterForgeState.emulatorFrames.values()].some(candidate =>
-        candidate !== frame && candidate.cinterForge68KStartup)) {
-      clearInterval(clipboardPoll);
-      clipboardPoll = null;
-    }
+    stopScreenWatch(frame);
+    frame.cinterForgeScreen = null;
     frame.pointerRelay?.remove();
     frame.remove();
     CinterForgeState.emulatorFrames.delete(tab.key);
@@ -374,19 +379,25 @@
     if (frame) frame.resetPointerRelay = () => {};
   };
 
-  // Screen dimension messages are restricted to the exact origin and iframe.
-  // Notifications do not expose application data; only dimensions are retained.
+  // The emulator sends raw RGBA pixels when screen_update_messages is set.
+  // Keep only the newest frame per active 68K guest, for the Finder classifier.
   window.addEventListener('message', event => {
-    if (event.origin !== 'https://infinitemac.org' || event.data?.type !== 'emulator_screen') return;
+    if (event.origin !== 'https://infinitemac.org' ||
+        event.data?.type !== 'emulator_screen') return;
     for (const frame of CinterForgeState.emulatorFrames.values()) {
       if (event.source !== frame.contentWindow) continue;
-      const width = event.data.width;
-      const height = event.data.height;
-      if (Number.isInteger(width) && Number.isInteger(height) &&
-          width > 0 && height > 0 && width <= 8192 && height <= 8192 &&
-          (frame.guestScreen?.width !== width || frame.guestScreen?.height !== height)) {
+      const {width, height, data} = event.data;
+      if (!Number.isInteger(width) || !Number.isInteger(height) ||
+          width < 320 || height < 240 || width > 4096 || height > 3072)
+        break;
+      if (frame.guestScreen?.width !== width || frame.guestScreen?.height !== height) {
         frame.guestScreen = {width, height};
         frame.resetPointerRelay?.();
+      }
+      if ((frame.cinterForge68KStartup || frame.lagomorphWatch) &&
+          (data instanceof Uint8Array || data instanceof Uint8ClampedArray) &&
+          data.length === width * height * 4) {
+        frame.cinterForgeScreen = {width, height, data};
       }
       break;
     }
@@ -396,7 +407,6 @@
   CinterForgeState.lagBootSequence = 0;
 
   // Original source lines 442–442
-  CinterForgeState.lagWelcomeTimer = null;
 
   // Original source lines 447–447
   CinterForgeState.lagPause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -566,34 +576,11 @@
     }
   };
 
-  // Original source lines 608–624
-  window.addEventListener('message', event => {
-    if (event.origin !== 'https://infinitemac.org' || event.source !== CinterForgeState.getActiveInfiniteMacFrame().contentWindow ||
-      CinterForgeState.computerView.hidden || event.data?.type !== 'emulator_loaded' ||
-      CinterForgeState.selected !== 'quadra-650') return;
-    const stamp = CinterForgeState.lagBootSequence;
-    if (CinterForgeState.lagWelcomeTimer) clearTimeout(CinterForgeState.lagWelcomeTimer);
-    // emulator_loaded means the emulator is running, not that Finder's
-    // Control Strip and Sticky Notes window have both finished opening.
-    CinterForgeState.lagWelcomeTimer = setTimeout(() => {
-      CinterForgeState.lagWelcomeTimer = null;
-      if (stamp !== CinterForgeState.lagBootSequence) return;
-      const target = CinterForgeState.getActiveInfiniteMacFrame().contentWindow;
-      if (target) void CinterForgeState.lagomorphBootControls(stamp, target).catch(e => {
-        console.error('Lagomorph guest controls:', e);
-      });
-    }, CinterForgeState.LAGOMORPH_DELAYS_MS.initialGuestBoot);
-  });
-
   // Original source lines 630–649
   CinterForgeState.showTerminal = () => {
     if (CinterForgeState.terminalOverlay.dataset.codeWrapperHidden === 'true')
       CinterForgeState.setCodeWrapperHidden(false);
     CinterForgeState.lagBootSequence++;
-    if (CinterForgeState.lagWelcomeTimer) {
-      clearTimeout(CinterForgeState.lagWelcomeTimer);
-      CinterForgeState.lagWelcomeTimer = null;
-    }
     // Only the recyclable emulator frame is disposed. The Code-OSS iframe
     // retains its workbench, editor state and all legitimate PTYs.
     CinterForgeState.codeFrame.hidden = true;
@@ -612,10 +599,6 @@
   CinterForgeState.showComputer = async (profile, tab) => {
     CinterForgeState.hideEmulatorFrames();
     CinterForgeState.lagBootSequence++;
-    if (CinterForgeState.lagWelcomeTimer) {
-      clearTimeout(CinterForgeState.lagWelcomeTimer);
-      CinterForgeState.lagWelcomeTimer = null;
-    }
     // An emulator lives only in the iframe. Host titlebar menus must survive
     // every VM load and remain clickable above the embedded screen.
     document.querySelectorAll('.terminal-menu[open]').forEach(menu => {
@@ -660,7 +643,10 @@
         existing.hidden = false;
         if (existing.pointerRelay) existing.pointerRelay.hidden = false;
         existing.resetPointerRelay?.();
-        CinterForgeState.schedule68KAppOpen(existing);
+        if (existing.lagomorphWatch && !existing.lagomorphWatch.started)
+          existing.lagomorphWatch.stamp = CinterForgeState.lagBootSequence;
+        if (existing.cinterForge68KStartup?.loaded || existing.lagomorphWatch?.loaded)
+          beginScreenWatch(existing);
         return;
       }
       const url = new URL('https://infinitemac.org/embed');
@@ -673,12 +659,12 @@
       const classicMac = /^(?:System 7\.|Mac OS (?:7\.|8\.|9\.))/.test(profile.disk || '');
       if (profile.macGame || (classicMac && !profile.lagomorph))
         url.searchParams.set('infinite_hd', 'true');
-      // The CinterForge Terminal disk is only for the three curated game OS versions.
+      // The CinterForge Terminal disk is only for the two supported 68K OS versions.
       // Leave every other System 7/8/9 guest's Infinite HD behavior alone,
       // and never interfere with Lagomorph's separate calibrated media.
       // The dynamic macGame profile for a Quadra 650 is not a Lagomorph
       // session, even though the museum's Quadra 650 profile is reserved.
-      const cinterForgeGameOS = Object.hasOwn(cinterForge68KBootDelay, profile.disk);
+      const cinterForgeGameOS = Object.hasOwn(cinterForgeOSAddress, profile.disk);
       if (cinterForgeGameOS && !profile.lagomorph) {
         try {
           const media = await CinterForgeState.api('/api/infinitemac/media');
@@ -750,20 +736,17 @@
             url.searchParams.getAll('disk_url').length === 1)
           iframe.cinterForge68KStartup = {
             os: profile.disk, address: cinterForgeOSAddress[profile.disk],
-            nonce: [...crypto.getRandomValues(new Uint8Array(8))]
-              .map(byte => byte.toString(16).padStart(2, '0')).join(''),
-            tab, loaded: false, ready: false, attempts: 0,
-            timer: null, readyAt: 0, helloStarted: 0, pendingCommand: null
+            tab, loaded: false, ready: false, attempts: 0, launching: false,
+            lastAttemptAt: 0, screenState: 'WAITING_FOR_FRAME' 
           };
+        if (profile.id === 'quadra-650' && profile.lagomorph)
+          iframe.lagomorphWatch = {tab, stamp: CinterForgeState.lagBootSequence,
+            loaded: false, started: false};
         CinterForgeState.installInfiniteMacPointerRelay(iframe);
-        // Dimensions are sent at most once every 10 seconds.  The parent
-        // discards the pixel buffer and uses only width and height.
+        // Receive actual RGBA frames to identify Finder before clicking.
         url.searchParams.set('screen_update_messages', 'true');
-        url.searchParams.set('screen_update_interval', '10000');
-        if (iframe.cinterForge68KStartup)
-          await CinterForgeState.arm68KClipboard(iframe);
-        // Boot its original tab even if the user switched while the native
-        // clipboard handshake was being prepared; do not reactivate it.
+        url.searchParams.set('screen_update_interval', String(cinterForge68KScreenCheckMs));
+        // Boot the original tab without writing a clipboard challenge.
         if (!tab.closed && CinterForgeState.emulatorFrames.get(tab.key) === iframe)
           iframe.src = url.toString();
       }

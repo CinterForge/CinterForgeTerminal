@@ -39,8 +39,8 @@
 #define MAX_DISCOVERED_APPLICATIONS 256
 #define MAX_CATALOG_FOLDERS 1200
 #define MAX_CATALOG_ENTRIES 50000
-/* The authored 145x225 artwork stretches horizontally to fill five
- * columns at every Games Report window width. Keep the card height fixed. */
+/* Keep the five-card layout at the System 7.1 card proportions.
+ * Wider guest screens must not stretch the card artwork horizontally. */
 #define CARD_ARTWORK_WIDTH 145
 #define CARD_ARTWORK_HEIGHT 225
 #define CARD_HEIGHT 144
@@ -121,11 +121,14 @@ static long g_catalogEntriesScanned = 0;
 static Boolean g_catalogScanActive = false;
 static Boolean g_catalogScanTruncated = false;
 static Boolean g_autoLaunchAttempted = false;
-/* Clipboard text is treated as a single, OS-targeted message; identical
- * scrap contents are never executed twice. Poll at most once per second. */
+/* Clipboard text is treated as a single, OS-targeted message. Ordinary
+ * commands run once, but a failed HELLO reply is retried next poll. */
 #define CINTER_CLIPBOARD_POLL_TICKS 60U
 static UInt32 g_nextClipboardPollTick = 0;
 static char g_lastClipboardMessage[192] = "";
+/* Only report the first Scrap Manager result and transitions: the guest may
+ * poll every second for hours, and the log must remain small. */
+static long g_lastScrapReadStatus = 0x7fffffffL;
 static char g_pendingClipboardCommand[128] = "";
 /* Defer unattended Scrap Manager calls until the Finder has handed the
  * application its first update event. This avoids accessing the startup
@@ -203,10 +206,10 @@ static Boolean names_match_ignoring_case(const char *leftName, const char *right
     return *leftName == 0 && *rightName == 0;
 }
 
-/* Crash-trace build 005. Every checkpoint is written and closed immediately.
+/* Crash-trace build 007. Every checkpoint is written and closed immediately.
  * Try guest-to-host The Outside World:Uploads first; fall back to the writable
  * CinterForge Terminal HFS disk. Logging never changes the terminal UI. */
-#define TRACE68K_VERSION "005"
+#define TRACE68K_VERSION "010"
 #define TRACE68K_FILE "\pCinterForgeTerminal.log"
 static Boolean g_traceSelected = false;
 static short g_traceVolume = 0;
@@ -381,13 +384,12 @@ static Boolean is_non_game_application_name(const unsigned char *finderName)
 }
 
 /* The guest Game Catalog is intentionally per-OS, not an all-APPL list.
- * These command tokens are the 83 copied Infinite HD entries curated in
+ * These command tokens are the 82 copied Infinite HD entries curated in
  * docs/Game Catalog.md. Both the Terminal and Games Report use this same
  * discovered catalog; unknown APPL files are not exposed automatically.
  * Games with duplicate Finder names all target the same OS. */
 #define GAME_OS_SYSTEM_71 71
 #define GAME_OS_MAC_76   76
-#define GAME_OS_MAC_81   81
 
 static short running_game_os(void)
 {
@@ -398,7 +400,6 @@ static short running_game_os(void)
     switch ((unsigned long)systemVersion & 0xFFF0UL) {
         case 0x0710UL: return GAME_OS_SYSTEM_71;
         case 0x0760UL: return GAME_OS_MAC_76;
-        case 0x0810UL: return GAME_OS_MAC_81;
         default: return 0;
     }
 }
@@ -423,9 +424,8 @@ static Boolean command_in_game_os_catalog(const char *command, short gameOS)
         "blobbo102lite", "marathonv12", "marathon2", "pathwaysintodarkness", "hornetace10",
         "fa18hornetclassic", "hellcats", "indysdesktopadventures", "nsshaft", "simcity200012",
         "snood", "starbound", "strategicconquest401", "strategicconquestplus20", "troubledsouls",
-    };
-    static const char *mac81Commands[] = {
-        "boom10", "abuse101", "marathon15", "loomppc", "ultimatedoomi",
+        /* Former Mac OS 8.1 entries except the PowerPC-only Loom copy. */
+        "boom10", "abuse101", "marathon15", "ultimatedoomi",
         "warcraft", "warcraftii100k", "warcraftiiv122",
     };
     const char *const *commands = NULL;
@@ -436,9 +436,6 @@ static Boolean command_in_game_os_catalog(const char *command, short gameOS)
     } else if (gameOS == GAME_OS_MAC_76) {
         commands = mac76Commands;
         commandCount = sizeof(mac76Commands) / sizeof(mac76Commands[0]);
-    } else if (gameOS == GAME_OS_MAC_81) {
-        commands = mac81Commands;
-        commandCount = sizeof(mac81Commands) / sizeof(mac81Commands[0]);
     }
     for (commandIndex = 0; commandIndex < commandCount; ++commandIndex)
         if (names_match_ignoring_case(command, commands[commandIndex])) return true;
@@ -1023,9 +1020,13 @@ static void draw_centered_text(const char *text, short x, short y, short width, 
     Str255 pascalText;
     short textWidth;
     copy_c_string_to_pascal(text, pascalText);
+    /* Match the crisp classic Macintosh chrome instead of synthesizing bold
+     * pixels at 10 points. The card artwork is already at final size here:
+     * this text is painted AFTER CopyBits, never stretched/scaled. */
     TextFont(0);
+    TextFace(normal);
     TextSize(size);
-    TextMode(srcCopy);
+    TextMode(srcOr);
     ForeColor(blackColor);
     /* Never draw outside the card's embossed label panel. */
     while (pascalText[0] > 3 && StringWidth(pascalText) > width - 3) {
@@ -1038,6 +1039,7 @@ static void draw_centered_text(const char *text, short x, short y, short width, 
     textWidth = StringWidth(pascalText);
     MoveTo((short)(x + (width - textWidth)/2), y);
     DrawString(pascalText);
+    TextFace(normal);
 }
 
 /*
@@ -1169,11 +1171,14 @@ static void draw_application_finder_icon(short applicationIndex, short x, short 
     applicationResourceFile = FSpOpenResFile(&g_discoveredApplications[applicationIndex].spec, fsRdPerm);
     if (applicationResourceFile < 0) return;
     UseResFile(applicationResourceFile);
-    /* Application icons are traditionally in -16455, but some use IDs from
-       a different BNDL. Prefer an actually present icon resource. */
+    /* Use the actual APPL resource fork, as Finder does. Prefer its color
+     * icon suite at -16455; for apps using another suite ID select a real
+     * color resource from that same file before monochrome fallback. */
     iconResource = Get1Resource('icl8', resourceID);
+    if (!iconResource) iconResource = Get1Resource('icl4', resourceID);
     if (!iconResource) iconResource = Get1Resource('ICN#', resourceID);
     if (!iconResource) iconResource = Get1IndResource('icl8', 1);
+    if (!iconResource) iconResource = Get1IndResource('icl4', 1);
     if (!iconResource) iconResource = Get1IndResource('ICN#', 1);
     if (iconResource) GetResInfo(iconResource, &resourceID, &resourceType, resourceName);
     SetRect(&iconBounds, x, y, x + iconSize, y + iconSize);
@@ -1195,20 +1200,32 @@ static void draw_application_finder_icon(short applicationIndex, short x, short 
     UseResFile(previousResourceFile);
 }
 
-/* Divide the entire width between the left margin and scrollbar among
- * exactly five cards. Integer edge division distributes spare pixels without
- * leaving an unused strip on the right at arbitrary window sizes. Rendering
- * and mouse hit testing must use this same geometry. */
+/* Use the System 7.1 five-column geometry as the maximum card width.
+ * That keeps 7.1 unchanged and stops 7.6 from stretching the cards when its
+ * report window grows. Center the unchanged card row in the extra space.
+ * Drawing and hit testing must always use these same bounds. */
 static void game_card_column_bounds(short column, short *cardLeft, short *cardWidth)
 {
-    short totalCardWidth = (short)(g_gamesReportWidth - REPORT_SIDE_MARGIN * 2
-        - CLASSIC_SCROLLBAR_WIDTH - (REPORT_COLUMN_COUNT - 1) * CARD_SPACING);
-    short left = (short)(REPORT_SIDE_MARGIN + column * CARD_SPACING
-        + (totalCardWidth * column) / REPORT_COLUMN_COUNT);
-    short right = (short)(REPORT_SIDE_MARGIN + column * CARD_SPACING
-        + (totalCardWidth * (column + 1)) / REPORT_COLUMN_COUNT);
-    *cardLeft = left;
-    *cardWidth = (short)(right - left);
+    short availableWidth = (short)(g_gamesReportWidth - REPORT_SIDE_MARGIN * 2
+                                     - CLASSIC_SCROLLBAR_WIDTH);
+    /* System 7.1 is 640 pixels wide, with a 615-pixel Games Report. */
+    short referenceWidth = (short)((640 - 25 - REPORT_SIDE_MARGIN * 2
+                                     - CLASSIC_SCROLLBAR_WIDTH
+                                     - (REPORT_COLUMN_COUNT - 1) * CARD_SPACING)
+                                    / REPORT_COLUMN_COUNT);
+    short maximumColumnWidth = (short)((availableWidth
+                                 - (REPORT_COLUMN_COUNT - 1) * CARD_SPACING)
+                                 / REPORT_COLUMN_COUNT);
+    short width = referenceWidth;
+    short rowWidth;
+    short rowLeft;
+    if (maximumColumnWidth < width) width = maximumColumnWidth;
+    if (width < 1) width = 1;
+    rowWidth = (short)(width * REPORT_COLUMN_COUNT
+                       + (REPORT_COLUMN_COUNT - 1) * CARD_SPACING);
+    rowLeft = (short)(REPORT_SIDE_MARGIN + (availableWidth - rowWidth) / 2);
+    *cardLeft = (short)(rowLeft + column * (width + CARD_SPACING));
+    *cardWidth = width;
 }
 
 static void draw_application_card(short visibleApplicationSlot, short cardLeft,
@@ -1219,17 +1236,18 @@ static void draw_application_card(short visibleApplicationSlot, short cardLeft,
     char finderName[64];
     SetRect(&cardBounds, cardLeft, cardTop, cardLeft + cardWidth, cardTop + CARD_HEIGHT);
     draw_game_card_background(&cardBounds);
-    /* Center real Finder icons and labels inside the horizontally stretched
-     * card. Keep the full Finder name in the catalog when it truncates here. */
+    /* Center real Finder icons and labels inside the unchanged 7.1-size card.
+     * Keep the full Finder name in the catalog when it truncates here. */
     draw_application_finder_icon(applicationIndex,
                                  (short)(cardLeft + (cardWidth - 26) / 2),
                                  (short)(cardTop + 43), 26);
     copy_pascal_string_to_c(g_discoveredApplications[applicationIndex].finderName,
                             finderName, sizeof(finderName));
-    draw_centered_text(finderName, cardLeft + 4, cardTop + 109, cardWidth - 8, 9);
+    /* 12-point Chicago uses the classic system bitmap, as the window title
+     * does; synthetic 10-point bold made these five-wide labels muddy. */
+    draw_centered_text(finderName, cardLeft + 4, cardTop + 109, cardWidth - 8, 12);
     draw_centered_text(g_discoveredApplications[applicationIndex].shortName,
-                       cardLeft + 4, cardTop + 124, cardWidth - 8, 9);
-    draw_centered_text("OPEN", cardLeft + 4, cardTop + 139, cardWidth - 8, 9);
+                       cardLeft + 4, cardTop + 124, cardWidth - 8, 12);
     if (applicationIndex == g_selectedApplicationIndex) {
         PenSize(2, 2);
         FrameRect(&cardBounds);
@@ -1470,7 +1488,12 @@ static void open_games_report_window(void)
         if (g_gamesReportHeight > 565) g_gamesReportHeight = 565;
         if (g_gamesReportHeight < 315) g_gamesReportHeight = 315;
         SetRect(&windowBounds, 17, 50, 17 + g_gamesReportWidth, 50 + g_gamesReportHeight);
-        g_gamesReportWindow = NewWindow(NULL, &windowBounds, "\pGames Report", false,
+        /* Finder icon suites need a Color QuickDraw port. NewWindow creates
+         * a monochrome GrafPort even on 8-bit/16-bit Mac displays; NewCWindow
+         * allows PlotIconSuite to use the application's real icl4/icl8 icons.
+         * Keep the separate, already-working Terminal window unchanged. */
+        g_gamesReportWindow = (WindowPtr)NewCWindow(NULL, &windowBounds,
+                             "\pGames Report", false,
                              documentProc, (WindowPtr)-1, true, 0);
         if (!g_gamesReportWindow) { SysBeep(1); append_terminal_history_line("Could not open Games Report window."); return; }
         load_game_card_artwork();
@@ -1816,7 +1839,6 @@ static const char *cinter_clipboard_os(void)
 {
     if (g_runningGameOS == GAME_OS_SYSTEM_71) return "7.1";
     if (g_runningGameOS == GAME_OS_MAC_76) return "7.6";
-    if (g_runningGameOS == GAME_OS_MAC_81) return "8.1";
     return NULL;
 }
 
@@ -1834,25 +1856,49 @@ static Boolean write_cinter_clipboard_reply(const char *verb, const char *detail
  * already back `games copy` and the native Paste command. */
 static Boolean read_cinter_clipboard_message(char *output, size_t capacity)
 {
-    /* Reuse a single handle; allocating and disposing one every second
-     * needlessly fragments the small System 7 application heap. */
+    /* GetScrap resizes this unlocked handle. Never treat a missing TEXT
+     * flavor as an empty HELLO, and preserve the result for diagnostics. */
     static Handle text = NULL;
     long length, offset = 0, i;
+    long usefulLength;
+    char diagnostic[96];
     if (!capacity) return false;
     if (!text) text = NewHandle(0);
-    if (!text) return false;
+    if (!text) {
+        if (g_lastScrapReadStatus != -108L) {
+            g_lastScrapReadStatus = -108L;
+            trace_checkpoint("clipboard: GetScrap handle allocation failed");
+        }
+        return false;
+    }
     length = read_mac_clipboard(text, 'TEXT', &offset);
+    if (length != g_lastScrapReadStatus) {
+        g_lastScrapReadStatus = length;
+        snprintf(diagnostic, sizeof(diagnostic),
+                 "clipboard: GetScrap TEXT result=%ld", length);
+        trace_checkpoint(diagnostic);
+    }
     if (length <= 0 || (unsigned long)length >= capacity ||
         GetHandleSize(text) < length) return false;
     HLock(text);
-    for (i = 0; i < length; ++i) {
+    usefulLength = length;
+    /* Classic Mac TEXT uses CR; native clipboards may supply CRLF, LF or
+     * a trailing NUL. None should prevent a one-line protocol message. */
+    while (usefulLength > 0 &&
+           ((*text)[usefulLength-1] == '\r' ||
+            (*text)[usefulLength-1] == '\n' ||
+            (*text)[usefulLength-1] == '\0'))
+        --usefulLength;
+    for (i = 0; i < usefulLength; ++i) {
         unsigned char byte = (unsigned char)(*text)[i];
         if (byte < 32 || byte > 126) break;
         output[i] = (char)byte;
     }
     output[i] = 0;
     HUnlock(text);
-    return i == length;
+    if (i != usefulLength || !usefulLength)
+        return false;
+    return true;
 }
 
 /* An addressable command may arrive while the incremental Infinite HD scan
@@ -1895,23 +1941,38 @@ static void poll_cinter_clipboard(void)
         (SInt32)(now - g_nextClipboardPollTick) < 0) return;
     g_nextClipboardPollTick = now + CINTER_CLIPBOARD_POLL_TICKS;
     if (!read_cinter_clipboard_message(text, sizeof(text))) return;
-    if (!strcmp(text, g_lastClipboardMessage)) return;
-    strcpy(g_lastClipboardMessage, text);
     snprintf(prefix, sizeof(prefix), "cinter:%s:", os);
     if (strncmp(text, prefix, strlen(prefix)) != 0) return;
     command = text + strlen(prefix);
     if (strncmp(command, "hello ", 6) == 0) {
         const char *token = command + 6;
         size_t tokenLength = strlen(token);
-        if (tokenLength < 8 || tokenLength > 32) return;
+        if (tokenLength < 8 || tokenLength > 32) {
+            trace_checkpoint("clipboard: HELLO token length rejected");
+            return;
+        }
         for (i = 0; i < tokenLength; ++i)
-            if (!isxdigit((unsigned char)token[i])) return;
-        write_cinter_clipboard_reply("ready", token);
-    } else if (strncmp(command, "play ", 5) == 0 ||
-               names_match_ignoring_case(command, "games") ||
-               names_match_ignoring_case(command, "games report") ||
-               names_match_ignoring_case(command, "games rescan") ||
-               names_match_ignoring_case(command, "help")) {
+            if (!isxdigit((unsigned char)token[i])) {
+                trace_checkpoint("clipboard: HELLO token contents rejected");
+                return;
+            }
+        /* A failed PutScrap must not permanently consume HELLO. Retry on
+         * the next poll until READY actually reaches the guest scrap. */
+        if (write_cinter_clipboard_reply("ready", token)) {
+            if (strcmp(text, g_lastClipboardMessage) != 0)
+                trace_checkpoint("clipboard: READY written to guest Scrap Manager");
+            strcpy(g_lastClipboardMessage, text);
+        } else {
+            trace_checkpoint("clipboard: READY write failed; will retry");
+        }
+    } else if (strcmp(text, g_lastClipboardMessage) != 0 &&
+               (strncmp(command, "play ", 5) == 0 ||
+                names_match_ignoring_case(command, "games") ||
+                names_match_ignoring_case(command, "games report") ||
+                names_match_ignoring_case(command, "games rescan") ||
+                names_match_ignoring_case(command, "help"))) {
+        /* Commands must not relaunch games on each subsequent poll. */
+        strcpy(g_lastClipboardMessage, text);
         dispatch_cinter_clipboard_command(command);
     }
 }
@@ -2257,6 +2318,14 @@ int main(void)
     MaxApplZone();
     trace_checkpoint("main: MaxApplZone done");
     trace_heap_checkpoint("after MaxApplZone");
+    /* Determine the clipboard address independently of Infinite HD scanning.
+     * The HELLO handshake must not depend on the game catalog. */
+    g_runningGameOS = running_game_os();
+    trace_checkpoint(g_runningGameOS == GAME_OS_SYSTEM_71
+        ? "clipboard: guest address 7.1" :
+        g_runningGameOS == GAME_OS_MAC_76
+        ? "clipboard: guest address 7.6" :
+          "clipboard: no supported guest OS address");
     trace_checkpoint("main: before initialize_terminal_interface");
     initialize_terminal_interface();
     trace_checkpoint("main: initialize_terminal_interface done");
@@ -2309,11 +2378,11 @@ int main(void)
             dispatch_cinter_clipboard_command(pending);
             trace_checkpoint("clipboard: pending command returned");
         }
-        /* Poll for cinter:<os>:hello and subsequent commands only once the
-         * first redraw and game scan have completed. The host emits speech on
-         * the matching READY reply; no guest speech traps are called. */
-        if (g_terminalHasDrawn && !g_startupTasksPending &&
-            !g_catalogScanActive) {
+        /* HELLO/READY must not wait for a potentially lengthy Infinite HD
+         * scan. The scan has already initialized the OS address by this point;
+         * launch commands received during discovery are deferred above.
+         * A prompt READY also prevents unnecessary host Finder retries. */
+        if (g_terminalHasDrawn && !g_startupTasksPending) {
             if (!tracedFirstPoll) trace_checkpoint("clipboard: first poll begin");
             poll_cinter_clipboard();
             if (!tracedFirstPoll) {
