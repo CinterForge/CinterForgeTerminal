@@ -467,7 +467,7 @@ class CIFBlockifyPreview extends CIFBlockify {
                 continue;
             }
             const group=new BABYLON.AnimationGroup(`minecraft-${clipKey}`,scene),fps=30,length=Math.max(.033,Number(clip.animation_length||1));
-            const locomotionPositions=locomotionBone?clip.bones?.[String(locomotionBone.name||'')]?.position:null;
+            const locomotionPositions=!clip.bedrock_flat_baked&&locomotionBone?clip.bones?.[String(locomotionBone.name||'')]?.position:null;
             const locomotionAt=time=>{
                 if (!locomotionPositions) {
                     return [0,0,0];

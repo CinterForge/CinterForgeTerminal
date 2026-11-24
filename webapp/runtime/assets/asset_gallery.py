@@ -35,8 +35,8 @@ def _card(manifest: dict, folder: Path, library: Path) -> str:
     if not isinstance(reps, dict):
         raise ValueError(f"Invalid representations object: {folder / 'manifest.json'}")
     solid = reps.get("solid") or {}
-    blocks = [(key, value) for key, value in reps.items() if str(key).startswith("block_") and isinstance(value, dict)]
-    block = blocks[0][1] if blocks else {}
+    blocks = [(key, value) for key, value in reps.items() if re.fullmatch(r"block_\d+", str(key)) and isinstance(value, dict)]
+    block = max(blocks, key=lambda row: int(row[0].split("_")[-1]))[1] if blocks else {}
     if not isinstance(solid, dict):
         raise ValueError(f"Invalid solid representation: {folder / 'manifest.json'}")
     # The established IFEditor library uses manifest["versions"] rather than
@@ -56,7 +56,7 @@ def _card(manifest: dict, folder: Path, library: Path) -> str:
     block_thumb = _asset_url(folder, library, block.get("thumbnail"))
     thumbnail = block_thumb or solid_thumb
     for version in manifest.get('versions') or []:
-        if (isinstance(version, dict) and version.get('thumbnail_recipe') == 'animation-frame-zero-v1'):
+        if (not block.get('blockbench_edited') and isinstance(version, dict) and version.get('thumbnail_recipe') == 'animation-frame-zero-v1'):
             frame_zero = _asset_url(folder, library, version.get('thumbnail_file'))
             if frame_zero and (folder / str(version.get('thumbnail_file') or '')).is_file():
                 thumbnail = frame_zero

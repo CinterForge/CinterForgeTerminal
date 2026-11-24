@@ -81,7 +81,79 @@ class CIFAssetEditor extends CIFBlockifyMinecraftServer {
     }
 
     static async PrepareSavedBlockbenchPayload(card){
-        return this.PrepareSavedBlockifyPayload(card,'CinterForge Voxel');
+        const folder=this.SavedFolderForCard(card);
+        const versions=folder?.versions||[];
+        const version=versions[Number(card?.dataset?.versionIndex||0)]||versions[0];
+        const uci=String(card?.dataset?.assignmentUci||version?.uci||folder?.uci||'').trim();
+        if (!uci) throw new Error('Saved asset UCI is unavailable.');
+        return {uci,product_name:String(card?.dataset?.productName||folder?.name||version?.file||uci).trim()};
+    }
+
+    static async VoxelTextureRGBA(dataUrl){
+        if(!dataUrl)return '';
+        if(!String(dataUrl).startsWith('data:image/png;base64,'))throw new Error('Voxel texture must be PNG.');
+        const image=new Image();
+        image.src=dataUrl;
+        await image.decode();
+        const width=image.naturalWidth,height=image.naturalHeight;
+        if(!width||!height||width*height>16*1024*1024)throw new Error('Voxel texture exceeds the local authoring limit.');
+        const canvas=document.createElement('canvas');
+        canvas.width=width;canvas.height=height;
+        const context=canvas.getContext('2d',{willReadFrequently:true});
+        context.drawImage(image,0,0);
+        const rgba=context.getImageData(0,0,width,height).data;
+        let binary='';
+        for(let offset=0;offset<rgba.length;offset+=0x8000)binary+=String.fromCharCode(...rgba.subarray(offset,offset+0x8000));
+        return btoa(binary);
+    }
+
+    static async ExportVoxelSavePreview(prepared){
+        await ensureBabylon();
+        const B=window.BABYLON,blockify=prepared.blockify;
+        const dimensions={width:Number(blockify.width),height:Number(blockify.height),depth:Number(blockify.depth)};
+        const engine=new B.NullEngine();
+        let previousScene=null,scene=null;
+        try {
+            // Reuse the original migration exporter. Preserve the Block GLTF's
+            // existing local unit scale and origin; never reopen/voxelize Solid.
+            let frame=prepared.export_frame;
+            if(!frame){
+                previousScene=new B.Scene(engine);
+                const url=await CIFRuntime.stagedAssetUrl('saved-file',{path:prepared.model_path});
+                const loaded=await B.SceneLoader.ImportMeshAsync('','',url,previousScene,undefined,'.gltf');
+                for(const group of loaded.animationGroups||[])group.stop();
+                for(const skeleton of loaded.skeletons||[])skeleton.returnToRest();
+                let minimum=null,scale=0;
+                for(const mesh of loaded.meshes||[]){
+                    const positions=mesh.getVerticesData?.(B.VertexBuffer.PositionKind);
+                    if(!positions||positions.length<12)continue;
+                    const matrix=mesh.computeWorldMatrix(true);
+                    const vertex=i=>B.Vector3.TransformCoordinates(B.Vector3.FromArray(positions,i),matrix);
+                    // The existing Block exporter emits six quad faces per cube.
+                    // The first adjacent vertices give the authored cube edge.
+                    if(!scale)scale=B.Vector3.Distance(vertex(0),vertex(3));
+                    for(let i=0;i<positions.length;i+=3){
+                        const point=vertex(i);
+                        minimum=minimum?B.Vector3.Minimize(minimum,point):point;
+                    }
+                }
+                const reference=prepared.reference_voxels||[];
+                if(!minimum||!(scale>0)||!reference.length)throw new Error('Cannot recover the existing Block GLTF coordinate frame.');
+                const min={x:Infinity,y:Infinity,z:Infinity};
+                for(const v of reference)for(const k of ['x','y','z'])min[k]=Math.min(min[k],Number(v[k]));
+                frame={scale,center:{x:minimum.x-min.x*scale,y:minimum.y-min.y*scale,z:minimum.z-min.z*scale}};
+                previousScene.dispose();previousScene=null;
+            }
+            const center={x:frame.center.x+dimensions.width*8*frame.scale,
+                          y:frame.center.y+dimensions.height*8*frame.scale,
+                          z:frame.center.z+dimensions.depth*8*frame.scale};
+            const animated=blockify.character_voxels?.length&&blockify.character_rig?.bones?.length;
+            scene=animated?this.MigrationAnimatedBlockScene(blockify.character_voxels,blockify.character_rig,blockify.character_animations,dimensions,engine,frame.scale,center)
+                          :this.MigrationBlockScene(blockify.voxels,dimensions,engine,frame.scale,center);
+            return {preview_files:await this.MigrationExportGltf(scene,'model'),export_frame:frame};
+        }finally{
+            previousScene?.dispose();scene?.dispose();engine.dispose();
+        }
     }
 
     static async OpenBlockbench(card){
@@ -140,21 +212,37 @@ class CIFAssetEditor extends CIFBlockifyMinecraftServer {
                 save.disabled=true;
                 status.textContent='Saving edits locally…';
                 try {
-                    const response=await CIFRuntime.assetCommand({
-                        operation:'local-blockbench-save',
-                        ...payload,
-                        geometry:message.payload?.geometry||{},
-                        animations:message.payload?.animations||{},
-                        texture_data_url:message.payload?.texture_data_url||'',
-                    });
+                    const edits={...payload,geometry:message.payload?.geometry||{},
+                        animations:message.payload?.animations||{},texture_data_url:message.payload?.texture_data_url||session.texture_data_url||'',
+                        revision:session.revision};
+                    edits.texture_rgba=await this.VoxelTextureRGBA(edits.texture_data_url);
+                    const preparation=await CIFRuntime.assetCommand({operation:'local-blockbench-prepare-preview',...edits});
+                    status.textContent='Regenerating Blockify preview…';
+                    const exported=await this.ExportVoxelSavePreview(preparation.result);
+                    const response=await CIFRuntime.assetCommand({operation:'local-blockbench-save',...edits,
+                        ...exported,revision:preparation.result.revision});
                     const folder=this.SavedFolderForCard(card);
                     const versions=folder?.versions||[];
                     const version=versions[Number(card.dataset.versionIndex||0)]||versions[0];
-                    if (version&&response?.result?.blockify) {
-                        version.blockify=response.result.blockify;
-                    }
-                    this.SetProgress(card,'CinterForge Voxel edits saved locally. Push when you are ready to publish.');
+                    if (version&&response?.result?.blockify) version.blockify=response.result.blockify;
                     dismiss();
+                    // Save succeeded. Refresh the existing card and gallery without
+                    // reopening the editor or navigating away from the Asset View.
+                    try {
+                        const image=card.querySelector('.saved-asset-thumb');
+                        if(image&&response.result.thumbnail){
+                            const url=await CIFRuntime.stagedAssetUrl('saved-file',{path:response.result.thumbnail});
+                            image.dataset.stagedResource='saved-file';
+                            image.dataset.stagedPath=response.result.thumbnail;
+                            delete image.dataset.thumbnailRecipe;
+                            if(url)image.src=url+(url.includes('?')?'&':'?')+'refresh='+Date.now();
+                        }
+                        await this.LoadSavedMinecraftPreview(card);
+                        this.SetProgress(card,'CinterForge Voxel edits saved locally. Push when you are ready to publish.');
+                    }catch(refreshError){
+                        this.SetProgress(card,'Voxel edits saved; preview refresh failed: '+String(refreshError.message||refreshError));
+                    }
+                    if(window.parent!==window)window.parent.postMessage({type:'cinterforge-assets-refresh-report'},window.location.origin);
                 } catch (error) {
                     status.textContent=`Save failed: ${error.message||error}`;
                     save.disabled=false;

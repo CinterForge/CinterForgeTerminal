@@ -1163,7 +1163,8 @@ class CinterForgeHTTPRoutes:
                 elif route == '/api/assets/picker':
                     result = _CinterForgeAssetViews.queue_tab(self.server, 'picker')
                 elif route == '/api/assets/report':
-                    result = _CinterForgeAssetViews.queue_tab(self.server, 'report')
+                    result = (_CinterForgeAssetViews.report(self.server) if body.get('refresh_only') is True
+                              else _CinterForgeAssetViews.queue_tab(self.server, 'report'))
                 elif route == '/api/assets/view':
                     result = _CinterForgeAssetViews.queue_tab(self.server, 'view', uci=body.get('uci'))
                 elif route == '/api/assets/blockify/start':
@@ -1409,11 +1410,6 @@ class CinterForgeHTTPRoutes:
                 chosen = self.server.bedrock.current_world()
                 if chosen is None:
                     raise ValueError('Select a Current World before running Bedrock')
-                if chosen['edition'] == 'java':
-                    freshness = self.server.bedrock.conversion_status(chosen)
-                    if freshness.get('needs_update'):
-                        if not (body.get('allow_stale') is True and freshness.get('has_conversion')):
-                            raise RuntimeError('Java conversion needs Update for Bedrock; choose Update or Run Anyway')
                 self._json(200, _CinterForgeSessions.open_bedrock_terminal(self.server,
                     '', body.get('cols', 80), body.get('rows', 24)))
                 return

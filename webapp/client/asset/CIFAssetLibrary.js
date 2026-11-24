@@ -212,7 +212,8 @@ class CIFAssetLibrary {
             // thumbnail exists, saved-thumb renders the model once, persists the
             // JPEG in the managed asset manifest, and all later views reuse it.
             const animated=String(folder.category||'').toLowerCase()==='animated'||(Array.isArray(current.inspection?.animation_names)&&current.inspection.animation_names.length>0);
-            const thumbnail=!isImage?`<img class="objaverse-thumb saved-asset-thumb" data-staged-resource="saved-thumb" data-staged-path="${this.escapeHtml(rel)}" ${animated?'data-thumbnail-recipe="animation-frame-zero-v1"':''} alt="${this.escapeHtml(folder.name||'asset')}">`:'';
+            const editedThumb=current.blockify?.blockbench_edited&&current.blockify?.thumbnail?`${folder.folder}/${current.blockify.thumbnail}`:'';
+            const thumbnail=!isImage?`<img class="objaverse-thumb saved-asset-thumb" data-staged-resource="${editedThumb?'saved-file':'saved-thumb'}" data-staged-path="${this.escapeHtml(editedThumb||rel)}" ${!editedThumb&&animated?'data-thumbnail-recipe="animation-frame-zero-v1"':''} alt="${this.escapeHtml(folder.name||'asset')}">`:'';
             const visual=isImage?`<img class="objaverse-thumb saved-image-source" data-staged-resource="saved-file" data-staged-path="${this.escapeHtml(rel)}" alt="${this.escapeHtml(folder.name||'asset')}"><canvas class="objaverse-canvas saved-asset-canvas image-minecraft-canvas" aria-label="Minecraft preview for ${this.escapeHtml(folder.name||'asset')}"></canvas>`:`${thumbnail}<canvas class="objaverse-canvas saved-asset-canvas" aria-label="${this.escapeHtml(folder.name||'asset')}"></canvas>`;
             const mixamo=this.savedCategory==='Animated'&&this.savedAnimated==='Mixamo';
             const fixed=this.savedCategory==='Animated'&&this.savedAnimated==='Fixed';

@@ -85,13 +85,6 @@ window.addEventListener('message', event => {
       void CinterForgeState.openLauncherTab(message.platform);
       return;
     }
-    if (message.action === 'bedrock-report' &&
-        CinterForgeState.activeTab?.kind === 'launcher' &&
-        CinterForgeState.activeTab.backend === message.platform) {
-      void CinterForgeState.api('/api/bedrock/report/open', {})
-        .catch(error => CinterForgeState.notice('CraftMaster report: ' + error.message));
-      return;
-    }
     if (message.action !== 'launch' || !CinterForgeState.launcherApps.has(message.app) ||
         CinterForgeState.activeTab?.kind !== 'launcher' || CinterForgeState.activeTab.backend !== message.platform) return;
     const tab = CinterForgeState.activeTab;

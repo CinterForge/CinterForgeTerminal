@@ -23,7 +23,7 @@ MAX_MAP_ASSET_BYTES = 8 * 1024 * 1024
 _MAX_MAP_LAYOUT_ENTRIES = 4096
 
 
-def open_map_tab(server, world: dict) -> dict:
+def open_map_tab(server, world: dict, *, preparing: bool = True) -> dict:
     """Queue a browser tab independently of Bedrock's interactive PTY."""
     manager = server.bedrock
     if manager is None:
@@ -33,22 +33,28 @@ def open_map_tab(server, world: dict) -> dict:
     # CraftMaster names its map cache after the original Java save folder,
     # not the shortened .mcworld/export name (e.g. Candlewood (Candlewood)).
     map_directory = output_root / 'Maps' / Path(world['path']).name / 'Overworld'
-    map_id = uuid.uuid4().hex
-    request = {
-        'id': map_id,
-        'world': world_name,
-        'url': '/craftmaster-map/' + map_id + '/Live%20Map.htm?refresh=5',
-    }
+    world_id = world['id']
     with server.craftmaster_map_lock:
-        if len(server.craftmaster_maps) >= MAX_VISIBLE_MAPS:
-            raise RuntimeError('Too many CraftMaster map tabs; close an existing map')
-        server.craftmaster_maps[map_id] = {
-            'name': world_name,
-            'directory': map_directory,
-            'phase': 'preparing',
-            'message': 'Preparing live Zoomify map…',
+        map_id = next((key for key, entry in server.craftmaster_maps.items()
+                       if entry.get('world_id') == world_id), None)
+        if map_id is None:
+            if len(server.craftmaster_maps) >= MAX_VISIBLE_MAPS:
+                raise RuntimeError('Too many CraftMaster map tabs; close an existing map')
+            map_id = uuid.uuid4().hex
+            server.craftmaster_maps[map_id] = {
+                'world_id': world_id, 'name': world_name, 'directory': map_directory,
+                'phase': 'preparing' if preparing else 'ready',
+                'message': 'Preparing live Zoomify map…' if preparing else 'Map ready',
+            }
+        elif preparing:
+            server.craftmaster_maps[map_id].update(
+                phase='preparing', message='Preparing live Zoomify map…')
+        request = {
+            'id': map_id, 'world': world_name, 'world_id': world_id,
+            'url': '/craftmaster-map/' + map_id + '/Live%20Map.htm?refresh=5',
         }
-        server.craftmaster_map_requests.append(request)
+        if not any(row['id'] == map_id for row in server.craftmaster_map_requests):
+            server.craftmaster_map_requests.append(request)
     return request
 
 
@@ -63,8 +69,7 @@ def open_existing_map(server, name: str) -> dict:
     viewer = output / 'Maps' / Path(world['path']).name / 'Overworld/Live Map.htm'
     if not viewer.is_file() or viewer.is_symlink():
         raise FileNotFoundError('No CraftMaster map yet; select Update for Bedrock')
-    request = open_map_tab(server, world)
-    mark_finished(server, request['id'])
+    request = open_map_tab(server, world, preparing=False)
     return {'map': request, 'opened': True}
 
 

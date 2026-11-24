@@ -54,7 +54,7 @@
   }
   async function convert(world) {
     report('Updating '+world.command_name+' for Bedrock…');
-    const job = await api('/api/craftmaster/map/run', {name:world.command_name});
+    const job = await api('/api/craftmaster/map/run', {name:world.id});
     if (!job?.map?.id) throw new Error('CraftMaster did not create a conversion tab');
     let previous = '';
     while (true) {
@@ -70,20 +70,9 @@
   async function runServer() {
     const current = [...inventory.worlds, ...inventory.java_worlds].find(w=>w.current);
     if(!current)throw new Error('Select a Current World first');
-    let allow_stale = false;
-    if(current.edition==='java' && current.conversion?.needs_update){
-      if (!current.conversion?.has_conversion) {
-        if (!confirm('This Java world has no Bedrock conversion. Convert it now?'))return 'Server start cancelled; choose Update for Bedrock when ready.';
-        await convert(current);
-      } else if (confirm('Java world has changed since the last Bedrock conversion. Update it now?')) {
-        await convert(current);
-      } else if (confirm('Run the previous Bedrock conversion anyway?')) {
-        allow_stale=true;
-      } else return 'Server start cancelled. The last Bedrock conversion is unchanged.';
-    }
     report('Preparing '+current.command_name+' and its selected pack; opening Bedrock console…');
     try {
-      const result = await api('/api/bedrock/run',{allow_stale});
+      const result = await api('/api/bedrock/run',{});
       if (!result.terminal_session)throw new Error('Server did not create a Bedrock console tab');
       send('server-started');
       return 'Bedrock console opened for '+current.command_name+'.';
@@ -116,7 +105,7 @@
         return world.command_name+' updated for Bedrock.';
       }
       if(type==='map'){
-        await api('/api/craftmaster/map/open',{name:world.command_name});
+        await api('/api/craftmaster/map/open',{name:world.id});
         return 'Opened latest map for '+world.command_name+'.';
       }
       if(type==='download'){
@@ -137,7 +126,7 @@
     if(world.edition==='java'){
       state.textContent=world.conversion?.ready?'Bedrock up to date':
         !world.conversion?.has_conversion?'Not converted to Bedrock':
-        world.conversion?.needs_update?'Update for Bedrock required':
+        world.conversion?.needs_update?'Bedrock update available':
         'Bedrock conversion present · freshness unverified';
       if(world.conversion?.needs_update)state.classList.add('stale');
     }else state.textContent='Bedrock save ready';

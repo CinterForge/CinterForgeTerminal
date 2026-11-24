@@ -537,7 +537,7 @@ def _packaged_craftmaster() -> Path:
     return binary
 
 
-def _open_bedrock_with_progress(world_name: str, *, allow_stale: bool = False) -> dict:
+def _open_bedrock_with_progress(world_name: str) -> dict:
     """Stream conversion/download status while the host creates the Bedrock tab.
 
     The HTTP run call may take minutes for a large Java world. Keep the calling
@@ -554,7 +554,7 @@ def _open_bedrock_with_progress(world_name: str, *, allow_stale: bool = False) -
 
     def request_server() -> None:
         try:
-            result.update(_api('/api/bedrock/run', body={'allow_stale': allow_stale}))
+            result.update(_api('/api/bedrock/run', body={}))
         except Exception as error:
             failures.append(error)
         finally:
@@ -1083,38 +1083,6 @@ def execute(args: list[str]) -> int:
             current = next((w for w in info['worlds'] + info['java_worlds'] if w['current']), None)
             if current is None:
                 raise ValueError('No Current World selected. Use bedrock world <name> or bedrock report.')
-            allow_stale = False
-            readiness = current.get('conversion') or {}
-            if current['edition'] == 'java' and readiness.get('needs_update'):
-                print('[bedrock] Java world ' + current['command_name'] + ' is not up to date for Bedrock.', flush=True)
-                prompt = ('Update for Bedrock [u], Run Anyway [r], Cancel [c]? '
-                          if readiness.get('has_conversion') else
-                          'No completed conversion. Update for Bedrock [u] or Cancel [c]? ')
-                answer = input(prompt).strip().casefold()
-                if answer in ('u', 'update'):
-                    job = _api('/api/craftmaster/map/run', body={'name': current['command_name']})
-                    map_id = job['map']['id']
-                    previous_message = ''
-                    last_heartbeat = time.monotonic()
-                    while True:
-                        time.sleep(1.5)
-                        progress = _api('/api/craftmaster/map/status?id=' + map_id)
-                        message = progress.get('message', '')
-                        if message and message != previous_message:
-                            print('[CraftMaster] ' + message, flush=True)
-                            previous_message = message
-                        if progress['phase'] == 'failed':
-                            raise RuntimeError('Update for Bedrock failed: ' + message)
-                        if progress['phase'] == 'ready':
-                            break
-                        if time.monotonic() - last_heartbeat >= 15:
-                            print('[CraftMaster] Conversion continues; map and Server Log show progress.', flush=True)
-                            last_heartbeat = time.monotonic()
-                elif answer in ('r', 'run') and readiness.get('has_conversion'):
-                    allow_stale = True
-                else:
-                    print('[bedrock] Cancelled. No server was started.', flush=True)
-                    return 0
             state = _api('/api/bedrock/status')
             if not state.get('eula_accepted'):
                 _api('/api/bedrock/eula', body={})
@@ -1140,7 +1108,7 @@ def execute(args: list[str]) -> int:
                     print('[bedrock] ' + str(progress), flush=True)
                     last_progress = progress
             print('[bedrock] Starting ' + current['command_name'] + ' in an interactive tab…', flush=True)
-            started_server = _open_bedrock_with_progress(current['command_name'], allow_stale=allow_stale)
+            started_server = _open_bedrock_with_progress(current['command_name'])
             if not started_server.get('terminal_session'):
                 raise RuntimeError('Bedrock failed to create its interactive console tab')
             print('[bedrock] Opened ' + current['command_name'] + '; close its tab or use bedrock stop.', flush=True)

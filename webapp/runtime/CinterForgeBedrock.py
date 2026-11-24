@@ -890,7 +890,7 @@ class CinterForgeBedrockManager:
         requested = requested_name.strip().casefold()
         matches = []
         for world in self.list_java_worlds():
-            names = {world['name'].casefold(), world['folder'].casefold(),
+            names = {world['id'], world['name'].casefold(), world['folder'].casefold(),
                      _world_command_name(world).casefold()}
             if requested in names:
                 matches.append(world)

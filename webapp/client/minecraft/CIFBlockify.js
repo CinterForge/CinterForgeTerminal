@@ -1472,7 +1472,7 @@ class CIFBlockify {
         const localPath=String(card?.dataset?.localAssetPath||'').replace(/\\/g,'/').replace(/^\/+/, '');
         if (localPath) {
             try {
-                const response=await CIFRuntime.assetCommand({operation:'local-blockify-load',path:localPath});
+                const response=await CIFRuntime.assetCommand({operation:'local-blockify-load',uci:String(card?.dataset?.assignmentUci||version.uci||folder.uci||'').trim()});
                 if (response?.blockify) {
                     existingBlockify=response.blockify;
                     version.blockify=existingBlockify;
@@ -1497,7 +1497,7 @@ class CIFBlockify {
             Number(existingBlockify.depth||0)===dimensions.depth &&
             (!isAnimated||String(existingBlockify.behavior_signature||'')===behaviorSignature) &&
             existingBlockify.source_up_normalized===true;
-        if (existingMatches) {
+        if (existingMatches||existingBlockify.blockbench_edited===true) {
             const warning=`A Blockify representation already exists at ${dimensions.width}×${dimensions.height}×${dimensions.depth} blocks. Re-Blockifying will replace it and any Blockbench edits to that representation will be lost. Continue?`;
             if (!window.confirm(warning)) {
                 this.SetProgress(card,'Blockify cancelled; existing representation was preserved.');
@@ -1598,7 +1598,7 @@ class CIFBlockify {
             const localPath=String(card?.dataset?.localAssetPath||'').replace(/\\/g,'/').replace(/^\/+/, '');
             if (localPath) {
                 try {
-                    const response=await CIFRuntime.assetCommand({operation:'local-blockify-load',path:localPath});
+                    const response=await CIFRuntime.assetCommand({operation:'local-blockify-load',uci:String(card?.dataset?.assignmentUci||version.uci||folder.uci||'').trim()});
                     if (response?.blockify) {
                         version.blockify=response.blockify;
                         return version.blockify;
@@ -1608,6 +1608,12 @@ class CIFBlockify {
                         throw error;
                     }
                 }
+            }
+            if(version.blockify?.blockbench_edited===true){
+                const uci=String(card?.dataset?.assignmentUci||version.uci||folder.uci||'').trim();
+                const response=await CIFRuntime.assetCommand({operation:'local-blockify-load',uci});
+                version.blockify=response.blockify;
+                return version.blockify;
             }
             const requested=this.BlockifyDimensions(card),cached=version.blockify||{},dimensionsMatch=Number(cached.width||0)===requested.width&&Number(cached.height||0)===requested.height&&Number(cached.depth||0)===requested.depth,isAnimated=this.BlockifyWantsAnimation(folder,version),behaviorSignature=this.BlockifyBehaviorSignature(folder,version),behaviorMatch=!isAnimated||String(cached.behavior_signature||'')===behaviorSignature,upnessCurrent=cached.source_up_normalized===true;
             if (!cached.file||!dimensionsMatch||!behaviorMatch||!upnessCurrent) {

@@ -138,6 +138,17 @@
     })().catch(error => state.notice('Unable to open Assets Report: ' + error.message));
   });
 
+  window.addEventListener('message', event => {
+    if(event.origin!==window.location.origin || event.data?.type!=='cinterforge-assets-refresh-report')return;
+    const sender=state.tabs.find(tab=>!tab.closed&&tab.kind==='asset-view'&&tab.assetKey!=='report'&&tab.mapFrame?.contentWindow===event.source);
+    if(!sender)return;
+    void (async()=>{
+      const report=await state.api('/api/assets/report',{refresh_only:true});
+      const existing=state.tabs.find(tab=>!tab.closed&&tab.kind==='asset-view'&&tab.assetKey==='report');
+      if(existing)existing.mapFrame.src=report.url+(report.url.includes('?')?'&':'?')+'refresh='+Date.now();
+    })().catch(error=>state.notice('Voxel saved; Assets Report refresh failed: '+error.message));
+  });
+
   state.openAssetTab = async request => {
     if (!['report', 'view', 'blockify', 'packs', 'bedrock-report'].includes(request?.kind) || typeof request.url !== 'string' ||
         !(request.kind === 'bedrock-report' ? request.url === '/bedrock-report/index.html' : request.url.startsWith('/assets-library/'))) return;

@@ -269,18 +269,39 @@ def authoring_command(server, body: dict) -> dict:
             from runtime.assets.asset_blockify import blockbench_resource_session_for_uci
             return {'ok': True, 'session': blockbench_resource_session_for_uci(
                 str(body.get('uci') or ''), product_name=str(body.get('product_name') or ''))}
-        if operation == 'local-blockbench-save':
-            from runtime.assets.asset_blockify import save_blockbench_override
-            rel = safe_relative(str(body.get('path') or ''))
-            result = save_blockbench_override(rel.parent.as_posix(), rel.name,
-                geometry=body.get('geometry') or {}, animations=body.get('animations') or {},
-                texture_data_url=str(body.get('texture_data_url') or ''),
-                product_name=str(body.get('product_name') or ''))
+        if operation in ('local-blockbench-prepare-preview', 'local-blockbench-save'):
+            from runtime.assets.asset_blockify import prepare_blockbench_preview_for_uci, save_blockbench_override_for_uci
+            args = dict(geometry=body.get('geometry') or {}, animations=body.get('animations') or {},
+                        texture_data_url=str(body.get('texture_data_url') or ''),
+                        product_name=str(body.get('product_name') or ''),
+                        texture_rgba=str(body.get('texture_rgba') or ''))
+            uci = str(body.get('uci') or '')
+            if operation == 'local-blockbench-prepare-preview':
+                prepared = prepare_blockbench_preview_for_uci(uci, **args)
+                if not body.get('revision') or body['revision'] != prepared['revision']:
+                    raise ValueError('Voxel asset changed while editing; reopen the editor before saving')
+                return {'ok': True, 'result': prepared}
+            with server.asset_actions_lock:
+                result = save_blockbench_override_for_uci(uci, **args,
+                    preview_files=body.get('preview_files'), export_frame=body.get('export_frame'),
+                    revision=str(body.get('revision') or ''))
             return {'ok': True, 'result': result}
         if operation in ('local-blockify-load', 'local-blockify-save'):
             from runtime.assets.asset_terrain import load_uci_blockify, save_uci_blockify
             resolved = api.resolve_uci_asset(str(body.get('uci') or ''))
             if operation == 'local-blockify-load':
+                representation = (resolved['manifest'].get('representations') or {}).get(f"block_{resolved['block_resolution']}") or {}
+                if representation.get('blockbench_edited'):
+                    # Voxel edits belong to the exact Block representation opened by
+                    # the editor (including higher-density migrated assets).
+                    folder = (api.assets_root() / resolved['folder']).resolve()
+                    data_path = (folder / str(representation.get('data') or '')).resolve()
+                    data_path.relative_to(folder)
+                    if not data_path.is_file() or api._sha256(data_path) != representation.get('data_sha256'):
+                        raise ValueError('Edited Blockify data is missing or failed its checksum')
+                    blockify = json.loads(data_path.read_text(encoding='utf-8'))
+                    return {'ok': True, 'uci': resolved['uci'], 'model_path': resolved['block_model'],
+                            'resolution': int(blockify.get('resolution') or 16), 'blockify': blockify}
                 try:
                     blockify = load_uci_blockify(resolved['uci'])
                 except FileNotFoundError:

@@ -1566,13 +1566,8 @@ def _blockbench_resource_session(folder_rel: str, filename: str, *, product_name
     }
 
 
-def blockbench_resource_session_for_uci(uci: str, *, product_name: str = "") -> dict[str, Any]:
-    """Open the existing local Blockify resource pack for a UCI without regenerating it.
-
-    UCI is asset identity.  Blockbench edits the already-persisted Blockify
-    representation; opening the editor must never reinterpret the solid model or
-    require the retired per-version manifest layout.
-    """
+def _uci_blockbench_addon(uci: str) -> tuple[dict[str, Any], Path]:
+    """Resolve the existing resource package using the canonical UCI identity."""
     from runtime.assets.asset_management import resolve_uci_asset
 
     resolved = resolve_uci_asset(uci)
@@ -1580,7 +1575,10 @@ def blockbench_resource_session_for_uci(uci: str, *, product_name: str = "") -> 
     if not block_model_rel:
         raise FileNotFoundError(f"local Blockify representation is missing for UCI {resolved['uci']}")
     root = assets_root().resolve()
-    block_model = (root / block_model_rel).resolve()
+    block_source = root / block_model_rel
+    if block_source.is_symlink():
+        raise ValueError("Symlinked Blockify model is not editable")
+    block_model = block_source.resolve()
     try:
         block_model.relative_to(root)
     except ValueError as exc:
@@ -1589,12 +1587,29 @@ def blockbench_resource_session_for_uci(uci: str, *, product_name: str = "") -> 
         raise FileNotFoundError(block_model)
 
     representation_folder = block_model.parent
+    asset_folder = (root / resolved["folder"]).resolve()
+    if representation_folder != (asset_folder / f"block_{resolved['block_resolution']}") or block_model.suffix.lower() != ".gltf":
+        raise ValueError("Blockify editor requires the canonical Block GLTF folder")
     addons = sorted(representation_folder.glob("*.mcaddon"))
     if len(addons) != 1:
         raise RuntimeError(
             f"UCI {resolved['uci']} Blockify representation must contain exactly one .mcaddon; found {len(addons)}"
         )
     addon = addons[0]
+    if addon.is_symlink():
+        raise ValueError("Symlinked Minecraft Add-On is not editable")
+    addon.resolve().relative_to(representation_folder)
+    return resolved, addon
+
+
+def blockbench_resource_session_for_uci(uci: str, *, product_name: str = "") -> dict[str, Any]:
+    """Open the existing local Blockify resource pack for a UCI without regenerating it.
+
+    UCI is asset identity.  Blockbench edits the already-persisted Blockify
+    representation; opening the editor must never reinterpret the solid model or
+    require the retired per-version manifest layout.
+    """
+    resolved, addon = _uci_blockbench_addon(uci)
     with zipfile.ZipFile(addon, "r") as outer:
         rp_name = next((name for name in outer.namelist() if name.lower().endswith("_rp.mcpack")), "")
         if not rp_name:
@@ -1621,17 +1636,315 @@ def blockbench_resource_session_for_uci(uci: str, *, product_name: str = "") -> 
         "uci": resolved["uci"],
         "product_name": str(product_name or resolved.get("name") or resolved["uci"]),
         "model_name": Path(geo_name).name,
-        "texture_name": Path(texture_name).name if texture_name else f"{block_model.stem}.png",
+        "texture_name": Path(texture_name).name if texture_name else f"{addon.stem}.png",
         "geometry": geometry,
         "animations": animations,
         "texture_data_url": texture_data_url,
         "animated": animated,
         "required_animation_ids": sorted(str(key) for key in (animations.get("animations") or {}).keys()),
-        "blockbench_edited": False,
+        "blockbench_edited": bool((resolved["manifest"].get("representations") or {}).get(f"block_{resolved['block_resolution']}", {}).get("blockbench_edited")),
+        "revision": _sha256(addon),
     }
 
 
-def _blockbench_static_geometry_to_voxels(geometry: dict[str, Any], texture_data_url: str, base: dict[str, Any]) -> list[dict[str, Any]]:
+def prepare_blockbench_preview_for_uci(
+    uci: str, *, geometry: dict[str, Any], animations: dict[str, Any] | None,
+    texture_data_url: str = "", product_name: str = "", texture_rgba: str = "",
+) -> dict[str, Any]:
+    """Reverse the authored Bedrock grid, never the original Solid model.
+
+    Migrated UCI assets may have only a Block GLTF, not a voxel JSON. The
+    previous Bedrock geometry supplies the grid in that case. Keep its origin
+    fixed after the first save so adding/removing edge blocks cannot shift it.
+    """
+    import math
+    resolved, addon = _uci_blockbench_addon(uci)
+    session = blockbench_resource_session_for_uci(uci, product_name=product_name)
+    resolution = int(resolved["block_resolution"])
+    block_key = f"block_{resolution}"
+    folder = (assets_root() / resolved["folder"]).resolve()
+    rep = resolved["manifest"]["representations"][block_key]
+    data_path = addon.parent / "blockify.json"
+    if data_path.is_symlink():
+        raise ValueError("Symlinked Blockify data is not editable")
+    data_path.resolve().relative_to(folder)
+    if rep.get("blockbench_edited") and (not data_path.is_file() or _sha256(data_path) != rep.get("data_sha256")):
+        raise ValueError("Edited Blockify data failed its checksum")
+    base = json.loads(data_path.read_text(encoding="utf-8")) if data_path.is_file() else {}
+    old_models = session["geometry"]["minecraft:geometry"]
+    old_bones = old_models[0].get("bones") or []
+    old_cubes = [c for b in old_bones for c in b.get("cubes") or []]
+    if not old_cubes:
+        raise ValueError("Existing Blockify geometry has no blocks")
+    source_rows = base.get("character_voxels" if session["animated"] else "voxels") or []
+    frame = base.get("blockbench_frame")
+    if not frame:
+        if source_rows:
+            frame = [(min(v["x"] for v in source_rows)+max(v["x"] for v in source_rows))/2,
+                     min(v["y"] for v in source_rows),
+                     (min(v["z"] for v in source_rows)+max(v["z"] for v in source_rows))/2]
+        else:
+            frame = [max(float(c["origin"][0])+float(c["size"][0])-.5 for c in old_cubes),
+                     -min(float(c["origin"][1]) for c in old_cubes),
+                     max(float(c["origin"][2])+float(c["size"][2])-.5 for c in old_cubes)]
+    if not isinstance(frame, list) or len(frame) != 3 or not all(math.isfinite(float(x)) for x in frame):
+        raise ValueError("Invalid saved Blockify grid origin")
+    texture = texture_data_url or session["texture_data_url"]
+    pixels = None
+    if texture:
+        if not texture.startswith("data:image/png;base64,"):
+            raise ValueError("Blockbench texture must be PNG")
+        png = base64.b64decode(texture.split(",", 1)[1], validate=True)
+        width, height = _png_dimensions(png)
+        if len(png) > 16 * 1024 * 1024 or width * height > 16 * 1024 * 1024:
+            raise ValueError("Blockbench texture exceeds the local authoring limit")
+        rgba = base64.b64decode(texture_rgba, validate=True)
+        if len(rgba) != width * height * 4:
+            raise ValueError("Decoded Voxel texture does not match its PNG dimensions")
+        pixels = (width, height, rgba)
+    voxels = _blockbench_static_geometry_to_voxels(geometry, "", base, frame=frame,
+                                                    preserve_bones=session["animated"], pixels=pixels)
+    # Existing GLTF was exported in the source asset's local frame. Retain its
+    # scale/translation via the existing browser exporter, not a new mesh engine.
+    reference = source_rows or _blockbench_static_geometry_to_voxels(
+        session["geometry"], "", base, frame=frame,
+        preserve_bones=session["animated"])
+    dimensions = {axis: max(int(base.get(axis) or max(1, resolution // 16)),
+                            math.ceil((max(v[coord] for v in voxels)-min(v[coord] for v in voxels)+1)/16))
+                  for axis, coord in (("width", "x"), ("height", "y"), ("depth", "z"))}
+    payload = {**base, **dimensions, "schema": "cinterforge-blockify-v3", "resolution": 16,
+               "voxels": [{k: v for k, v in row.items() if k != "bone"} for row in voxels],
+               "voxel_count": len(voxels), "blockbench_frame": frame,
+               "blockbench_edited": True, "source_up_normalized": True,
+               "product_name": session["product_name"]}
+    if session["animated"]:
+        # CinterForge exports an intentionally flat, world-space baked rig.
+        # Recover exactly that supported rig and numeric animation channels.
+        bones = geometry["minecraft:geometry"][0].get("bones") or []
+        prior_bones = {b["name"]: b for b in (base.get("character_rig") or {}).get("bones") or []}
+        rig = []
+        for bone in bones:
+            name = str(bone.get("name") or "")
+            if name == "cinterforge_root" and not bone.get("cubes"):
+                continue
+            if bone.get("parent") not in (None, "", "cinterforge_root"):
+                raise ValueError("Blockify preview requires the existing flat Bedrock rig")
+            pivot = bone.get("pivot") or [0, 0, 0]
+            rig.append({**prior_bones.get(name, {}), "name": name, "parent": "",
+                        "pivot": [frame[0]-float(pivot[0]), frame[1]+float(pivot[1]), frame[2]-float(pivot[2])]})
+        names = {b["name"] for b in rig}
+        if not rig or any(v.get("bone") not in names for v in voxels):
+            raise ValueError("Edited character blocks must retain valid bone ownership")
+        clips = {}
+        prior_clips = base.get("character_animations") or {}
+        prior_keys = {_safe_token(str(key)).casefold(): key for key in prior_clips}
+        for identifier, clip in (animations or {}).get("animations", {}).items():
+            suffix = identifier.rsplit(".", 1)[-1]
+            key = prior_keys.get(suffix, identifier)
+            previous = prior_clips.get(key) or {}
+            channels = {}
+            for name, tracks in (clip.get("bones") or {}).items():
+                if name not in names or any(k not in ("rotation", "position") for k in tracks):
+                    raise ValueError("Blockify preview supports numeric rotation/position on the flat rig")
+                row = {}
+                for kind, samples in tracks.items():
+                    if isinstance(samples, list): samples = {"0": samples}
+                    if not isinstance(samples, dict):
+                        raise ValueError("Blockify preview requires numeric animation keyframes")
+                    clean = {}
+                    for t, v in samples.items():
+                        if not isinstance(v, list) or len(v) != 3 or not all(isinstance(x, (int, float)) and math.isfinite(x) for x in v) or not math.isfinite(float(t)):
+                            raise ValueError("Blockify preview requires numeric XYZ animation keyframes")
+                        clean[str(t)] = [float(x) for x in v]
+                    if kind == "position":
+                        row[kind] = clean
+                    else:
+                        # Inverse of the existing exporter: its two X/Z sign
+                        # changes cancel, leaving the sampled XYZ Euler basis.
+                        quaternions = {}
+                        for t, v in clean.items():
+                            x,y,z = (math.radians(q)/2 for q in v)
+                            cx,cy,cz = math.cos(x),math.cos(y),math.cos(z)
+                            sx,sy,sz = math.sin(x),math.sin(y),math.sin(z)
+                            quaternions[t] = [sx*cy*cz-cx*sy*sz, cx*sy*cz+sx*cy*sz,
+                                              cx*cy*sz-sx*sy*cz, cx*cy*cz+sx*sy*sz]
+                        row["rotation"] = {t: [-v[0],v[1],-v[2]] for t,v in clean.items()}
+                        row["rotation_quaternion"] = quaternions
+                if row: channels[name] = row
+            clips[key] = {**previous, "label": previous.get("label") or suffix,
+                          "animation_length": float(clip.get("animation_length") or 1),
+                          "bones": channels, "bedrock_flat_baked": True}
+        payload.update(character_voxels=voxels, character_voxel_count=len(voxels),
+                       character_rig={**(base.get("character_rig") or {}), "bones": rig},
+                       character_animations=clips)
+    else:
+        for key in ("character_voxels", "character_voxel_count", "character_rig", "character_animations", "behavior_profile"):
+            payload.pop(key, None)
+    return {"blockify": payload, "reference_voxels": reference,
+            "model_path": resolved["block_model"], "block_resolution": resolution,
+            "revision": _sha256(addon), "export_frame": rep.get("blockbench_export_frame")}
+
+
+def save_blockbench_override_for_uci(
+    uci: str, *, geometry: dict[str, Any], animations: dict[str, Any] | None,
+    texture_data_url: str = "", product_name: str = "", texture_rgba: str = "",
+    preview_files: list[dict[str, Any]] | None = None, export_frame: dict[str, Any] | None = None,
+    revision: str = "",
+) -> dict[str, Any]:
+    """Save the edited document into the same local add-on the editor opens.
+
+    Preserve pack identities, behavior files and all unrelated resource entries.
+    This does not regenerate the solid model or publish to Cloudflare.
+    """
+    resolved, addon = _uci_blockbench_addon(uci)
+    session = blockbench_resource_session_for_uci(uci, product_name=product_name)
+    models = geometry.get("minecraft:geometry") if isinstance(geometry, dict) else None
+    if not isinstance(models, list) or not models or not isinstance(models[0], dict):
+        raise ValueError("Blockbench did not return valid Bedrock geometry")
+    old_id = session["geometry"]["minecraft:geometry"][0]["description"]["identifier"]
+    if models[0].get("description", {}).get("identifier") != old_id:
+        raise ValueError("Blockbench must preserve the existing Bedrock geometry identifier")
+    animation_payload = animations if isinstance(animations, dict) else {"format_version": "1.8.0", "animations": {}}
+    edited = animation_payload.get("animations")
+    if not isinstance(edited, dict):
+        raise ValueError("Blockbench did not return valid animations")
+    missing = set(session["required_animation_ids"]) - set(edited)
+    if missing:
+        raise ValueError("Blockbench must preserve existing animation identifiers: " + ", ".join(sorted(missing)))
+    texture = None
+    if texture_data_url:
+        if not texture_data_url.startswith("data:image/png;base64,"):
+            raise ValueError("Blockbench texture must be PNG")
+        texture = base64.b64decode(texture_data_url.split(",", 1)[1], validate=True)
+        if len(texture) > 16 * 1024 * 1024 or not texture.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError("Blockbench texture PNG is invalid or too large")
+    if not revision or _sha256(addon) != revision:
+        raise ValueError("Voxel asset changed while editing; reopen the editor before saving")
+    prepared = prepare_blockbench_preview_for_uci(uci, geometry=geometry, animations=animation_payload,
+                                                   texture_data_url=texture_data_url, product_name=product_name, texture_rgba=texture_rgba)
+    payload = prepared["blockify"]
+    if not isinstance(preview_files, list) or not preview_files or not isinstance(export_frame, dict):
+        raise ValueError("Save Back requires the regenerated Blockify GLTF and export frame")
+    import math
+    scale = export_frame.get("scale")
+    center = export_frame.get("center")
+    if not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale <= 0 or not isinstance(center, dict) or not all(isinstance(center.get(k), (int, float)) and math.isfinite(center[k]) for k in ("x", "y", "z")):
+        raise ValueError("Invalid Blockify export frame")
+    folder = (assets_root() / resolved["folder"]).resolve()
+    block_model = (assets_root() / resolved["block_model"]).resolve()
+    block_model.relative_to(folder)
+    rep = resolved["manifest"]["representations"][f"block_{resolved['block_resolution']}"]
+    thumbnail = (folder / str(rep["thumbnail"])) if rep.get("thumbnail") else block_model.with_name(block_model.stem + "_thumbnail.png")
+    if thumbnail.is_symlink() or thumbnail.parent != addon.parent or thumbnail.resolve().parent != addon.parent or thumbnail.suffix.lower() != ".png":
+        raise ValueError("Unsafe Blockify thumbnail path")
+    artifacts = {}
+    document = None
+    for row in preview_files:
+        name = str(row.get("name") or "")
+        if not name or Path(name).name != name or "\\" in name or Path(name).suffix.lower() not in (".gltf", ".bin", ".png", ".jpg", ".jpeg"):
+            raise ValueError("Invalid Blockify export resource name")
+        if name.lower().endswith(".gltf"):
+            if document is not None or row.get("encoding") != "text":
+                raise ValueError("Expected exactly one readable Blockify GLTF")
+            document = json.loads(row["data"])
+            target = block_model
+            data = row["data"].encode("utf-8")
+        else:
+            target = addon.parent / name
+            if row.get("encoding") != "base64":
+                raise ValueError("Blockify export resource must be binary")
+            data = base64.b64decode(row["data"], validate=True)
+        if target in artifacts or target in (addon, thumbnail, addon.parent / "blockify.json") or target.is_symlink():
+            raise ValueError("Invalid duplicate or conflicting Blockify export resource")
+        artifacts[target] = data
+    if not isinstance(document, dict) or document.get("asset", {}).get("version") != "2.0" or not document.get("meshes") or not document.get("buffers") or not document.get("accessors"):
+        raise ValueError("Blockify export has no GLTF mesh")
+    for entry in (document.get("buffers") or []) + (document.get("images") or []):
+        uri = entry.get("uri")
+        if not isinstance(uri, str) or Path(uri).name != uri or addon.parent / uri not in artifacts:
+            raise ValueError("Blockify GLTF references an unowned resource")
+        if "byteLength" in entry and len(artifacts[addon.parent / uri]) != int(entry["byteLength"]):
+            raise ValueError("Blockify GLTF buffer length does not match its document")
+    if session["animated"] and (not document.get("skins") or len(document.get("animations") or []) != len(payload.get("character_animations") or {})):
+        raise ValueError("Blockify export lost character rig or animations")
+    data_path = addon.parent / "blockify.json"
+    payload["file"] = data_path.relative_to(folder).as_posix()
+    payload["thumbnail"] = thumbnail.relative_to(folder).as_posix()
+    artifacts[data_path] = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    artifacts[thumbnail] = _blockify_hero_icon_png(payload["voxels"], size=512, transparent=False)
+    rep.update(data=payload["file"], data_sha256=hashlib.sha256(artifacts[data_path]).hexdigest(),
+               voxel_count=len(payload["voxels"]), thumbnail=thumbnail.relative_to(folder).as_posix(),
+               files=[path.relative_to(folder).as_posix() for path in artifacts if path not in (data_path, thumbnail)],
+               blockbench_edited=True, blockbench_export_frame=export_frame)
+    with zipfile.ZipFile(addon) as outer:
+        outer_rows = [(info, outer.read(info)) for info in outer.infolist()]
+    rp_name = next(info.filename for info, _ in outer_rows if info.filename.lower().endswith("_rp.mcpack"))
+    rp_bytes = next(data for info, data in outer_rows if info.filename == rp_name)
+    with zipfile.ZipFile(io.BytesIO(rp_bytes)) as rp:
+        rows = [(info, rp.read(info)) for info in rp.infolist()]
+    geo_name = next(info.filename for info, _ in rows if info.filename.startswith("models/entity/") and Path(info.filename).name == session["model_name"])
+    texture_name = next((info.filename for info, _ in rows if info.filename.startswith("textures/entity/") and Path(info.filename).name == session["texture_name"]), "")
+    animation_name = next((info.filename for info, _ in rows if info.filename.startswith("animations/") and info.filename.endswith(".animation.json")), "")
+    if texture is not None and not texture_name:
+        raise ValueError("Existing resource pack has no editable texture")
+    if edited and not animation_name:
+        raise ValueError("Existing resource pack has no animation document")
+    replacements = {geo_name: json.dumps(geometry, ensure_ascii=False).encode("utf-8")}
+    if texture is not None:
+        replacements[texture_name] = texture
+    if animation_name:
+        replacements[animation_name] = json.dumps(animation_payload, ensure_ascii=False).encode("utf-8")
+    updated = io.BytesIO()
+    with zipfile.ZipFile(updated, "w", compression=zipfile.ZIP_DEFLATED) as rp:
+        for info, data in rows:
+            rp.writestr(info, replacements.get(info.filename, data))
+    # Stage every derivative before replacing the existing files. On an I/O
+    # failure restore the previous versions, including the add-on and manifest.
+    from .asset_management import _normalize_legacy_manifest_paths, _validate_manifest_relative_paths
+    import shutil
+    manifest = resolved["manifest"]
+    _normalize_legacy_manifest_paths(manifest)
+    _validate_manifest_relative_paths(manifest)
+    manifest_path = folder / "manifest.json"
+    artifacts[manifest_path] = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    with tempfile.TemporaryDirectory(dir=addon.parent, prefix="blockbench-") as scratch:
+        staging = Path(scratch)
+        staged_addon = staging / "addon.mcaddon"
+        with zipfile.ZipFile(staged_addon, "w", compression=zipfile.ZIP_DEFLATED) as outer:
+            for info, data in outer_rows:
+                outer.writestr(info, updated.getvalue() if info.filename == rp_name else data)
+        staged = {addon: staged_addon}
+        for index, (target, data) in enumerate(artifacts.items()):
+            staged_file = staging / f"new-{index}"
+            staged_file.write_bytes(data)
+            staged[target] = staged_file
+        backups = {}
+        replaced = []
+        for index, target in enumerate(staged):
+            if target.is_symlink():
+                raise ValueError("Cannot replace a symlinked Blockify artifact")
+            if target.exists():
+                backup = staging / f"old-{index}"
+                shutil.copy2(target, backup)
+                os.chmod(staged[target], target.stat().st_mode & 0o777)
+                backups[target] = backup
+        try:
+            for target, staged_file in staged.items():
+                staged_file.replace(target)
+                replaced.append(target)
+        except BaseException:
+            for target in reversed(replaced):
+                if target in backups:
+                    backups[target].replace(target)
+                else:
+                    target.unlink(missing_ok=True)
+            raise
+    log(f"asset-blockbench-uci-saved uci={resolved['uci']} addon={addon.name} voxels={len(payload['voxels'])}")
+    return {"uci": resolved["uci"], "addon": addon.relative_to(assets_root().resolve()).as_posix(),
+            "blockify": payload, "thumbnail": thumbnail.relative_to(assets_root().resolve()).as_posix()}
+
+
+def _blockbench_static_geometry_to_voxels(geometry: dict[str, Any], texture_data_url: str, base: dict[str, Any], *, frame: list[float] | None = None, preserve_bones: bool = False, pixels: tuple[int, int, bytes] | None = None) -> list[dict[str, Any]]:
     """Recover CinterForge static voxel coordinates/colors from an edited Bedrock cube model.
 
     CinterForge's static Blockbench session is deliberately one 1x1x1 Bedrock cube
@@ -1639,29 +1952,45 @@ def _blockbench_static_geometry_to_voxels(geometry: dict[str, Any], texture_data
     grid makes Blockbench a true round trip instead of a Minecraft-export-only
     override.  Non-unit/off-grid cubes fail loudly rather than being re-voxelized.
     """
+    import math
     rows=list(base.get("voxels") or [])
-    if not rows: raise ValueError("Blockbench round trip has no base Blockify voxels")
-    min_x=min(int(v["x"]) for v in rows); max_x=max(int(v["x"]) for v in rows)
-    min_y=min(int(v["y"]) for v in rows); min_z=min(int(v["z"]) for v in rows); max_z=max(int(v["z"]) for v in rows)
-    center_x=(min_x+max_x)/2.0; center_z=(min_z+max_z)/2.0
-    image=None
-    if texture_data_url:
+    if frame is None:
+        if not rows: raise ValueError("Blockbench round trip has no base Blockify voxels")
+        min_x=min(int(v["x"]) for v in rows); max_x=max(int(v["x"]) for v in rows)
+        min_y=min(int(v["y"]) for v in rows); min_z=min(int(v["z"]) for v in rows); max_z=max(int(v["z"]) for v in rows)
+        center_x=(min_x+max_x)/2.0; center_z=(min_z+max_z)/2.0
+    else:
+        center_x, min_y, center_z = map(float, frame)
+    if pixels is None and texture_data_url:
         if not texture_data_url.startswith("data:image/png;base64,"): raise ValueError("Blockbench texture must be PNG")
         try:
             from PIL import Image
-            image=Image.open(io.BytesIO(base64.b64decode(texture_data_url.split(",",1)[1],validate=True))).convert("RGBA")
+            with Image.open(io.BytesIO(base64.b64decode(texture_data_url.split(",",1)[1],validate=True))) as source_image:
+                image=source_image.convert("RGBA")
+                pixels=(image.width,image.height,image.tobytes())
         except Exception as exc: raise ValueError(f"Blockbench texture PNG could not be read: {exc}") from exc
     palette=list(base.get("palette") or [])
     def cube_rgb(cube: dict[str,Any]) -> tuple[int,int,int]:
         uv=cube.get("uv")
-        if image is not None and isinstance(uv,dict):
+        if pixels is not None and isinstance(uv,dict):
+            image_width,image_height,rgba=pixels
             for face in ("north","south","east","west","up","down"):
                 q=uv.get(face) if isinstance(uv.get(face),dict) else None
                 pos=q.get("uv") if q else None
                 if isinstance(pos,list) and len(pos)>=2:
-                    x=max(0,min(image.width-1,int(round(float(pos[0]))))); y=max(0,min(image.height-1,int(round(float(pos[1])))))
-                    r,g,b,a=image.getpixel((x,y))
+                    size=q.get("uv_size") or [1,1]
+                    x=max(0,min(image_width-1,int(math.floor(float(pos[0])+float(size[0])/2)))); y=max(0,min(image_height-1,int(math.floor(float(pos[1])+float(size[1])/2))))
+                    offset=(y*image_width+x)*4
+                    r,g,b,a=rgba[offset:offset+4]
                     if a: return int(r),int(g),int(b)
+        if pixels is not None and isinstance(uv,list) and len(uv)>=2:
+            image_width,image_height,rgba=pixels
+            size=cube.get("size") or [1,1,1]
+            x=max(0,min(image_width-1,int(math.floor(float(uv[0])+float(size[2])+float(size[0])/2))))
+            y=max(0,min(image_height-1,int(math.floor(float(uv[1])+float(size[2])+float(size[1])/2))))
+            offset=(y*image_width+x)*4
+            r,g,b,a=rgba[offset:offset+4]
+            if a: return int(r),int(g),int(b)
         if palette:
             q=palette[0]; return int(q.get("r",255)),int(q.get("g",255)),int(q.get("b",255))
         return 255,255,255
@@ -1669,11 +1998,17 @@ def _blockbench_static_geometry_to_voxels(geometry: dict[str, Any], texture_data
     if not isinstance(geometries,list) or not geometries: raise ValueError("Blockbench returned no Minecraft geometry")
     cubes=[]
     for bone in list((geometries[0] or {}).get("bones") or []):
-        if isinstance(bone,dict): cubes.extend(c for c in list(bone.get("cubes") or []) if isinstance(c,dict))
+        if isinstance(bone,dict):
+            if frame is not None and any(abs(float(v))>1e-4 for v in bone.get("rotation") or []):
+                raise ValueError("Blockify round trip requires an unrotated bind rig")
+            cubes.extend((str(bone.get("name") or ""), c) for c in list(bone.get("cubes") or []) if isinstance(c,dict))
     out=[]; seen=set()
-    for cube in cubes:
+    for bone_name, cube in cubes:
+        if frame is not None and (any(abs(float(v))>1e-4 for v in cube.get("rotation") or []) or abs(float(cube.get("inflate") or 0))>1e-4):
+            raise ValueError("Blockify round trip requires unrotated, uninflated block cubes")
         origin=cube.get("origin"); size=cube.get("size")
-        if not (isinstance(origin,list) and len(origin)>=3 and isinstance(size,list) and len(size)>=3): continue
+        if not (isinstance(origin,list) and len(origin)>=3 and isinstance(size,list) and len(size)>=3):
+            raise ValueError("Blockbench cube has no valid origin or size")
         if any(abs(float(size[i])-1.0)>1e-4 for i in range(3)):
             raise ValueError("CinterForge Blockbench round trip requires 1x1x1 block cubes; resize blocks only by adding/removing cubes")
         bx=float(origin[0])+0.5; by=float(origin[1]); bz=float(origin[2])+0.5
@@ -1681,9 +2016,12 @@ def _blockbench_static_geometry_to_voxels(geometry: dict[str, Any], texture_data
         xyz=(int(round(x)),int(round(y)),int(round(z)))
         if max(abs(x-xyz[0]),abs(y-xyz[1]),abs(z-xyz[2]))>1e-4:
             raise ValueError("CinterForge Blockbench round trip requires cubes snapped to the block grid")
-        if xyz in seen: continue
-        seen.add(xyz); r,g,b=cube_rgb(cube)
-        out.append({"x":xyz[0],"y":xyz[1],"z":xyz[2],"r":r,"g":g,"b":b,"samples":1})
+        identity=(bone_name, *xyz) if preserve_bones else xyz
+        if identity in seen: continue
+        seen.add(identity); r,g,b=cube_rgb(cube)
+        row={"x":xyz[0],"y":xyz[1],"z":xyz[2],"r":r,"g":g,"b":b,"samples":1}
+        if preserve_bones: row["bone"] = bone_name
+        out.append(row)
     if not out: raise ValueError("Blockbench round trip returned no blocks")
     return out
 

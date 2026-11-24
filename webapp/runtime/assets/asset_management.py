@@ -1131,7 +1131,12 @@ def list_local_uci_assets() -> dict[str, Any]:
         has_terrain_data = (folder / terrain_data).is_file()
         for saved_version in versions:
             saved_block = dict(saved_version.get("blockify") or {})
-            if not saved_block.get("file"):
+            if block.get("blockbench_edited"):
+                saved_block.update({"file": block.get("data"), "resolution": 16,
+                                    "blockbench_edited": True, "source_up_normalized": True,
+                                    "thumbnail": block.get("thumbnail")})
+                saved_version["blockify"] = saved_block
+            elif not saved_block.get("file"):
                 if has_terrain_data:
                     saved_block.update({"file": terrain_data, "resolution": 16})
                 elif block_model and (folder / block_model).is_file():

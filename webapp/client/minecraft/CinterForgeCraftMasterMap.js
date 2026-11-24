@@ -58,12 +58,12 @@
     const pack = document.createElement('span'), progress = document.createElement('span');
     controls.append(played, updated);
     const update = create('Update for Bedrock', async () => {
-      const result = await state.api('/api/craftmaster/map/run', {name: request.world});
+      const result = await state.api('/api/craftmaster/map/run', {name: request.world_id});
       state.notice('CraftMaster update started in map tab ' + (result.map?.world || request.world));
     });
     const select = create('Set Current', async () => {
       const details = await state.api('/api/bedrock/report');
-      const world = details.java_worlds.find(w => w.command_name === request.world);
+      const world = details.java_worlds.find(w => w.id === request.world_id);
       if (!world) throw new Error('Java world is no longer available');
       await state.api('/api/bedrock/world/select', {name:world.id});
       await refreshControls();
@@ -73,20 +73,10 @@
       const details = await state.api('/api/bedrock/report');
       if (details.running) await state.api('/api/bedrock/stop', {});
       else {
-        const world = details.java_worlds.find(w => w.command_name === request.world);
+        const world = details.java_worlds.find(w => w.id === request.world_id);
         if (!world) throw new Error('Java world is no longer available');
         if (!world.current) await state.api('/api/bedrock/world/select', {name: world.id});
-        let allow_stale=false;
-        if (world.conversion?.needs_update) {
-          if (!world.conversion.has_conversion || confirm('Update for Bedrock before starting?')) {
-            await state.api('/api/craftmaster/map/run', {name:request.world});
-            state.notice('CraftMaster update started; start again after it finishes');
-            return;
-          }
-          if (!confirm('Run the last converted world anyway?')) return;
-          allow_stale=true;
-        }
-        try {await state.api('/api/bedrock/run', {allow_stale});}
+        try {await state.api('/api/bedrock/run', {});}
         catch (error) {
           if (/EULA|not installed/i.test(error.message)) {
             await state.api('/api/bedrock/eula', {});
@@ -102,7 +92,7 @@
     const refreshControls = async () => {
       if (mapTab.closed) return;
       const details = await state.api('/api/bedrock/report');
-      const world = details.java_worlds.find(w => w.command_name === request.world);
+      const world = details.java_worlds.find(w => w.id === request.world_id);
       if (!world) return;
       played.textContent='Last Played: ' + format(world.conversion?.last_played);
       updated.textContent='Last Updated: ' + format(world.conversion?.last_updated);
@@ -117,7 +107,7 @@
           phase.phase === 'preparing' ? phase.message :
           world.conversion?.ready ? 'Bedrock ready' :
           !world.conversion?.has_conversion ? 'Not converted to Bedrock' :
-          world.conversion?.needs_update ? 'Update for Bedrock required' :
+          world.conversion?.needs_update ? 'Bedrock update available' :
           'Bedrock conversion present · freshness unverified';
       } catch (_) {progress.textContent = 'Map status unavailable';}
     };
