@@ -91,17 +91,17 @@
   var POST_PRELUDE_PAUSE_MS = 1000;
 
   // Fixed, unscaled TTS start delays (ms) — not affected by presentationSpeed.
-  var GREETING_SPEECH_START_DELAY_MS = 500;
-  var PLAY_PROMPT_SPEECH_START_DELAY_MS = 500;
+  var GREETING_SPEECH_START_DELAY_MS = 200;
+  var PLAY_PROMPT_SPEECH_START_DELAY_MS = 200;
 
   function runBootMessages(deps) {
     var speed = deps.speed;
     var typingDelay = Presentation.scaleDelay(60, speed);
     var pauseAfterNoise = Presentation.scaleDelay(POST_PRELUDE_PAUSE_MS, speed);
-    var pauseBetweenMessages = Presentation.scaleDelay(700, speed);
-    var pauseBeforeMenu = Presentation.scaleDelay(700, speed);
-    var greetingRate = Presentation.scaleRate(0.72, speed);
-    var playPromptRate = Presentation.scaleRate(0.78, speed);
+    var pauseBetweenMessages = Presentation.scaleDelay(300, speed);
+    var pauseBeforeMenu = Presentation.scaleDelay(300, speed);
+    var greetingRate = Presentation.scaleRate(0.70, speed);
+    var playPromptRate = Presentation.scaleRate(0.72, speed);
     var noiseTimeoutMs = deps.noiseTimeoutMs || 6000;
 
     // Independent second safety net around the noise player itself: even if

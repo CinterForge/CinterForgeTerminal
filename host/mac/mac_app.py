@@ -213,8 +213,8 @@ def _stage_complete_resources(builds: Path, app: Path) -> None:
     from host.lifecycle.universal_package import _authored_webapp_assets
     required = _authored_webapp_assets(authored.parent)
     catalog = json.loads((authored / 'data/mac_games.json').read_text(encoding='utf-8'))
-    if catalog.get('schema') != 'cinterforge.terminal.macgames.v1' or len(catalog.get('games', [])) != 67:
-        raise RuntimeError('Repository requires complete 67-game catalog')
+    if catalog.get('schema') != 'cinterforge.terminal.macgames.v1' or len(catalog.get('games', [])) != 64:
+        raise RuntimeError('Repository requires complete 64-game catalog')
     for source, destination in sources:
         _copy_runtime_tree(source, destination)
     # CraftMaster is built/staged first by the Terminal Build orchestrator.

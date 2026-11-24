@@ -551,7 +551,7 @@ def _verify_mac_if_runtime(app: Path) -> None:
         if not member.is_file() or not source.is_file() or member.read_bytes() != source.read_bytes():
             raise RuntimeError('Mac ZIP refused: bundled Terminal shell asset missing or stale: ' + name)
     catalog = json.loads((shell / 'data/mac_games.json').read_text(encoding='utf-8'))
-    if catalog.get('schema') != 'cinterforge.terminal.macgames.v1' or len(catalog.get('games', [])) != 67:
+    if catalog.get('schema') != 'cinterforge.terminal.macgames.v1' or len(catalog.get('games', [])) != 64:
         raise RuntimeError('Mac ZIP refused: incomplete Macintosh game catalog')
     dist = embedded / 'CinterForgeTerminal/Dependencies/ZMachine/0.3.2/dist'
     if not dist.is_dir() or dist.is_symlink() or not (dist / 'index.js').is_file():

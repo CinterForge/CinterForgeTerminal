@@ -1,1 +1,67 @@
-# OS<TAB>game command; this is the only curated 68K catalog.7.1	3wizcolunr7.1	maelstrom7.1	outofthisworld1037.1	battlechess7.1	bolo09977.1	minotaur7.1	minotaur27.1	minotaur37.1	minotaur47.1	minotaur57.1	minotaur67.1	minotaur77.1	chainshot7.1	civilization7.1	continuum7.1	cosmicosmo7.1	darkcastle7.1	glider4067.1	glider4097.1	zero2207.1	lemmings7.1	fateofatlantis117.1	fateofatlantisv157.1	indy7.1	loom7.1	pipedream7.1	monkeyisland7.1	missilecommand307.1	ok0207.1	pararena206m7.1	pipedream27.1	princeofpersia7.1	colorrisk2417.1	scarabofra147.1	shufflepuckcafv107.1	simcityclassic7.1	sokoban242a7.1	solarianii7.1	spectre117.1	strategicconquest3017.1	stuntcopter107.1	stuntcopter127.1	stuntcopter157.1	stuntcopter167.1	stuntcopter207.1	stuntcopterpatchedforan7.1	tetris7.1	tetriscolor7.1	oregontrail7.1	wesleyantetris7.6	a10attack157.6	apeiron7.6	apeiron27.6	avara7.6	avaracommuter7.6	barrack7.6	bubbletrouble7.6	chiral7.6	escapevelocity7.6	swoop7.6	blobbo102lite7.6	marathonv127.6	marathon27.6	pathwaysintodarkness7.6	hornetace107.6	fa18hornetclassic7.6	hellcats7.6	indysdesktopadventures7.6	nsshaft7.6	simcity2000127.6	snood7.6	starbound7.6	strategicconquest4017.6	strategicconquestplus207.6	troubledsouls7.6	boom107.6	abuse1017.6	marathon157.6	ultimatedoomi7.6	warcraft7.6	warcraftii100k7.6	warcraftiiv122
+# CinterForge classic Macintosh games — 61 selected entries
+# Generated from webapp/data/mac_games.json, the canonical host game catalog.
+# Games.txt is a human-readable export; the current 68K app does not load this file at runtime.
+# 34 games for System 7.1; 27 games for Mac OS 7.6.
+# Columns: OS, host play command, game title, guest play command, Finder application name, mapping status.
+OS	host_command	title	guest_command	finder_name	status
+7.1	3wiz	3Wiz!	3wizcolunr	3Wiz! col./unr.	mapped; runtime launch not individually verified
+7.6	a10attack	A-10 Attack!	a10attack15	A-10 Attack! 1.5	mapped; runtime launch not individually verified
+7.6	abuse	Abuse	abuse101	Abuse 1.01	mapped; runtime launch not individually verified
+7.1	anotherworld	Another World	outofthisworld103	Out of this World™ 1.0.3	mapped; runtime launch not individually verified
+7.6	apeiron103	Apeiron 1.0.3	apeiron2	Apeiron	guest version unverified
+7.6	avara	Avara	avara	Avara	mapped; runtime launch not individually verified
+7.6	barrack	Barrack	barrack	Barrack	mapped; runtime launch not individually verified
+7.1	battlechess	Battle Chess	battlechess	Battle Chess	mapped; runtime launch not individually verified
+7.6	blobbolite	Blobbo Lite	blobbo102lite	Blobbo 1.0.2 Lite	mapped; runtime launch not individually verified
+7.1	bolo	Bolo	bolo0997	Bolo 0.99.7	mapped; runtime launch not individually verified
+7.6	boom	BOOM	boom10	BOOM 1.0	mapped; runtime launch not individually verified
+7.6	bubbletrouble	Bubble Trouble	bubbletrouble	Bubble Trouble	mapped; runtime launch not individually verified
+7.1	chainshot	ChainShot!	chainshot	ChainShot!	mapped; runtime launch not individually verified
+7.6	chiral	Chiral	chiral	Chiral	mapped; runtime launch not individually verified
+7.1	civilization	Civilization	civilization	Civilization™	mapped; runtime launch not individually verified
+7.1	continuum	Continuum	continuum	Continuum	mapped; runtime launch not individually verified
+7.1	cosmicosmo	Cosmic Osmo	cosmicosmo	Cosmic Osmo	mapped; runtime launch not individually verified
+7.1	darkcastle	Dark Castle	darkcastle	Dark Castle	mapped; runtime launch not individually verified
+7.6	escapevelocity	Escape Velocity	escapevelocity	Escape Velocity	mapped; runtime launch not individually verified
+7.6	fa18hornet	F-A-18 Hornet	fa18hornetclassic	F/A-18 Hornet Classic	mapped; runtime launch not individually verified
+7.1	glider	Glider	glider409	Glider 4.09	mapped; runtime launch not individually verified
+7.6	hellcatsoverthepacific	Hellcats Over the Pacific	hellcats	Hellcats	mapped; runtime launch not individually verified
+7.6	indyandhisdesktopadventures	Indy and His Desktop Adventures	indysdesktopadventures	Indy’s Desktop Adventures	mapped; runtime launch not individually verified
+7.1	indyandthefateofatlantis	Indy and The Fate of Atlantis	fateofatlantisv15	Fate of Atlantis v.1.5	mapped; runtime launch not individually verified
+7.1	indyandthelastcrusade	Indy	indy	Indy™	mapped; runtime launch not individually verified
+7.1	lemmings	Lemmings	lemmings	Lemmings	mapped; runtime launch not individually verified
+7.1	loom	Loom	loom	Loom™	mapped; runtime launch not individually verified
+7.1	maelstrom	Maelstrom	maelstrom	Maelstrom	mapped; runtime launch not individually verified
+7.6	marathon	Marathon	marathon15	Marathon ∞ 1.5	mapped; runtime launch not individually verified
+7.6	marathon2	Marathon 2	marathon2	Marathon 2	mapped; runtime launch not individually verified
+7.1	minotaur	Minotaur	minotaur	Minotaur	mapped; runtime launch not individually verified
+7.1	missilecommand	Missile Command	missilecommand30	MissileCommand 3.0	mapped; runtime launch not individually verified
+7.6	nsshaft	NS-SHAFT	nsshaft	NS-SHAFT	mapped; runtime launch not individually verified
+7.1	okasheepgame	ok - A sheep game	ok020	ok 0.2.0	mapped; runtime launch not individually verified
+7.1	pararena	Pararena	pararena206m	Pararena 2.06M	mapped; runtime launch not individually verified
+7.6	pathwaysintodarkness	Pathways Into Darkness	pathwaysintodarkness	Pathways Into Darkness	mapped; runtime launch not individually verified
+7.1	pipedream	Pipe Dream	pipedream2	Pipe Dream™	mapped; runtime launch not individually verified
+7.1	princeofpersia	Prince of Persia	princeofpersia	Prince of Persia	mapped; runtime launch not individually verified
+7.1	risk	ColorRisk 2.41	colorrisk241	ColorRisk 2.41	mapped; runtime launch not individually verified
+7.1	scarabofra	Scarab of Ra	scarabofra14	Scarab of RA 1.4	mapped; runtime launch not individually verified
+7.1	shufflepuckcafe	Shufflepuck Café	shufflepuckcafv10	Shufflepuck Café v1.0	mapped; runtime launch not individually verified
+7.1	simcity	SimCity	simcityclassic	Sim City Classic	mapped; runtime launch not individually verified
+7.6	simcity2000	SimCity 2000	simcity200012	SimCity 2000® 1.2	mapped; runtime launch not individually verified
+7.6	snood	Snood	snood	Snood	mapped; runtime launch not individually verified
+7.1	sokoban	Sokoban	sokoban242a	Sokoban 2.4.2a	mapped; runtime launch not individually verified
+7.1	solarianii	Solarian II	solarianii	Solarian II	mapped; runtime launch not individually verified
+7.1	spectre	Spectre	spectre11	Spectre 1.1	mapped; runtime launch not individually verified
+7.6	starbound	Starbound	starbound	StarBound	mapped; runtime launch not individually verified
+7.1	strategicconquest30	Strategic Conquest 3.0	strategicconquest301	Strategic Conquest 3.01	mapped; runtime launch not individually verified
+7.6	strategicconquest401	Strategic Conquest 4.0.1	strategicconquest401	Strategic Conquest 4.0.1	mapped; runtime launch not individually verified
+7.6	strategicconquestplus	Strategic Conquest Plus	strategicconquestplus20	Strategic Conquest Plus 2.0	mapped; runtime launch not individually verified
+7.1	stuntcopter	StuntCopter	stuntcopter20	StuntCopter 2.0	mapped; runtime launch not individually verified
+7.6	swoop	Swoop	swoop	Swoop	mapped; runtime launch not individually verified
+7.1	tetris	Tetris	tetris	TETRIS	mapped; runtime launch not individually verified
+7.1	theoregontrail	The Oregon Trail	oregontrail	OREGON TRAIL	mapped; runtime launch not individually verified
+7.1	thesecretofmonkeyisland	The Secret of Monkey Island	monkeyisland	Monkey Island	mapped; runtime launch not individually verified
+7.6	troubledsouls	Troubled Souls	troubledsouls	Troubled Souls	mapped; runtime launch not individually verified
+7.6	ultimatedoom	Ultimate Doom	ultimatedoomi	Ultimate Doom I	mapped; runtime launch not individually verified
+7.6	warcraftorcshumans	Warcraft - Orcs & Humans	warcraft	Warcraft	mapped; runtime launch not individually verified
+7.6	warcraftiitidesofdarkness	Warcraft II - Tides of Darkness	warcraftiiv122	Warcraft II v.1.22	mapped; runtime launch not individually verified
+7.1	wesleyantetris	Wesleyan Tetris	wesleyantetris	Wesleyan Tetris	mapped; runtime launch not individually verified

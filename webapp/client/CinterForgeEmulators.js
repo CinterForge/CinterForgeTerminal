@@ -47,11 +47,26 @@
   // need the parent pointer relay in the embedded Terminal WebView.
   const relativeMouseMachines = new Set(['Power Macintosh 7500']);
 
-  const speak68KReadyGreeting = async () => {
+  // Game launches reuse an OS-specific session. Record the request before
+  // opening the emulator, so the guest Terminal's startup voice is skipped.
+  const pending68KGames = new Map();
+  let next68KGameRequest = 0;
+  const max68KGameAttempts = 12;
+  CinterForgeState.queue68KGame = game => {
+    // All characters are representable by Infinite Mac's physical keyboard API.
+    // A fresh token per request lets the guest ignore repeated complete packets.
+    const token = Date.now().toString(36).padStart(8, '0').slice(-8) + (++next68KGameRequest).toString(36);
+    pending68KGames.set(game.os, {...game, token, attempts: 0,
+      nextSendAt: 0, sending: false, checking: false,
+      sawTerminal: false, awayChecks: 0});
+  };
+  CinterForgeState.cancel68KGame = os => pending68KGames.delete(os);
+  const speak68KReadyGreeting = async frame => {
     // The 68K app never invokes MacinTalk. Reuse the host's native Zarvox
     // greeting, triggered once after the Terminal becomes visually frontmost.
     if (CinterForgeState.platform !== 'mac') return;
     for (const part of ['welcome', 'question']) {
+      if (pending68KGames.has(frame?.cinterForge68KStartup?.os)) return;
       try {
         const result = await CinterForgeState.api('/api/startup/speech', {part});
         if (!result?.spoken) {
@@ -142,6 +157,290 @@
       CinterForgeState.activeEmulatorFrame === frame &&
       !CinterForgeState.computerView.hidden && !frame.hidden;
   };
+  // A second, non-interactive OCR watch runs only after the ordinary 68K
+  // Terminal has been recognized. It never sends mouse/keyboard events to the
+  // guest, opens new windows or changes the emulator startup classifier.
+  const stopLauncherWatch = frame => {
+    if (!frame?.gamesLauncherWatch) return;
+    clearInterval(frame.gamesLauncherWatch.timer);
+    frame.gamesLauncherWatch = null;
+  };
+  const launcherDimensions = screen => {
+    // These are the same NewCWindow bounds and cell equations used by the
+    // native 68K Games Launcher. The fixed grid contains 50/32 real slots,
+    // with the remaining 8x7/6x6 cells intentionally left blank.
+    const is71 = screen.os === 'System 7.1';
+    const columns = is71 ? 8 : 6, rows = is71 ? 7 : 6;
+    const width = Math.min(1000, Math.max(400, screen.width - 22));
+    const height = Math.min(730, Math.max(350, screen.height - 72));
+    return {left: 11, top: 43, width, height, columns, rows,
+      expected: is71 ? 50 : 32, topGap: is71 ? 8 : 0};
+  };
+  const launcherTitleImage = screen => {
+    // Recognize the real window title, not a guessed timer after launch.
+    // The 68K window's title bar is above its content port (top=43).
+    const height = Math.min(44, screen.height - 12);
+    const sample = document.createElement('canvas');
+    sample.width = screen.width;
+    sample.height = height;
+    const context = sample.getContext('2d');
+    const rgba = context.createImageData(screen.width, height);
+    const start = 12 * screen.width * 4;
+    rgba.data.set(screen.data.subarray(start, start + rgba.data.length));
+    context.putImageData(rgba, 0, 0);
+    const enlarged = document.createElement('canvas');
+    enlarged.width = sample.width * 3;
+    enlarged.height = sample.height * 3;
+    const enlargedContext = enlarged.getContext('2d');
+    enlargedContext.imageSmoothingEnabled = false;
+    enlargedContext.drawImage(sample, 0, 0, enlarged.width, enlarged.height);
+    return enlarged;
+  };
+  const launcherIconPixels = (screen, layout, slot) => {
+    const column = slot % layout.columns;
+    const row = Math.floor(slot / layout.columns);
+    const left = Math.floor(column * layout.width / layout.columns);
+    const right = Math.floor((column + 1) * layout.width / layout.columns);
+    const top = layout.topGap + Math.floor(row * (layout.height - layout.topGap) / layout.rows);
+    const bottom = layout.topGap + Math.floor((row + 1) * (layout.height - layout.topGap) / layout.rows);
+    const contentTop = top + (bottom - top > 51 ? Math.floor((bottom - top - 51) / 2) : 0);
+    const x = layout.left + left + Math.floor((right - left - 32) / 2);
+    const y = layout.top + contentTop;
+    if (x < 0 || y < 0 || x + 32 > screen.width || y + 32 > screen.height)
+      throw new Error('Games Launcher grid is outside the guest framebuffer');
+    const pixels = new Uint8ClampedArray(32 * 32 * 4);
+    let ink = 0;
+    for (let line = 0; line < 32; ++line) {
+      const source = ((y + line) * screen.width + x) * 4;
+      const dest = line * 32 * 4;
+      pixels.set(screen.data.subarray(source, source + 32 * 4), dest);
+      for (let col = 0; col < 32; ++col) {
+        const i = dest + col * 4;
+        if (Math.min(pixels[i], pixels[i + 1], pixels[i + 2]) < 210) ++ink;
+      }
+    }
+    return {pixels, ink};
+  };
+  const launcherGridSample = (screen, layout) => {
+    // A stable pair of successive full-resolution frames protects against
+    // extracting icons while the 68K catalog is still populating its grid.
+    let fingerprint = 2166136261, occupied = 0;
+    const icons = [];
+    for (let slot = 0; slot < layout.expected; ++slot) {
+      const icon = launcherIconPixels(screen, layout, slot);
+      icons.push(icon);
+      if (icon.ink >= 8) ++occupied;
+      for (let i = 0; i < icon.pixels.length; i += 4) {
+        fingerprint = Math.imul(fingerprint ^ icon.pixels[i], 16777619) >>> 0;
+        fingerprint = Math.imul(fingerprint ^ icon.pixels[i + 1], 16777619) >>> 0;
+        fingerprint = Math.imul(fingerprint ^ icon.pixels[i + 2], 16777619) >>> 0;
+      }
+    }
+    return {fingerprint, occupied, icons};
+  };
+  const launcherIconPNGBase64 = async rgba => {
+    // Finder's white icon background is not part of the artwork. Export
+    // exact-white pixels with zero alpha; leave every nonwhite icon pixel
+    // unchanged. Do not modify the source guest framebuffer.
+    const pixels = new Uint8ClampedArray(rgba);
+    for (let i = 0; i < pixels.length; i += 4) {
+      if (pixels[i] === 255 && pixels[i + 1] === 255 && pixels[i + 2] === 255) {
+        pixels[i] = pixels[i + 1] = pixels[i + 2] = 0;
+        pixels[i + 3] = 0;
+      }
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 32;
+    canvas.getContext('2d').putImageData(new ImageData(pixels, 32, 32), 0, 0);
+    // PNG bytes are sent to the authenticated HTTP host as JSON. No data:
+    // URL, guest clipboard, ZIP download or CSP exception is involved.
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) throw new Error('Could not encode original guest icon PNG');
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let text = '';
+    for (const byte of bytes) text += String.fromCharCode(byte);
+    return btoa(text);
+  };
+  const checkLauncherWatch = async frame => {
+    const watch = frame?.gamesLauncherWatch;
+    if (!watch || watch.busy || !visibleFrame(frame) || !frame.cinterForgeScreen) return;
+    watch.busy = true;
+    try {
+      const source = frame.cinterForgeScreen;
+      const os = frame.cinterForge68KStartup?.os;
+      if (!os || !Object.hasOwn(cinterForgeOSAddress, os)) return;
+      const worker = await getOCRWorker();
+      if (!visibleFrame(frame) || frame.gamesLauncherWatch !== watch) return;
+      const answer = await worker.recognize(launcherTitleImage(source));
+      const title = String(answer?.data?.text || '').replace(/[^a-z]+/gi, ' ').toLowerCase();
+      if (!/\bgames\s+launcher\b/.test(title)) {
+        watch.fingerprint = null;
+        watch.stableFrames = 0;
+        return;
+      }
+      const layout = launcherDimensions({...source, os});
+      const sample = launcherGridSample(source, layout);
+      if (sample.occupied < Math.floor(layout.expected * 0.8)) {
+        console.info(`[Games Launcher ${os}] waiting for populated grid: ${sample.occupied}/${layout.expected}`);
+        return;
+      }
+      watch.stableFrames = sample.fingerprint === watch.fingerprint ? watch.stableFrames + 1 : 1;
+      watch.fingerprint = sample.fingerprint;
+      if (watch.stableFrames < 2) return;
+      // Snapshot the exact OCR-confirmed frame before awaiting any network I/O.
+      // A subsequently opened game cannot affect the PNGs saved below.
+      const captured = [], blank = [];
+      console.info(`[Games Launcher ${os}] OCR confirmed; extracting ${layout.expected} native 32x32 cells`);
+      for (let slot = 0; slot < layout.expected; ++slot) {
+        if (!visibleFrame(frame) || frame.gamesLauncherWatch !== watch) return;
+        const icon = sample.icons[slot];
+        if (icon.ink < 8) blank.push(slot + 1); // Preserve even apparently empty real slots.
+        const png_base64 = await launcherIconPNGBase64(icon.pixels);
+        await CinterForgeState.api('/api/infinitemac/game-icons', {
+          os: cinterForgeOSAddress[os], slot: slot + 1, png_base64
+        });
+        captured.push(slot + 1);
+      }
+      const result = await CinterForgeState.api('/api/infinitemac/game-icons/finish', {
+        os: cinterForgeOSAddress[os], captured, missing: [], blank_slots: blank
+      });
+      console.info(`[Games Launcher ${os}] saved ${captured.length}/${layout.expected} PNG icons to ${result.directory}`);
+      CinterForgeState.notice(`Games Launcher ${os}: saved ${captured.length} icon PNGs` +
+        (blank.length ? ` (${blank.length} appear blank; review)` : ''));
+      stopLauncherWatch(frame);
+    } catch (error) {
+      // Preserve the working emulator when the developer Assets destination
+      // is unavailable. Do not attempt downloads or alternate destinations.
+      console.error('Games Launcher icon capture:', error);
+      stopLauncherWatch(frame);
+      CinterForgeState.notice('Games Launcher icon capture: ' + error.message);
+    } finally {
+      watch.busy = false;
+    }
+  };
+  const beginLauncherWatch = frame => {
+    if (!frame?.cinterForge68KStartup?.ready || frame.gamesLauncherWatch || !visibleFrame(frame)) return;
+    frame.gamesLauncherWatch = {timer: null, busy: false, fingerprint: null, stableFrames: 0};
+    frame.gamesLauncherWatch.timer = setInterval(() => { void checkLauncherWatch(frame); }, 2000);
+    void checkLauncherWatch(frame);
+  };
+  // Physical ADB key events use the same documented emulator controls as
+  // the existing Lagomorph integration. All guest catalog commands are ASCII.
+  const gameKeyCode = character => character === ' ' ? 'Space' :
+    /[a-z]/.test(character) ? 'Key' + character.toUpperCase() :
+    /[0-9]/.test(character) ? 'Digit' + character : null;
+  const gamePause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const gameKey = async (frame, code, heldMs = 55) => {
+    const send = type => frame.contentWindow.postMessage({type, code}, 'https://infinitemac.org');
+    send('emulator_key_down');
+    try { await gamePause(heldMs); } finally { send('emulator_key_up'); }
+    await gamePause(35);
+  };
+  // The host retransmits the *same* framed command while the guest starts:
+  //   cinterbegin <token> play <guest-command> cinterend <token>
+  // The 68K application executes a matching complete frame once per token.
+  // Do not rely on a brittle OCR window-title match to deliver input. Initial
+  // Finder launching still uses OCR; after that we retry the keyboard packet.
+  const deliver68KGame = async frame => {
+    const startup = frame?.cinterForge68KStartup;
+    const game = pending68KGames.get(startup?.os);
+    if (!game || game.sending || !visibleFrame(frame) || !frame.cinterForgeScreen)
+      return;
+    // Never type during boot or during the scripted Finder double-clicks.
+    // If 7.6's Terminal OCR is late, the completed Finder launch attempt is
+    // sufficient to begin retries (not a reason to stall forever).
+    const launchAttemptComplete = startup?.loaded && startup.attempts > 0 &&
+      !startup.launching && Date.now() - startup.lastAttemptAt >= 1800;
+    if (startup?.launching || (!startup?.ready && !launchAttemptComplete)) return;
+    if (Date.now() < game.nextSendAt) return;
+    if (game.attempts >= max68KGameAttempts) {
+      CinterForgeState.notice('Unable to confirm launch of ' + game.title +
+        ' after ' + game.attempts + ' keyboard attempts');
+      CinterForgeState.cancel68KGame(startup.os);
+      return;
+    }
+    game.sending = true;
+    const packet = `cinterbegin ${game.token} play ${game.command} cinterend ${game.token}`;
+    try {
+      frame.focus();
+      // Clear any interrupted frame before the next BEGIN marker. This is a
+      // key event only; no host or guest clipboard and no new emulator disk.
+      await gameKey(frame, 'Escape', 55);
+      for (const character of packet) {
+        if (!visibleFrame(frame) || pending68KGames.get(startup.os) !== game)
+          return;
+        const code = gameKeyCode(character);
+        if (!code) throw new Error('Unsupported character in framed 68K command');
+        await gameKey(frame, code);
+      }
+      if (!visibleFrame(frame) || pending68KGames.get(startup.os) !== game)
+        return;
+      await gameKey(frame, 'Enter', 90);
+      game.attempts++;
+      game.nextSendAt = Date.now() + 1900;
+      console.info(`[68K ${startup.address}] sent framed play ${game.command}; ` +
+        `request=${game.token}; attempt=${game.attempts}`);
+    } catch (error) {
+      game.nextSendAt = Date.now() + 2500;
+      console.error('68K framed game keyboard:', error);
+      CinterForgeState.notice('68K game keyboard: ' + error.message);
+    } finally {
+      game.sending = false;
+    }
+  };
+
+  // OCR is used here *only* to stop retries after the game takes the front,
+  // never to gate delivery of a complete keyboard packet. Require two
+  // observations because an intermittent OCR miss must not lose a request.
+  const check68KGameForeground = async frame => {
+    const startup = frame?.cinterForge68KStartup;
+    const game = pending68KGames.get(startup?.os);
+    if (!game || game.checking || game.sending || !game.attempts ||
+        !visibleFrame(frame) || !frame.cinterForgeScreen) return;
+    game.checking = true;
+    try {
+      const worker = await getOCRWorker();
+      const answer = await worker.recognize(menuBarImage(frame.cinterForgeScreen));
+      if (pending68KGames.get(startup.os) !== game || !visibleFrame(frame)) return;
+      const state = classifyMenuText(answer?.data?.text);
+      if (state === 'TERMINAL_RUNNING') {
+        game.sawTerminal = true;
+        game.awayChecks = 0;
+      } else if ((game.sawTerminal || startup.ready) &&
+          (state === 'OTHER_APP_OR_MENU' || state === 'BOOT_OR_BLANK')) {
+        game.awayChecks++;
+        if (game.awayChecks >= 2) {
+          console.info(`[68K ${startup.address}] game took foreground; ` +
+            `stop framed keyboard retries for ${game.command}`);
+          CinterForgeState.cancel68KGame(startup.os);
+        }
+      } else game.awayChecks = 0;
+    } catch (error) {
+      if (!game.ocrWarning) {
+        console.warn('68K launch completion check unavailable:', error);
+        game.ocrWarning = true;
+      }
+    } finally {
+      game.checking = false;
+    }
+  };
+  CinterForgeState.resume68KGame = tab => {
+    const frame = tab && CinterForgeState.emulatorFrames.get(tab.key);
+    if (!frame) return;
+    if (frame.cinterForge68KStartup?.loaded && !frame.cinterForge68KStartup.ready)
+      beginScreenWatch(frame);
+    void deliver68KGame(frame);
+  };
+  // Retry a bounded number of times with the same request token. The guest
+  // deduplicates complete packets; the host stops when the game takes focus.
+  setInterval(() => {
+    for (const frame of CinterForgeState.emulatorFrames.values()) {
+      if (!pending68KGames.has(frame.cinterForge68KStartup?.os)) continue;
+      void check68KGameForeground(frame);
+      void deliver68KGame(frame);
+    }
+  }, 900);
+
   const stopScreenWatch = frame => {
     if (!frame?.screenWatch) return;
     clearInterval(frame.screenWatch.timer);
@@ -198,7 +497,11 @@
       startup.ready = true;
       stopScreenWatch(frame);
       console.info(`[68K ${startup.address}] Terminal menu detected; Finder automation complete`);
-      void speak68KReadyGreeting();
+      if (pending68KGames.has(startup.os)) void deliver68KGame(frame);
+      else {
+        beginLauncherWatch(frame);
+        void speak68KReadyGreeting(frame);
+      }
     } else if (startup.loaded && watch.finderMatches >= 2) {
       CinterForgeState.schedule68KAppOpen(frame);
     }
@@ -341,6 +644,7 @@
       // Release a held mouse button while the guest is still addressable.
       if (!frame.hidden) frame.resetPointerRelay?.();
       stopScreenWatch(frame);
+      stopLauncherWatch(frame);
       frame.hidden = true;
       if (frame.pointerRelay) frame.pointerRelay.hidden = true;
     }
@@ -352,6 +656,7 @@
     if (!frame) return;
     // Releasing a tab is the only time we intentionally destroy its guest.
     stopScreenWatch(frame);
+    stopLauncherWatch(frame);
     frame.cinterForgeScreen = null;
     frame.pointerRelay?.remove();
     frame.remove();
@@ -590,6 +895,8 @@
     delete CinterForgeState.frame.dataset.launcher;
     CinterForgeState.codeError.hidden = true;
     CinterForgeState.computerView.hidden = true;
+    if (CinterForgeState.platform === 'mac')
+      void CinterForgeState.nativeEvent('clipboard-context', {embedded: false});
     CinterForgeState.$('terminal-keys').hidden = false;
     CinterForgeState.$('terminal-screen').hidden = false;
     CinterForgeState.$('terminal-input').disabled = false;
@@ -607,6 +914,8 @@
     CinterForgeState.$('terminal-screen').hidden = true;
     CinterForgeState.$('terminal-input').disabled = true;
     CinterForgeState.computerView.hidden = false;
+    if (CinterForgeState.platform === 'mac')
+      void CinterForgeState.nativeEvent('clipboard-context', {embedded: true});
     CinterForgeState.$('terminal-keys').hidden = true;
     CinterForgeState.codeError.hidden = true;
     if (CinterForgeState.museumKind(profile) !== 'codeoss') {
@@ -645,7 +954,11 @@
         existing.resetPointerRelay?.();
         if (existing.lagomorphWatch && !existing.lagomorphWatch.started)
           existing.lagomorphWatch.stamp = CinterForgeState.lagBootSequence;
-        if (existing.cinterForge68KStartup?.loaded || existing.lagomorphWatch?.loaded)
+        if (existing.cinterForge68KStartup?.ready) {
+          if (pending68KGames.has(existing.cinterForge68KStartup.os)) void deliver68KGame(existing);
+          else beginLauncherWatch(existing);
+        }
+        else if (existing.cinterForge68KStartup?.loaded || existing.lagomorphWatch?.loaded)
           beginScreenWatch(existing);
         return;
       }
@@ -726,7 +1039,10 @@
         iframe.title = profile.name + ' emulator';
         iframe.referrerPolicy = 'no-referrer';
         iframe.relativeMouse = relativeMouseMachines.has(profile.machine);
-        iframe.setAttribute('allow', 'cross-origin-isolated');
+        // Infinite Mac reads the host text clipboard on a real paste gesture.
+        // Delegate clipboard-read to the trusted emulator origin only; without
+        // this permission, its readText() is denied inside our cross-origin iframe.
+        iframe.setAttribute('allow', 'cross-origin-isolated; clipboard-read https://infinitemac.org');
         iframe.hidden = true;
         CinterForgeState.computerView.append(iframe);
         CinterForgeState.emulatorFrames.set(tab.key, iframe);

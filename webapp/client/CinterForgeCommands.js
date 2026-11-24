@@ -47,35 +47,44 @@ setInterval(async () => {
     }
   }, 850);
 
-  // Original source lines 3077–3100
-setInterval(async () => {
-    if (document.visibilityState === 'hidden') return;
+  // Host `play <title>` always targets the existing OS-specific 68K Terminal.
+  // Never manufacture a per-game emulator profile or load a library URL.
+  setInterval(async () => {
+    if (document.visibilityState === 'hidden' || CinterForgeState.pollingMacGames) return;
+    CinterForgeState.pollingMacGames = true;
+    let requestedOS = null;
     try {
       const result = await CinterForgeState.api('/api/macgames/next');
       if (!result.game) return;
       const game = CinterForgeState.macCatalog.get(result.game);
-      if (!game) throw new Error('Unknown Macintosh game: ' + result.game);
-      // Resolve the curated starting OS through the existing museum profiles:
-      // never invent a disk/machine pair or treat a guess as guest-tested.
+      if (!game || !/^[a-z0-9]{1,64}$/.test(game.guest_command || ''))
+        throw new Error('Missing 68K game command for ' + result.game);
+      const os = game.guest_os === '7.1' ? 'System 7.1' :
+        game.guest_os === '7.6' ? 'Mac OS 7.6' : null;
       const emulator = CinterForgeState.profiles.find(profile => profile.id === game.emulator_profile);
-      if (!emulator || !emulator.machine || !emulator.disk)
-        throw new Error('Unsupported Macintosh emulator profile for ' + game.title);
-      const { machine, disk } = emulator;
-      CinterForgeState.profiles = CinterForgeState.profiles.filter(profile => profile.id !== 'macgame-' + result.game);
-      CinterForgeState.profiles.push({
-        id: 'macgame-' + result.game,
-        name: game.title,
-        machine,
-        disk,
-        kind: 'emulator',
-        year: emulator.year,
-        macGame: true,
-        gameAttemptUrl: result.url || null,
-        gameUnverified: !result.verified
-      });
-      await CinterForgeState.openSession('macgame-' + result.game);
+      if (!os || emulator?.disk !== os || emulator.kind !== 'emulator' || emulator.lagomorph)
+        throw new Error('Unsupported 68K game emulator for ' + game.title);
+      // Queue before opening a cold emulator: this suppresses the host's
+      // normal startup greeting while Finder and Terminal are recognized by OCR.
+      // Commands are delivered through Infinite Mac's keyboard API, not
+      // through the host or guest clipboard.
+      requestedOS = os;
+      CinterForgeState.queue68KGame({os, command: game.guest_command,
+        title: game.title});
+      CinterForgeState.notice('Launching ' + game.title + '. This may take a second...');
+      const opened = await CinterForgeState.openSession(emulator.id);
+      // openSession returns an existing singleton tab, but returns undefined
+      // on its first (new) emulator open. Resolve the actual new tab by OS.
+      const tab = opened || CinterForgeState.tabs.find(item => !item.closed &&
+        item.kind === 'emulator' && CinterForgeState.profiles.some(profile =>
+          profile.id === item.profileId && profile.disk === os && !profile.lagomorph));
+      if (!tab || tab.closed) throw new Error('Could not open the ' + os + ' emulator');
+      CinterForgeState.resume68KGame(tab);
     } catch (error) {
+      if (requestedOS) CinterForgeState.cancel68KGame(requestedOS);
       CinterForgeState.notice('Mac game: ' + error.message);
+    } finally {
+      CinterForgeState.pollingMacGames = false;
     }
   }, 850);
 

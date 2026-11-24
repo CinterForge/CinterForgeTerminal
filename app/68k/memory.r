@@ -4,7 +4,8 @@
  * catalog, scrollback history, controls, and decoded color card artwork.
  *
  * These are Finder's Preferred Size (4 MB) and Minimum Size (2 MB).
- * Flags are deliberately the same as Retro68's default SIZE resource.
+ * Enable canBackground so catalog discovery can finish after a game takes
+ * the foreground. The scan yields through WaitNextEvent between batches.
  */
 #include "Processes.r"
 
@@ -12,7 +13,7 @@ resource 'SIZE' (-1) {
     reserved,
     ignoreSuspendResumeEvents,
     reserved,
-    cannotBackground,
+    canBackground,
     needsActivateOnFGSwitch,
     backgroundAndForeground,
     dontGetFrontClicks,

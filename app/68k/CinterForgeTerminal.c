@@ -7,7 +7,7 @@
  *               must stay aligned with the other CinterForge terminals.
  *   - Games Report: the separate, scrollable Game Card browser.
  *   - Games Launcher: a separate Finder-style icon folder for screenshots
- *     and direct game launches (8x8 on 7.1, 6x6 on 7.6).
+ *     and direct game launches (8x7 on 7.1, 6x6 on 7.6).
  *
  * Games are discovered from actual APPL files on the mounted Infinite HD.
  * Their Finder names and native icon resources are read from those files.
@@ -51,6 +51,8 @@
 #define LAUNCHER_ICON_SIZE 32
 #define LAUNCHER_LABEL_SIZE 9
 #define LAUNCHER_CONTENT_HEIGHT 51
+#define LAUNCHER_LABEL_LOWER_PX 8
+#define LAUNCHER_MAC_71_TOP_GAP_PX 8
 #define REPORT_HEADER_HEIGHT 98
 #define REPORT_FOOTER_HEIGHT 23
 #define REPORT_SIDE_MARGIN 8
@@ -96,6 +98,8 @@ static UInt32 mac_double_click_interval_in_ticks(void)
 
 /* Keep the event loop responsive while enumerating large HFS volumes. */
 #define CATALOG_ENTRIES_PER_EVENT_TICK 70
+/* TickCount runs at approximately 60 ticks per second on classic Mac OS. */
+#define CATALOG_START_DELAY_TICKS 180U
 #define CARD_OPEN_BUTTON_OFFSET_Y 124
 
 /* Finder location and display name for one executable found on Infinite HD. */
@@ -135,13 +139,19 @@ static char g_lastClipboardMessage[192] = "";
  * poll every second for hours, and the log must remain small. */
 static long g_lastScrapReadStatus = 0x7fffffffL;
 static char g_pendingClipboardCommand[128] = "";
+/* A known host play request takes priority over finishing catalog discovery.
+ * Once its real FSSpec is found, launch it, then finish the same scan for the
+ * Games Launcher. The pending command is retained if that game is absent. */
+static char g_priorityPlayName[64] = "";
 /* Defer unattended Scrap Manager calls until the Finder has handed the
  * application its first update event. This avoids accessing the startup
  * clipboard while the Process Manager is still activating the new app. */
 static Boolean g_terminalHasDrawn = false;
-/* Wait for the first window update before scanning Infinite HD. Clipboard
- * polling begins after this initial scan, not during Process Manager startup. */
+/* Wait three seconds after the first Terminal redraw before scanning Infinite
+ * HD. Clipboard polling may proceed once that redraw has completed, so the
+ * host can exchange HELLO/READY and deliver a play request first. */
 static Boolean g_startupTasksPending = true;
+static UInt32 g_catalogScanStartTick = 0;
 /* Game.txt is read at startup or by the explicit Run Game.txt menu command. */
 static char g_requestedFinderName[64] = "";
 
@@ -165,6 +175,9 @@ static char g_terminalHistoryLines[MAX_TERMINAL_HISTORY_LINES][TERMINAL_OUTPUT_L
 static short g_terminalHistoryCount = 0;
 static short g_terminalFirstVisibleLine = 0;
 static char g_terminalInput[TERMINAL_INPUT_SIZE] = "";
+/* Host keyboard packets are deliberately retransmitted across emulator startup.
+ * Remember the last accepted request so retries cannot launch a game twice. */
+static char g_lastKeyboardPlayToken[16] = "";
 static Boolean g_listGamesWhenScanCompletes = false;
 static short g_terminalWindowWidth = 620;
 static short g_terminalWindowHeight = 360;
@@ -184,6 +197,8 @@ static Rect g_searchFieldBounds;
 
 /* Keyboard handlers are above the clipboard implementation in this file. */
 static void copy_game_list_to_mac_clipboard(void);
+static OSErr launch_discovered_application(short applicationIndex);
+static void try_launch_priority_game(short applicationIndex);
 
 /* -------------------------------------------------------------------------
  * String helpers: Toolbox names are Pascal strings, user commands are C text
@@ -215,9 +230,11 @@ static Boolean names_match_ignoring_case(const char *leftName, const char *right
     return *leftName == 0 && *rightName == 0;
 }
 
-/* Crash-trace build 007. Every checkpoint is written and closed immediately.
- * Try guest-to-host The Outside World:Uploads first; fall back to the writable
- * CinterForge Terminal HFS disk. Logging never changes the terminal UI. */
+/* Crash-trace checkpoints are written and closed immediately on the guest's
+ * writable CinterForge Terminal HFS disk. Never write a trace into The Outside
+ * World:Uploads: Infinite Mac auto-downloads each changed guest file as a ZIP,
+ * which WebKit correctly blocks as a data: frame navigation. Logging must not
+ * trigger browser downloads or change the Terminal UI. */
 #define TRACE68K_VERSION "010"
 #define TRACE68K_FILE "\pCinterForgeTerminal.log"
 static Boolean g_traceSelected = false;
@@ -258,38 +275,21 @@ static OSErr trace_write(short volume, long directory, const char *line, Boolean
 static void trace_checkpoint(const char *phase)
 {
     char line[192];
-    short outside, terminal;
+    short terminal;
     snprintf(line, sizeof(line), "trace=%s seq=%lu tick=%lu %s\r",
              TRACE68K_VERSION, ++g_traceNumber, (unsigned long)TickCount(), phase);
     if (g_traceSelected) {
         if (g_traceVolume) (void)trace_write(g_traceVolume, g_traceDir, line, false);
         return;
     }
-    outside = find_outside_world_volume();
-    if (outside) {
-        CInfoPBRec folder;
-        Str255 folderName = "\pUploads";
-        memset(&folder, 0, sizeof(folder));
-        folder.dirInfo.ioNamePtr = folderName;
-        folder.dirInfo.ioVRefNum = outside;
-        folder.dirInfo.ioFDirIndex = 0;
-        folder.dirInfo.ioDrDirID = HFS_ROOT_DIRECTORY_ID;
-        if (PBGetCatInfoSync(&folder) == noErr &&
-                (folder.hFileInfo.ioFlAttrib & ioDirMask) &&
-                trace_write(outside, folder.dirInfo.ioDrDirID, line, true) == noErr) {
-            g_traceVolume = outside;
-            g_traceDir = folder.dirInfo.ioDrDirID;
-        }
+    /* Keep diagnostic output inside the guest. File writes to Outside World
+     * Uploads generate browser downloads unrelated to game icon extraction. */
+    terminal = find_cinterforge_hd_volume();
+    if (terminal && trace_write(terminal, HFS_ROOT_DIRECTORY_ID, line, true) == noErr) {
+        g_traceVolume = terminal;
+        g_traceDir = HFS_ROOT_DIRECTORY_ID;
     }
-    if (!g_traceVolume) {
-        terminal = find_cinterforge_hd_volume();
-        if (terminal &&
-                trace_write(terminal, HFS_ROOT_DIRECTORY_ID, line, true) == noErr) {
-            g_traceVolume = terminal;
-            g_traceDir = HFS_ROOT_DIRECTORY_ID;
-        }
-    }
-    g_traceSelected = (g_traceVolume != 0); /* Retry if drives not ready yet. */
+    g_traceSelected = (g_traceVolume != 0); /* Retry if disk is not ready yet. */
 }
 
 /* Query the application heap without allocating an image or a scratch buffer.
@@ -392,11 +392,10 @@ static Boolean is_non_game_application_name(const unsigned char *finderName)
     return false;
 }
 
-/* The guest Game Catalog is intentionally per-OS, not an all-APPL list.
- * These command tokens are the 82 copied Infinite HD entries curated in
- * docs/Game Catalog.md. Both the Terminal and Games Report use this same
- * discovered catalog; unknown APPL files are not exposed automatically.
- * Games with duplicate Finder names all target the same OS. */
+/* The scanner recognizes the original 82 per-OS guest APPL candidates.
+ * Older versions remain internally recognized only to keep Finder-name
+ * collision numbering stable; current_game_command() filters the visible
+ * 34 System 7.1 and 27 Mac OS 7.6 launch targets. */
 #define GAME_OS_SYSTEM_71 71
 #define GAME_OS_MAC_76   76
 
@@ -449,6 +448,47 @@ static Boolean command_in_game_os_catalog(const char *command, short gameOS)
     for (commandIndex = 0; commandIndex < commandCount; ++commandIndex)
         if (names_match_ignoring_case(command, commands[commandIndex])) return true;
     return false;
+}
+
+/* Retain older catalog entries internally ONLY to preserve the existing
+ * short-name collision numbering (for example Apeiron / Apeiron2). Only the
+ * newest selected copy of each game may appear in Games, Games Report, or
+ * Games Launcher. These exclusions mirror the selected real guest targets in
+ * webapp/data/mac_games.json; the excluded APPL entries do not become cards.
+ */
+static Boolean current_game_command(const char *command, short gameOS)
+{
+    static const char *old71[] = {
+        "minotaur2", "minotaur3", "minotaur4", "minotaur5", "minotaur6", "minotaur7",
+        "stuntcopter10", "stuntcopter12", "stuntcopter15", "stuntcopter16",
+        "stuntcopterpatchedforan", "glider406", "fateofatlantis11",
+        "pipedream", "tetriscolor", "zero220"
+    };
+    static const char *old76[] = {
+        "apeiron", "avaracommuter", "hornetace10", "marathonv12",
+        "warcraftii100k"
+    };
+    const char *const *excluded = NULL;
+    size_t excludedCount = 0, i;
+    if (!command_in_game_os_catalog(command, gameOS)) return false;
+    if (gameOS == GAME_OS_SYSTEM_71) {
+        excluded = old71;
+        excludedCount = sizeof(old71) / sizeof(old71[0]);
+    } else if (gameOS == GAME_OS_MAC_76) {
+        excluded = old76;
+        excludedCount = sizeof(old76) / sizeof(old76[0]);
+    }
+    for (i = 0; i < excludedCount; ++i)
+        if (names_match_ignoring_case(command, excluded[i])) return false;
+    return true;
+}
+
+static Boolean current_discovered_game(short applicationIndex)
+{
+    return applicationIndex >= 0 &&
+           applicationIndex < g_discoveredApplicationCount &&
+           current_game_command(g_discoveredApplications[applicationIndex].shortName,
+                                g_runningGameOS);
 }
 
 static void set_games_report_status(const char *message)
@@ -740,7 +780,8 @@ static void rebuild_visible_application_list(void)
     for (applicationIndex = 0; applicationIndex < g_discoveredApplicationCount; applicationIndex++) {
         copy_pascal_string_to_c(g_discoveredApplications[applicationIndex].finderName,
                                 applicationName, sizeof(applicationName));
-        if (name_contains_filter(applicationName, g_applicationNameFilter)) {
+        if (current_discovered_game(applicationIndex) &&
+            name_contains_filter(applicationName, g_applicationNameFilter)) {
             g_visibleApplicationIndices[g_visibleApplicationCount++] = applicationIndex;
         }
     }
@@ -766,9 +807,10 @@ static void rebuild_visible_application_list(void)
 static void rebuild_launcher_application_list(void)
 {
     short i, insert;
-    g_launcherApplicationCount = g_discoveredApplicationCount;
-    for (i = 0; i < g_launcherApplicationCount; ++i)
-        g_launcherApplicationIndices[i] = i;
+    g_launcherApplicationCount = 0;
+    for (i = 0; i < g_discoveredApplicationCount; ++i)
+        if (current_discovered_game(i))
+            g_launcherApplicationIndices[g_launcherApplicationCount++] = i;
     for (i = 1; i < g_launcherApplicationCount; ++i) {
         short toInsert = g_launcherApplicationIndices[i];
         insert = i;
@@ -804,6 +846,8 @@ static short find_infinite_hd_volume(void)
 
 static void start_infinite_hd_catalog_scan(void)
 {
+    /* An explicit Rescan during the startup delay replaces the timed scan. */
+    g_startupTasksPending = false;
     g_discoveredApplicationCount = 0;
     g_visibleApplicationCount = 0;
     g_launcherApplicationCount = 0;
@@ -894,6 +938,11 @@ static void scan_next_catalog_batch(void)
                 assign_game_short_name(g_discoveredApplicationCount);
                 if (command_in_game_os_catalog(application->shortName, g_runningGameOS)) {
                     ++g_discoveredApplicationCount;
+                    /* Launch the requested game as soon as its actual APPL
+                     * appears, not when the entire Infinite HD scan ends.
+                     * The current folder stack is retained and scanned later
+                     * for the Games Launcher, even after the game takes focus. */
+                    try_launch_priority_game((short)(g_discoveredApplicationCount - 1));
                     /* Avoid rebuilding/sorting every single catalog record. */
                     if (!(g_discoveredApplicationCount % 32)) rebuild_visible_application_list();
                 }
@@ -917,6 +966,7 @@ static void scan_next_catalog_batch(void)
             short i;
             for (i = 0; i < g_discoveredApplicationCount; ++i) {
                 char listed[TERMINAL_OUTPUT_LINE_SIZE];
+                if (!current_discovered_game(i)) continue;
                 char finder[64];
                 copy_pascal_string_to_c(g_discoveredApplications[i].finderName,
                                         finder, sizeof(finder));
@@ -1017,12 +1067,32 @@ static OSErr launch_discovered_application(short applicationIndex)
     return launchError;
 }
 
+/* Launch only a full Finder-name or short-command match. Host game commands
+ * use the guest short name; a missing name is handled by the post-scan lookup.
+ * The existing catalog alias determines which installed version to select. */
+static void try_launch_priority_game(short applicationIndex)
+{
+    const DiscoveredApplication *application;
+    char finderName[64];
+    if (!g_priorityPlayName[0] || !current_discovered_game(applicationIndex)) return;
+    application = &g_discoveredApplications[applicationIndex];
+    copy_pascal_string_to_c(application->finderName, finderName, sizeof(finderName));
+    if (!names_match_ignoring_case(g_priorityPlayName, application->shortName) &&
+        !names_match_ignoring_case(g_priorityPlayName, finderName)) return;
+    if (launch_discovered_application(applicationIndex) == noErr) {
+        trace_checkpoint("catalog: requested game launched; completing scan");
+        g_priorityPlayName[0] = 0;
+        g_pendingClipboardCommand[0] = 0;
+    }
+}
+
 /* Wait until the catalog has finished so duplicate Finder names are detected. */
 static void auto_launch_requested_game_if_ready(void)
 {
     short applicationIndex, matchingIndex = -1, matchCount = 0;
     char applicationName[64];
-    if (!g_requestedFinderName[0] || g_catalogScanActive || g_autoLaunchAttempted) return;
+    if (!g_requestedFinderName[0] || g_startupTasksPending ||
+        g_catalogScanActive || g_autoLaunchAttempted) return;
     g_autoLaunchAttempted = true;
     for (applicationIndex = 0; applicationIndex < g_discoveredApplicationCount; ++applicationIndex) {
         copy_pascal_string_to_c(g_discoveredApplications[applicationIndex].finderName,
@@ -1561,18 +1631,18 @@ static void open_games_report_window(void)
 /* -------------------------------------------------------------------------
  * Games Launcher: separate Finder-style icon folder; no card images or export.
  * All icons and names come from the same real APPL entries as Games Report.
- * The exact 8x8 / 6x6 cells remain fixed even when fewer games are mounted,
+ * The exact 6x6 cells remain fixed even when fewer games are mounted,
  * so each screenshot can later be sliced on deterministic cell boundaries.
  * ------------------------------------------------------------------------- */
 
 static short launcher_column_count(void)
 {
-    return g_runningGameOS == GAME_OS_MAC_76 ? 6 : 8;
+    return 6;
 }
 
 static short launcher_row_count(void)
 {
-    return g_runningGameOS == GAME_OS_MAC_76 ? 6 : 8;
+    return 6;
 }
 
 /* Finder-style two-line names, rather than a single card-width truncation.
@@ -1621,10 +1691,13 @@ static void draw_games_launcher_window(void)
     RGBColor white = {0xffff, 0xffff, 0xffff};
     RGBColor black = {0, 0, 0};
     short columns = launcher_column_count(), rows = launcher_row_count();
+    short topGap = g_runningGameOS == GAME_OS_MAC_76 ? 0 : LAUNCHER_MAC_71_TOP_GAP_PX;
+    short gridHeight;
     short slot, capacity = (short)(columns * rows);
     if (!g_gamesLauncherWindow) return;
     SetPort(g_gamesLauncherWindow);
     bounds = g_gamesLauncherWindow->portRect;
+    gridHeight = (short)(bounds.bottom - topGap);
     RGBBackColor(&white);
     RGBForeColor(&black);
     EraseRect(&bounds);
@@ -1638,8 +1711,8 @@ static void draw_games_launcher_window(void)
         short row = (short)(slot / columns);
         short left = (short)((long)column * bounds.right / columns);
         short right = (short)((long)(column + 1) * bounds.right / columns);
-        short top = (short)((long)row * bounds.bottom / rows);
-        short bottom = (short)((long)(row + 1) * bounds.bottom / rows);
+        short top = (short)(topGap + (long)row * gridHeight / rows);
+        short bottom = (short)(topGap + (long)(row + 1) * gridHeight / rows);
         short cellWidth = (short)(right - left);
         short cellHeight = (short)(bottom - top);
         short contentTop = (short)(top + (cellHeight > LAUNCHER_CONTENT_HEIGHT
@@ -1649,7 +1722,8 @@ static void draw_games_launcher_window(void)
                                      (short)(left + (cellWidth - LAUNCHER_ICON_SIZE)/2),
                                      contentTop, LAUNCHER_ICON_SIZE);
         draw_launcher_name(applicationIndex, left + 2,
-                           (short)(contentTop + 39), cellWidth - 4);
+                           (short)(contentTop + 39 + LAUNCHER_LABEL_LOWER_PX),
+                           cellWidth - 4);
     }
 }
 
@@ -1661,13 +1735,16 @@ static void handle_games_launcher_click(Point point, UInt32 clickTime)
     static UInt32 previousClick = 0;
     Rect bounds;
     short columns = launcher_column_count(), rows = launcher_row_count();
+    short topGap = g_runningGameOS == GAME_OS_MAC_76 ? 0 : LAUNCHER_MAC_71_TOP_GAP_PX;
+    short gridHeight;
     short column, row, slot, applicationIndex;
     if (!g_gamesLauncherWindow) return;
     bounds = g_gamesLauncherWindow->portRect;
-    if (point.h < 0 || point.v < 0 || point.h >= bounds.right ||
-        point.v >= bounds.bottom || !bounds.right || !bounds.bottom) return;
+    gridHeight = (short)(bounds.bottom - topGap);
+    if (point.h < 0 || point.v < topGap || point.h >= bounds.right ||
+        point.v >= bounds.bottom || !bounds.right || gridHeight <= 0) return;
     column = (short)((long)point.h * columns / bounds.right);
-    row = (short)((long)point.v * rows / bounds.bottom);
+    row = (short)((long)(point.v - topGap) * rows / gridHeight);
     slot = (short)(row * columns + column);
     if (slot >= g_launcherApplicationCount) return;
     applicationIndex = g_launcherApplicationIndices[slot];
@@ -1752,6 +1829,7 @@ static Ptr make_game_list_text(long *textLength)
         char title[64];
         char row[128];
         size_t rowLength;
+        if (!current_discovered_game(gameIndex)) continue;
         copy_pascal_string_to_c(g_discoveredApplications[gameIndex].finderName,
                                 title, sizeof(title));
         snprintf(row, sizeof(row), "%s\t%s\r",
@@ -1904,9 +1982,9 @@ static void list_discovered_games_in_terminal(void)
 {
     short visibleIndex;
     char applicationName[64], outputLine[TERMINAL_OUTPUT_LINE_SIZE];
-    if (g_catalogScanActive) {
+    if (g_startupTasksPending || g_catalogScanActive) {
         g_listGamesWhenScanCompletes = true;
-        append_terminal_history_line("Scanning Infinite HD; listing games when ready...");
+        append_terminal_history_line("Waiting for Infinite HD catalog; listing games when ready...");
         return;
     }
     if (!g_infiniteHdVolumeRef) {
@@ -1916,6 +1994,7 @@ static void list_discovered_games_in_terminal(void)
     snprintf(outputLine, sizeof(outputLine), "Games:");
     append_terminal_history_line(outputLine);
     for (visibleIndex = 0; visibleIndex < g_discoveredApplicationCount; ++visibleIndex) {
+        if (!current_discovered_game(visibleIndex)) continue;
         copy_pascal_string_to_c(
             g_discoveredApplications[visibleIndex].finderName,
             applicationName, sizeof(applicationName));
@@ -1952,8 +2031,34 @@ static void launch_game_by_finder_name(const char *requestedName)
         append_terminal_history_line("Enter an exact Finder application name.");
         return;
     }
-    if (g_catalogScanActive) {
-        append_terminal_history_line("Wait for the Infinite HD scan to complete.");
+    if (g_startupTasksPending || g_catalogScanActive) {
+        /* Do not wait for all games. Remember the exact Finder/short name and
+         * launch as soon as its APPL is encountered. Continue the unfinished
+         * scan afterward so Games Report and Games Launcher become complete. */
+        memcpy(g_priorityPlayName, requestedName, requestedNameLength);
+        g_priorityPlayName[requestedNameLength] = 0;
+        snprintf(g_pendingClipboardCommand, sizeof(g_pendingClipboardCommand),
+                 "play %.*s", (int)requestedNameLength, requestedName);
+        if (g_startupTasksPending && g_terminalHasDrawn) {
+            /* A direct play request bypasses the ordinary 3-second scan
+             * delay. It is already safe: the Terminal has drawn. */
+            start_infinite_hd_catalog_scan();
+        }
+        if (g_catalogScanActive) {
+            /* The incremental scan may have passed this game's directory
+             * before the host sent play, so check what is already known. */
+            for (applicationIndex = 0;
+                 applicationIndex < g_discoveredApplicationCount && g_priorityPlayName[0];
+                 ++applicationIndex) try_launch_priority_game(applicationIndex);
+            if (g_priorityPlayName[0])
+                append_terminal_history_line("Finding requested game; catalog scan continues.");
+        } else if (!g_startupTasksPending) {
+            /* Missing Infinite HD or unsupported OS: don't leave a command
+             * waiting forever for a scan that could not start. */
+            g_priorityPlayName[0] = 0;
+            g_pendingClipboardCommand[0] = 0;
+            append_terminal_history_line("Cannot search for game: Infinite HD catalog unavailable.");
+        }
         return;
     }
 
@@ -1961,6 +2066,7 @@ static void launch_game_by_finder_name(const char *requestedName)
     for (applicationIndex = 0;
          applicationIndex < g_discoveredApplicationCount;
          ++applicationIndex) {
+        if (!current_discovered_game(applicationIndex)) continue;
         copy_pascal_string_to_c(g_discoveredApplications[applicationIndex].finderName,
                                 finderName, sizeof(finderName));
         {
@@ -2110,9 +2216,9 @@ static Boolean read_cinter_clipboard_message(char *output, size_t capacity)
     return true;
 }
 
-/* An addressable command may arrive while the incremental Infinite HD scan
- * is running. Defer one command until discovery completes instead of claiming
- * execution when the game is not yet resolvable. */
+/* An addressable command may arrive during catalog discovery. A play
+ * request now starts a priority lookup; the rest of the scan continues after
+ * launch so Finder icons and game lists become available. */
 static void dispatch_cinter_clipboard_command(const char *command)
 {
     char mutableCommand[128];
@@ -2125,10 +2231,8 @@ static void dispatch_cinter_clipboard_command(const char *command)
         !names_match_ignoring_case(command, "games") &&
         !names_match_ignoring_case(command, "games report") &&
         !names_match_ignoring_case(command, "games rescan")) return;
-    if (g_catalogScanActive && strncmp(command, "play ", 5) == 0) {
-        strcpy(g_pendingClipboardCommand, command);
-        return;
-    }
+    /* Route play through the same priority lookup used by typed commands.
+     * Ack means the request was accepted, not that its game has booted. */
     if (names_match_ignoring_case(command, "games report"))
         trace_checkpoint("report: request arrived via clipboard");
     strcpy(mutableCommand, command);
@@ -2186,6 +2290,39 @@ static void poll_cinter_clipboard(void)
     }
 }
 
+/* A keyboard packet has an explicit beginning, end, and repeated request ID:
+ *   cinterbegin <id> play <shortname> cinterend <id>
+ * A partial packet, stale input before BEGIN, or a retry cannot accidentally
+ * execute a regular Terminal command. Host uses only ASCII key events. */
+static Boolean handle_framed_keyboard_play(const char *line)
+{
+    const char *begin = strstr(line, "cinterbegin ");
+    char token[16], command[32], endToken[16];
+    char exact[TERMINAL_INPUT_SIZE];
+    char playLine[48];
+    char extra;
+    size_t i;
+    if (!begin) return false;
+    if (sscanf(begin, "cinterbegin %15s play %31s cinterend %15s %c",
+               token, command, endToken, &extra) != 3) return true;
+    if (strlen(token) < 6 || strcmp(token, endToken) != 0) return true;
+    for (i = 0; token[i]; ++i)
+        if (!((token[i] >= 'a' && token[i] <= 'z') ||
+              (token[i] >= '0' && token[i] <= '9'))) return true;
+    for (i = 0; command[i]; ++i)
+        if (!((command[i] >= 'a' && command[i] <= 'z') ||
+              (command[i] >= '0' && command[i] <= '9'))) return true;
+    snprintf(exact, sizeof(exact), "cinterbegin %s play %s cinterend %s",
+             token, command, token);
+    if (strcmp(begin, exact) != 0) return true;
+    if (strcmp(g_lastKeyboardPlayToken, token) == 0) return true;
+    strcpy(g_lastKeyboardPlayToken, token);
+    snprintf(playLine, sizeof(playLine), "play %s", command);
+    trace_checkpoint("keyboard: complete framed play accepted");
+    execute_terminal_command(playLine);
+    return true;
+}
+
 static void handle_terminal_key(EventRecord *keyboardEvent)
 {
     unsigned char typedCharacter =
@@ -2222,11 +2359,17 @@ static void handle_terminal_key(EventRecord *keyboardEvent)
     }
 
     if (typedCharacter == 0x0d || typedCharacter == 0x03) {
-        char enteredCommandLine[TERMINAL_OUTPUT_LINE_SIZE];
-        snprintf(enteredCommandLine, sizeof(enteredCommandLine),
-                 "CinterForge Terminal> %.85s", g_terminalInput);
-        append_terminal_history_line(enteredCommandLine);
-        execute_terminal_command(g_terminalInput);
+        if (!handle_framed_keyboard_play(g_terminalInput)) {
+            char enteredCommandLine[TERMINAL_OUTPUT_LINE_SIZE];
+            snprintf(enteredCommandLine, sizeof(enteredCommandLine),
+                     "CinterForge Terminal> %.85s", g_terminalInput);
+            append_terminal_history_line(enteredCommandLine);
+            execute_terminal_command(g_terminalInput);
+        }
+        g_terminalInput[0] = 0;
+    } else if (typedCharacter == 0x1b) {
+        /* Each new host retry starts with Escape to discard an incomplete
+         * previous packet. Normal manually typed commands are unaffected. */
         g_terminalInput[0] = 0;
     } else if (typedCharacter == 0x08 || typedCharacter == 0x7f) {
         if (inputLength) g_terminalInput[inputLength - 1] = 0;
@@ -2418,6 +2561,8 @@ static void handle_window_update(WindowPtr window)
     }
     EndUpdate(window);
     if (window == g_terminalWindow) {
+        if (!g_terminalHasDrawn)
+            g_catalogScanStartTick = TickCount() + CATALOG_START_DELAY_TICKS;
         g_terminalHasDrawn = true;
         if (!g_traceFirstUpdate) {
             g_traceFirstUpdate = true;
@@ -2566,8 +2711,8 @@ int main(void)
             }
             handle_classic_mac_event(&eventRecord);
         }
-        if (g_startupTasksPending && g_terminalHasDrawn) {
-            g_startupTasksPending = false;
+        if (g_startupTasksPending && g_terminalHasDrawn &&
+            (SInt32)(TickCount() - g_catalogScanStartTick) >= 0) {
             /* Machine cards start Terminal only. The host speaks its existing
              * greeting only after a matching clipboard READY arrives. */
             trace_checkpoint("catalog: before start_infinite_hd_catalog_scan");
@@ -2592,24 +2737,28 @@ int main(void)
         }
         /* The optional Game.txt is explicit-only. Clipboard commands use the
          * same discovered catalog and keep Terminal running in the background. */
-        if (!g_catalogScanActive && g_requestedFinderName[0]) {
+        if (!g_startupTasksPending && !g_catalogScanActive &&
+            g_requestedFinderName[0]) {
             trace_checkpoint("launcher: requested game begin");
             auto_launch_requested_game_if_ready();
             trace_checkpoint("launcher: requested game returned");
         }
-        if (!g_catalogScanActive && g_pendingClipboardCommand[0]) {
+        if (!g_startupTasksPending && !g_catalogScanActive &&
+            g_pendingClipboardCommand[0]) {
+            /* Requested APPL was not encountered during discovery; retain
+             * the post-scan lookup to report not-found/ambiguous names. */
             char pending[sizeof(g_pendingClipboardCommand)];
+            g_priorityPlayName[0] = 0;
             strcpy(pending, g_pendingClipboardCommand);
             g_pendingClipboardCommand[0] = 0;
             trace_checkpoint("clipboard: pending command begin");
             dispatch_cinter_clipboard_command(pending);
             trace_checkpoint("clipboard: pending command returned");
         }
-        /* HELLO/READY must not wait for a potentially lengthy Infinite HD
-         * scan. The scan has already initialized the OS address by this point;
-         * launch commands received during discovery are deferred above.
-         * A prompt READY also prevents unnecessary host Finder retries. */
-        if (g_terminalHasDrawn && !g_startupTasksPending) {
+        /* HELLO/READY is safe once the Terminal has drawn, and must not wait
+         * for the delayed or lengthy Infinite HD scan. The OS address was
+         * initialized before the first event; early play requests queue above. */
+        if (g_terminalHasDrawn) {
             if (!tracedFirstPoll) trace_checkpoint("clipboard: first poll begin");
             poll_cinter_clipboard();
             if (!tracedFirstPoll) {

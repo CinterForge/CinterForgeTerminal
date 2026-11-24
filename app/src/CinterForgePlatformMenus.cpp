@@ -288,8 +288,10 @@ namespace CinterForgePlatformMenus {
             target->debuggerAction = [&window]
             { window.dispatch([&window]
                               { openNativeInspector(window); }); };
-            // The native menu must copy reliably even when WKWebView's asynchronous
-            // navigator.clipboard API lacks permission (or a DOM user gesture).
+            // Host Terminal's Edit actions remain ours. Embedded editors use
+            // Cocoa's native copy:/paste: selectors with nil menu targets, so
+            // WKWebView receives the real user-initiated event without an
+            // intermediate asynchronous CinterForge action.
             target->copyAction = [&window]
             { window.dispatch([&window]
                               {
@@ -297,7 +299,7 @@ namespace CinterForgePlatformMenus {
             static_cast<webview_t>(&window),
             WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER);
         if (!browser) return;
-        // Do not steal standard clipboard commands from a separate Web Inspector.
+        // A separate Web Inspector window owns its own native Edit actions.
         if (NSApp.keyWindow && NSApp.keyWindow != browser.window) {
             [NSApp sendAction:@selector(copy:) to:nil from:nil];
             return;
@@ -309,6 +311,7 @@ namespace CinterForgePlatformMenus {
             [pasteboard clearContents];
             [pasteboard setString:(NSString*)value forType:NSPasteboardTypeString];
         }]; }); };
+            target->embeddedClipboardActive = NO;
             target->pasteAction = [&window]
             {
                 WKWebView *browser=(WKWebView*)webview_get_native_handle(
@@ -319,8 +322,7 @@ namespace CinterForgePlatformMenus {
                     return;
                 }
                 NSString *value = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
-                if (!value)
-                    return;
+                if (!value) return;
                 const std::string utf8 = [value UTF8String] ?: "";
                 window.dispatch([&window, utf8]
                                 { window.eval("window.CinterEdit && window.CinterEdit.insert(\"" + CinterForgeApplicationPaths::jsonEscape(utf8) + "\")"); });

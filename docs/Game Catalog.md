@@ -1,6 +1,6 @@
 # Games and Experiences
 
-**Every game launches by typing its command in any existing Terminal Session, with or without the optional `play` prefix.** There is no separate Game mode or New Game Terminal menu action. Type `joshua` (or `play joshua`, or its `wargames` alias) to open the **original, unchanged JOSHUA** application as a new Session tab; `joshua` is first in `games`. The `games` list then shows each of the 16 actual interactive-fiction title commands (from the authored JSON), one `infinitemac` emulator gallery command, and `bedrock` last. The 67 classic Macintosh game aliases remain available directly but do not clutter `games`. `infinitemac` / `play infinitemac` opens a searchable/filterable gallery of the same 20 OS-version choices (one representative machine per OS release) shown in the machine menus, with each thumbnail opening its emulator in a new tab. `bedrock` / `play bedrock` opens Bedrock help and controls Minecraft; `minecraft` opens a live server console; `lagomorph` retains its hidden original easter egg.
+**Every game launches by typing its command in any existing Terminal Session, with or without the optional `play` prefix.** There is no separate Game mode or New Game Terminal menu action. Type `joshua` (or `play joshua`, or its `wargames` alias) to open the **original, unchanged JOSHUA** application as a new Session tab; `joshua` is first in `games`. The `games` list then shows each of the 16 actual interactive-fiction title commands (from the authored JSON), one `infinitemac` emulator gallery command, and `bedrock` last. The 64 curated classic Macintosh game aliases remain available directly but do not clutter `games`. `infinitemac` / `play infinitemac` opens a searchable/filterable gallery of the same 20 OS-version choices (one representative machine per OS release) shown in the machine menus, with each thumbnail opening its emulator in a new tab. `bedrock` / `play bedrock` opens Bedrock help and controls Minecraft; `minecraft` opens a live server console; `lagomorph` retains its hidden original easter egg.
 
 Games run in their existing appropriate player, emulator or service. `wargames` uses JOSHUA's existing standalone web application and original audio, presentation and input logic. Terminal commands remain available from ordinary Mac/Windows/Linux shell Sessions, while `code` opens Code-OSS for development. Native Mac/Windows/Linux and Minecraft console actions remain in the system menu; game names are typed, not selected through a special Game-mode menu.
 
@@ -61,16 +61,55 @@ No host Game Cards have been implemented yet.
 From the existing System 7.1 or Mac OS 7.6 68K Terminal, choose **Games → Games
 Launcher** or enter `games launcher`. This opens a third, independent classic
 Macintosh window, using the discovered Finder applications and their actual
-resource-fork icons. The fixed **8×8** (System 7.1, up to 50 games) or **6×6**
+resource-fork icons. The fixed **8×7** (System 7.1, up to 50 games) or **6×6**
 (Mac OS 7.6, up to 32 games) folder layout leaves unused cells blank to make
 screenshots consistently sliceable. Finder names appear below the icons; one
 click on a populated cell launches that exact application, as in Games Report.
 The original Terminal window, Game Card report and emulator boot behavior do
 not change. This view does not require or export an icon ZIP.
 
+## Host OCR acquisition of Games Launcher artwork
+
+When the **existing** Infinite Mac OCR recognizes the 68K Terminal and then
+recognizes **Games Launcher** in the guest framebuffer, the host samples two
+unchanged frames before cropping all 50 System 7.1 or 32 Mac OS 7.6 launcher
+slots. The cropping geometry is exactly the 8×7 or 6×6 drawing geometry in
+`app/68k/CinterForgeTerminal.c`, not the WebView CSS scale. Each slot is saved
+as a real 32×32 PNG, including any blank-looking icon, under the selected
+`Builds/Assets/Games/Icons/System-7.1/` or `Mac-OS-7.6/` directory. A JSON
+manifest preserves operating system, grid dimensions, slot order, and slots
+that appear empty. Slot order is positional and is **not** silently mapped
+to the unrelated 67-entry modern alias catalog; identity mapping can be
+verified when that catalog integration is implemented.
+
+The existing authenticated host API performs this write. No guest clipboard,
+ZIP export, data URL, network scraper, new emulator interaction or CSP change
+is required. A missing selected Builds/Assets root is reported rather than
+replaced with a guessed developer folder or an installed-app Builds tree.
+The actual emulator capture remains an end-to-end acceptance item.
+
 ## Classic Macintosh games — direct commands
 
 `infinitemac` opens the 20-OS-version emulator gallery; individual classic Macintosh game aliases remain available as direct commands but are not separate `games` entries. The catalog is based on the [Infinite Mac](https://infinitemac.org/) game library; titles use their command aliases rather than arbitrary file paths. Infinite Mac's browser runtime and game media may require network access, and each game's appropriate Mac profile/software media must be respected.
+
+For `play <game>` or a short game alias, the host selects the OS version
+recorded in `webapp/data/mac_games.json`, reuses the existing System 7.1 or
+Mac OS 7.6 emulator tab, and waits for OCR to verify the native 68K Terminal
+is foreground. It then types the corresponding `play <guest_command>` via
+Infinite Mac's documented physical keyboard events. When **game-initiated**
+boot first opens the 68K Terminal, it skips the native host Zarvox welcome;
+normal machine-card startup still speaks. Commands typed during the guest's
+Infinite HD scan are deferred until that scan finishes. This no longer
+creates experimental per-game emulator tabs or attempts library downloads.
+`infinitemac list` shows the canonical entries with supported guest commands.
+
+A guest game already in the foreground cannot yet be switched back to the
+68K Terminal automatically by the embedded keyboard protocol. In that case
+`play` stays pending and the host asks the user to bring the Terminal forward;
+it retries after OCR sees the 68K Terminal again. The catalog contains one
+unverified guest mapping (`marathoninfinity`), which refuses to claim launch.
+Successful keyboard dispatch is not proof the guest game booted; live WebView
+acceptance remains necessary.
 
 The game commands are:
 
@@ -144,24 +183,21 @@ The game commands are:
 | `warcraftiitidesofdarkness` | Warcraft II - Tides of Darkness |
 | `wesleyantetris` | Wesleyan Tetris |
 
-### Per-game historical Macintosh starting profiles
+### Classic Macintosh launch profiles
 
-The existing host-side 67-game `webapp/data/mac_games.json` catalog now
-specifies `emulator_profile` for each command. Both a newly opened game tab
-and restoration of a previously opened game tab resolve that ID through the
-real emulator definitions in `webapp/data/terminal_styles.json` rather than
-using Mac OS 7.6 for everything, or an unsupported Mac OS 9.2 value for an
-OS X-only item. These are **initial compatibility candidates**, not tested
-minimum operating-system requirements. The existing legacy game-command path
-still launches the Infinite Mac environment; automated opening of the game
-inside the guest is **not proven**.
+The host's 64-entry `webapp/data/mac_games.json` catalog supplies
+`emulator_profile`, `guest_os` and the guest's real `guest_command`. `play`
+selects the one canonical System 7.1 (Mac II) or Mac OS 7.6 (Quadra 650)
+emulator for the title and reuses that OS tab. Its existing 68K CinterForge
+Terminal is started if needed; once OCR confirms it is foreground, the host
+types `play <guest_command>` without an extra spoken startup greeting.
+Other museum emulators and Lagomorph are unchanged.
 
-| Target emulator | Guest OS | Typical game era/use |
-|---|---|---|
-| Mac II | System 7.1 | Earlier 68K/black-and-white classics; some may work better under System 6, where the 68K companion is not available |
-| Quadra 650 | Mac OS 7.6 | System 7-era colour games and 68040 titles |
-| Power Macintosh G3 (Blue & White) | Mac OS 9.0.4 | Available as a fallback if a game demonstrably needs Mac OS 9; no game is assigned here without evidence |
-| Power Macintosh G4 (PCI Graphics) | Mac OS X 10.3 | Only the existing catalog entries explicitly marked as requiring Mac OS X |
+The 64 rows include aliases. One (`marathoninfinity`) has no verified guest
+application, so direct launch refuses it rather than guessing a different
+Marathon version. Existing classic Macintosh game windows may need the user
+to activate the 68K Terminal before a pending command can run; cross-app
+focus automation is not yet verified.
 
 ### Current Infinite HD guest scan: OS candidates by exact copied name
 

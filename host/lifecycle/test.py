@@ -472,9 +472,9 @@ class RepositoryContractSmoke(unittest.TestCase):
         import re
         games = json.loads((REPO / 'webapp/data/mac_games.json').read_text())
         titles = json.loads((REPO / 'webapp/data/if_titles.json').read_text())
-        self.assertEqual(len(games['games']), 67)
+        self.assertEqual(len(games['games']), 64)
         self.assertEqual(len(titles['titles']), 16)
-        self.assertEqual(len({item['command'] for item in games['games']}), 67)
+        self.assertEqual(len({item['command'] for item in games['games']}), 64)
         terminal = (REPO / 'webapp/runtime/CinterForgeCommands.py').read_text() + (REPO / 'webapp/runtime/CinterForgeState.py').read_text()
         self.assertIn('lagomorph', terminal.lower())
         self.assertTrue((REPO / 'webapp/index.html').is_file())

@@ -967,6 +967,97 @@ class CinterForgeHTTPRoutes:
             body = json.loads(self.rfile.read(n))
             if not isinstance(body, dict):
                 raise ValueError('Expected a JSON object')
+            if route in ('/api/infinitemac/game-icons', '/api/infinitemac/game-icons/finish'):
+                # Accept only authenticated native-loopback requests. Unlike
+                # optional Asset/DevTools authoring, the raw framebuffer is
+                # supplied by the existing embedded Infinite Mac WebView.
+                if self.client_address[0] not in ('127.0.0.1', '::1'):
+                    self._json(403, {'error': 'Icon capture requires the local Terminal host'})
+                    return
+                os_version = body.get('os')
+                versions = {'7.1': ('System-7.1', 50), '7.6': ('Mac-OS-7.6', 32)}
+                if not isinstance(os_version, str) or os_version not in versions:
+                    raise ValueError('Unknown Games Launcher operating system')
+                folder, expected = versions[os_version]
+                from runtime.assets import CinterForgeAssetViews as _GameIconAssets
+                library = _GameIconAssets.root_for(self.server)
+                # No guessed ~/Source or installed-app Builds fallback. The
+                # user-selected shared Assets root is the only destination.
+                destination = library / 'Games' / 'Icons' / folder
+                for directory in (library / 'Games', library / 'Games' / 'Icons', destination):
+                    if directory.is_symlink():
+                        raise ValueError('Games icon asset destination is a symlink')
+                destination.mkdir(parents=True, exist_ok=True)
+                if route == '/api/infinitemac/game-icons':
+                    slot = body.get('slot')
+                    encoded = body.get('png_base64')
+                    if (type(slot) is not int or slot < 1 or slot > expected or
+                            not isinstance(encoded, str) or len(encoded) > 48 * 1024):
+                        raise ValueError('Invalid Games Launcher icon slot or PNG data')
+                    raw = base64.b64decode(encoded, validate=True)
+                    # A screenshot crop is precisely 32x32 in the original
+                    # guest resolution, not a resized CSS/browser screenshot.
+                    if (len(raw) < 45 or len(raw) > 32 * 1024 or
+                            raw[:8] != b'\x89PNG\r\n\x1a\n' or
+                            raw[12:16] != b'IHDR' or
+                            struct.unpack('>II', raw[16:24]) != (32, 32) or
+                            raw[-12:-8] != b'\x00\x00\x00\x00' or raw[-8:-4] != b'IEND'):
+                        raise ValueError('Games Launcher icon must be a 32x32 PNG')
+                    output = destination / f'slot-{slot:02d}.png'
+                    if output.is_symlink():
+                        raise ValueError('Games Launcher icon path is a symlink')
+                    changed = not output.is_file() or output.read_bytes() != raw
+                    if changed:
+                        temporary = destination / (f'.slot-{slot:02d}-{uuid.uuid4().hex}.tmp')
+                        try:
+                            temporary.write_bytes(raw)
+                            temporary.replace(output)
+                        finally:
+                            temporary.unlink(missing_ok=True)
+                    self._json(200, {'saved': True, 'changed': changed, 'slot': slot})
+                    return
+                captured = body.get('captured')
+                missing = body.get('missing')
+                blank_slots = body.get('blank_slots', [])
+                if (not isinstance(captured, list) or not isinstance(missing, list) or
+                        not isinstance(blank_slots, list) or
+                        any(type(n) is not int or n < 1 or n > expected for n in blank_slots) or
+                        not set(blank_slots).issubset(captured) or
+                        any(type(n) is not int or n < 1 or n > expected for n in captured + missing) or
+                        len(set(captured + missing)) != expected or
+                        set(captured).intersection(missing)):
+                    raise ValueError('Incomplete or inconsistent Games Launcher grid inventory')
+                if any(not (destination / f'slot-{slot:02d}.png').is_file() for slot in captured):
+                    raise ValueError('A Games Launcher PNG is missing from the asset library')
+                manifest = {
+                    'source': 'Infinite Mac native 68K framebuffer; OCR-detected Games Launcher',
+                    'os': os_version, 'columns': 8 if os_version == '7.1' else 6,
+                    'rows': 8 if os_version == '7.1' else 6,
+                    'expected': expected, 'captured': len(captured), 'missing_slots': sorted(missing),
+                    'possible_blank_slots': sorted(set(blank_slots)),
+                    'image_size': [32, 32],
+                    # Slots are deliberately positional. The guest's dynamic
+                    # Finder-name ordering must not be guessed from the older
+                    # webapp game aliases or filename lists.
+                    'icons': [{'slot': slot, 'file': f'slot-{slot:02d}.png'}
+                              for slot in sorted(captured)]}
+                output = destination / 'manifest.json'
+                if output.is_symlink():
+                    raise ValueError('Games Launcher manifest path is a symlink')
+                data = (json.dumps(manifest, indent=2, sort_keys=True) + '\n').encode('utf-8')
+                if not output.is_file() or output.read_bytes() != data:
+                    temporary = destination / ('.manifest-' + uuid.uuid4().hex + '.tmp')
+                    try:
+                        temporary.write_bytes(data)
+                        temporary.replace(output)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+                self.server.log_event('Games Launcher icons captured: os=' + os_version +
+                                      ' icons=' + str(len(captured)) + '/' + str(expected) +
+                                      ' path=' + str(destination))
+                self._json(200, {'saved': True, 'count': len(captured),
+                                 'directory': str(destination)})
+                return
             if route == '/assets/command':
                 if not self.server.capabilities.get('assets') or not self._local() or not self._lan_logged_in():
                     self._json(403, {'ok': False, 'error': 'not authorized'})
@@ -1415,37 +1506,14 @@ class CinterForgeHTTPRoutes:
                 if not isinstance(command, str) or command not in catalog:
                     raise ValueError('Unknown Macintosh game command')
                 entry = catalog[command]
-                # A library_path is a repository pathname, NOT a playable URL.
-                # Only explicit HTTPS media candidates in the authored catalog
-                # may be attempted. Failed URLs remain skipped until session end.
-                raw_urls = entry.get('download_urls', [])
-                if not isinstance(raw_urls, list):
-                    raise ValueError('Invalid game download_urls list')
-                urls = []
-                for raw in raw_urls:
-                    if not isinstance(raw, str) or len(raw) > 2048:
-                        raise ValueError('Invalid game download URL')
-                    parsed = urlsplit(raw)
-                    if (parsed.scheme != 'https' or not parsed.netloc or
-                            parsed.username or parsed.password or parsed.fragment):
-                        raise ValueError('Game media must use public HTTPS URLs')
-                    if raw not in urls:
-                        urls.append(raw)
+                if not entry.get('guest_command'):
+                    raise ValueError('No verified 68K game launch mapping for ' + entry['title'])
+                if entry.get('guest_os') not in ('7.1', '7.6') or not re.fullmatch(
+                        r'[a-z0-9]{1,64}', entry['guest_command']):
+                    raise ValueError('Invalid installed 68K game launch mapping')
                 with self.server.debug_lock:
-                    state = self.server.game_verification.setdefault(command, {
-                        'verified_url': None, 'failed_urls': [],
-                        'last_attempt_url': None, 'last_outcome': None,
-                        'status': 'unverified'})
-                    preferred = state.get('verified_url')
-                    selected = preferred if preferred in urls else next(
-                        (url for url in urls if url not in state['failed_urls']), None)
-                    state['last_attempt_url'] = selected
-                    if not selected and urls and not preferred:
-                        state['status'] = 'all_sources_failed'
-                    self.server.macgame_request = {
-                        'game': command, 'url': selected, 'verified': bool(selected and selected == preferred)}
-                self._json(200, {'requested': True, 'command': command,
-                                 'source_url': selected})
+                    self.server.macgame_request = {'game': command}
+                self._json(200, {'requested': True, 'command': command})
                 return
             if route == '/api/games/feedback':
                 command = body.get('command')

@@ -337,6 +337,34 @@ namespace cinterforge {
             }
 #endif
 #ifdef __APPLE__
+            // Do not consume the macOS Copy/Paste key equivalents when an
+            // embedded browser is active. They must enter WKWebView through the
+            // ordinary responder chain, allowing WebKit to deliver paste
+            // to Infinite Mac's focused iframe. Re-dispatching from a custom
+            // menu target can lose the original key event/gesture in WebKit.
+            if (args.find("\"event\":\"clipboard-context\"") != std::string::npos) {
+                const bool embedded = args.find("\"embedded\":true") != std::string::npos;
+                window.dispatch([embedded] {
+                    id owner = [NSApp delegate];
+                    if (![owner isKindOfClass:[CinterForgeFileMenuTarget class]]) return;
+                    CinterForgeFileMenuTarget *target = (CinterForgeFileMenuTarget *)owner;
+                    target->embeddedClipboardActive = embedded ? YES : NO;
+                    NSMenu *edit = [[[NSApp mainMenu] itemWithTitle:@"Edit"] submenu];
+                    for (NSMenuItem *item in [edit itemArray]) {
+                        if ([[item title] isEqualToString:@"Copy"]) {
+                            [item setAction:embedded ? @selector(copy:) : @selector(copyTerminal:)];
+                            [item setTarget:embedded ? nil : target];
+                            [item setEnabled:YES];
+                        } else if ([[item title] isEqualToString:@"Paste"]) {
+                            [item setAction:embedded ? @selector(paste:) : @selector(pasteTerminal:)];
+                            [item setTarget:embedded ? nil : target];
+                            [item setEnabled:YES];
+                        }
+                    }
+                });
+            }
+#endif
+#ifdef __APPLE__
             // code-menu-mode has no Cocoa action: the real menu state is
             // provided by code-menu-model. Do not queue a no-op UI dispatch.
             if (args.find("\"event\":\"code-menu-model\"") != std::string::npos) {
@@ -389,12 +417,22 @@ namespace cinterforge {
                                     [entry setTarget:nil];
                                     [entry setKeyEquivalent:@"x"];
                                 } else if ([title isEqualToString:@"Copy"]) {
-                                    if ([action isEqualToString:@"edit:copy"])
+                                    // Embedded editors must receive the native
+                                    // Copy action, never our Terminal transcript handler.
+                                    if (target->embeddedClipboardActive) {
+                                        [entry setAction:@selector(copy:)];
+                                        [entry setTarget:nil];
+                                    } else if ([action isEqualToString:@"edit:copy"]) {
                                         [entry setAction:@selector(copyTerminal:)];
+                                    }
                                     [entry setKeyEquivalent:@"c"];
                                 } else if ([title isEqualToString:@"Paste"]) {
-                                    if ([action isEqualToString:@"edit:paste"])
+                                    if (target->embeddedClipboardActive) {
+                                        [entry setAction:@selector(paste:)];
+                                        [entry setTarget:nil];
+                                    } else if ([action isEqualToString:@"edit:paste"]) {
                                         [entry setAction:@selector(pasteTerminal:)];
+                                    }
                                     [entry setKeyEquivalent:@"v"];
                                 }
                             }

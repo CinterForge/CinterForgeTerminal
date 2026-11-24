@@ -219,7 +219,7 @@ def _cli_mac_catalog():
     from runtime import CinterForgeSettings as _CinterForgeSettings
     from pathlib import Path
     data = json.loads((_CinterForgeSettings.ASSETS / 'data/mac_games.json').read_text(encoding='utf-8'))
-    if data.get('schema') != 'cinterforge.terminal.macgames.v1' or len(data.get('games', [])) != 67:
+    if data.get('schema') != 'cinterforge.terminal.macgames.v1' or len(data.get('games', [])) != 64:
         raise RuntimeError('Incomplete Macintosh games catalog')
     result = {}
     for game in data['games']:
@@ -233,7 +233,7 @@ def _cli_mac_catalog():
 
 
 def _game_catalog():
-    """The 68-game launch list: original JOSHUA plus 67 classic Mac titles."""
+    """Original JOSHUA plus the 64 curated Classic Mac command aliases."""
     return {'wargames': {'title':'WarGames (JOSHUA)', 'kind':'joshua'},
             **_cli_mac_catalog()}
 
@@ -248,13 +248,14 @@ def _launch_wargames():
 
 
 def _mac_launch(command, entry):
-    # The emulator can boot with Infinite HD present. Its public embedding API
-    # does not yet provide a verified program-by-name launch capability.
+    # The host reuses the two canonical 68K emulators, waits for Terminal OCR
+    # and types the guest's short game command using supported keyboard events.
+    if not entry.get('guest_command'):
+        raise RuntimeError(f"{entry['title']} has no verified matching game on Infinite HD")
     data = _api('/api/macgames/open', body={'command':command})
     if not data.get('requested'):
         raise RuntimeError('Macintosh emulator launch was not accepted')
-    print(f"Starting Macintosh environment for {entry['title']} (experimental direct launch)", flush=True)
-    print('If the game does not auto-open, locate it on Infinite HD; this title needs a guest startup recipe.', flush=True)
+    print(f"Opening {entry['title']} in the {entry['guest_os']} Macintosh Terminal…", flush=True)
     return 0
 
 
@@ -906,8 +907,21 @@ def execute(args: list[str]) -> int:
         for name, entry in _cli_if_catalog().items():
             print(f"  {name:29} {entry['title']}")
         print('  infinitemac                   Search historical Macintosh, NeXTSTEP and BeOS emulators')
+        print('  infinitemac list              List installed classic Mac games and play commands')
         print('  bedrock                       Serve any Java or Bedrock world with CinterForge Behavior Packs')
         return 0
+    if command in ('infinitemac', 'infinite-mac') and options == ['list']:
+        print('Infinite Mac games on the installed 68K catalog:')
+        for game in _cli_mac_catalog().values():
+            if game.get('alias_of'): continue
+            if not game.get('guest_command'):
+                # Do not claim a game is launchable without a matching guest APPL.
+                continue
+            print(f"  {game['title']:<34} {game['guest_os']:<4} play {game['command']}")
+        return 0
+    if command in ('infinitemac', 'infinite-mac') and options:
+        print('Usage: infinitemac [list]', file=sys.stderr)
+        return 2
     if command in ('infinitemac', 'infinite-mac') and not options:
         result = _api('/api/emulators/open', body={})
         if not result.get('requested'):
@@ -945,7 +959,10 @@ def execute(args: list[str]) -> int:
         commands.update({name.casefold(): name for name in games})
         commands['wargames'] = 'joshua'  # Catalog's legacy key is an alias, not a CLI handler.
         by_title = {entry['title'].casefold(): name for name, entry
-                    in {**games, **stories}.items()}
+                    in {**games, **stories}.items() if not entry.get('alias_of')}
+        for name, entry in games.items():
+            for alias in entry.get('aliases', []):
+                by_title[alias.casefold()] = name
         by_title['wargames (joshua)'] = 'joshua'
         name = commands.get(selected.casefold()) or by_title.get(selected.casefold())
         if name is None:

@@ -24,6 +24,9 @@
     std::function<void()> debuggerAction;
     std::function<void()> copyAction;
     std::function<void()> pasteAction;
+    // True while an embedded WebView (Infinite Mac, Code-OSS, etc.) owns Edit.
+    // Native copy:/paste: must reach the focused content, not the host PTY.
+    BOOL embeddedClipboardActive;
     std::function<void(const std::string &)> codeMenuAction;
     NSMenuItem *minecraftItem;
     // Keep webview/webview's original Cocoa delegate alive and forward all of
