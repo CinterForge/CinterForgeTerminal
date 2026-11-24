@@ -60,22 +60,63 @@ def ensure_craftmaster_sources(builds: Path) -> tuple[Path, Path]:
     return resolved['cinterforge-craftmaster'], resolved['cinterforge-leveldb']
 
 
+def _host_user_home() -> Path:
+    """The actual login home, not the synthetic Colima/Lima toolchain HOME."""
+    if os.name == 'posix':
+        import pwd
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    return Path.home()
+
+
+def _host_saves_root(builds: Path) -> Path:
+    override = os.environ.get('CINTER_CRAFTMASTER_SAVES_ROOT')
+    home = _host_user_home()
+    if override:
+        saves = Path(override).expanduser()
+    elif platform.system() == 'Darwin':
+        saves = home / 'Library/Application Support/minecraft/saves'
+    elif platform.system() == 'Windows':
+        saves = Path(os.environ.get('APPDATA') or str(home / 'AppData/Roaming')) / '.minecraft/saves'
+    else:
+        saves = home / '.minecraft/saves'
+    saves = saves.resolve()
+    if saves == builds.resolve() or builds.resolve() in saves.parents:
+        raise RuntimeError('CraftMaster saves must not be inside Builds: ' + str(saves))
+    return saves
+
+
+def _host_environment(builds: Path) -> dict[str, str]:
+    # Preserve managed tools and Docker selectors. Override only CraftMaster's
+    # explicit data location (and default credential lookup), not Colima HOME.
+    env = dict(os.environ, CINTER_BUILDS_ROOT=str(builds),
+               CINTER_CRAFTMASTER_SAVES_ROOT=str(_host_saves_root(builds)))
+    # A compiler-only reference mount is never a host world location.
+    env.pop('CINTER_CRAFTMASTER_REFERENCE_ROOT', None)
+    env.pop('CINTER_CRAFTMASTER_DATA_OFFLINE', None)
+    if not (env.get('CINTERFORGE_CLOUDFLARE_CONFIG') or env.get('CINTER_CLOUDFLARE_CONFIG')):
+        env['CINTERFORGE_CLOUDFLARE_CONFIG'] = str(_host_user_home() / 'cfdev/config.json')
+    return env
+
+
 def setup_receipts_present(builds: Path, targets: tuple[str, ...]) -> bool:
-    """Dirty-gate check for Setup's own receipts, never Build/Stage outputs."""
-    for target in targets:
-        if target not in TARGETS:
-            return False
-        receipt = builds / 'CinterForgeCraftMaster/Setup' / (target + '.json')
-        try:
-            doc = json.loads(receipt.read_text(encoding='utf-8'))
-            if (doc.get('schema') != 'cinterforge.craftmaster.setup.v1'
-                    or doc.get('target') != target or
-                    not isinstance(doc.get('reference_data'), dict) or
-                    not doc['reference_data'].get('mapping_inputs')):
-                return False
-        except (OSError, ValueError, TypeError):
-            return False
-    return True
+    """Ask the owning lifecycle to validate current shared data hashes.
+
+    This runs on the host without booting a guest. A stale or missing guest
+    receipt invalidates Terminal Setup, so the managed guest Setup runs before
+    Build. Never repair a Setup receipt during Build.
+    """
+    if not targets:
+        return True
+    if any(target not in TARGETS for target in targets):
+        return False
+    try:
+        source, _ = _source_roots(builds)
+        result = subprocess.run(
+            [sys.executable, '-B', str(source / 'Cinter'), 'setup', 'status', *targets],
+            cwd=source, env=_host_environment(builds), check=False)
+        return result.returncode == 0
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _source_roots(builds: Path) -> tuple[Path, Path]:
@@ -94,7 +135,7 @@ def _mac_lifecycle(builds: Path, action: str) -> None:
     source, leveldb = _source_roots(builds)
     if platform.system() != 'Darwin':
         raise RuntimeError('Mac CraftMaster native target requires Xcode/macOS')
-    env = dict(os.environ, CINTER_BUILDS_ROOT=str(builds),
+    env = dict(_host_environment(builds),
                CINTER_LEVELDB_SOURCE=str(leveldb), CINTER_CRAFTMASTER_SKIP_WORLD_SETUP='1')
     from host.lifecycle.setup_progress import progress_step
     with progress_step('CraftMaster mac ' + action, prefix='[CRAFTMASTER]'):
@@ -137,8 +178,10 @@ def _prepare_guest_cmake_generator(builds: Path, target: str) -> None:
 def _guest_lifecycle(builds: Path, action: str, target: str, *, docker: str | None = None) -> None:
     """Run standalone Cinter in Terminal's pre-existing AMD64 Debian image.
 
-    Both source trees mount readonly; generated files remain under /builds. The
-    image is the already provisioned single t guest, not another VM/server.
+    Both source trees mount readonly; software outputs remain under /builds.
+    Only the host's non-world ReferenceData directory is mounted for compilation.
+    No host saves, maps, annotations or acceptance directories are exposed as
+    guest saves. The guest's temporary Linux home owns its smoke fixtures.
     """
     if target not in ('linux', 'win'):
         raise ValueError('Unexpected CraftMaster guest platform: ' + target)
@@ -147,7 +190,7 @@ def _guest_lifecycle(builds: Path, action: str, target: str, *, docker: str | No
         # Data acquisition and mapping generation are host-owned, respectively
         # Setup and Build. The existing compiler guest has no network.
         subprocess.run([sys.executable, '-B', str(source / 'Cinter'), action, 'data'],
-                       cwd=source, env=dict(os.environ, CINTER_BUILDS_ROOT=str(builds)), check=True)
+                       cwd=source, env=_host_environment(builds), check=True)
     from host.windows.windows_environment import WindowsCrossEnvironment
     from host.lifecycle.amd64_backend import docker_bind_source
     cross = WindowsCrossEnvironment(builds)
@@ -160,23 +203,17 @@ def _guest_lifecycle(builds: Path, action: str, target: str, *, docker: str | No
     if not docker or not cross.image:
         raise RuntimeError('Setup-provisioned AMD64 compiler image unavailable')
     # Share only CraftMaster's non-world data workspace with the compiler guest.
-    if platform.system() == 'Darwin':
-        saves = Path.home() / 'Library/Application Support/minecraft/saves'
-    elif platform.system() == 'Windows':
-        saves = Path(os.environ.get('APPDATA') or str(Path.home() / 'AppData/Roaming')) / '.minecraft/saves'
-    else:
-        saves = Path.home() / '.minecraft/saves'
-    override = os.environ.get('CINTER_CRAFTMASTER_SAVES_ROOT')
-    if override:
-        saves = Path(override).resolve()
-    shared = saves / 'CinterForge'
-    if shared.is_symlink() or (shared / 'level.dat').exists():
-        raise RuntimeError('Unsafe CraftMaster shared saves workspace: ' + str(shared))
-    shared.mkdir(parents=True, exist_ok=True)
+    saves = _host_saves_root(builds)
+    workspace = saves / 'CinterForge'
+    shared = workspace / 'ReferenceData'
+    if workspace.is_symlink() or shared.is_symlink() or (workspace / 'level.dat').exists():
+        raise RuntimeError('Unsafe CraftMaster reference workspace: ' + str(shared))
+    if not shared.is_dir():
+        raise RuntimeError('CraftMaster reference data missing; run Terminal Setup')
     mounts = [('--mount', f'type=bind,src={docker_bind_source(source)},dst=/craftmaster,readonly'),
               ('--mount', f'type=bind,src={docker_bind_source(leveldb)},dst=/leveldb,readonly'),
               ('--mount', f'type=bind,src={docker_bind_source(builds)},dst=/builds'),
-              ('--mount', f'type=bind,src={docker_bind_source(shared)},dst=/craftmaster-saves/CinterForge')]
+              ('--mount', f'type=bind,src={docker_bind_source(shared)},dst=/craftmaster-reference')]
     cmd = [docker, 'run', '--rm', '--platform', 'linux/amd64', '--network', 'none']
     for item in mounts:
         cmd.extend(item)
@@ -184,7 +221,8 @@ def _guest_lifecycle(builds: Path, action: str, target: str, *, docker: str | No
                 '--env', 'CINTER_LEVELDB_SOURCE=/leveldb',
                 '--env', 'PYTHONUNBUFFERED=1', '--env', 'CINTER_CRAFTMASTER_SKIP_WORLD_SETUP=1',
                 '--env', 'CINTER_CRAFTMASTER_DATA_OFFLINE=1',
-                '--env', 'CINTER_CRAFTMASTER_SAVES_ROOT=/craftmaster-saves'])
+                '--env', 'CINTER_CRAFTMASTER_REFERENCE_ROOT=/craftmaster-reference',
+                '--env', 'HOME=/tmp/craftmaster-compiler-home'])
     if action == 'build':
         # Debian t guest contains ninja-build and GCC; it deliberately has no
         # GNU Make. CraftMaster's CMake defaults to Unix Makefiles otherwise.
@@ -216,7 +254,7 @@ def craftmaster_world_command(builds: Path, args: list[str], *, optional: bool =
             source, _ = ensure_craftmaster_sources(builds)
         else:
             raise RuntimeError('CraftMaster checkout missing; run Terminal Setup first')
-    env = dict(os.environ, CINTER_BUILDS_ROOT=str(builds), PYTHONDONTWRITEBYTECODE='1')
+    env = dict(_host_environment(builds), PYTHONDONTWRITEBYTECODE='1')
     if optional:
         env['CINTER_CRAFTMASTER_OPTIONAL_WORLD_SETUP'] = '1'
     else:
