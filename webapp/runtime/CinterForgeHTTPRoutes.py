@@ -1348,7 +1348,11 @@ class CinterForgeHTTPRoutes:
             if route == '/api/bedrock/world/select':
                 if self.server.bedrock is None:
                     raise RuntimeError('Bedrock is unavailable')
-                self._json(200, self.server.bedrock.select_world(body.get('name', '')))
+                with self.server.bedrock_terminal_lock:
+                    if body.get('published') is True:
+                        self._json(200, self.server.bedrock.select_named_published_world(body.get('name', '')))
+                    else:
+                        self._json(200, self.server.bedrock.select_world(body.get('name', '')))
                 return
             if route == '/api/bedrock/pack/set':
                 self._json(200, _CinterForgeAssetViews.pack_set_current(self.server, body.get('name')))

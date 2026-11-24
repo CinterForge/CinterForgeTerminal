@@ -4,7 +4,7 @@ Responsibilities
 ----------------
 - Discover local Java and Bedrock worlds without changing their source data.
 - Convert selected Java worlds with the bundled, receipt-verified CraftMaster CLI.
-- Reuse verified CraftMaster archives installed in Java saves by Setup.
+- Reuse verified CraftMaster archives installed in Java saves by Setup or a named beta launch.
 - Install Mojang's official Bedrock Dedicated Server only with EULA consent.
 - Supervise the visible server console and its exact macOS VM process.
 
@@ -796,8 +796,8 @@ class CinterForgeBedrockManager:
             self._save_world_settings({'root': str(path), 'selected': previous.get('selected')})
             return self.list_worlds()
 
-    def _java_world_roots(self) -> list[Path]:
-        """Use each OS's real Java saves root; never scan arbitrary directories."""
+    def _java_saves_destination(self) -> Path:
+        """The native login account, even if the worker has a synthetic HOME."""
         home = self._login_home()
         if self.platform == 'mac':
             paths = [home / 'Library/Application Support/minecraft/saves']
@@ -806,7 +806,14 @@ class CinterForgeBedrockManager:
             paths = [roaming / '.minecraft/saves']
         else:
             paths = [home / '.minecraft/saves']
-        return [p.resolve() for p in paths if p.is_dir() and not p.is_symlink()]
+        path = paths[0]
+        if path.is_symlink() or any(p.name.casefold() == 'builds' for p in (path.resolve(), *path.resolve().parents)):
+            raise RuntimeError('Unsafe Java saves directory: ' + str(path))
+        return path
+
+    def _java_world_roots(self) -> list[Path]:
+        path = self._java_saves_destination()
+        return [path.resolve()] if path.is_dir() else []
 
     # --- Bundled native CraftMaster conversion -------------------------------
     def _craftmaster_cli(self) -> tuple[Path, Path]:
@@ -816,7 +823,8 @@ class CinterForgeBedrockManager:
         package = binary.parent.parent
         manifest = json.loads((package / 'manifest.json').read_text('utf-8'))
         for name in ('Resources.json', 'Contours.json', 'MCTemplate.mcworld',
-                     'world-template.htm', 'zoomify-viewer.min.js', 'CinterForgeAtlas.js', 'TownNames.json', 'preview.py'):
+                     'world-template.htm', 'zoomify-viewer.min.js', 'CinterForgeAtlas.js', 'TownNames.json', 'preview.py', 'world_artifacts.py',
+                'AuxValueToBlockStateMap.md', 'IntrinsicBlockStatesList.md', 'BlockStateAndTraitListings.md'):
             asset = package / 'data' / name
             expected = manifest.get('files', {}).get('data/' + name)
             if (not asset.is_file() or asset.is_symlink() or
@@ -963,7 +971,74 @@ class CinterForgeBedrockManager:
                    if world['path'] == path and world['edition'] == selected.get('edition', 'bedrock')]
         return matches[0] if len(matches) == 1 else None
 
-    def select_world(self, requested: str) -> dict:
+    def select_named_published_world(self, requested: str) -> dict:
+        """Check beta on explicit named launch; never install the whole catalog."""
+        name = str(requested or '').strip()
+        if not name:
+            raise ValueError('Expected a world name')
+        _, assets = self._craftmaster_cli()  # includes SHA-256 of the canonical installer
+        spec = importlib.util.spec_from_file_location('cinter_craftmaster_world_artifacts', assets / 'world_artifacts.py')
+        if spec is None or spec.loader is None:
+            raise RuntimeError('Packaged CraftMaster Java publication installer unavailable')
+        installer = importlib.util.module_from_spec(spec)
+        # Execute the verified source, not an old .pyc; don't write into the installed package.
+        script = assets / 'world_artifacts.py'
+        raw = script.read_bytes()
+        manifest = json.loads((assets.parent / 'manifest.json').read_text('utf-8'))
+        if hashlib.sha256(raw).hexdigest() != manifest.get('files', {}).get('data/world_artifacts.py'):
+            raise RuntimeError('Packaged Java publication installer changed after verification')
+        exec(compile(raw, str(script), 'exec'), installer.__dict__)
+        saves = self._java_saves_destination()
+        self._append_log('Checking beta Java world catalog: ' + name)
+        try:
+            entries = installer.fetch_public_catalog('beta')
+        except (OSError, RuntimeError, ValueError) as error:
+            # Offline local play is allowed, but do not claim it is current.
+            warning = 'Beta world catalog unavailable; latest revision not verified: ' + str(error)
+            self._append_log(warning)
+            try:
+                result = self.select_world(name, require_idle_or_current=True)
+            except ValueError:
+                raise RuntimeError(warning + '; no matching local world: ' + name) from error
+            return {**result, 'publication_warning': warning}
+        matches = [(key, entry) for key, entry in entries.items()
+                   if name.casefold() in (key.casefold(), entry['folder'].casefold())]
+        if not matches:
+            return self.select_world(name, require_idle_or_current=True)
+        if len(matches) != 1:
+            raise ValueError('Ambiguous beta world: ' + name)
+        published_name, entry = matches[0]
+        destination = saves / entry['folder']
+        warning = None
+        try:
+            # Do not replace Java data while BDS or a native conversion is active.
+            with self._craftmaster_conversion_lock:
+                if not installer.installed_world_current(destination, entry):
+                    with self._lock:
+                        if self._live_session_locked()[0] is not None:
+                            raise RuntimeError('Stop Bedrock before downloading a newer beta Java world')
+                    installer.install_catalog_world(saves, published_name, entry, 'beta', report=self._append_log)
+                else:
+                    self._append_log('Reusing installed beta Java world: ' + published_name)
+        except RuntimeError as error:
+            if not str(error).startswith('Preserving ') or not (destination / 'level.dat').is_file() or destination.is_symlink():
+                raise
+            warning = str(error) + '; beta update not installed'
+            self._append_log(warning)
+        # Match the precise installed Java folder, never a same-named Bedrock copy.
+        world = next((w for w in self.list_java_worlds() if Path(w['path']) == destination.resolve()), None)
+        if world is None:
+            raise RuntimeError('Published Java save was not discovered: ' + str(destination))
+        result = self.select_world(world['id'], require_idle_or_current=True)
+        readiness = self.conversion_status(world) if warning is None else None
+        if readiness and readiness.get('needs_update'):
+            with self._lock:
+                if self._live_session_locked()[0] is not None:
+                    raise RuntimeError('Stop Bedrock before updating the beta world conversion')
+        return {**result, 'publication_warning': warning, 'publication_matched': True,
+                'conversion': readiness}
+
+    def select_world(self, requested: str, *, require_idle_or_current: bool = False) -> dict:
         """Exactly one global selection, stored by verified source path and edition."""
         inventory = self.list_worlds()
         worlds = inventory['worlds'] + inventory['java_worlds']
@@ -982,6 +1057,10 @@ class CinterForgeBedrockManager:
         world = matched[0]
         with self._lock:
             previous = self._world_settings()
+            if require_idle_or_current and self._live_session_locked()[0] is not None:
+                selected = previous.get('selected') or {}
+                if selected.get('id') != world['id']:
+                    raise RuntimeError('Stop Bedrock before switching to another world')
             self._save_world_settings({'root': previous.get('root'),
                 'selected': {key: world[key] for key in ('id','path','edition','folder','name','command_name')}})
         return {'current_world': world['command_name'], 'world': world}
@@ -1498,7 +1577,7 @@ class CinterForgeBedrockManager:
         if java_world:
             return self._convert_java_world(java_world, progress=progress).name
 
-        raise ValueError('No local world named ' + repr(name) + '; install published Java worlds with ./Cinter setup worlds <channel>')
+        raise ValueError('No local world named ' + repr(name) + '; use bedrock <name> to fetch a published beta Java world')
 
     def list_worlds(self) -> dict:
         entries: list[dict] = []

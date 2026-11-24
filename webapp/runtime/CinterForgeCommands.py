@@ -82,6 +82,7 @@ CODE_HELP = '''code [open|status|help]
 BEDROCK_HELP = '''bedrock [command]
   bedrock report                Open the Java and Bedrock worlds report
   bedrock packs                 Open Minecraft behavior pack gallery
+  bedrock <name>                Fetch latest beta Java world if published; start it
   bedrock world <name>          Select the Current World
   bedrock pack <name>           Select a pack for the Current World
   bedrock pack none             Clear the Current World's pack
@@ -369,7 +370,7 @@ def _api(path: str, *, body: dict | None = None) -> dict:
                       data=json.dumps(body).encode('utf-8') if body is not None else None,
                       headers=headers, method='POST' if body is not None else 'GET')
     try:
-        with urlopen(request, timeout=1800 if path == '/api/bedrock/run' else 120 if path in ('/api/bedrock/install', '/api/craftmaster/map/run') else 90 if path in ('/api/bedrock/stop', '/api/bedrock/restart') else 10) as response:
+        with urlopen(request, timeout=1800 if path == '/api/bedrock/run' or (path == '/api/bedrock/world/select' and body and body.get('published') is True) else 120 if path in ('/api/bedrock/install', '/api/craftmaster/map/run') else 90 if path in ('/api/bedrock/stop', '/api/bedrock/restart') else 10) as response:
             return json.loads(response.read().decode('utf-8'))
     except HTTPError as error:
         try:
@@ -540,7 +541,7 @@ def _packaged_craftmaster() -> Path:
     return binary
 
 
-def _open_bedrock_with_progress(world_name: str) -> dict:
+def _bedrock_request_with_progress(world_name: str, path: str, body: dict) -> dict:
     """Stream conversion/download status while the host creates the Bedrock tab.
 
     The HTTP run call may take minutes for a large Java world. Keep the calling
@@ -557,7 +558,7 @@ def _open_bedrock_with_progress(world_name: str) -> dict:
 
     def request_server() -> None:
         try:
-            result.update(_api('/api/bedrock/run', body={}))
+            result.update(_api(path, body=body))
         except Exception as error:
             failures.append(error)
         finally:
@@ -581,7 +582,7 @@ def _open_bedrock_with_progress(world_name: str) -> dict:
                 if any(word in message.lower() for word in (
                     'convert dimension', 'stream ', 'map ', 'download',
                     'install', 'reuse', 'reus', 'ready', 'packag', 'converting',
-                    'craftmaster conversion', 'failed',
+                    'craftmaster conversion', 'failed', 'beta', 'preserv', 'verifying',
                 )):
                     print('[bedrock] ' + message, flush=True)
                     last_output = time.monotonic()
@@ -595,6 +596,10 @@ def _open_bedrock_with_progress(world_name: str) -> dict:
     if failures:
         raise failures[0]
     return result
+
+
+def _open_bedrock_with_progress(world_name: str) -> dict:
+    return _bedrock_request_with_progress(world_name, '/api/bedrock/run', {})
 
 
 def _games_download() -> int:
@@ -1104,9 +1109,45 @@ def execute(args: list[str]) -> int:
             result = _api('/api/bedrock/stop', body={})
             print('[bedrock] Server stopped.', flush=True)
             return 0
-        if action in ('start', 'run') and len(options) == 1:
-            info = _api('/api/bedrock/report')
-            current = next((w for w in info['worlds'] + info['java_worlds'] if w['current']), None)
+        # Preserve the two-argument property interface; quote a multiword world name.
+        named_launch = len(options) == 1 and action not in (
+            'report', 'world', 'pack', 'start', 'run', 'stop', 'help', 'packs',
+            'install', 'status', 'restart', 'properties')
+        if named_launch or (action in ('start', 'run') and len(options) == 1):
+            if named_launch:
+                requested = options[0].strip()
+                selection = _bedrock_request_with_progress(requested, '/api/bedrock/world/select',
+                    {'name': requested, 'published': True})
+                if selection.get('publication_warning'):
+                    print('[bedrock] ' + selection['publication_warning'], flush=True)
+                current = selection['world']
+                if selection.get('publication_matched') and not selection.get('publication_warning'):
+                    print('[bedrock] Beta Java world ready: ' + current['folder'], flush=True)
+                if selection.get('publication_matched') and not selection.get('publication_warning'):
+                    readiness = selection.get('conversion') or {}
+                    if readiness.get('needs_update'):
+                        print('[bedrock] Updating the beta Java world for Bedrock.', flush=True)
+                        job = _api('/api/craftmaster/map/run', body={'name': current['id']})
+                        map_id = job['map']['id']
+                        previous_message = ''
+                        last_heartbeat = time.monotonic()
+                        while True:
+                            time.sleep(1.5)
+                            progress = _api('/api/craftmaster/map/status?id=' + map_id)
+                            message = progress.get('message', '')
+                            if message and message != previous_message:
+                                print('[CraftMaster] ' + message, flush=True)
+                                previous_message = message
+                            if progress['phase'] == 'failed':
+                                raise RuntimeError('Update for Bedrock failed: ' + message)
+                            if progress['phase'] == 'ready':
+                                break
+                            if time.monotonic() - last_heartbeat >= 15:
+                                print('[CraftMaster] Conversion continues; map and Server Log show progress.', flush=True)
+                                last_heartbeat = time.monotonic()
+            else:
+                info = _api('/api/bedrock/report')
+                current = next((w for w in info['worlds'] + info['java_worlds'] if w['current']), None)
             if current is None:
                 raise ValueError('No Current World selected. Use bedrock world <name> or bedrock report.')
             state = _api('/api/bedrock/status')

@@ -316,9 +316,9 @@ def staged_craftmaster(builds: Path, target: str) -> Path:
             files = manifest.get('files')
             if not isinstance(files, dict) or not files:
                 raise RuntimeError('Stage has no file inventory')
-            if not {'data/ResourcesNew.json', 'data/AuxValueToBlockStateMap.md',
+            if not {'data/world_artifacts.py', 'data/ResourcesNew.json', 'data/AuxValueToBlockStateMap.md',
                     'data/IntrinsicBlockStatesList.md', 'data/BlockStateAndTraitListings.md'} <= set(files):
-                raise RuntimeError('Stage lacks restored Bedrock mappings; rebuild CraftMaster')
+                raise RuntimeError('Stage lacks restored Bedrock mappings or the Java publication installer; rebuild CraftMaster')
             expected = {'manifest.json', *files}
             # Re-evaluate the manifest and all file bytes, not merely a receipt
             # or directory existence. Never accept symlinks or extra files.
@@ -504,7 +504,7 @@ def verify_embedded_craftmaster(app_root: Path, target: str) -> Path:
         raise RuntimeError('Installed CraftMaster native CLI missing')
     if not all('data/' + data in files for data in
                ('Resources.json', 'Contours.json', 'MCTemplate.mcworld',
-                'world-template.htm', 'zoomify-viewer.min.js', 'CinterForgeAtlas.js', 'TownNames.json', 'preview.py',
+                'world-template.htm', 'zoomify-viewer.min.js', 'CinterForgeAtlas.js', 'TownNames.json', 'preview.py', 'world_artifacts.py',
                 'AuxValueToBlockStateMap.md', 'IntrinsicBlockStatesList.md', 'BlockStateAndTraitListings.md',
                 'ResourcesNew.json')):
         raise RuntimeError('Installed CraftMaster runtime data is incomplete')
