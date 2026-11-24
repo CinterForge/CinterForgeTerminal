@@ -121,13 +121,14 @@ files:
     if command -v iptables >/dev/null 2>&1; then iptables -L -n -v 2>&1 || true; else echo "CINTER_BDS_FIREWALL iptables=unavailable"; fi
     if command -v nft >/dev/null 2>&1; then nft list ruleset 2>&1 || true; else echo "CINTER_BDS_FIREWALL nft=unavailable"; fi
     echo "CINTER_BDS_FIREWALL_END"
-    echo "CINTER_BDS_UDP_PRELAUNCH_BEGIN port=19132"
+    BDS_PORT=$(awk -F= '$1 ~ /^[ \t]*server-port[ \t]*$/ { v=$2; gsub(/^[ \t]+|[ \t\r]+$/, "", v) } END { print v=="" ? 19132 : v }' "$BDS_ROOT/server.properties")
+    echo "CINTER_BDS_UDP_PRELAUNCH_BEGIN port=$BDS_PORT"
     if command -v nc >/dev/null 2>&1; then
       set +e
-      printf 'CINTER_BDS_UDP_BROADCAST_PROBE\n' | nc -u -w 1 255.255.255.255 19132 >/dev/null 2>&1
+      printf 'CINTER_BDS_UDP_BROADCAST_PROBE\n' | nc -u -w 1 255.255.255.255 "$BDS_PORT" >/dev/null 2>&1
       UDP_RC=$?
       set -e
-      echo "CINTER_BDS_UDP_BROADCAST_SEND rc=$UDP_RC destination=255.255.255.255:19132"
+      echo "CINTER_BDS_UDP_BROADCAST_SEND rc=$UDP_RC destination=255.255.255.255:$BDS_PORT"
     else
       echo "CINTER_BDS_UDP_BROADCAST_SEND nc=unavailable"
     fi
@@ -183,17 +184,17 @@ files:
         # them to /dev/console races BDS, which also owns /dev/console for its
         # interactive stdin/stdout and caused the host smoke to wait forever even
         # after BDS printed "Server started.".
-        echo "CINTER_BDS_NETHERNET_ATTEMPT attempt=$((i+1)) port=19132"
-        if "$BDS_ROOT/.cinter/cinter-nethernet-probe" 19132 >/dev/null 2>&1; then
-          echo "CINTER_BDS_NETHERNET_PASS port=19132"
+        echo "CINTER_BDS_NETHERNET_ATTEMPT attempt=$((i+1)) port=$BDS_PORT"
+        if "$BDS_ROOT/.cinter/cinter-nethernet-probe" "$BDS_PORT" >/dev/null 2>&1; then
+          echo "CINTER_BDS_NETHERNET_PASS port=$BDS_PORT"
           exit 0
         fi
         i=$((i+1)); sleep 1
       done
       echo "CINTER_BDS_NETHERNET_DIAGNOSTIC_BEGIN"
-      echo "CINTER_BDS_NETHERNET_DIAGNOSTIC port=19132"
-      "$BDS_ROOT/.cinter/cinter-nethernet-probe" 19132 2>&1 || true
-      echo "CINTER_BDS_NETHERNET_FAIL timeout attempts=$i port=19132"
+      echo "CINTER_BDS_NETHERNET_DIAGNOSTIC port=$BDS_PORT"
+      "$BDS_ROOT/.cinter/cinter-nethernet-probe" "$BDS_PORT" 2>&1 || true
+      echo "CINTER_BDS_NETHERNET_FAIL timeout attempts=$i port=$BDS_PORT"
     ) &
     PROBE_PID=$!
     set +e

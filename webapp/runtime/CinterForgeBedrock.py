@@ -62,6 +62,7 @@ if os.name != 'nt':
 
 from runtime import CinterForgeSettings as _CinterForgeSettings
 from runtime.CinterForgeBedrockAccess import BedrockServerAccess
+from runtime.CinterForgeBedrockProperties import BedrockProperties, read_world_settings
 from runtime.CinterForgeCode import CinterForgeCodeWorkspace
 from runtime.CinterForgeGuest import CinterForgeGuestSupervisor
 from runtime.CinterForgeLogging import CinterForgeRuntimeLog
@@ -327,7 +328,7 @@ def _parse_raknet_pong(packet: bytes, address: str, port: int) -> dict | None:
     }
 
 
-def discover_lan_bedrock(*, timeout: float = 1.5) -> list[dict]:
+def discover_lan_bedrock(*, timeout: float = 1.5, ports=(19132, 19133)) -> list[dict]:
     """Discover nearby Bedrock servers with a bounded host-side UDP scan.
 
     This proves only host-side UDP reception. The separate guest-relay marker
@@ -338,7 +339,7 @@ def discover_lan_bedrock(*, timeout: float = 1.5) -> list[dict]:
     discovered_servers = {}
 
     try:
-        for bedrock_port in (19132, 19133):
+        for bedrock_port in dict.fromkeys(ports):
             udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             udp_socket.bind(('0.0.0.0', 0))
@@ -434,6 +435,7 @@ class CinterForgeBedrockManager:
         self._craftmaster_conversion_lock = threading.Lock()
         # Server access rules belong to this installation, not any selected
         # level. All world launches reuse this one policy and Run directory.
+        self.properties = BedrockProperties(self.root, self.run_root, self.package)
         self.access = BedrockServerAccess(
             self.root, self.run_root,
             live=lambda: self._live_session_locked()[0] is not None,
@@ -1399,6 +1401,10 @@ class CinterForgeBedrockManager:
         (progress or self._append_log)(export_name + ': world imported for Bedrock')
         return destination
 
+    def _managed_world_path(self, source: Path) -> Path:
+        key = hashlib.sha256(str(source.resolve()).encode('utf-8')).hexdigest()[:12]
+        return self.run_root / 'worlds' / ('CinterForge-' + key)
+
     def refresh_managed_world(self, source: Path) -> None:
         """Replace an *offline* managed server copy after explicit CraftMaster update.
 
@@ -1406,8 +1412,7 @@ class CinterForgeBedrockManager:
         source folder. Reusing an old copy would silently restart old blocks.
         """
         source = source.resolve(strict=True)
-        key = hashlib.sha256(str(source).encode('utf-8')).hexdigest()[:12]
-        destination = self.run_root / 'worlds' / ('CinterForge-' + key)
+        destination = self._managed_world_path(source)
         if destination.is_symlink():
             raise RuntimeError('Refusing linked managed Bedrock world: ' + str(destination))
         if not destination.exists():
@@ -2039,9 +2044,8 @@ class CinterForgeBedrockManager:
             source = Path(world['path'])
             if not (source / 'level.dat').is_file() or not (source / 'db').is_dir():
                 raise RuntimeError('World disappeared before launch: ' + str(source))
-            key = hashlib.sha256(str(source).encode('utf-8')).hexdigest()[:12]
-            managed_name = 'CinterForge-' + key
-            target = self.run_root / 'worlds' / managed_name
+            target = self._managed_world_path(source)
+            managed_name = target.name
             if not self.accepted() or not self.installed():
                 raise RuntimeError('Install the official Bedrock server and accept its EULA before running a saved world')
             existing_pid, _, _ = self._live_session_locked()
@@ -2066,17 +2070,10 @@ class CinterForgeBedrockManager:
             # Must follow Add-On installation: discover its actual cinter:* item
             # definitions, then register the generated function for this world.
             self._install_cinter_utility_pack(target)
-            config = self.run_root / 'server.properties'
-            original = config.read_text('utf-8') if config.is_file() else ''
-            lines = [line for line in original.splitlines()
-                     if not line.strip().startswith(('level-name=', 'content-log-console-output-enabled='))]
-            lines.extend(('level-name=' + managed_name, 'content-log-console-output-enabled=true'))
-            temp = config.with_name('server.properties.tmp-' + uuid.uuid4().hex)
-            try:
-                temp.write_text('\n'.join(lines) + '\n', 'utf-8')
-                os.replace(temp, config)
-            finally:
-                temp.unlink(missing_ok=True)
+            # The selected managed folder must remain authoritative; a native
+            # level-name is a world selector, not a global display-name setting.
+            self.properties.apply_world(target / 'level.dat')
+            self.properties.apply_server(level_name=managed_name)
             chosen = selected_world or world
             self._save_world_settings({'root': self._world_settings().get('root'),
                                        'selected': {key: chosen[key] for key in
@@ -2101,39 +2098,57 @@ class CinterForgeBedrockManager:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
         self.access.apply_before_launch()
-        # Server-wide policy, not per-world state: every Bedrock launch uses
-        # cheats, including existing imported saves and CraftMaster updates.
-        properties = self.run_root / 'server.properties'
-        if properties.is_symlink():
-            raise RuntimeError('Refusing linked Bedrock server.properties')
-        if not properties.is_file():
-            raise RuntimeError('Bedrock server.properties is missing')
-        original = properties.read_text('utf-8')
-        lines = []
-        seen = False
-        changed = False
-        for line in original.splitlines():
-            key = line.split('=', 1)[0].strip().casefold() if '=' in line and not line.lstrip().startswith('#') else ''
-            if key == 'allow-cheats':
-                if seen:
-                    changed = True
-                    continue
-                seen = True
-                if line.strip() != 'allow-cheats=true':
-                    changed = True
-                lines.append('allow-cheats=true')
-            else:
-                lines.append(line)
-        if not seen:
-            lines.append('allow-cheats=true')
-            changed = True
-        if changed:
-            temporary = properties.with_name('server.properties.tmp-' + uuid.uuid4().hex)
+        self.properties.apply_server()
+
+    def property_snapshot(self) -> dict:
+        with self._lock:
+            selected = self._world_settings().get('selected') or {}
+            # Read the managed copy only when it represents the selected world.
+            # A Java selection may not have been converted yet: don't trigger
+            # conversion or import merely to list configuration.
+            actual, world_error = {}, None
+            path = selected.get('path')
             try:
-                temporary.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-                os.replace(temporary, properties)
-            finally:
-                temporary.unlink(missing_ok=True)
+                source = None
+                if path and selected.get('edition') == 'bedrock':
+                    source = Path(path)
+                elif path and selected.get('edition') == 'java' and self.curated_worlds.is_dir():
+                    # Use existing verified conversion receipts. Listing
+                    # settings must never start CraftMaster or convert a save.
+                    matches = []
+                    for folder in self.curated_worlds.iterdir():
+                        receipt = folder / 'cinter-craftmaster-world.json'
+                        if folder.is_symlink() or receipt.is_symlink() or not receipt.is_file():
+                            continue
+                        data = json.loads(receipt.read_text('utf-8'))
+                        if (data.get('schema') == 'cinterforge.terminal.craftmaster-world.v1' and
+                                data.get('source') == str(Path(path).resolve())):
+                            matches.append(folder)
+                    if len(matches) == 1:
+                        source = matches[0]
+                    elif len(matches) > 1:
+                        world_error = 'Multiple converted saves match the selected Java world.'
+                if source is not None:
+                    managed = self._managed_world_path(source) / 'level.dat'
+                    candidate = managed if managed.is_file() else source / 'level.dat'
+                    if candidate.is_file():
+                        actual = read_world_settings(candidate)
+            except (OSError, ValueError, RuntimeError) as error:
+                world_error = str(error)
+            return {'properties': self.properties.snapshot(selected=selected.get('command_name',''), world_values=actual),
+                    'running': self._live_session_locked()[0] is not None,
+                    'world': selected.get('command_name',''), 'world_error': world_error}
+
+    def set_property(self, name: str, value: str) -> dict:
+        with self._lock:
+            if isinstance(name, str) and name.casefold() == 'level-name':
+                # Selecting a world by its existing ID/name preserves its own
+                # unique managed directory and avoids accidentally opening or
+                # creating a different save when the server starts.
+                selected = self.select_world(value)
+                return {'name':'level-name','value':selected['current_world'],
+                        'scope':'world selection','applies':'next server start'}
+            return self.properties.set(name,value)
 
     def installed(self) -> bool:
         executable = 'bedrock_server.exe' if self.target == 'win' else 'bedrock_server'
@@ -2160,7 +2175,13 @@ class CinterForgeBedrockManager:
         # The host's LAN scan does not prove reachability of the bridged guest.
         # Old NAT relay markers in persistent logs are historical and must not
         # be shown as evidence about a current native-bridged server.
-        return {'servers': discover_lan_bedrock(timeout=timeout),
+        native = self._server_configuration()
+        ports = [19132, 19133]
+        for key in ('server-port', 'server-portv6'):
+            value = native.get(key, '')
+            if value.isdecimal() and 1 <= int(value) <= 65535:
+                ports.append(int(value))
+        return {'servers': discover_lan_bedrock(timeout=timeout, ports=ports),
                 'relay_events': [], 'scope': 'host UDP scan, not a guest readiness test'}
 
     def _log_path(self) -> Path:
@@ -2516,9 +2537,9 @@ class CinterForgeBedrockManager:
             # Keep the locally signed VM and its LAN relay together.
             script = launcher.read_text(encoding='utf-8', errors='replace')
             if ('CinterBDSNetRelay' not in script or
-                    'CINTER_BDS_NETWORK host-relay' not in script):
+                    'CINTER_BDS_PROPERTY_PORTS_V1' not in script):
                 raise RuntimeError('Installed LinuxKit launcher is stale (missing LAN relay). '
-                                   'Run ./Cinter build all followed by ./Cinter stage all.')
+                                   'Run ./Cinter setup all, ./Cinter build all and ./Cinter stage all.')
             for name in ('bedrock_server', 'server.properties'):
                 if not (self.run_root / name).is_file():
                     raise RuntimeError('LinuxKit server runtime incomplete: ' + str(self.run_root / name))

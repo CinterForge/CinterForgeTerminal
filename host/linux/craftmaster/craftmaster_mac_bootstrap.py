@@ -67,13 +67,14 @@ echo "CINTER_BDS_FIREWALL_BEGIN"
 if command -v iptables >/dev/null 2>&1; then iptables -L -n -v 2>&1 || true; else echo "CINTER_BDS_FIREWALL iptables=unavailable"; fi
 if command -v nft >/dev/null 2>&1; then nft list ruleset 2>&1 || true; else echo "CINTER_BDS_FIREWALL nft=unavailable"; fi
 echo "CINTER_BDS_FIREWALL_END"
-echo "CINTER_BDS_UDP_PRELAUNCH_BEGIN port=19132"
+BDS_PORT=$(awk -F= '$1 ~ /^[ \t]*server-port[ \t]*$/ { v=$2; gsub(/^[ \t]+|[ \t\r]+$/, "", v) } END { print v=="" ? 19132 : v }' "$BDS_ROOT/server.properties")
+echo "CINTER_BDS_UDP_PRELAUNCH_BEGIN port=$BDS_PORT"
 if command -v nc >/dev/null 2>&1; then
   set +e
-  printf 'CINTER_BDS_UDP_BROADCAST_PROBE\n' | nc -u -w 1 255.255.255.255 19132 >/dev/null 2>&1
+  printf 'CINTER_BDS_UDP_BROADCAST_PROBE\n' | nc -u -w 1 255.255.255.255 "$BDS_PORT" >/dev/null 2>&1
   UDP_RC=$?
   set -e
-  echo "CINTER_BDS_UDP_BROADCAST_SEND rc=$UDP_RC destination=255.255.255.255:19132"
+  echo "CINTER_BDS_UDP_BROADCAST_SEND rc=$UDP_RC destination=255.255.255.255:$BDS_PORT"
 else
   echo "CINTER_BDS_UDP_BROADCAST_SEND nc=unavailable"
 fi
@@ -129,9 +130,9 @@ BDS_PID=$!
     # them to /dev/console races BDS, which also owns /dev/console for its
     # interactive stdin/stdout and caused the host smoke to wait forever even
     # after BDS printed "Server started.".
-    echo "CINTER_BDS_NETHERNET_ATTEMPT attempt=$((i+1)) port=19132"
-    if "$BDS_ROOT/.cinter/cinter-nethernet-probe" 19132 >/dev/null 2>&1; then
-      echo "CINTER_BDS_NETHERNET_PASS port=19132"
+    echo "CINTER_BDS_NETHERNET_ATTEMPT attempt=$((i+1)) port=$BDS_PORT"
+    if "$BDS_ROOT/.cinter/cinter-nethernet-probe" "$BDS_PORT" >/dev/null 2>&1; then
+      echo "CINTER_BDS_NETHERNET_PASS port=$BDS_PORT"
       exit 0
     fi
     if ! kill -0 "$BDS_PID" 2>/dev/null; then
@@ -147,9 +148,9 @@ BDS_PID=$!
     sleep 1
   done
   echo "CINTER_BDS_NETHERNET_DIAGNOSTIC_BEGIN"
-  echo "CINTER_BDS_NETHERNET_DIAGNOSTIC port=19132"
-  "$BDS_ROOT/.cinter/cinter-nethernet-probe" 19132 2>&1 || true
-  echo "CINTER_BDS_NETHERNET_FAIL timeout attempts=$i port=19132"
+  echo "CINTER_BDS_NETHERNET_DIAGNOSTIC port=$BDS_PORT"
+  "$BDS_ROOT/.cinter/cinter-nethernet-probe" "$BDS_PORT" 2>&1 || true
+  echo "CINTER_BDS_NETHERNET_FAIL timeout attempts=$i port=$BDS_PORT"
 ) &
 PROBE_PID=$!
 set +e
@@ -210,7 +211,65 @@ static void *discovery_main(void *opaque){
     close(fd);return NULL;
 }
 static int read_guest_ip(const char*path){for(int i=0;i<300&&running;++i){FILE*f=fopen(path,"r");if(f){char line[128]={0};if(fgets(line,sizeof line,f)){line[strcspn(line,"\r\n")]=0;struct in_addr a;if(inet_pton(AF_INET,line,&a)==1){snprintf(guest_ip,sizeof guest_ip,"%s",line);fclose(f);return 0;}}fclose(f);}usleep(100000);}return -1;}
-int main(int argc,char**argv){if(argc!=3){fprintf(stderr,"usage: %s /path/to/guest-ip host-lan-ipv4\n",argv[0]);return 2;}struct in_addr host_addr;if(inet_pton(AF_INET,argv[2],&host_addr)!=1){fprintf(stderr,"CINTER_BDS_LAN_RELAY_ERROR invalid-host-ip %s\n",argv[2]);return 6;}snprintf(host_ip,sizeof host_ip,"%s",argv[2]);signal(SIGINT,on_signal);signal(SIGTERM,on_signal);if(read_guest_ip(argv[1])!=0){fprintf(stderr,"CINTER_BDS_LAN_RELAY_ERROR guest-ip-timeout path=%s\n",argv[1]);return 3;}fprintf(stderr,"CINTER_BDS_LAN_RELAY_GUEST guest=%s host=%s\n",guest_ip,host_ip);fflush(stderr);int tcp_port=19132;pthread_t tcp;if(pthread_create(&tcp,NULL,tcp_main,&tcp_port)!=0)return 4;pthread_t discovery;if(pthread_create(&discovery,NULL,discovery_main,NULL)!=0){running=0;pthread_join(tcp,NULL);return 5;}const int ports[]={19132,19133,19140,19141,19142,19143,19144,19145,19146,19147,19148,19149,19150,19151,19152,19153,19154,19155};struct udp_arg args[sizeof ports/sizeof ports[0]];pthread_t threads[sizeof ports/sizeof ports[0]];size_t started=0;for(size_t i=0;i<sizeof ports/sizeof ports[0];++i){args[i].port=ports[i];if(pthread_create(&threads[i],NULL,udp_main,&args[i])!=0){running=0;break;}started++;}while(running)sleep(1);pthread_join(tcp,NULL);pthread_join(discovery,NULL);for(size_t i=0;i<started;++i)pthread_join(threads[i],NULL);return 0;}
+/* Port configuration is supplied by the existing host launcher, reading the
+ * same native server.properties BDS will load. No property rewrites. */
+static int parse_port(const char *value) {
+    char *end = NULL; long n = strtol(value, &end, 10);
+    return end && *value && !*end && n > 0 && n <= 65535 ? (int)n : 0;
+}
+static void add_port(int *ports, size_t *count, int port) {
+    if (!port) return;
+    for (size_t i=0; i<*count; ++i) if (ports[i]==port) return;
+    ports[(*count)++] = port;
+}
+int main(int argc, char **argv) {
+    if (argc != 7) {
+        fprintf(stderr, "usage: %s guest-ip-file host-ip server-port server-portv6 lan-visible debug-port-or-zero\n", argv[0]);
+        return 2;
+    }
+    int tcp_ports[2], ports[24]; size_t ntcp=0, nports=0;
+    int port4=parse_port(argv[3]), port6=parse_port(argv[4]);
+    int lan=!strcmp(argv[5], "true"), debug=parse_port(argv[6]);
+    if (!port4 || !port6 || (!lan && strcmp(argv[5], "false")) || (!debug && strcmp(argv[6], "0"))) {
+        fprintf(stderr, "CINTER_BDS_LAN_RELAY_ERROR invalid port or visibility setting\n"); return 2;
+    }
+    add_port(tcp_ports, &ntcp, port4); add_port(tcp_ports, &ntcp, debug);
+    add_port(ports, &nports, port4); add_port(ports, &nports, port6);
+    if (lan) { add_port(ports, &nports, 19132); add_port(ports, &nports, 19133); }
+    for (int p=19140; p<=19155; ++p) add_port(ports, &nports, p);
+    struct in_addr host_addr;
+    if (inet_pton(AF_INET, argv[2], &host_addr)!=1) {
+        fprintf(stderr, "CINTER_BDS_LAN_RELAY_ERROR invalid-host-ip %s\n", argv[2]); return 6;
+    }
+    snprintf(host_ip, sizeof host_ip, "%s", argv[2]);
+    signal(SIGINT, on_signal); signal(SIGTERM, on_signal);
+    if (read_guest_ip(argv[1])!=0) {
+        fprintf(stderr, "CINTER_BDS_LAN_RELAY_ERROR guest-ip-timeout path=%s\n", argv[1]); return 3;
+    }
+    fprintf(stderr, "CINTER_BDS_LAN_RELAY_GUEST guest=%s host=%s\n", guest_ip, host_ip); fflush(stderr);
+    pthread_t tcp[2], discovery, threads[24]; struct udp_arg args[24];
+    size_t tcp_started=0, udp_started=0; int discovery_started=0, failure=0;
+    for (size_t i=0; i<ntcp; ++i) {
+        if (pthread_create(&tcp[i], NULL, tcp_main, &tcp_ports[i])!=0) { failure=1; running=0; break; }
+        ++tcp_started;
+    }
+    /* If the user assigns 7551 as a gameplay port, do not also bind it as
+     * the auxiliary LAN broadcast relay. The BDS gameplay port wins. */
+    if (running && lan && port4!=7551 && port6!=7551) {
+        if (pthread_create(&discovery, NULL, discovery_main, NULL)!=0) { failure=1; running=0; }
+        else discovery_started=1;
+    }
+    for (size_t i=0; running && i<nports; ++i) {
+        args[i].port=ports[i];
+        if (pthread_create(&threads[i], NULL, udp_main, &args[i])!=0) { failure=1; running=0; break; }
+        ++udp_started;
+    }
+    while (running) sleep(1);
+    for (size_t i=0; i<tcp_started; ++i) pthread_join(tcp[i], NULL);
+    if (discovery_started) pthread_join(discovery, NULL);
+    for (size_t i=0; i<udp_started; ++i) pthread_join(threads[i], NULL);
+    return failure ? 4 : 0;
+}
 '''
 
 
@@ -239,7 +298,21 @@ DEFAULT_IF=$(/sbin/route -n get default 2>/dev/null | awk '/interface:/{print $2
 HOST_IP=$(/usr/sbin/ipconfig getifaddr "$DEFAULT_IF" 2>/dev/null || true)
 printf '%s\n' "$HOST_IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || { echo "CINTER_VM_ERROR cannot determine LAN IPv4 on $DEFAULT_IF" >&2; exit 58; }
 [ -x "$HERE/CinterBDSNetRelay" ] || { echo "CINTER_VM_ERROR missing Setup-built LAN relay" >&2; exit 56; }
-"$HERE/CinterBDSNetRelay" "$BDS/.cinter/guest-ip" "$HOST_IP" &
+# CINTER_BDS_PROPERTY_PORTS_V1: native property values, not relay constants.
+read_property() {
+  awk -F= -v key="$1" -v fallback="$2" '
+    { name=$1; gsub(/^[ \t]+|[ \t]+$/, "", name) }
+    name==key { value=substr($0,index($0,"=")+1); gsub(/^[ \t]+|[ \t\r]+$/, "",value); found=1 }
+    END { print found ? value : fallback }' "$BDS/server.properties"
+}
+PORT4=$(read_property server-port 19132)
+PORT6=$(read_property server-portv6 19133)
+LAN_VISIBLE=$(read_property enable-lan-visibility true)
+DEBUG_PORT=0
+if [ "$(read_property allow-inbound-script-debugging false)" = true ]; then
+  DEBUG_PORT=$(read_property force-inbound-debug-port 19144)
+fi
+"$HERE/CinterBDSNetRelay" "$BDS/.cinter/guest-ip" "$HOST_IP" "$PORT4" "$PORT6" "$LAN_VISIBLE" "$DEBUG_PORT" &
 RELAY_PID=$!
 cleanup() { rc=$?; trap - EXIT INT TERM; kill "$RELAY_PID" 2>/dev/null || true; wait "$RELAY_PID" 2>/dev/null || true; exit "$rc"; }
 trap cleanup EXIT INT TERM
@@ -250,7 +323,7 @@ export CINTER_BDS_HOST_DIR="$BDS"
 # No restricted Apple networking entitlement is necessary. The same host
 # relay used by the original Mac pipeline exposes Bedrock TCP, gameplay UDP,
 # and discovery UDP; the guest itself has a private VZ address.
-echo "CINTER_BDS_NETWORK host-relay host=$HOST_IP tcp=19132 udp=19132,19133,19140-19155 discovery=7551"
+echo "CINTER_BDS_NETWORK host-relay host=$HOST_IP tcp=$PORT4 udp=$PORT4,$PORT6,19140-19155 lan-visible=$LAN_VISIBLE debug-port=$DEBUG_PORT"
 # This process stays attached to the VM serial console. If it exits early,
 # BedrockManager immediately reports the error rather than claiming a server.
 "$HERE/CinterBDSVM"

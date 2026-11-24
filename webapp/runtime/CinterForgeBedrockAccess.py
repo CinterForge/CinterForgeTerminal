@@ -203,14 +203,6 @@ class BedrockServerAccess:
         new_permissions = list(native.values())
         if new_permissions != original_permissions:
             _atomic_json(self.run_root / 'permissions.json', new_permissions)
-        if state['allowlist']:
-            props = self.run_root / 'server.properties'
-            if props.is_file() and not props.is_symlink() and not self._allowlist_enabled():
-                original = props.read_text('utf-8')
-                lines = [line for line in original.splitlines() if not line.strip().startswith('allow-list=')]
-                lines.append('allow-list=true')
-                _atomic_text(props, '\n'.join(lines) + '\n')
-                self.event('Allowlist enabled for subsequent server launches')
         if running:
             # BDS does not watch edits to its JSON files automatically.
             self.send('allowlist reload')
@@ -261,8 +253,6 @@ class BedrockServerAccess:
             # BDS can op only a connected player by name. The XUID-backed
             # operator role also persists and is reapplied on future starts.
             self.send(('op ' if action == 'add' else 'deop ') + _quote(name))
-        if running and kind == 'allowlist' and action == 'add':
-            self.send('allowlist on')
         return self.snapshot()
 
     def observe(self, data: bytes) -> None:
@@ -325,17 +315,3 @@ class BedrockServerAccess:
 
 def _quote(name: str) -> str:
     return '"' + _name(name) + '"' if ' ' in name else _name(name)
-
-
-def _atomic_text(path: Path, value: str) -> None:
-    if path.is_symlink() or path.parent.is_symlink():
-        raise RuntimeError('Refusing linked Bedrock server.properties')
-    tmp = path.with_name(path.name + '-' + uuid.uuid4().hex + '.tmp')
-    try:
-        with tmp.open('x', encoding='utf-8') as handle:
-            handle.write(value)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)

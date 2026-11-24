@@ -86,10 +86,13 @@ BEDROCK_HELP = '''bedrock [command]
   bedrock pack <name>           Select a pack for the Current World
   bedrock pack none             Clear the Current World's pack
   bedrock start                 Start the Current World and its selected pack
-  bedrock run                   Prompt before running an outdated Java conversion
+  bedrock run                   Start the Current World, including an older conversion
   bedrock stop                  Stop the running Bedrock server
   bedrock op [name|remove name]  List or manage persistent operators
   bedrock allowlist [name|remove name]  List or manage allowed players
+  bedrock properties            Show all server and world property values
+  bedrock properties list       Include descriptions, defaults and allowed values
+  bedrock <property> "<value>"   Set a persistent property for subsequent launches
   bedrock help                  Show these commands
   Each world remembers its own current pack.
   Operators and allowlist entries persist across worlds.'''
@@ -1055,13 +1058,36 @@ def execute(args: list[str]) -> int:
                     print('  ' + name)
                 if not state.get('allowlist'):
                     print('  (none)')
-            if state.get('allowlist') and not state.get('allowlist_enabled'):
-                print('Note: allow-list will be enabled on the next server launch.')
+            if kind == 'allowlist' and not state.get('allowlist_enabled'):
+                print('Allow-list enforcement is independent; set bedrock allow-list true to enable it.')
             return 0
         if not options or options in (['help'], ['--help'], ['-h']):
             print(BEDROCK_HELP)
             return 0
         action = options[0].casefold()
+        if action == 'properties' and len(options) <= 2:
+            detailed = len(options) == 2 and options[1].casefold() == 'list'
+            if len(options) == 2 and not detailed:
+                print('Usage: bedrock properties [list]', file=sys.stderr)
+                return 2
+            state = _api('/api/bedrock/properties')
+            for scope in ('server.properties', 'level.dat'):
+                print('\n'+scope+':')
+                for row in state['properties']:
+                    if row['scope'] != scope:
+                        continue
+                    print('  '+row['name']+' = '+json.dumps(row['value'], ensure_ascii=False))
+                    if detailed:
+                        print('    '+row['description'])
+                        print('    Default: '+json.dumps(row['default'], ensure_ascii=False)+'; Allowed: '+row['allowed'])
+                    if row['overridden'] and row['native_value'] != row['value']:
+                        print('    Saved override; applies at next launch.')
+                    if row['name']=='level-name' and row['native_value'] and row['native_value']!=row['value']:
+                        print('    Native managed folder: '+row['native_value'])
+            if state.get('world_error'):
+                print('World values unavailable: '+state['world_error'])
+            print('\nSettings are shared across worlds. Restart Bedrock to apply changes.')
+            return 0
         if action == 'report' and len(options) == 1:
             _api('/api/bedrock/report/open', body={})
             print('[bedrock] Opening Java and Bedrock Worlds report.', flush=True)
@@ -1112,6 +1138,10 @@ def execute(args: list[str]) -> int:
             if not started_server.get('terminal_session'):
                 raise RuntimeError('Bedrock failed to create its interactive console tab')
             print('[bedrock] Opened ' + current['command_name'] + '; close its tab or use bedrock stop.', flush=True)
+            return 0
+        if len(options) == 2:
+            result = _api('/api/bedrock/properties', body={'name':options[0], 'value':options[1]})
+            print(result['name']+' = '+json.dumps(result['value'], ensure_ascii=False)+' ('+result['applies']+')')
             return 0
         print(BEDROCK_HELP, file=sys.stderr)
         return 2

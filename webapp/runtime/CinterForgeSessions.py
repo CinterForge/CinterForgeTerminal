@@ -720,6 +720,16 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
             self._bedrock_boot_buffer = b''
             return (heading + b'[Bedrock] Server ready. Type commands here '
                     b'(e.g. list); close this tab to stop the server.\r\n'
+                    + ('\r\n\r\nWINDOWS USERS IMPORTANT: Minecraft Bedrock on Windows runs as a sandboxed '
+                       'UWP/Microsoft Store app. By default, Windows marks new Wi-Fi networks as Public '
+                       'and blocks UWP apps from receiving incoming peer-to-peer/WebRTC UDP packets'
+                       '—even on a local LAN. Your PC sends the initial "Trust" handshake out, '
+                       'the Bedrock server sends the WebRTC media response back, and Windows Defender '
+                       'Firewall silently drops it, causing Door - 2225.\r\n\r\n'
+                       'To fix this, open Settings > Network & internet > Wi-Fi, click your connected '
+                       'Wi-Fi network, and check if Network profile type is set to Public. Switching '
+                       'that toggle to Private (and confirming Minecraft is allowed in Windows '
+                       'Defender Firewall) fixes Door - 2225.\r\n\r\n').encode('utf-8')
                     + self._visible_output(pending[end + 1:]))
         # Only essential startup errors and readiness markers belong in the
         # user console. Everything else is already preserved in output_log.

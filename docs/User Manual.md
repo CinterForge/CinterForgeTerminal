@@ -191,7 +191,7 @@ The `bedrock packs` gallery uses local generated MCAddons when a valid developme
 
 ```text
 bedrock start                   Start Current World with its selected pack
-bedrock run                     Run Current World; prompt when Java conversion is stale
+bedrock run                     Start Current World, even if its conversion is stale
 bedrock stop                    Stop the running server
 bedrock op                      List operators
 bedrock op <gamertag>           Remember an operator and allowlist the player
@@ -199,11 +199,37 @@ bedrock op remove <name>        Remove an operator
 bedrock allowlist               List allowed players
 bedrock allowlist <name>        Allow a player
 bedrock allowlist remove <name> Remove a player
+bedrock properties             Show configured server/world settings
+bedrock properties list        Show descriptions, defaults and allowed values
+bedrock <property> "<value>"    Set a property for future launches
 ```
 
-`bedrock start` **does not take a world argument**. First choose a world with `bedrock world <name>` or Set Current in the report. The active pack is always the pack stored for that specific world, not a global default. `bedrock run` checks whether a Java-derived Bedrock conversion is outdated; if so, the shell asks whether to **Update for Bedrock** or **Run Anyway**. Start from the report follows the same freshness protection so it cannot silently bypass that decision. A missing or invalid conversion must be updated before the world can run.
+`bedrock start` **does not take a world argument**. First choose a world with `bedrock world <name>` or Set Current in the report. The active pack is always the pack stored for that specific world, not a global default. `bedrock run` and Start from the report reuse an existing valid Bedrock world even if its Java conversion is stale. Update for Bedrock remains an explicit operation. A missing or invalid conversion must be prepared before the world can run.
 
 The server opens in its owned interactive console tab. Type supported Minecraft server commands, such as `list`, into that tab. Closing the server tab or using `bedrock stop` stops the server; closing an independent Zoomify Map tab does not. Server operators and allowlist entries are server-wide and persist when you change worlds. If a second console attaches to the existing server, it must not launch a duplicate server.
+
+### Server and world properties
+
+All documented Bedrock `server.properties` settings and additional properties found in the installed package (including optional commented settings) use the same command. The installed package supplies version-specific defaults; saved settings are shared across worlds in `ServerProperties.json` in the Bedrock installation root. Existing native configuration is retained. Start or restart the server to apply saved changes. `level-name` is the existing Current World selector, not an arbitrary replacement for its unique managed save directory. `level-seed` does not regenerate existing terrain.
+
+```text
+bedrock properties
+bedrock properties list
+bedrock allow-cheats "true"
+bedrock allow-list "false"
+bedrock gamemode "creative"
+bedrock force-gamemode "true"
+bedrock educationFeaturesEnabled "true"
+bedrock keepinventory "true"
+bedrock showcoordinates "true"
+bedrock educationFeaturesEnabled "inherit"
+```
+
+The native `op` and `allowlist` commands continue to manage player identities in their JSON files. Adding a player no longer automatically enables allow-list enforcement, and cheats are no longer forced at launch. To enable enforcement use `bedrock allow-list true`. `content-log-console-output-enabled` can be changed; disabling it may hide CinterForge in-world status messages.
+
+World properties are written to the managed server copy's little-endian `level.dat` before BDS starts, never the original Java or Bedrock source save. `inherit` stops applying that global override on future launches; it does not undo earlier changes saved to a managed world. `educationFeaturesEnabled` enables Bedrock's compatible Education features (including chemistry). Camera/portfolio availability and behavior depend on the client and game version. `eduOffer` is an Education world marker, not a separate camera/portfolio switch; use `0` for ordinary Bedrock compatibility. Setting `1` can make a world incompatible with ordinary Bedrock clients. The server keeps its selected world and its own pack.
+
+The macOS VM's IPv4 relay and guest readiness probe follow the configured ports. This does not add native IPv6 guest connectivity; setting an IPv6 port does not guarantee IPv6 reachability through the macOS relay. Inbound script debugging, if explicitly enabled, exposes its configured port; use appropriate access controls. Native server behavior still depends on the installed BDS version.
 
 ### Conversions and world storage
 

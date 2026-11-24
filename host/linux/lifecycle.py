@@ -233,10 +233,19 @@ def verify_guest() -> Path:
             if not file.is_file() or file.is_symlink():
                 raise RuntimeError(f'Setup-produced Bedrock guest dependency missing: {file}')
             _require_elf(file, machine)
+        from host.linux.craftmaster.craftmaster_mac_bootstrap import LAN_RELAY_C
         runner = output / 'run-mac-bds.sh'
+        relay = output / 'CinterBDSNetRelay'
+        receipt = output / 'relay-source-sha256.json'
+        try:
+            saved = json.loads(receipt.read_text())
+        except (OSError, ValueError):
+            saved = {}
         if (not runner.is_file() or runner.is_symlink() or
-                'CinterBDSNetRelay' not in runner.read_text() or
-                not (output / 'CinterBDSNetRelay').is_file()):
+                'CINTER_BDS_PROPERTY_PORTS_V1' not in runner.read_text() or
+                not relay.is_file() or relay.is_symlink() or
+                saved.get('source_sha256') != hashlib.sha256(LAN_RELAY_C.encode('utf-8')).hexdigest() or
+                saved.get('binary_sha256') != hashlib.sha256(relay.read_bytes()).hexdigest()):
             raise RuntimeError('Guest LAN relay launcher missing/stale; run ./Cinter setup all')
     return output
 
