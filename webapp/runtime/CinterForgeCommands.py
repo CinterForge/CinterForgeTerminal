@@ -219,7 +219,7 @@ def _cli_mac_catalog():
     from runtime import CinterForgeSettings as _CinterForgeSettings
     from pathlib import Path
     data = json.loads((_CinterForgeSettings.ASSETS / 'data/mac_games.json').read_text(encoding='utf-8'))
-    if data.get('schema') != 'cinterforge.terminal.macgames.v1' or len(data.get('games', [])) != 64:
+    if data.get('schema') != 'cinterforge.terminal.macgames.v1' or len(data.get('games', [])) != 61:
         raise RuntimeError('Incomplete Macintosh games catalog')
     result = {}
     for game in data['games']:
@@ -233,7 +233,7 @@ def _cli_mac_catalog():
 
 
 def _game_catalog():
-    """Original JOSHUA plus the 64 curated Classic Mac command aliases."""
+    """Original JOSHUA plus the 61 curated Classic Mac game commands."""
     return {'wargames': {'title':'WarGames (JOSHUA)', 'kind':'joshua'},
             **_cli_mac_catalog()}
 
@@ -252,10 +252,10 @@ def _mac_launch(command, entry):
     # and types the guest's short game command using supported keyboard events.
     if not entry.get('guest_command'):
         raise RuntimeError(f"{entry['title']} has no verified matching game on Infinite HD")
+    print(f"Launching {entry['title']}. This may take a second...", flush=True)
     data = _api('/api/macgames/open', body={'command':command})
     if not data.get('requested'):
         raise RuntimeError('Macintosh emulator launch was not accepted')
-    print(f"Opening {entry['title']} in the {entry['guest_os']} Macintosh Terminal…", flush=True)
     return 0
 
 
@@ -898,14 +898,21 @@ def execute(args: list[str]) -> int:
         return 0
     command, *options = args
     if command == 'games':
+        if options == ['report']:
+            result = _api('/api/games/report/open', body={})
+            if not result.get('requested'):
+                raise RuntimeError('Games Report could not be opened')
+            print('Opening Games Report: 61 Macintosh games (System 7.1 / Mac OS 7.6).', flush=True)
+            return 0
         if options == ['download']:
             return _games_download()
         if options:
-            print('Usage: games', file=sys.stderr)
+            print('Usage: games [report|download]', file=sys.stderr)
             return 2
         print(GAMES_HELP)
         for name, entry in _cli_if_catalog().items():
             print(f"  {name:29} {entry['title']}")
+        print('  games report                  Open Macintosh Games Report (61 playable games)')
         print('  infinitemac                   Search historical Macintosh, NeXTSTEP and BeOS emulators')
         print('  infinitemac list              List installed classic Mac games and play commands')
         print('  bedrock                       Serve any Java or Bedrock world with CinterForge Behavior Packs')

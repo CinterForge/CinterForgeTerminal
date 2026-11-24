@@ -321,6 +321,129 @@
     search.focus();
   };
 
+  // Games Report is the same native Terminal-tab/card presentation as Machines
+  // Report. Cards are sourced solely from the installed 61-game catalog, and
+  // Play reuses the proven /api/macgames/open -> framed-keyboard launch path.
+  state.openGamesReportTab = async () => {
+    const existing = state.tabs.find(tab => !tab.closed && tab.kind === 'asset-view' && tab.assetKey === 'games-report');
+    if (existing) {
+      await state.activateTab(existing);
+      return;
+    }
+    const response = await state.api('/api/games/catalog');
+    if (!Array.isArray(response.games) || response.games.length !== 61)
+      throw new Error('The canonical 61-game Macintosh catalog is unavailable');
+    const element = (tag, cls, value) => {
+      const node = document.createElement(tag);
+      if (cls) node.className = cls;
+      if (value != null) node.textContent = String(value);
+      return node;
+    };
+    const shell = element('section', 'emulator-gallery games-report');
+    shell.hidden = true;
+    shell.setAttribute('aria-label', 'Classic Macintosh Games Report');
+    const header = element('header', 'emulator-gallery-header');
+    const heading = element('h2', '', 'Classic Macintosh Games');
+    const search = element('input', 'emulator-gallery-search');
+    search.type = 'search';
+    search.placeholder = 'Find a game…';
+    search.setAttribute('aria-label', 'Search Macintosh games');
+    const osFilter = element('select', 'emulator-gallery-filter');
+    osFilter.setAttribute('aria-label', 'Filter games by Mac OS version');
+    for (const [value, label] of [['', 'All systems'], ['7.1', 'System 7.1'], ['7.6', 'Mac OS 7.6']]) {
+      const option = element('option', '', label);
+      option.value = value;
+      osFilter.append(option);
+    }
+    const count = element('span', 'emulator-gallery-count');
+    header.append(heading, search, osFilter, count);
+    const scroll = element('div', 'emulator-gallery-scroll');
+    const groups = new Map();
+    const entries = [];
+    for (const [os, label] of [['7.1', 'System 7.1'], ['7.6', 'Mac OS 7.6']]) {
+      const section = element('section', 'emulator-gallery-section');
+      const sectionHeader = element('div', 'emulator-gallery-section-header');
+      const tally = element('span', 'emulator-gallery-section-count');
+      sectionHeader.append(element('h3', '', label), tally);
+      const grid = element('div', 'emulator-gallery-grid');
+      section.append(sectionHeader, grid);
+      scroll.append(section);
+      groups.set(os, {section, grid, tally, entries: []});
+    }
+    const launch = async game => {
+      try {
+        await state.api('/api/macgames/open', {command: game.command});
+        state.notice('Launching ' + game.title + '. This may take a second...');
+      } catch (error) {
+        state.notice('Unable to launch ' + game.title + ': ' + error.message);
+      }
+    };
+    for (const game of response.games) {
+      const group = groups.get(game.os);
+      if (!group || !/^[a-z0-9]+$/.test(game.command)) continue;
+      const card = element('article', 'emulator-gallery-card cf-card cf-card--game');
+      const thumb = element('button', 'emulator-gallery-thumb cf-card__media');
+      thumb.type = 'button';
+      thumb.setAttribute('aria-label', 'Play ' + game.title);
+      thumb.title = 'Play ' + game.title;
+      if (typeof game.icon === 'string' && /^\/game-icons\/(System71|MacOS76)\/[a-z0-9_-]+\.png$/.test(game.icon)) {
+        const img = element('img', 'games-report-icon');
+        img.alt = '';
+        img.src = game.icon;
+        img.onerror = () => {
+          img.remove();
+          thumb.append(element('span', 'games-report-missing', 'Icon unavailable'));
+        };
+        thumb.append(img);
+      } else {
+        thumb.append(element('span', 'games-report-missing', 'Icon unavailable'));
+      }
+      thumb.addEventListener('click', () => void launch(game));
+      const details = element('div', 'emulator-gallery-meta cf-card__details');
+      details.append(element('strong', '', game.title),
+        element('small', '', game.os === '7.1' ? 'System 7.1' : 'Mac OS 7.6'));
+      const actions = element('div', 'cf-card__actions');
+      const play = element('button', '', 'Play');
+      play.type = 'button';
+      play.addEventListener('click', () => void launch(game));
+      actions.append(play, element('span', 'cf-card__action-note', game.os === '7.1' ? 'Mac II' : 'Quadra 650'));
+      card.append(thumb, details, actions);
+      group.grid.append(card);
+      const entry = {card, game, query: (game.title + ' ' + game.command).toLocaleLowerCase()};
+      group.entries.push(entry);
+      entries.push(entry);
+    }
+    const refresh = () => {
+      const query = search.value.trim().toLocaleLowerCase();
+      let visible = 0;
+      for (const entry of entries) {
+        entry.card.hidden = Boolean(osFilter.value && osFilter.value !== entry.game.os) ||
+          Boolean(query && !entry.query.includes(query));
+        if (!entry.card.hidden) visible++;
+      }
+      for (const group of groups.values()) {
+        const shown = group.entries.filter(entry => !entry.card.hidden).length;
+        group.section.hidden = !shown;
+        group.tally.textContent = shown + ' of ' + group.entries.length;
+      }
+      count.textContent = visible + ' of ' + entries.length + ' games · ' + response.icons + ' icons';
+    };
+    search.addEventListener('input', refresh);
+    osFilter.addEventListener('change', refresh);
+    shell.append(header, scroll);
+    refresh();
+    state.computerView.append(shell);
+    const buffer = state.makeBuffer();
+    const tab = {key: ++state.tabSerial, label: 'Games · Report',
+      kind: 'asset-view', assetKey: 'games-report', mapFrame: shell,
+      profileId: 'modern', session: null, closed: false,
+      display: new state.VTOutput(buffer), buffer};
+    tab.display.target = buffer;
+    state.tabs.push(tab);
+    await state.activateTab(tab);
+    search.focus();
+  };
+
   let polling = false;
   setInterval(async () => {
     if (polling || document.visibilityState === 'hidden') return;
@@ -329,6 +452,7 @@
       const request = await state.api('/api/assets/next');
       if (request?.kind === 'picker') state.openAssetPicker();
       else if (request?.kind === 'emulators') await state.openEmulatorGalleryTab();
+      else if (request?.kind === 'games-report') await state.openGamesReportTab();
       else if (request?.kind) await state.openAssetTab(request);
     } catch (_) { /* Not configured, no credentials, or server exiting. */ }
     finally { polling = false; }

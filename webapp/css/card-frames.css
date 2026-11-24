@@ -13,6 +13,7 @@
   box-shadow:none!important;
 }
 .cf-card--machine{background-image:url('../cards/MachineCard.png')!important}
+.cf-card--game{background-image:url('../cards/GameCard.png')!important}
 .cf-card--asset{background-image:url('../cards/AssetCard.png')!important}
 .cf-card--world{background-image:url('../cards/WorldCard.png')!important}
 .cf-card__media{
@@ -144,3 +145,17 @@
   .emulator-gallery-grid,.group.cf-world-grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,180px),1fr))!important}
   #stage #grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,96px),1fr))!important}
 }
+
+/* 61-game report: use the actual extracted 32x32 Finder pixels in GameCard.
+ * Keep the same proportional card slots and grid used by Machines Report. */
+.games-report .cf-card--game{justify-self:center;display:block!important}
+.games-report .cf-card--game .games-report-icon{
+  width:min(72%,128px)!important;height:min(72%,128px)!important;
+  object-fit:contain!important;image-rendering:pixelated;
+}
+.games-report .cf-card--game .games-report-missing{
+  font:12px/1.3 system-ui,sans-serif;color:#d5d9dc;text-align:center;
+}
+.games-report .cf-card--game .cf-card__details,
+.games-report .cf-card--game .cf-card__details :is(strong,small){color:#112432!important}
+.games-report .cf-card--game .cf-card__actions{grid-template-rows:1fr!important}

@@ -91,6 +91,42 @@ def _webapp_static_file(root: Path, url_path: str) -> Path | None:
     return asset
 
 
+def _mac_games_report_icons(server, catalog: dict) -> dict[str, str]:
+    """Only serve GameIcons explicitly matched to the canonical 61-game catalog.
+
+    This is a read-only shared Builds/Assets library, not a copy in the app
+    bundle. The same manifest and PNG bytes are published/restored by Assets.
+    """
+    from runtime.assets.CinterForgeAssetViews import root_for
+    library = root_for(server) / 'GameIcons'
+    manifest = library / 'manifest.json'
+    if (library.is_symlink() or manifest.is_symlink() or not manifest.is_file()
+            or manifest.stat().st_size > 1024 * 1024):
+        return {}
+    document = json.loads(manifest.read_text(encoding='utf-8'))
+    if not isinstance(document, dict) or not isinstance(document.get('games'), list):
+        raise ValueError('Invalid GameIcons manifest')
+    matched = {}
+    for record in document['games']:
+        if not isinstance(record, dict):
+            continue
+        command = record.get('host_command')
+        game = catalog.get(command) if isinstance(command, str) else None
+        if not game or record.get('os') != game.get('guest_os') or record.get('status') != 'extracted':
+            continue
+        relative = record.get('file')
+        folder = 'System71' if game['guest_os'] == '7.1' else 'MacOS76'
+        if (not isinstance(relative, str) or not re.fullmatch(
+                re.escape(folder) + r'/[a-z0-9_-]+\.png', relative)):
+            continue
+        candidate = library.joinpath(*relative.split('/'))
+        if (candidate.is_symlink() or candidate.parent.is_symlink() or not candidate.is_file()
+                or candidate.stat().st_size > 1024 * 1024):
+            continue
+        matched[command] = relative
+    return matched
+
+
 class _IndexScripts(HTMLParser):
     """The authored index.html is the single source for classic script order."""
     def __init__(self) -> None:
@@ -549,6 +585,40 @@ class CinterForgeHTTPRoutes:
                 if ready:
                     self.server.wargames_requests -= 1
             self._json(200, {'open':ready})
+            return
+        if path == '/api/games/catalog':
+            if not self._authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            catalog = _CinterForgeSessions._mac_catalog()
+            try:
+                icons = _mac_games_report_icons(self.server, catalog)
+            except (OSError, RuntimeError, ValueError):
+                icons = {}  # Games remain launchable if Assets have not been set up.
+            self._json(200, {'games': [
+                {'command': command, 'title': game['title'], 'os': game['guest_os'],
+                 'icon': ('/game-icons/' + icons[command]) if command in icons else None}
+                for command, game in catalog.items()], 'count': len(catalog), 'icons': len(icons)})
+            return
+        if path.startswith('/game-icons/'):
+            # Only known PNGs from the trusted manifest; never expose arbitrary Assets.
+            if not self._code_authorized():
+                self._json(403, {'error': 'not authorized'})
+                return
+            relative = path[len('/game-icons/'):]
+            try:
+                from runtime.assets.CinterForgeAssetViews import root_for
+                allowed = _mac_games_report_icons(self.server, _CinterForgeSessions._mac_catalog())
+                if relative not in allowed.values():
+                    raise FileNotFoundError('Unknown game icon')
+                root = root_for(self.server) / 'GameIcons'
+                image = root.joinpath(*relative.split('/'))
+                if (root.is_symlink() or image.is_symlink() or image.parent.is_symlink()
+                        or not image.is_file()):
+                    raise FileNotFoundError('Game icon missing')
+                self._send(200, image.read_bytes(), 'image/png')
+            except (OSError, RuntimeError, ValueError):
+                self._json(404, {'error': 'Game icon unavailable'})
             return
         if path == '/api/games/verification':
             if not self._authorized():
@@ -1498,6 +1568,17 @@ class CinterForgeHTTPRoutes:
                         request for request in self.server.asset_actions
                         if request.get('kind') != 'emulators')
                     self.server.asset_actions.append({'kind': 'emulators'})
+                self._json(200, {'requested': True})
+                return
+            if route == '/api/games/report/open':
+                if body:
+                    raise ValueError('Games Report takes no arguments')
+                # Existing Assets tab-action queue also owns Machines Report.
+                with self.server.asset_actions_lock:
+                    self.server.asset_actions = type(self.server.asset_actions)(
+                        item for item in self.server.asset_actions
+                        if item.get('kind') != 'games-report')
+                    self.server.asset_actions.append({'kind': 'games-report'})
                 self._json(200, {'requested': True})
                 return
             if route == '/api/macgames/open':

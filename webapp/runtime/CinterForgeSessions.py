@@ -113,7 +113,7 @@ def _shell_command(system: str, scripts: Path, builds: Path | None = None) -> li
 def _mac_catalog():
     from runtime import CinterForgeSettings as _CinterForgeSettings
     data = json.loads((_CinterForgeSettings.ASSETS / 'data/mac_games.json').read_text(encoding='utf-8'))
-    if data.get('schema') != 'cinterforge.terminal.macgames.v1' or len(data.get('games', [])) != 64:
+    if data.get('schema') != 'cinterforge.terminal.macgames.v1' or len(data.get('games', [])) != 61:
         raise RuntimeError('Incomplete staged Macintosh game catalog')
     result = {}
     for game in data['games']:

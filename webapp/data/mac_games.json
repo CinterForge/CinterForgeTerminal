@@ -2,7 +2,7 @@
   "schema": "cinterforge.terminal.macgames.v1",
   "source": "https://github.com/CinterForge/cinterforge-infinite-mac/tree/main/Library/Games",
   "source_snapshot": "Library.zip provided 2026-11-09",
-  "launch_policy": "Direct 68K Terminal command injection via authenticated host and supported Infinite Mac keyboard events; never substitute library downloads",
+  "launch_policy": "Single canonical host and 68K game list. Build generates the guest C allowlist from this JSON. Only real scanned guest APPL matches are launchable.",
   "games": [
     {
       "command": "3wiz",
@@ -11,7 +11,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "3wizcolunr"
+      "guest_command": "3wizcolunr",
+      "finder_name": "3Wiz! col./unr.",
+      "finder_occurrence": 1
     },
     {
       "command": "a10attack",
@@ -21,7 +23,9 @@
       "needs_system_7": true,
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "a10attack15"
+      "guest_command": "a10attack15",
+      "finder_name": "A-10 Attack! 1.5",
+      "finder_occurrence": 1
     },
     {
       "command": "abuse",
@@ -30,7 +34,9 @@
       "format": "json",
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "abuse101"
+      "guest_command": "abuse101",
+      "finder_name": "Abuse 1.01",
+      "finder_occurrence": 1
     },
     {
       "command": "anotherworld",
@@ -39,17 +45,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "outofthisworld103"
-    },
-    {
-      "command": "apeiron102",
-      "title": "Apeiron 1.0.3",
-      "library_path": "Library/Games/Ambrosia Software/Apeiron 1.0.2.zip",
-      "format": "zip",
-      "emulator_profile": "mac-quadra-650",
-      "guest_os": "7.6",
-      "guest_command": "apeiron2",
-      "alias_of": "apeiron103"
+      "guest_command": "outofthisworld103",
+      "finder_name": "Out of this World™ 1.0.3",
+      "finder_occurrence": 1
     },
     {
       "command": "apeiron103",
@@ -59,7 +57,9 @@
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
       "guest_command": "apeiron2",
-      "guest_match_unverified": "Two guest applications have the Finder name Apeiron; version-to-command mapping needs live verification."
+      "guest_match_unverified": "Second Apeiron Finder application selected from the scanned guest; live 1.0.3 identity verification still required.",
+      "finder_name": "Apeiron",
+      "finder_occurrence": 2
     },
     {
       "command": "avara",
@@ -68,7 +68,9 @@
       "format": "zip",
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "avara"
+      "guest_command": "avara",
+      "finder_name": "Avara",
+      "finder_occurrence": 1
     },
     {
       "command": "barrack",
@@ -77,7 +79,9 @@
       "format": "zip",
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "barrack"
+      "guest_command": "barrack",
+      "finder_name": "Barrack",
+      "finder_occurrence": 1
     },
     {
       "command": "battlechess",
@@ -86,7 +90,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "battlechess"
+      "guest_command": "battlechess",
+      "finder_name": "Battle Chess",
+      "finder_occurrence": 1
     },
     {
       "command": "blobbolite",
@@ -95,7 +101,9 @@
       "format": "zip",
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "blobbo102lite"
+      "guest_command": "blobbo102lite",
+      "finder_name": "Blobbo 1.0.2 Lite",
+      "finder_occurrence": 1
     },
     {
       "command": "bolo",
@@ -104,7 +112,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "bolo0997"
+      "guest_command": "bolo0997",
+      "finder_name": "Bolo 0.99.7",
+      "finder_occurrence": 1
     },
     {
       "command": "boom",
@@ -114,7 +124,9 @@
       "needs_system_7": true,
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "boom10"
+      "guest_command": "boom10",
+      "finder_name": "BOOM 1.0",
+      "finder_occurrence": 1
     },
     {
       "command": "bubbletrouble",
@@ -123,7 +135,9 @@
       "format": "zip",
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "bubbletrouble"
+      "guest_command": "bubbletrouble",
+      "finder_name": "Bubble Trouble",
+      "finder_occurrence": 1
     },
     {
       "command": "chainshot",
@@ -132,7 +146,9 @@
       "format": "zip",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "chainshot"
+      "guest_command": "chainshot",
+      "finder_name": "ChainShot!",
+      "finder_occurrence": 1
     },
     {
       "command": "chiral",
@@ -141,7 +157,9 @@
       "format": "zip",
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "chiral"
+      "guest_command": "chiral",
+      "finder_name": "Chiral",
+      "finder_occurrence": 1
     },
     {
       "command": "civilization",
@@ -150,7 +168,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "civilization"
+      "guest_command": "civilization",
+      "finder_name": "Civilization™",
+      "finder_occurrence": 1
     },
     {
       "command": "continuum",
@@ -159,7 +179,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "continuum"
+      "guest_command": "continuum",
+      "finder_name": "Continuum",
+      "finder_occurrence": 1
     },
     {
       "command": "cosmicosmo",
@@ -168,7 +190,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "cosmicosmo"
+      "guest_command": "cosmicosmo",
+      "finder_name": "Cosmic Osmo",
+      "finder_occurrence": 1
     },
     {
       "command": "darkcastle",
@@ -177,7 +201,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "darkcastle"
+      "guest_command": "darkcastle",
+      "finder_name": "Dark Castle",
+      "finder_occurrence": 1
     },
     {
       "command": "escapevelocity",
@@ -186,7 +212,9 @@
       "format": "zip",
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "escapevelocity"
+      "guest_command": "escapevelocity",
+      "finder_name": "Escape Velocity",
+      "finder_occurrence": 1
     },
     {
       "command": "fa18hornet",
@@ -196,7 +224,9 @@
       "needs_system_7": true,
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "fa18hornetclassic"
+      "guest_command": "fa18hornetclassic",
+      "finder_name": "F/A-18 Hornet Classic",
+      "finder_occurrence": 1
     },
     {
       "command": "glider",
@@ -205,7 +235,9 @@
       "format": "zip",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "glider409"
+      "guest_command": "glider409",
+      "finder_name": "Glider 4.09",
+      "finder_occurrence": 1
     },
     {
       "command": "hellcatsoverthepacific",
@@ -214,7 +246,9 @@
       "format": "json",
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "hellcats"
+      "guest_command": "hellcats",
+      "finder_name": "Hellcats",
+      "finder_occurrence": 1
     },
     {
       "command": "indyandhisdesktopadventures",
@@ -223,7 +257,9 @@
       "format": "json",
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "indysdesktopadventures"
+      "guest_command": "indysdesktopadventures",
+      "finder_name": "Indy’s Desktop Adventures",
+      "finder_occurrence": 1
     },
     {
       "command": "indyandthefateofatlantis",
@@ -232,7 +268,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "fateofatlantisv15"
+      "guest_command": "fateofatlantisv15",
+      "finder_name": "Fate of Atlantis v.1.5",
+      "finder_occurrence": 1
     },
     {
       "command": "indyandthelastcrusade",
@@ -244,7 +282,9 @@
       "guest_command": "indy",
       "aliases": [
         "Indy and The Last Crusade"
-      ]
+      ],
+      "finder_name": "Indy™",
+      "finder_occurrence": 1
     },
     {
       "command": "lemmings",
@@ -253,7 +293,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "lemmings"
+      "guest_command": "lemmings",
+      "finder_name": "Lemmings",
+      "finder_occurrence": 1
     },
     {
       "command": "loom",
@@ -262,7 +304,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "loom"
+      "guest_command": "loom",
+      "finder_name": "Loom™",
+      "finder_occurrence": 1
     },
     {
       "command": "maelstrom",
@@ -271,7 +315,9 @@
       "format": "zip",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "maelstrom"
+      "guest_command": "maelstrom",
+      "finder_name": "Maelstrom",
+      "finder_occurrence": 1
     },
     {
       "command": "marathon",
@@ -281,7 +327,9 @@
       "needs_system_7": true,
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "marathon15"
+      "guest_command": "marathon15",
+      "finder_name": "Marathon ∞ 1.5",
+      "finder_occurrence": 1
     },
     {
       "command": "marathon2",
@@ -291,17 +339,9 @@
       "needs_system_7": true,
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "marathon2"
-    },
-    {
-      "command": "marathoninfinity",
-      "title": "Marathon Infinity",
-      "library_path": "Library/Games/Bungie/Marathon Infinity.zip",
-      "format": "zip",
-      "emulator_profile": "mac-quadra-650",
-      "guest_os": "7.6",
-      "guest_command": null,
-      "unavailable_reason": "Marathon Infinity not found in the inspected 68K guest catalog"
+      "guest_command": "marathon2",
+      "finder_name": "Marathon 2",
+      "finder_occurrence": 1
     },
     {
       "command": "minotaur",
@@ -310,7 +350,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "minotaur"
+      "guest_command": "minotaur",
+      "finder_name": "Minotaur",
+      "finder_occurrence": 1
     },
     {
       "command": "missilecommand",
@@ -319,7 +361,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "missilecommand30"
+      "guest_command": "missilecommand30",
+      "finder_name": "MissileCommand 3.0",
+      "finder_occurrence": 1
     },
     {
       "command": "nsshaft",
@@ -328,7 +372,9 @@
       "format": "zip",
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "nsshaft"
+      "guest_command": "nsshaft",
+      "finder_name": "NS-SHAFT",
+      "finder_occurrence": 1
     },
     {
       "command": "okasheepgame",
@@ -337,7 +383,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "ok020"
+      "guest_command": "ok020",
+      "finder_name": "ok 0.2.0",
+      "finder_occurrence": 1
     },
     {
       "command": "pararena",
@@ -346,7 +394,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "pararena206m"
+      "guest_command": "pararena206m",
+      "finder_name": "Pararena 2.06M",
+      "finder_occurrence": 1
     },
     {
       "command": "pathwaysintodarkness",
@@ -355,7 +405,9 @@
       "format": "json",
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "pathwaysintodarkness"
+      "guest_command": "pathwaysintodarkness",
+      "finder_name": "Pathways Into Darkness",
+      "finder_occurrence": 1
     },
     {
       "command": "pipedream",
@@ -364,7 +416,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "pipedream2"
+      "guest_command": "pipedream2",
+      "finder_name": "Pipe Dream™",
+      "finder_occurrence": 2
     },
     {
       "command": "princeofpersia",
@@ -373,7 +427,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "princeofpersia"
+      "guest_command": "princeofpersia",
+      "finder_name": "Prince of Persia",
+      "finder_occurrence": 1
     },
     {
       "command": "risk",
@@ -385,7 +441,9 @@
       "guest_command": "colorrisk241",
       "aliases": [
         "Risk"
-      ]
+      ],
+      "finder_name": "ColorRisk 2.41",
+      "finder_occurrence": 1
     },
     {
       "command": "scarabofra",
@@ -394,7 +452,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "scarabofra14"
+      "guest_command": "scarabofra14",
+      "finder_name": "Scarab of RA 1.4",
+      "finder_occurrence": 1
     },
     {
       "command": "shufflepuckcafe",
@@ -403,7 +463,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "shufflepuckcafv10"
+      "guest_command": "shufflepuckcafv10",
+      "finder_name": "Shufflepuck Café v1.0",
+      "finder_occurrence": 1
     },
     {
       "command": "simcity",
@@ -412,7 +474,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "simcityclassic"
+      "guest_command": "simcityclassic",
+      "finder_name": "Sim City Classic",
+      "finder_occurrence": 1
     },
     {
       "command": "simcity2000",
@@ -422,7 +486,9 @@
       "needs_system_7": true,
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "simcity200012"
+      "guest_command": "simcity200012",
+      "finder_name": "SimCity 2000® 1.2",
+      "finder_occurrence": 1
     },
     {
       "command": "snood",
@@ -432,18 +498,9 @@
       "needs_system_7": true,
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "snood"
-    },
-    {
-      "command": "snood30",
-      "title": "Snood",
-      "library_path": "Library/Games/Snood 3.0.json",
-      "format": "json",
-      "needs_mac_os_x": true,
-      "emulator_profile": "mac-quadra-650",
-      "guest_os": "7.6",
       "guest_command": "snood",
-      "alias_of": "snood"
+      "finder_name": "Snood",
+      "finder_occurrence": 1
     },
     {
       "command": "sokoban",
@@ -452,7 +509,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "sokoban242a"
+      "guest_command": "sokoban242a",
+      "finder_name": "Sokoban 2.4.2a",
+      "finder_occurrence": 1
     },
     {
       "command": "solarianii",
@@ -461,7 +520,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "solarianii"
+      "guest_command": "solarianii",
+      "finder_name": "Solarian II",
+      "finder_occurrence": 1
     },
     {
       "command": "spectre",
@@ -470,7 +531,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "spectre11"
+      "guest_command": "spectre11",
+      "finder_name": "Spectre 1.1",
+      "finder_occurrence": 1
     },
     {
       "command": "starbound",
@@ -480,7 +543,9 @@
       "needs_system_7": true,
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "starbound"
+      "guest_command": "starbound",
+      "finder_name": "StarBound",
+      "finder_occurrence": 1
     },
     {
       "command": "strategicconquest30",
@@ -489,7 +554,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "strategicconquest301"
+      "guest_command": "strategicconquest301",
+      "finder_name": "Strategic Conquest 3.01",
+      "finder_occurrence": 1
     },
     {
       "command": "strategicconquest401",
@@ -498,7 +565,9 @@
       "format": "zip",
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "strategicconquest401"
+      "guest_command": "strategicconquest401",
+      "finder_name": "Strategic Conquest 4.0.1",
+      "finder_occurrence": 1
     },
     {
       "command": "strategicconquestplus",
@@ -507,7 +576,9 @@
       "format": "json",
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "strategicconquestplus20"
+      "guest_command": "strategicconquestplus20",
+      "finder_name": "Strategic Conquest Plus 2.0",
+      "finder_occurrence": 1
     },
     {
       "command": "stuntcopter",
@@ -516,7 +587,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "stuntcopter20"
+      "guest_command": "stuntcopter20",
+      "finder_name": "StuntCopter 2.0",
+      "finder_occurrence": 1
     },
     {
       "command": "swoop",
@@ -526,7 +599,9 @@
       "needs_system_7": true,
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "swoop"
+      "guest_command": "swoop",
+      "finder_name": "Swoop",
+      "finder_occurrence": 1
     },
     {
       "command": "tetris",
@@ -535,7 +610,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "tetris"
+      "guest_command": "tetris",
+      "finder_name": "TETRIS",
+      "finder_occurrence": 1
     },
     {
       "command": "theoregontrail",
@@ -544,7 +621,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "oregontrail"
+      "guest_command": "oregontrail",
+      "finder_name": "OREGON TRAIL",
+      "finder_occurrence": 1
     },
     {
       "command": "thesecretofmonkeyisland",
@@ -553,7 +632,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "monkeyisland"
+      "guest_command": "monkeyisland",
+      "finder_name": "Monkey Island",
+      "finder_occurrence": 1
     },
     {
       "command": "troubledsouls",
@@ -563,7 +644,9 @@
       "needs_system_7": true,
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "troubledsouls"
+      "guest_command": "troubledsouls",
+      "finder_name": "Troubled Souls",
+      "finder_occurrence": 1
     },
     {
       "command": "ultimatedoom",
@@ -573,7 +656,9 @@
       "needs_system_7": true,
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "ultimatedoomi"
+      "guest_command": "ultimatedoomi",
+      "finder_name": "Ultimate Doom I",
+      "finder_occurrence": 1
     },
     {
       "command": "warcraftorcshumans",
@@ -583,7 +668,9 @@
       "needs_system_7": true,
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "warcraft"
+      "guest_command": "warcraft",
+      "finder_name": "Warcraft",
+      "finder_occurrence": 1
     },
     {
       "command": "warcraftiitidesofdarkness",
@@ -593,7 +680,9 @@
       "needs_system_7": true,
       "emulator_profile": "mac-quadra-650",
       "guest_os": "7.6",
-      "guest_command": "warcraftiiv122"
+      "guest_command": "warcraftiiv122",
+      "finder_name": "Warcraft II v.1.22",
+      "finder_occurrence": 1
     },
     {
       "command": "wesleyantetris",
@@ -602,7 +691,9 @@
       "format": "json",
       "emulator_profile": "mac-ii",
       "guest_os": "7.1",
-      "guest_command": "wesleyantetris"
+      "guest_command": "wesleyantetris",
+      "finder_name": "Wesleyan Tetris",
+      "finder_occurrence": 1
     }
   ]
 }

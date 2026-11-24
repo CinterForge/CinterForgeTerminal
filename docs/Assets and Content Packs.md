@@ -132,9 +132,18 @@ with `object_prefix=cinterforge` uses the R2 key prefix
 `cinterforge/assets` (or `cinterforge/assets/beta`), inside its existing
 configured bucket. Never confuse this prefix with the bucket name.
 
-`assets publish` uploads every file beneath the selected `Builds/Assets`
-**individually** to the matching key in the existing R2 Assets folder. Files
-retain the original hierarchy, names, and web content types. For example,
+`assets publish` uploads **every regular file and directory** beneath the selected
+`Builds/Assets` tree, without a category, extension, name, provenance, or
+hidden-file allowlist. Hidden metadata, provider downloads, arbitrary nested
+folders, user ZIPs, and `GameIcons` are included. Files are uploaded
+**individually** to the matching key in the existing R2 Assets folder.
+Empty directories are included in the manifest and recreated by Setup.
+Unsafe symlinks and paths fail explicitly instead of being skipped.
+**Beta and release channels expose uploaded files publicly; review the complete
+Assets folder for secrets, private content, and redistribution rights before
+publishing.**
+
+Files retain the original hierarchy, names, and web content types. For example,
 `Builds/Assets/Animated/Mixamo/<UCI>/solid/model.glb` is stored at
 `<provider-prefix>/assets/beta/Animated/Mixamo/<UCI>/solid/model.glb`
 for beta, directly retrievable over the bucket's normal public HTTPS URL.
@@ -142,8 +151,9 @@ No ZIP bundle is generated or uploaded. The terminal prints file and byte
 progress, downloads each newly uploaded object to confirm its SHA-256, then
 commits `assets/index.json` with schema `cinterforge.assets-files.v1`.
 Unchanged previously verified direct objects can be reused on later uploads.
-Publishing refuses to drop files from an existing direct inventory merely
-because the local tree is incomplete.
+Files previously indexed but now absent from the local tree are deleted from
+that channel when publishing the new snapshot. Unindexed remote objects are
+left untouched.
 
 `assets setup` reads that **direct-file** index, fetches individual objects,
 checks every size and SHA-256, and merges them into the local library without
