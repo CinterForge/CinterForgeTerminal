@@ -149,8 +149,13 @@ class CinterForgeHTTPAuthorization:
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('X-Frame-Options', 'SAMEORIGIN' if same_origin_frame else 'DENY')
-        self.send_header('Referrer-Policy', 'no-referrer')
-        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://*:20303; frame-src 'self' https://infinitemac.org; object-src 'none'; base-uri 'none'; frame-ancestors " + ("'self'" if same_origin_frame else "'none'"))
+        # The authored atlas embeds its logo as a PNG data URL. Permit data
+        # images only for this map document, not scripts or unrelated pages.
+        map_document = (same_origin_frame and ctype.startswith('text/html') and
+                        urlsplit(self.path).path.startswith('/craftmaster-map/'))
+        self.send_header('Referrer-Policy', 'same-origin' if map_document else 'no-referrer')
+        images = "img-src 'self' data:; " if map_document else ''
+        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; " + images + "connect-src 'self' ws://*:20303; frame-src 'self' https://infinitemac.org; object-src 'none'; base-uri 'none'; frame-ancestors " + ("'self'" if same_origin_frame else "'none'"))
         self.end_headers()
         try:
             self.wfile.write(body)

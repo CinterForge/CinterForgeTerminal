@@ -64,38 +64,79 @@ _server_thread = None
 _guest_boot_cancel = threading.Event()
 
 
-def _watch_native_http_parent(server: _CinterForgeHTTP.CinterForgeHTTPServer, parent_pid: int) -> None:
-    """Release this worker's listener when its native window exits abruptly.
+# Capture the direct native parent before a listener can be bound. The worker
+# may receive several stop/start RPCs during a server reboot; ownership belongs
+# to the worker, not to a particular server instance.
+_native_parent_pid = os.getppid()
+_native_watch_lock = threading.Lock()
+_native_watch_started = False
 
-    Xcode Stop may terminate the parent without giving the Python RPC worker a
-    shutdown message. Do not leave its HTTP service holding the reserved 20300
-    port. This observer only shuts down this worker's own server; it never
-    inspects, adopts, or terminates another process.
+
+def _start_native_http_watch() -> None:
+    """Arm process-lifetime supervision before creating any listening socket."""
+    global _native_watch_started
+    with _native_watch_lock:
+        if _native_watch_started:
+            return
+        parent_pid = _native_parent_pid
+        if parent_pid <= 1 or os.getppid() != parent_pid:
+            raise RuntimeError('Native HTTP owner has already exited')
+        parent_handle = None
+        if os.name == 'nt':
+            # On Windows getppid() continues to return the original PID after
+            # death. Keep a real kernel process handle, not a PID liveness guess.
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+            kernel.OpenProcess.restype = ctypes.c_void_p
+            kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            kernel.WaitForSingleObject.restype = ctypes.c_uint32
+            kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel.CloseHandle.restype = ctypes.c_int
+            parent_handle = kernel.OpenProcess(0x00100000, 0, parent_pid)  # SYNCHRONIZE
+            if not parent_handle:
+                raise RuntimeError('Cannot verify native HTTP owner process')
+            if kernel.WaitForSingleObject(parent_handle, 0) != 0x102:  # WAIT_TIMEOUT
+                kernel.CloseHandle(parent_handle)
+                raise RuntimeError('Native HTTP owner has already exited')
+        threading.Thread(target=_watch_native_http_parent,
+                         args=(parent_pid, parent_handle),
+                         name='cinter-native-http-owner', daemon=True).start()
+        _native_watch_started = True
+
+
+def _watch_native_http_parent(parent_pid: int, parent_handle=None) -> None:
+    """On owner death, release every socket even if ordinary cleanup hangs.
+
+    Only this worker is terminated. The existing independent VM watchdog owns
+    guest cleanup; never terminate a foreign listener or another native owner.
+    The bounded cleanup runs on a different thread so a stuck lock or log flush
+    cannot keep the HTTP process alive. OS process exit closes all its sockets.
     """
-    from runtime import CinterForgeHTTP as _CinterForgeHTTP
-    global _server
-    while _server is server and os.getppid() == parent_pid:
-        time.sleep(0.5)
-    if _server is not server:
-        return
-    server.log_event('Native HTTP owner exited; releasing managed listener and worker')
-    try:
-        server.stop()
-    except Exception as error:
-        # The native parent is gone; the worker must not survive just because
-        # an inherited stdin pipe is still open in another child process.
+    if parent_handle is not None:
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel.WaitForSingleObject.restype = ctypes.c_uint32
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel.CloseHandle.restype = ctypes.c_int
         try:
-            server.log_event('Native listener cleanup failed: ' + str(error))
-        except (OSError, ValueError):
-            pass
-    finally:
-        if _server is server:
-            _server = None
-        # This is our OWN orphaned worker, not an attached listener or another
-        # native owner's process. The independent native-PID watchdog owns VM
-        # cleanup, even when Xcode Stop makes C++ destructors impossible.
-        # No Python main-loop RPC can arrive from the dead native parent.
-        os._exit(0)
+            kernel.WaitForSingleObject(parent_handle, 0xffffffff)
+        finally:
+            kernel.CloseHandle(parent_handle)
+    else:
+        while os.getppid() == parent_pid:
+            time.sleep(0.1)
+    server = _server
+    if server is not None:
+        def cleanup():
+            try:
+                server.stop()
+            except Exception:
+                pass
+        closing = threading.Thread(target=cleanup, name='cinter-orphan-cleanup', daemon=True)
+        closing.start()
+        closing.join(timeout=2.0)
+    # Also covers crashes during startup, attach, and an in-flight stop RPC.
+    os._exit(0)
 
 
 def handle(method: str, params: dict) -> dict:
@@ -109,6 +150,7 @@ def handle(method: str, params: dict) -> dict:
     if method == 'start':
         if _server is not None:
             raise RuntimeError('CinterForgeTerminal HTTP server already started')
+        _start_native_http_watch()
         _guest_boot_cancel.clear()
         builds = Path(params['builds']).resolve(strict=True)
         if builds.name != 'Builds' or not _CinterForgeSettings.ASSETS.is_relative_to(builds):
@@ -176,9 +218,6 @@ def handle(method: str, params: dict) -> dict:
                 _CinterForgeAuthentication._write_lan_owner(_server)
             _server_thread = threading.Thread(target=_server.serve_forever, name='cinter-http', daemon=True)
             _server_thread.start()
-            threading.Thread(target=_watch_native_http_parent,
-                             args=(_server, os.getppid()),
-                             name='cinter-native-http-owner', daemon=True).start()
             # DevTools are optional: merely opening the Terminal never boots
             # Colima, Docker, Linux/Windows guests, or their VNC endpoints.
             # One explicit guest-boot request owns the same existing supervisor.

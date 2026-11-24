@@ -18,6 +18,7 @@ import os
 import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import re
+import secrets
 import threading
 import uuid
 from pathlib import Path
@@ -57,9 +58,19 @@ def write_map_annotation(handler, path):
     if not match: return False
     server = handler.server
     scheme = getattr(server,'scheme','http')
-    if (not handler._local() or not handler._lan_logged_in() or handler.headers.get('Origin') != scheme+'://'+handler.headers.get('Host','') or
-            handler.headers.get('Sec-Fetch-Site','same-origin') != 'same-origin'):
-        handler._json(403,{'error':'Same-origin map access required'});return True
+    origin = handler.headers.get('Origin')
+    expected = scheme + '://' + handler.headers.get('Host', '')
+    site = handler.headers.get('Sec-Fetch-Site', 'same-origin')
+    # WebKit can omit or null the Origin under a no-referrer policy. For that
+    # case require the issued opaque map ID in a non-simple request header.
+    # Cross-origin browser requests cannot set it without a CORS preflight,
+    # which these map endpoints do not authorize. Never accept a foreign origin.
+    issued_header = secrets.compare_digest(handler.headers.get('X-Cinter-Map-Write', ''), match.group(1))
+    origin_ok = origin == expected or (origin in (None, 'null') and issued_header)
+    json_body = handler.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() == 'application/json'
+    if not (handler._local() and handler._lan_logged_in() and origin_ok and site == 'same-origin' and json_body):
+        server.log_event('Rejected map annotation write (host/login/origin/request headers)')
+        handler._json(403, {'error': 'Same-origin map access required'}); return True
     with server.craftmaster_map_lock:
         state = server.craftmaster_maps.get(match.group(1))
         if state is not None: state = dict(state)
@@ -415,6 +426,12 @@ def serve_map_asset(handler, path: str) -> bool:
     if any((directory.joinpath(*parts[:index])).is_symlink() for index in range(1, len(parts) + 1)):
         handler._json(404, {'error': 'Unsafe map asset'})
         return True
+    # A sparse world has no height tile for ungenerated regions. This is a
+    # legitimate unknown sample, not a missing web resource. Never synthesize Y.
+    if (not asset.is_file() and len(parts) >= 3 and parts[-3:-1] == ('Layers', 'DepthY')
+            and re.fullmatch(r'r\.-?\d+\.-?\d+\.bin', parts[-1])):
+        handler._send(204, b'', 'application/octet-stream')
+        return True
     if not asset.is_file() or (relative_text == 'Live Map.htm' and
                                not _authored_viewer_ready(state, dimension, zoomify)):
         # HTTP 202 is a readiness response, not a second HTML viewer. Pollers
@@ -563,6 +580,9 @@ class _MapHTTPHandler(CinterForgeHTTPAuthorization, BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
+        # Annotation writes perform their own equivalent scoped origin/login check.
+        if write_map_annotation(self, path):
+            return
         if not self._same_origin():
             self._json(403, {'error': 'Same-origin request required'})
             return
@@ -589,8 +609,6 @@ class _MapHTTPHandler(CinterForgeHTTPAuthorization, BaseHTTPRequestHandler):
             return
         if not self._lan_logged_in():
             self._json(401, {'error': 'LAN login required'})
-            return
-        if write_map_annotation(self,path):
             return
         if not path.startswith('/map-update/'):
             self._json(404, {'error': 'Unknown map action'})

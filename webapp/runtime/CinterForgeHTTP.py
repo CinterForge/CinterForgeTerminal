@@ -61,7 +61,9 @@ from runtime.CinterForgeHTTPRoutes import CinterForgeHTTPRoutes
 
 class CinterForgeHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = False
+    # Unix permits reuse after a closed connection, not a second active listener.
+    # Windows SO_REUSEADDR can steal an active port: keep exclusive ownership there.
+    allow_reuse_address = os.name != 'nt'
 
     def __init__(self, builds: Path, *, lan: bool = False):
         from runtime import CinterForgeAuthentication as _CinterForgeAuthentication
@@ -218,17 +220,18 @@ class CinterForgeHTTPServer(ThreadingHTTPServer):
         # independent watchdog both need it to release the Colima lock before
         # attempting their own owned-VM shutdown.
         _CinterForgeService._guest_boot_cancel.set()
-        # Stop every owned browser listener, including VNC and PTY sockets.
-        if self.sidecars is not None:
-            self.sidecars.stop()
-            self.sidecars = None
-        # Release the listener FIRST. Slow PTY/Bedrock cleanup must not hold
-        # 20300 after a native Quit, Xcode Stop, or an authenticated recovery.
+        # Release the primary listener before any potentially slow sidecar,
+        # PTY, Bedrock or guest cleanup. The lifetime watchdog bounds crash cleanup.
         try:
             if self._http_serving.is_set():
                 self.shutdown()
         finally:
             self.server_close()
+        try:
+            if self.sidecars is not None:
+                self.sidecars.stop()
+        finally:
+            self.sidecars = None
             if self.lan:
                 _CinterForgeAuthentication._remove_lan_owner(self)
         try:
