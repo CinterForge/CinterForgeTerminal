@@ -69,7 +69,9 @@ def setup_receipts_present(builds: Path, targets: tuple[str, ...]) -> bool:
         try:
             doc = json.loads(receipt.read_text(encoding='utf-8'))
             if (doc.get('schema') != 'cinterforge.craftmaster.setup.v1'
-                    or doc.get('target') != target):
+                    or doc.get('target') != target or
+                    not isinstance(doc.get('reference_data'), dict) or
+                    not doc['reference_data'].get('mapping_inputs')):
                 return False
         except (OSError, ValueError, TypeError):
             return False
@@ -141,6 +143,11 @@ def _guest_lifecycle(builds: Path, action: str, target: str, *, docker: str | No
     if target not in ('linux', 'win'):
         raise ValueError('Unexpected CraftMaster guest platform: ' + target)
     source, leveldb = _source_roots(builds)
+    if action in ('setup', 'build'):
+        # Data acquisition and mapping generation are host-owned, respectively
+        # Setup and Build. The existing compiler guest has no network.
+        subprocess.run([sys.executable, '-B', str(source / 'Cinter'), action, 'data'],
+                       cwd=source, env=dict(os.environ, CINTER_BUILDS_ROOT=str(builds)), check=True)
     from host.windows.windows_environment import WindowsCrossEnvironment
     from host.lifecycle.amd64_backend import docker_bind_source
     cross = WindowsCrossEnvironment(builds)
@@ -152,15 +159,32 @@ def _guest_lifecycle(builds: Path, action: str, target: str, *, docker: str | No
     docker = docker or cross.docker
     if not docker or not cross.image:
         raise RuntimeError('Setup-provisioned AMD64 compiler image unavailable')
+    # Share only CraftMaster's non-world data workspace with the compiler guest.
+    if platform.system() == 'Darwin':
+        saves = Path.home() / 'Library/Application Support/minecraft/saves'
+    elif platform.system() == 'Windows':
+        saves = Path(os.environ.get('APPDATA') or str(Path.home() / 'AppData/Roaming')) / '.minecraft/saves'
+    else:
+        saves = Path.home() / '.minecraft/saves'
+    override = os.environ.get('CINTER_CRAFTMASTER_SAVES_ROOT')
+    if override:
+        saves = Path(override).resolve()
+    shared = saves / 'CinterForge'
+    if shared.is_symlink() or (shared / 'level.dat').exists():
+        raise RuntimeError('Unsafe CraftMaster shared saves workspace: ' + str(shared))
+    shared.mkdir(parents=True, exist_ok=True)
     mounts = [('--mount', f'type=bind,src={docker_bind_source(source)},dst=/craftmaster,readonly'),
               ('--mount', f'type=bind,src={docker_bind_source(leveldb)},dst=/leveldb,readonly'),
-              ('--mount', f'type=bind,src={docker_bind_source(builds)},dst=/builds')]
+              ('--mount', f'type=bind,src={docker_bind_source(builds)},dst=/builds'),
+              ('--mount', f'type=bind,src={docker_bind_source(shared)},dst=/craftmaster-saves/CinterForge')]
     cmd = [docker, 'run', '--rm', '--platform', 'linux/amd64', '--network', 'none']
     for item in mounts:
         cmd.extend(item)
     cmd.extend(['--workdir', '/craftmaster', '--env', 'CINTER_BUILDS_ROOT=/builds',
                 '--env', 'CINTER_LEVELDB_SOURCE=/leveldb',
-                '--env', 'PYTHONUNBUFFERED=1', '--env', 'CINTER_CRAFTMASTER_SKIP_WORLD_SETUP=1'])
+                '--env', 'PYTHONUNBUFFERED=1', '--env', 'CINTER_CRAFTMASTER_SKIP_WORLD_SETUP=1',
+                '--env', 'CINTER_CRAFTMASTER_DATA_OFFLINE=1',
+                '--env', 'CINTER_CRAFTMASTER_SAVES_ROOT=/craftmaster-saves'])
     if action == 'build':
         # Debian t guest contains ninja-build and GCC; it deliberately has no
         # GNU Make. CraftMaster's CMake defaults to Unix Makefiles otherwise.
@@ -254,6 +278,9 @@ def staged_craftmaster(builds: Path, target: str) -> Path:
             files = manifest.get('files')
             if not isinstance(files, dict) or not files:
                 raise RuntimeError('Stage has no file inventory')
+            if not {'data/ResourcesNew.json', 'data/AuxValueToBlockStateMap.md',
+                    'data/IntrinsicBlockStatesList.md', 'data/BlockStateAndTraitListings.md'} <= set(files):
+                raise RuntimeError('Stage lacks restored Bedrock mappings; rebuild CraftMaster')
             expected = {'manifest.json', *files}
             # Re-evaluate the manifest and all file bytes, not merely a receipt
             # or directory existence. Never accept symlinks or extra files.
@@ -439,7 +466,9 @@ def verify_embedded_craftmaster(app_root: Path, target: str) -> Path:
         raise RuntimeError('Installed CraftMaster native CLI missing')
     if not all('data/' + data in files for data in
                ('Resources.json', 'Contours.json', 'MCTemplate.mcworld',
-                'world-template.htm', 'zoomify-viewer.min.js', 'CinterForgeAtlas.js', 'TownNames.json', 'preview.py')):
+                'world-template.htm', 'zoomify-viewer.min.js', 'CinterForgeAtlas.js', 'TownNames.json', 'preview.py',
+                'AuxValueToBlockStateMap.md', 'IntrinsicBlockStatesList.md', 'BlockStateAndTraitListings.md',
+                'ResourcesNew.json')):
         raise RuntimeError('Installed CraftMaster runtime data is incomplete')
     if target == 'win':
         verify_packaged_windows_runtime(folder, binary)
