@@ -4,7 +4,7 @@ Responsibilities
 ----------------
 - Discover local Java and Bedrock worlds without changing their source data.
 - Convert selected Java worlds with the bundled, receipt-verified CraftMaster CLI.
-- Import independently published CraftMaster worlds from public Cloudflare URLs.
+- Reuse verified CraftMaster archives installed in Java saves by Setup.
 - Install Mojang's official Bedrock Dedicated Server only with EULA consent.
 - Supervise the visible server console and its exact macOS VM process.
 
@@ -104,17 +104,6 @@ def _terminate_owned_bedrock(process, *, force: bool) -> None:
     else:
         process.terminate(force=force)
 
-
-# Official Bedrock binary download metadata remains restricted to Minecraft.
-# Published converted worlds are separate, public Cloudflare R2 objects.
-PUBLIC_CRAFTMASTER_WORLDS_URL = (
-    'https://cinterforge.ucreg.io/CinterForgeCraftMaster/Worlds/'
-)
-PUBLIC_CRAFTMASTER_CHANNELS = ('release', 'beta')
-PUBLIC_MANIFEST_MAX_BYTES = 1024 * 1024
-WORLD_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
-WORLD_DOWNLOAD_PROGRESS_BYTES = 16 * 1024 * 1024
-WORLD_ARCHIVE_MAX_BYTES = 32 * 1024**3
 
 ASSET_LOCATION = _CinterForgeSettings.ASSETS  # Existing caller compatibility.
 
@@ -776,13 +765,22 @@ class CinterForgeBedrockManager:
         if custom:
             root = Path(custom)
             roots = [root.resolve()] if root.is_dir() and not root.is_symlink() else []
-            if self.curated_worlds.is_dir() and not self.curated_worlds.is_symlink():
-                roots.append(self.curated_worlds.resolve())
-            return roots
-        roots = list(dict.fromkeys(self._default_world_roots()))
+        else:
+            roots = list(dict.fromkeys(self._default_world_roots()))
+        # Converted worlds are owned by their Java saves. The legacy store
+        # remains discoverable for existing Bedrock-only saves; never write
+        # new CraftMaster imports there.
+        for saves in self._java_world_roots():
+            for source in saves.iterdir():
+                local = source / 'CinterForge'
+                converted = local / 'Bedrock'
+                if (source.is_dir() and not source.is_symlink() and
+                        (source / 'level.dat').is_file() and not local.is_symlink() and
+                        converted.is_dir() and not converted.is_symlink()):
+                    roots.append(converted.resolve())
         if self.curated_worlds.is_dir() and not self.curated_worlds.is_symlink():
             roots.append(self.curated_worlds.resolve())
-        return roots
+        return list(dict.fromkeys(roots))
 
     def set_world_path(self, raw: str) -> dict:
         with self._lock:
@@ -818,7 +816,7 @@ class CinterForgeBedrockManager:
         package = binary.parent.parent
         manifest = json.loads((package / 'manifest.json').read_text('utf-8'))
         for name in ('Resources.json', 'Contours.json', 'MCTemplate.mcworld',
-                     'world-template.htm', 'zoomify-viewer.min.js', 'preview.py'):
+                     'world-template.htm', 'zoomify-viewer.min.js', 'CinterForgeAtlas.js', 'TownNames.json', 'preview.py'):
             asset = package / 'data' / name
             expected = manifest.get('files', {}).get('data/' + name)
             if (not asset.is_file() or asset.is_symlink() or
@@ -1018,6 +1016,8 @@ class CinterForgeBedrockManager:
                 if (base_path / directory).is_symlink():
                     raise RuntimeError('Linked directory in Java save: ' + str(base_path / directory))
             for name in sorted(names):
+                if name == '.DS_Store' or name.startswith('._'):
+                    continue
                 file = base_path / name
                 if file.is_symlink():
                     raise RuntimeError('Linked file in Java save: ' + str(file))
@@ -1195,7 +1195,9 @@ class CinterForgeBedrockManager:
                 source.parent == saves for saves in self._java_world_roots())
         if world.get('edition') == 'bedrock':
             return (source.name == 'Candlewood' and
-                    source.parent == self.curated_worlds and source.is_dir())
+                    (source.parent == self.curated_worlds or
+                     (source.parent.name == 'Bedrock' and source.parent.parent.name == 'CinterForge' and
+                      source.parent.parent.parent.name == 'Candlewood (Candlewood)')) and source.is_dir())
         return False
 
     def export_world_file(self, world: dict, temporary_root: Path) -> tuple[Path, bool]:
@@ -1338,67 +1340,96 @@ class CinterForgeBedrockManager:
         report(export_name + ': Zoomify and Bedrock export ready')
         return archive
 
+    def _java_conversion_destination(self, world: dict) -> Path:
+        root = self.craftmaster_output_root(world) / 'Bedrock'
+        if root.is_symlink():
+            raise RuntimeError('Linked Java conversion cache')
+        return root / self.java_world_export_name(world)
+
+    @staticmethod
+    def _conversion_receipt(destination: Path, source: Path) -> dict | None:
+        marker = destination / 'cinter-craftmaster-world.json'
+        if (destination.parent.is_symlink() or destination.is_symlink() or marker.is_symlink() or not marker.is_file() or
+                not (destination / 'level.dat').is_file() or not (destination / 'db/CURRENT').is_file() or
+                not any((destination / 'db').glob('MANIFEST-*'))):
+            return None
+        data = json.loads(marker.read_text('utf-8'))
+        if (data.get('schema') != 'cinterforge.terminal.craftmaster-world.v1' or
+                data.get('source') != str(source.resolve()) or
+                any(path.is_symlink() for path in destination.rglob('*'))):
+            return None
+        return data
+
     def _convert_java_world(
         self, world: dict, progress: Callable[[str], None] | None = None,
         *, force: bool = False,
     ) -> Path:
-        """Reuse an installed save, or atomically import a converted update."""
-        source = Path(world['path'])
+        """Import the world-local conversion; only convert on explicit update or no archive."""
+        source = Path(world['path']).resolve(strict=True)
         export_name = self.java_world_export_name(world)
-        destination = self.curated_worlds / export_name
-        if destination.is_symlink() or self.curated_worlds.is_symlink():
-            raise RuntimeError('Refusing linked CraftMaster world destination')
-        if destination.is_dir() and not any(path.is_symlink() for path in destination.rglob('*')):
-            if not force and (
-                (destination / 'level.dat').is_file()
-                and (destination / 'db/CURRENT').is_file()
-                and any((destination / 'db').glob('MANIFEST-*'))
-            ):
-                if progress:
-                    progress(export_name + ': reusing validated Bedrock world')
+        destination = self._java_conversion_destination(world)
+        legacy = self.curated_worlds / export_name
+        report = progress or self._append_log
+        prior = self._conversion_receipt(destination, source)
+        legacy_receipt = self._conversion_receipt(legacy, source)
+        if destination.exists() and prior is None:
+            raise RuntimeError('Refusing to overwrite unowned Java conversion cache: ' + str(destination))
+        archive = self.craftmaster_output_root(world) / 'Worlds' / export_name / (export_name + '.mcworld')
+        if archive.is_symlink():
+            raise RuntimeError('Linked CraftMaster archive')
+        if not force:
+            if not archive.is_file():
+                if prior or legacy_receipt:
+                    return destination if prior else legacy
+            elif prior and prior.get('archive_sha256') == _sha256(archive):
+                report(export_name + ': reusing validated Bedrock world')
                 return destination
-        if destination.exists() and not force:
-            raise RuntimeError('Refusing to overwrite Bedrock world: ' + str(destination))
-        if force and destination.exists() and (not destination.is_dir() or any(
-                entry.is_symlink() for entry in destination.rglob('*'))):
-            raise RuntimeError('Refusing unsafe existing CraftMaster world: ' + str(destination))
-
-        archive = self.run_native_craftmaster(world, progress=progress)
-        self.curated_worlds.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            prefix='craftmaster-import-', dir=self.curated_worlds,
-        ) as temporary_directory:
-            extracted = Path(temporary_directory) / 'world'
+        # Do not replace a playable world while a managed Bedrock process uses it.
+        with self._lock:
+            pid, _, _ = self._live_session_locked()
+            active = self._server_configuration().get('level-name', '')
+            if pid is not None and any(active == self._managed_world_path(p).name
+                                       for p in (destination, legacy)):
+                if not force and (prior or legacy_receipt):
+                    return destination if prior else legacy
+                raise RuntimeError('Stop Bedrock before replacing its converted world')
+        if force or not archive.is_file():
+            archive = self.run_native_craftmaster(world, progress=progress)
+        digest = _sha256(archive)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='craftmaster-import-', dir=destination.parent) as temp:
+            extracted = Path(temp) / 'world'
             extracted.mkdir()
             _safe_extract(archive, extracted, max_uncompressed_bytes=64 * 1024**3)
-            if not all((extracted / path).is_file() for path in ('level.dat', 'levelname.txt', 'db/CURRENT')):
+            if not all((extracted / p).is_file() for p in ('level.dat', 'levelname.txt', 'db/CURRENT')) or not list((extracted / 'db').glob('MANIFEST-*')):
                 raise RuntimeError('CraftMaster archive missing Bedrock level or LevelDB')
-            if not list((extracted / 'db').glob('MANIFEST-*')):
-                raise RuntimeError('CraftMaster world LevelDB missing MANIFEST')
             (extracted / 'levelname.txt').write_text(export_name + '\n', encoding='utf-8')
-            (extracted / 'cinter-craftmaster-world.json').write_text(
-                json.dumps({
-                    'schema': 'cinterforge.terminal.craftmaster-world.v1',
-                    'source': str(source.resolve()),
-                    'world': export_name,
-                    'archive_sha256': _sha256(archive),
-                }, indent=2) + '\n', encoding='utf-8',
-            )
+            (extracted / 'cinter-craftmaster-world.json').write_text(json.dumps({
+                'schema': 'cinterforge.terminal.craftmaster-world.v1', 'source': str(source),
+                'world': export_name, 'archive_sha256': digest}, indent=2) + '\n', encoding='utf-8')
+            backup = Path(temp) / 'previous'
             if destination.exists():
-                if not force:
-                    raise RuntimeError('CraftMaster destination changed during conversion: ' + str(destination))
-                backup = self.curated_worlds / ('craftmaster-previous-' + uuid.uuid4().hex)
+                if self._conversion_receipt(destination, source) is None:
+                    raise RuntimeError('Conversion destination changed during import')
                 os.replace(destination, backup)
-                try:
-                    os.replace(extracted, destination)
-                except Exception:
-                    os.replace(backup, destination)
-                    raise
-                else:
-                    shutil.rmtree(backup)  # Converted and validated before replacing the old save.
-            else:
+            try:
                 os.replace(extracted, destination)
-        (progress or self._append_log)(export_name + ': world imported for Bedrock')
+                # Preserve existing Bedrock gameplay on a pure relocation.
+                # A different archive is an explicit conversion/publication update.
+                managed = self._managed_world_path(destination)
+                old_managed = self._managed_world_path(legacy)
+                if (not force and not managed.exists() and legacy_receipt and
+                        legacy_receipt.get('archive_sha256') == digest and old_managed.is_dir()):
+                    self._safe_world_copy(old_managed, managed)
+                elif not force:
+                    self.refresh_managed_world(destination)
+            except BaseException:
+                if destination.exists():
+                    shutil.rmtree(destination)
+                if backup.exists():
+                    os.replace(backup, destination)
+                raise
+        report(export_name + ': world imported for Bedrock from local Java save')
         return destination
 
     def _managed_world_path(self, source: Path) -> Path:
@@ -1439,203 +1470,12 @@ class CinterForgeBedrockManager:
             if fresh.exists():
                 shutil.rmtree(fresh)
 
-    # --- Public Cloudflare published-world installation ----------------------
-    def install_published_world(
-        self,
-        name: str,
-        progress: Callable[[str], None] | None = None,
-    ) -> Path:
-        """Download and verify an explicitly selected public CraftMaster world.
-
-        Cloudflare public channels (no private developer bucket):
-          release: https://cinterforge.ucreg.io/CinterForgeCraftMaster/Worlds/<world>/
-          beta:    https://cinterforge.ucreg.io/CinterForgeCraftMaster/Worlds/beta/<world>/
-
-        Download the .mcworld directly without contacting any manifest URL.
-        Verify ZIP CRC and Bedrock structure; record the observed SHA-256
-        without falsely claiming independent publisher authentication.
-        run_world() creates the separately writable server copy.
-        """
-        if (
-            not isinstance(name, str)
-            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 _().-]{0,120}', name)
-            or name.endswith((' ', '.'))
-        ):
-            raise ValueError('Invalid curated world name')
-
-        world_directory = self.curated_worlds / name
-        installed_receipt_path = world_directory / 'cinter-published-world.json'
-        if world_directory.is_symlink() or self.curated_worlds.is_symlink():
-            raise RuntimeError('Refusing linked published-world destination')
-
-        if installed_receipt_path.is_file() and not installed_receipt_path.is_symlink():
-            installed_receipt = json.loads(installed_receipt_path.read_text(encoding='utf-8'))
-            if (
-                installed_receipt.get('schema') == 'cinterforge.terminal.curated-world.v1'
-                and installed_receipt.get('world') == name
-                and re.fullmatch(r'[0-9a-f]{64}', str(installed_receipt.get('sha256', '')))
-                and (world_directory / 'level.dat').is_file()
-                and (world_directory / 'db/CURRENT').is_file()
-                and (world_directory / 'levelname.txt').is_file()
-                and not any(item.is_symlink() for item in world_directory.rglob('*'))
-            ):
-                if progress:
-                    progress(
-                        name + ': already installed from verified published world ('
-                        + str(world_directory) + ')'
-                    )
-                return world_directory
-
-        if world_directory.exists():
-            raise RuntimeError(
-                'Existing Candlewood content is incomplete or unverified: '
-                + str(world_directory)
-            )
-
-        # Public R2 URLs are stable. Do not require a separate manifest to
-        # authorize the archive: Cloudflare may expose the .mcworld even when
-        # manifest.json is blocked or not propagated. A manifest, if available,
-        # provides additional checksum verification, never a download gate.
-        encoded_name = quote(name, safe='')
-        archive_name = name + '.mcworld'
-        missing_channels = []
-        self.curated_worlds.mkdir(parents=True, exist_ok=True)
-
-        for channel in PUBLIC_CRAFTMASTER_CHANNELS:
-            channel_prefix = '' if channel == 'release' else channel + '/'
-            world_url = PUBLIC_CRAFTMASTER_WORLDS_URL + channel_prefix + encoded_name
-            download_url = world_url + '/' + quote(archive_name, safe='')
-            if progress:
-                progress(f'{name}: downloading public {channel} world directly: {download_url}')
-
-            with tempfile.TemporaryDirectory(
-                prefix='published-world-download-', dir=self.curated_worlds,
-            ) as temporary_directory:
-                temporary_root = Path(temporary_directory)
-                downloaded_archive = temporary_root / archive_name
-                digest = hashlib.sha256()
-                downloaded_bytes = 0
-                last_progress_bytes = 0
-                try:
-                    # Match an ordinary public browser GET.  In particular,
-                    # do NOT send Cache-Control: no-cache: the public Cloudflare
-                    # edge may serve a cached object while rejecting an origin
-                    # revalidation that a normal browser never asks it to do.
-                    request = Request(download_url, headers={
-                        'User-Agent': ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-                                       'AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15'),
-                        'Accept': 'application/octet-stream, application/zip, */*',
-                    })
-                    with urlopen(request, timeout=60) as response:
-                        if response.geturl() != download_url or response.status != 200:
-                            raise RuntimeError('Unexpected published world download response')
-                        declared_size = response.headers.get('Content-Length')
-                        if declared_size and int(declared_size) > WORLD_ARCHIVE_MAX_BYTES:
-                            raise RuntimeError('Published world exceeds maximum archive size')
-                        with downloaded_archive.open('wb') as archive_stream:
-                            for block in iter(
-                                lambda: response.read(WORLD_DOWNLOAD_CHUNK_BYTES), b''
-                            ):
-                                downloaded_bytes += len(block)
-                                if downloaded_bytes > WORLD_ARCHIVE_MAX_BYTES:
-                                    raise RuntimeError('Published world exceeds maximum archive size')
-                                archive_stream.write(block)
-                                digest.update(block)
-                                if (
-                                    progress
-                                    and downloaded_bytes - last_progress_bytes >= WORLD_DOWNLOAD_PROGRESS_BYTES
-                                ):
-                                    progress(f'{name}: downloaded {downloaded_bytes / 1048576:.1f} MiB')
-                                    last_progress_bytes = downloaded_bytes
-                except HTTPError as error:
-                    if error.code in (403, 404):
-                        # A 404 means no published object on this channel; a 403
-                        # means this HTTP client was denied.  Neither establishes
-                        # anything about other channels or a user's browser.
-                        status = 'not published' if error.code == 404 else 'request denied'
-                        ray = error.headers.get('CF-Ray', '') if error.headers else ''
-                        detail = (f'{channel}: HTTP {error.code} ({status}) '
-                                  f'for GET {download_url}')
-                        if ray:
-                            detail += f' (Cloudflare Ray {ray})'
-                        missing_channels.append(detail)
-                        if progress:
-                            progress(name + ': ' + detail)
-                        continue
-                    raise
-
-                if downloaded_bytes < 1024:
-                    raise RuntimeError('Published world download is empty: ' + download_url)
-                actual_sha256 = digest.hexdigest()
-                if progress:
-                    progress(f'{name}: downloaded {downloaded_bytes / 1048576:.1f} MiB; validating Bedrock ZIP')
-
-                # No public manifest request. The verified HTTPS archive URL is
-                # the only network dependency. ZIP entries are CRC-checked by
-                # ZipFile.extractall; avoid decompressing this large world twice.
-                # Without independent publisher metadata, the checksum proves
-                # local integrity only, not authenticated publisher provenance.
-                extracted_world = temporary_root / name
-                extracted_world.mkdir()
-                if progress:
-                    progress(name + ': extracting and CRC-checking Bedrock world')
-                try:
-                    _safe_extract(
-                        downloaded_archive, extracted_world,
-                        max_uncompressed_bytes=64 * 1024**3,
-                    )
-                except zipfile.BadZipFile as error:
-                    raise RuntimeError('Published world ZIP failed integrity check') from error
-                if not all(
-                    (extracted_world / filename).is_file()
-                    for filename in ('level.dat', 'levelname.txt', 'db/CURRENT')
-                ):
-                    raise RuntimeError('Published world archive missing Bedrock files')
-                if not list((extracted_world / 'db').glob('MANIFEST-*')):
-                    raise RuntimeError('Published world LevelDB missing MANIFEST')
-
-                (extracted_world / 'levelname.txt').write_text(name + '\n', encoding='utf-8')
-                receipt = {
-                    'schema': 'cinterforge.terminal.curated-world.v1',
-                    'world': name,
-                    'sha256': actual_sha256,
-                    'bytes': downloaded_bytes,
-                    'publication_version': None,
-                    'checksum_source': 'downloaded-content-only',
-                    'source': download_url,
-                }
-                (extracted_world / 'cinter-published-world.json').write_text(
-                    json.dumps(receipt, indent=2) + '\n', encoding='utf-8',
-                )
-                os.replace(extracted_world, world_directory)
-                if progress:
-                    progress(f'{name}: installed validated Bedrock archive at {world_directory}')
-                return world_directory
-
-        raise RuntimeError(
-            'Public CraftMaster download failed for ' + name + ': '
-            + '; '.join(missing_channels)
-        )
-
     def prepare_selected_java_world(self, world: dict, progress: Callable[[str], None] | None = None) -> str:
-        """Only reuse a curated conversion identified as this Java save's output."""
-        source = Path(world['path']).resolve(strict=True)
-        export = self.java_world_export_name(world)
-        curated = self.curated_worlds / export
-        receipt = curated / 'cinter-craftmaster-world.json'
-        if (curated.is_dir() and not curated.is_symlink() and receipt.is_file()
-                and not receipt.is_symlink()):
-            data = json.loads(receipt.read_text('utf-8'))
-            if (data.get('schema') == 'cinterforge.terminal.craftmaster-world.v1' and
-                    data.get('source') == str(source) and
-                    (curated / 'level.dat').is_file() and (curated / 'db/CURRENT').is_file()):
-                return export
-        if curated.exists():
-            raise RuntimeError('Cannot replace a Bedrock world with an unverified Java association: ' + export)
+        """Use the last validated conversion, regardless of Java freshness."""
         return self._convert_java_world(world, progress=progress).name
 
     def prepare_world(self, name: str, progress: Callable[[str], None] | None = None) -> str:
-        """Resolve the requested world: Bedrock save, Java save, then public CDN.
+        """Resolve a local Bedrock or Java save; Setup installs published Java saves.
 
         A Java save is matched by its displayed name or folder; CraftMaster
         determines the export name (for example, `Candlewood (Candlewood)`
@@ -1658,8 +1498,7 @@ class CinterForgeBedrockManager:
         if java_world:
             return self._convert_java_world(java_world, progress=progress).name
 
-        # Only explicitly missing local worlds attempt the public CDN.
-        return self.install_published_world(name, progress=progress).name
+        raise ValueError('No local world named ' + repr(name) + '; install published Java worlds with ./Cinter setup worlds <channel>')
 
     def list_worlds(self) -> dict:
         entries: list[dict] = []
@@ -1671,6 +1510,16 @@ class CinterForgeBedrockManager:
             for folder in folders:
                 if folder.is_symlink() or not folder.is_dir() or not (folder / 'level.dat').is_file() or not (folder / 'db').is_dir():
                     continue
+                if root == self.curated_worlds.resolve():
+                    marker = folder / 'cinter-craftmaster-world.json'
+                    if marker.is_file() and not marker.is_symlink():
+                        try:
+                            original = Path(json.loads(marker.read_text('utf-8'))['source'])
+                            local = original / 'CinterForge' / 'Bedrock' / folder.name
+                            if self._conversion_receipt(local, original):
+                                continue
+                        except (OSError, ValueError, KeyError, TypeError):
+                            pass
                 name_file = folder / 'levelname.txt'
                 try:
                     name = name_file.read_text('utf-8-sig', errors='replace')[:2048].strip() if name_file.is_file() else folder.name
@@ -2036,6 +1885,14 @@ class CinterForgeBedrockManager:
             matches = [world for world in self.list_worlds()['worlds']
                        if name.strip().casefold() in (world['name'].casefold(), world['folder'].casefold(),
                                                       _world_command_name(world).casefold())]
+            if selected_world is not None and selected_world.get('edition') == 'java':
+                java_source = Path(selected_world['path'])
+                local = self._java_conversion_destination(selected_world)
+                paths = [local, self.curated_worlds / local.name]
+                for path in paths:
+                    if self._conversion_receipt(path, java_source):
+                        matches = [item for item in matches if Path(item['path']) == path.resolve()]
+                        break
             if not matches:
                 raise ValueError('No Bedrock save named ' + repr(name) + '; type bedrock start for the list')
             if len(matches) != 1:
@@ -2112,22 +1969,13 @@ class CinterForgeBedrockManager:
                 source = None
                 if path and selected.get('edition') == 'bedrock':
                     source = Path(path)
-                elif path and selected.get('edition') == 'java' and self.curated_worlds.is_dir():
-                    # Use existing verified conversion receipts. Listing
-                    # settings must never start CraftMaster or convert a save.
-                    matches = []
-                    for folder in self.curated_worlds.iterdir():
-                        receipt = folder / 'cinter-craftmaster-world.json'
-                        if folder.is_symlink() or receipt.is_symlink() or not receipt.is_file():
-                            continue
-                        data = json.loads(receipt.read_text('utf-8'))
-                        if (data.get('schema') == 'cinterforge.terminal.craftmaster-world.v1' and
-                                data.get('source') == str(Path(path).resolve())):
-                            matches.append(folder)
-                    if len(matches) == 1:
-                        source = matches[0]
-                    elif len(matches) > 1:
-                        world_error = 'Multiple converted saves match the selected Java world.'
+                elif path and selected.get('edition') == 'java':
+                    original = Path(path)
+                    local = self._java_conversion_destination(selected)
+                    for candidate in (local, self.curated_worlds / local.name):
+                        if self._conversion_receipt(candidate, original):
+                            source = candidate
+                            break
                 if source is not None:
                     managed = self._managed_world_path(source) / 'level.dat'
                     candidate = managed if managed.is_file() else source / 'level.dat'

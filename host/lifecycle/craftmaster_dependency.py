@@ -93,7 +93,7 @@ def _mac_lifecycle(builds: Path, action: str) -> None:
     if platform.system() != 'Darwin':
         raise RuntimeError('Mac CraftMaster native target requires Xcode/macOS')
     env = dict(os.environ, CINTER_BUILDS_ROOT=str(builds),
-               CINTER_LEVELDB_SOURCE=str(leveldb))
+               CINTER_LEVELDB_SOURCE=str(leveldb), CINTER_CRAFTMASTER_SKIP_WORLD_SETUP='1')
     from host.lifecycle.setup_progress import progress_step
     with progress_step('CraftMaster mac ' + action, prefix='[CRAFTMASTER]'):
         subprocess.run([sys.executable, '-B', str(source / 'Cinter'), action, 'mac'],
@@ -160,7 +160,7 @@ def _guest_lifecycle(builds: Path, action: str, target: str, *, docker: str | No
         cmd.extend(item)
     cmd.extend(['--workdir', '/craftmaster', '--env', 'CINTER_BUILDS_ROOT=/builds',
                 '--env', 'CINTER_LEVELDB_SOURCE=/leveldb',
-                '--env', 'PYTHONUNBUFFERED=1'])
+                '--env', 'PYTHONUNBUFFERED=1', '--env', 'CINTER_CRAFTMASTER_SKIP_WORLD_SETUP=1'])
     if action == 'build':
         # Debian t guest contains ninja-build and GCC; it deliberately has no
         # GNU Make. CraftMaster's CMake defaults to Unix Makefiles otherwise.
@@ -178,6 +178,26 @@ def _guest_lifecycle(builds: Path, action: str, target: str, *, docker: str | No
     with progress_step('CraftMaster ' + target + ' ' + action, prefix='[CRAFTMASTER]'):
         subprocess.run(cmd, check=True)
 
+
+
+def craftmaster_world_command(builds: Path, args: list[str], *, optional: bool = False) -> None:
+    """Delegate world publication/installation to its owning checkout on the host.
+
+    Setup invokes the documented CraftMaster CLI, never a guest or an embedded
+    duplicate. Missing catalog is optional only for ordinary product Setup.
+    """
+    source = Path(__file__).resolve().parents[2].parent / 'cinterforge-craftmaster'
+    if source.is_symlink() or not (source / 'Cinter').is_file():
+        if args[0] == 'setup':
+            source, _ = ensure_craftmaster_sources(builds)
+        else:
+            raise RuntimeError('CraftMaster checkout missing; run Terminal Setup first')
+    env = dict(os.environ, CINTER_BUILDS_ROOT=str(builds), PYTHONDONTWRITEBYTECODE='1')
+    if optional:
+        env['CINTER_CRAFTMASTER_OPTIONAL_WORLD_SETUP'] = '1'
+    else:
+        env.pop('CINTER_CRAFTMASTER_OPTIONAL_WORLD_SETUP', None)
+    subprocess.run([sys.executable, '-B', str(source / 'Cinter'), *args], cwd=source, env=env, check=True)
 
 def setup_craftmaster(builds: Path, *, targets: tuple[str, ...] = TARGETS,
                       guest: bool = False, docker: str | None = None) -> None:
@@ -419,7 +439,7 @@ def verify_embedded_craftmaster(app_root: Path, target: str) -> Path:
         raise RuntimeError('Installed CraftMaster native CLI missing')
     if not all('data/' + data in files for data in
                ('Resources.json', 'Contours.json', 'MCTemplate.mcworld',
-                'world-template.htm', 'zoomify-viewer.min.js', 'preview.py')):
+                'world-template.htm', 'zoomify-viewer.min.js', 'CinterForgeAtlas.js', 'TownNames.json', 'preview.py')):
         raise RuntimeError('Installed CraftMaster runtime data is incomplete')
     if target == 'win':
         verify_packaged_windows_runtime(folder, binary)

@@ -10,20 +10,73 @@ served. Java saves, archives, LevelDB and arbitrary host paths are never exposed
 
 from __future__ import annotations
 
+import html
+import types
+import json
 import mimetypes
+import os
+import ssl
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import re
 import threading
 import uuid
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, quote, urlsplit, parse_qs
+
+from runtime.CinterForgeHTTPAuthorization import CinterForgeHTTPAuthorization
 
 
+MAP_HTTP_PORT = 20330
 MAX_VISIBLE_MAPS = 16
 MAX_MAP_ASSET_BYTES = 8 * 1024 * 1024
 _MAX_MAP_LAYOUT_ENTRIES = 4096
 
 
-def open_map_tab(server, world: dict, *, preparing: bool = True) -> dict:
+_provider_lock = threading.RLock()
+_provider = {}
+
+
+def _map_provider(server):
+    # CraftMaster owns the annotated map schema; reuse its manifest-verified
+    # preview resource instead of maintaining a second persistence implementation.
+    manager = server.bedrock
+    with _provider_lock:
+        cached = _provider.get(manager)
+        if cached is not None: return cached
+        _, data = manager._craftmaster_cli()
+        path = data / 'preview.py'
+        module = types.ModuleType('craftmaster_map_preview')
+        module.__file__ = str(path)
+        exec(compile(path.read_bytes(), str(path), 'exec'), module.__dict__)
+        _provider[manager] = module
+        return module
+
+
+def write_map_annotation(handler, path):
+    match = re.fullmatch(r'/craftmaster-map/([0-9a-f]{32})/MapAnnotations\.json',path)
+    if not match: return False
+    server = handler.server
+    scheme = getattr(server,'scheme','http')
+    if (not handler._local() or not handler._lan_logged_in() or handler.headers.get('Origin') != scheme+'://'+handler.headers.get('Host','') or
+            handler.headers.get('Sec-Fetch-Site','same-origin') != 'same-origin'):
+        handler._json(403,{'error':'Same-origin map access required'});return True
+    with server.craftmaster_map_lock:
+        state = server.craftmaster_maps.get(match.group(1))
+        if state is not None: state = dict(state)
+    if state is None or (hasattr(server,'scheme') and not state.get('remote')):
+        handler._json(404,{'error':'Unknown map'});return True
+    try:
+        n=int(handler.headers.get('Content-Length','0'))
+        if not 1<=n<=4096: raise ValueError('Invalid annotation request')
+        edit=json.loads(handler.rfile.read(n))
+        result=_map_provider(server).map_annotations(state['directory'].parent,edit)
+        handler._json(200,result)
+    except (OSError,ValueError,RuntimeError,TypeError):
+        handler._json(400,{'error':'Could not save map annotation'})
+    return True
+
+
+def open_map_tab(server, world: dict, *, preparing: bool = True, enqueue: bool = True) -> dict:
     """Queue a browser tab independently of Bedrock's interactive PTY."""
     manager = server.bedrock
     if manager is None:
@@ -38,23 +91,31 @@ def open_map_tab(server, world: dict, *, preparing: bool = True) -> dict:
         map_id = next((key for key, entry in server.craftmaster_maps.items()
                        if entry.get('world_id') == world_id), None)
         if map_id is None:
-            if len(server.craftmaster_maps) >= MAX_VISIBLE_MAPS:
+            if enqueue and sum(bool(entry.get('tab_open')) for entry in server.craftmaster_maps.values()) >= MAX_VISIBLE_MAPS:
                 raise RuntimeError('Too many CraftMaster map tabs; close an existing map')
             map_id = uuid.uuid4().hex
             server.craftmaster_maps[map_id] = {
                 'world_id': world_id, 'name': world_name, 'directory': map_directory,
                 'phase': 'preparing' if preparing else 'ready',
+                'working': False, 'tab_open': False, 'remote': False,
                 'message': 'Preparing live Zoomify map…' if preparing else 'Map ready',
             }
-        elif preparing:
+        elif preparing and not server.craftmaster_maps[map_id].get('working'):
             server.craftmaster_maps[map_id].update(
                 phase='preparing', message='Preparing live Zoomify map…')
         request = {
             'id': map_id, 'world': world_name, 'world_id': world_id,
-            'url': '/craftmaster-map/' + map_id + '/Live%20Map.htm?refresh=5',
+            'url': '/craftmaster-map/' + map_id + '/Overworld/Live%20Map.htm?refresh=5',
         }
-        if not any(row['id'] == map_id for row in server.craftmaster_map_requests):
-            server.craftmaster_map_requests.append(request)
+        state = server.craftmaster_maps[map_id]
+        if enqueue:
+            if not state.get('tab_open') and sum(bool(entry.get('tab_open')) for entry in server.craftmaster_maps.values()) >= MAX_VISIBLE_MAPS:
+                raise RuntimeError('Too many CraftMaster map tabs; close an existing map')
+            state['tab_open'] = True
+            if not any(row['id'] == map_id for row in server.craftmaster_map_requests):
+                server.craftmaster_map_requests.append(request)
+        else:
+            state['remote'] = True
     return request
 
 
@@ -109,18 +170,26 @@ def mark_finished(server, map_id: str, error: Exception | None = None) -> None:
         state = server.craftmaster_maps.get(map_id)
         if state is None:
             return
+        state['working'] = False
         state['phase'] = 'failed' if error else 'ready'
         state['message'] = str(error) if error else 'Conversion complete; map stays live in this tab'
+        if not state.get('remote') and not state.get('tab_open'):
+            server.craftmaster_maps.pop(map_id, None)
 
 
-def run_map_conversion(server, name: str) -> dict:
+def run_map_conversion(server, name: str, *, enqueue: bool = True, update_served_world: bool = True) -> dict:
     """Start `craftmaster <world>` in a worker; return before conversion ends."""
     if server.bedrock is None:
         raise RuntimeError(server.bedrock_error or 'CraftMaster is unavailable')
     world = server.bedrock.find_java_world(name)
     if world is None:
         raise ValueError('No local Java world named ' + repr(name))
-    request = open_map_tab(server, world)
+    with server.craftmaster_map_lock:
+        request = open_map_tab(server, world, enqueue=enqueue)
+        state = server.craftmaster_maps[request['id']]
+        if state.get('working'):
+            return {'map': request, 'started': False, 'already_running': True}
+        state.update(working=True, phase='preparing', message='Preparing live Zoomify map…')
 
     def convert() -> None:
         from runtime import CinterForgeSessions as _CinterForgeSessions
@@ -129,6 +198,13 @@ def run_map_conversion(server, name: str) -> dict:
         def progress(line: str) -> None:
             report_progress(server, request['id'], line)
         try:
+            if not update_served_world:
+                # A map-only web request updates the portable Java-derived assets.
+                # It must never stop or replace the live Bedrock server's save.
+                with server.bedrock_terminal_lock:
+                    manager.run_native_craftmaster(world, progress=progress)
+                mark_finished(server, request['id'])
+                return
             # The same operation lock guards missing-world import and startup.
             # An explicit update never overlaps a live server for that world.
             with server.bedrock_terminal_lock:
@@ -278,8 +354,38 @@ def serve_map_asset(handler, path: str) -> bool:
     ):
         handler._json(404, {'error': 'Invalid map asset'})
         return True
-    dimension, zoomify = _map_layout(state)
-    if relative_text in ('Live Map.htm', 'zoomify-viewer.min.js', 'LiveMap.status'):
+    # World-level manifest and explicit canonical dimensions only; no raw save access.
+    world_root = state['directory'].parent
+    if relative_text in ('MapAnnotations.json','MapPlayers.json') or (len(parts)==2 and parts[0]=='Profiles'):
+        try:
+            provider=_map_provider(handler.server)
+            if relative_text=='MapAnnotations.json': handler._json(200,provider.map_annotations(world_root))
+            elif relative_text=='MapPlayers.json': handler._json(200,provider.map_players(world_root))
+            elif parts[1].endswith('.json'): handler._json(200,provider.map_profile(world_root,parts[1][:-5]))
+            elif parts[1].endswith('.png'): handler._send(200,provider.map_profile_skin(world_root,parts[1][:-4]),'image/png')
+            else: raise ValueError('Unknown map profile')
+        except (OSError,ValueError,RuntimeError,TypeError): handler._json(404,{'error':'Map metadata unavailable'})
+        return True
+    if relative_text == 'LiveMap.json':
+        asset = world_root / 'LiveMap.json'
+        if any(p.is_symlink() for p in (asset, world_root, *world_root.parents)) or not asset.is_file():
+            handler._json(404, {'error': 'Live dimension inventory not ready'})
+        elif asset.stat().st_size > MAX_MAP_ASSET_BYTES:
+            handler._json(413, {'error': 'Map inventory exceeds size limit'})
+        else:
+            handler._send(200, asset.read_bytes(), 'application/json')
+        return True
+    if parts[0] in ('Overworld', 'Nether', 'End') and len(parts) > 1:
+        dimension = world_root / parts[0]
+        parts = parts[1:]
+        relative = Path(*parts)
+        relative_text = relative.as_posix()
+        zoomify = (None if dimension.is_symlink() or relative_text in
+                   ('LiveMap.status', 'LiveMap POIs.json', 'zoomify-viewer.min.js', 'CinterForgeAtlas.js', 'TownNames.json')
+                   else _find_zoomify_root(dimension))
+    else:
+        dimension, zoomify = _map_layout(state)
+    if relative_text in ('Live Map.htm', 'zoomify-viewer.min.js', 'CinterForgeAtlas.js', 'TownNames.json', 'LiveMap.status', 'LiveMap POIs.json', world_root.name + ' POIs.json'):
         allowed = True
     else:
         # Only serve a true Zoomify tile/metadata file under the discovered
@@ -290,7 +396,9 @@ def serve_map_asset(handler, path: str) -> bool:
             (len(parts) == len(prefix) + 1 and parts[-1] == 'ImageProperties.xml'
              or len(parts) == len(prefix) + 2
              and _TILE_GROUP.fullmatch(parts[-2])
-             and _ZOOMIFY_TILE.fullmatch(parts[-1]))
+             and _ZOOMIFY_TILE.fullmatch(parts[-1])
+             or len(parts) == len(prefix) + 3 and parts[-3:-1] == ('Layers', 'DepthY')
+             and re.fullmatch(r'r\.-?\d+\.-?\d+\.bin', parts[-1]))
         )
     if not allowed:
         handler._json(404, {'error': 'Unknown Zoomify asset'})
@@ -302,6 +410,8 @@ def serve_map_asset(handler, path: str) -> bool:
         handler._json(404, {'error': 'Unsafe map directory'})
         return True
     asset = directory / relative
+    # The converter's live status determines whether a rectangle is active.
+    # Retain the authored origin even when conversion is complete.
     if any((directory.joinpath(*parts[:index])).is_symlink() for index in range(1, len(parts) + 1)):
         handler._json(404, {'error': 'Unsafe map asset'})
         return True
@@ -325,3 +435,216 @@ def serve_map_asset(handler, path: str) -> bool:
         same_origin_frame=(relative_text == 'Live Map.htm'),
     )
     return True
+
+
+# The LAN map endpoint shares the Terminal runtime, world inventory, conversion
+# locks and restricted Zoomify routes. It does not expose the Terminal shell.
+_MAP_SERVICE_JS = r"""(() => {
+'use strict';
+const root = document.querySelector('main[data-map]');
+if (!root) return;
+const id = root.dataset.map, frame = document.querySelector('#world-map');
+const status = document.querySelector('#map-status'), button = document.querySelector('#update-map');
+let loaded = false, pending = false, polling = false, wasWorking = false;
+async function poll() {
+  if (polling) return; polling = true;
+  try {
+    const response = await fetch('/map-status/' + id, {cache:'no-store'});
+    if (!response.ok) throw Error('Map service unavailable');
+    const data = await response.json();
+    status.textContent = data.message; button.disabled = pending || data.working;
+    if (!loaded && data.ready) { loaded = true; frame.src = root.dataset.viewer; frame.hidden = false; }
+    else if (loaded && wasWorking && !data.working && data.phase === 'ready') {
+      try { frame.contentWindow.location.reload(); } catch(_) { frame.src = root.dataset.viewer; }
+    }
+    wasWorking = data.working;
+  } catch(e) { status.textContent = e.message; }
+  finally { polling = false; }
+}
+button.addEventListener('click', async () => {
+  if (pending) return; pending = true; button.disabled = true;
+  try {
+    const response = await fetch('/map-update/' + id, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    if (!response.ok) {const data = await response.json(); throw Error(data.error || 'Update failed');}
+    status.textContent = 'CraftMaster update requested…';
+  } catch(e) {status.textContent = e.message;}
+  finally {pending = false; await poll();}
+});
+setInterval(poll,1000); void poll();
+})();"""
+
+_MAP_SERVICE_STYLE = """html,body{height:100%;margin:0;background:#e8d6a9;color:#47321f;font:14px Georgia,serif}main{height:100%;display:flex;flex-direction:column}header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:#efe0b9;flex-wrap:wrap}h1{font-size:18px;margin:0}a,button{color:#523b25;background:#e9d6ac;border:1px solid #b59a6c;border-radius:6px;padding:7px 10px;text-decoration:none;font:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:default}iframe{border:0;flex:1;width:100%;min-height:0}iframe[hidden]{display:none}ul{list-style:none;padding:16px;display:grid;gap:12px;align-content:start}#map-status{margin-left:auto;color:#614a30}"""
+
+
+class _MapHTTPHandler(CinterForgeHTTPAuthorization, BaseHTTPRequestHandler):
+    """Narrow map-only HTTP surface; never route through Terminal's CLI APIs."""
+
+    def _page(self, title, body, *, script=False):
+        document = ('<!doctype html><html lang="en"><meta charset="utf-8">'
+                    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                    '<title>' + html.escape(title) + '</title><style>' + _MAP_SERVICE_STYLE +
+                    '</style><body>' + body +
+                    ('<script src="/map-service.js" defer></script>' if script else '') + '</body></html>')
+        self._send(200, document.encode('utf-8'), 'text/html; charset=utf-8')
+
+    def _remote_state(self, map_id):
+        if not re.fullmatch(r'[0-9a-f]{32}', map_id):
+            return None
+        with self.server.craftmaster_map_lock:
+            state = self.server.craftmaster_maps.get(map_id)
+            return dict(state) if state and state.get('remote') else None
+
+    def _same_origin(self):
+        # Reject cross-origin browser writes, including unauthenticated LAN mode.
+        return (self.headers.get('Origin') == self.server.scheme + '://' + self.headers.get('Host', '')
+                and self.headers.get('Sec-Fetch-Site', 'same-origin') == 'same-origin')
+
+    def do_GET(self):
+        path = urlsplit(self.path).path
+        if not self._lan_logged_in():
+            if path.startswith(('/craftmaster-map/', '/map-status/')):
+                self._json(401, {'error': 'LAN login required'})
+            else:
+                self._login_page()
+            return
+        try:
+            if path == '/map-service.js':
+                self._send(200, _MAP_SERVICE_JS.encode('utf-8'), 'text/javascript; charset=utf-8')
+                return
+            if path.startswith('/craftmaster-map/'):
+                if not self._remote_state(path.split('/')[2]):
+                    self._json(404, {'error': 'Unknown map'})
+                else:
+                    serve_map_asset(self, path)
+                return
+            if path.startswith('/map-status/'):
+                state = self._remote_state(path[len('/map-status/'):])
+                if state is None:
+                    self._json(404, {'error': 'Unknown map'})
+                    return
+                dimension, zfy = _map_layout(state)
+                ready = _authored_viewer_ready(state, dimension, zfy)
+                working = bool(state.get('working'))
+                # Do not expose native logs (which can contain local file paths).
+                progress = re.search(r'CONVERT dimension=(\d+) phase=\d+ chunks=(\d+/\d+) percent=([\d.]+)', state['message'])
+                message = ('Converting · ' + progress.group(2) + ' chunks · ' + progress.group(3) + '%') if working and progress else (
+                    'Updating map…' if working else 'Update failed; see the Terminal server log' if state['phase'] == 'failed' else
+                    'Map ready' if ready else 'No map yet — request an update')
+                self._json(200, {'ready': ready, 'working': working, 'message': message, 'phase': state['phase']})
+                return
+            manager = self.server.bedrock
+            if manager is None:
+                self._json(503, {'error': 'CraftMaster unavailable'})
+                return
+            if path == '/':
+                rows = []
+                for world in manager.list_java_worlds():
+                    # Unique IDs are accepted as well as readable world names.
+                    name = world.get('command_name') or world['name']
+                    rows.append('<li><a href="/' + quote(world['id'], safe='') + '">' + html.escape(name) + '</a></li>')
+                self._page('CinterForge World Maps', '<main><header><h1>CinterForge World Maps</h1></header><ul>' + ''.join(rows) + '</ul></main>')
+                return
+            name = unquote(path[1:])
+            if not name or len(name) > 240 or '/' in name or '\\' in name or name in ('.', '..') or any(ord(c) < 32 for c in name):
+                self._json(404, {'error': 'Unknown world'})
+                return
+            world = manager.find_java_world(name)
+            if world is None:
+                self._json(404, {'error': 'Unknown Java world'})
+                return
+            request = open_map_tab(self.server, world, preparing=False, enqueue=False)
+            label = html.escape(request['world'])
+            self._page(request['world'], '<main data-map="' + request['id'] + '" data-viewer="' + html.escape(request['url'], quote=True) + '">'
+                       '<header><a href="/">Worlds</a><h1>' + label + '</h1><button id="update-map" type="button">Update map</button>'
+                       '<span id="map-status" role="status">Loading…</span></header><iframe id="world-map" title="World map" allow="clipboard-write" hidden></iframe></main>', script=True)
+        except (OSError, ValueError, RuntimeError) as error:
+            self.server.log_event('[CraftMaster map service] ' + str(error))
+            self._json(409, {'error': 'World or map unavailable; see the Terminal server log'})
+
+    def do_POST(self):
+        path = urlsplit(self.path).path
+        if not self._same_origin():
+            self._json(403, {'error': 'Same-origin request required'})
+            return
+        if path == '/login' and self.server.lan_login is not None:
+            from runtime.CinterForgeAuthentication import _check_lan_login
+            try:
+                n = int(self.headers.get('Content-Length', '0'))
+                if not 1 <= n <= 2048:
+                    raise ValueError('Invalid login length')
+                fields = parse_qs(self.rfile.read(n).decode('utf-8'), keep_blank_values=True)
+                valid = (len(fields.get('username', [])) == 1 and len(fields.get('password', [])) == 1 and
+                         _check_lan_login(self.server.lan_login, fields['username'][0], fields['password'][0]))
+            except (ValueError, UnicodeDecodeError):
+                valid = False
+            if not valid:
+                self._login_page(failed=True)
+                return
+            self.send_response(303)
+            self.send_header('Location', '/')
+            self.send_header('Set-Cookie', 'cinter_lan=' + self.server.lan_cookie + '; HttpOnly; SameSite=Strict; Path=/' +
+                             ('; Secure' if self.server.scheme == 'https' else ''))
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        if not self._lan_logged_in():
+            self._json(401, {'error': 'LAN login required'})
+            return
+        if write_map_annotation(self,path):
+            return
+        if not path.startswith('/map-update/'):
+            self._json(404, {'error': 'Unknown map action'})
+            return
+        state = self._remote_state(path[len('/map-update/'):])
+        if state is None:
+            self._json(404, {'error': 'Unknown map'})
+            return
+        try:
+            n = int(self.headers.get('Content-Length', '0'))
+            if not 0 <= n <= 2048:
+                raise ValueError('Invalid update length')
+            self.rfile.read(n)
+            result = run_map_conversion(self.server.owner, state['world_id'], enqueue=False, update_served_world=False)
+            self._json(202, {'started': result['started'], 'already_running': result.get('already_running', False)})
+        except (OSError, RuntimeError, ValueError) as error:
+            self.server.log_event('[CraftMaster map service] ' + str(error))
+            self._json(409, {'error': 'Could not start map update; see the Terminal server log'})
+
+    def do_HEAD(self):
+        self.send_error(405)
+
+    def do_OPTIONS(self):
+        self.send_error(405)
+
+
+class CraftMasterMapHTTPServer(ThreadingHTTPServer):
+    """One app-owned map listener. TLS uses a host-supplied certificate/key."""
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, owner, port=MAP_HTTP_PORT):
+        self.owner = owner
+        self.scheme = 'http'
+        certificate = os.environ.get('CINTER_MAP_TLS_CERT')
+        private_key = os.environ.get('CINTER_MAP_TLS_KEY')
+        if bool(certificate) != bool(private_key):
+            raise ValueError('Map HTTPS requires both CINTER_MAP_TLS_CERT and CINTER_MAP_TLS_KEY')
+        context = None
+        if certificate:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.load_cert_chain(certificate, private_key)
+            self.scheme = 'https'
+        # Respect the primary listener's LAN policy.
+        super().__init__(('0.0.0.0' if owner.lan else '127.0.0.1', port), _MapHTTPHandler)
+        if context is not None:
+            try:
+                self.socket = context.wrap_socket(self.socket, server_side=True)
+            except Exception:
+                self.server_close()
+                raise
+
+    def __getattr__(self, name):
+        # Share authorization and map registry with the primary app owner.
+        # The restricted handler never calls the full Terminal HTTP dispatcher.
+        return getattr(self.owner, name)

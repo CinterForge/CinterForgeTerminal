@@ -257,7 +257,8 @@ def _run_automated_regression_tests() -> None:
 @contextmanager
 def _temporary_build_services(argv: list[str]):
     """Lifecycle phase owns only its Colima helpers, including crash cleanup."""
-    owner = (bool(argv) and argv[0] in ('setup', 'build', 'test', 'publish') and
+    world_only = len(argv) >= 2 and argv[:2] in (['setup', 'worlds'], ['publish', 'world'])
+    owner = (bool(argv) and not world_only and argv[0] in ('setup', 'build', 'test', 'publish') and
              not os.environ.get('CINTER_LIFECYCLE_PARENT') and
              platform.system() == 'Darwin')
     if not owner:
@@ -376,6 +377,10 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) == 3 and argv[:2] == ['linuxkit', 'build']:
         raise ValueError('Use ./Cinter setup all (no per-platform lifecycle stages)')
+    if (len(argv) >= 2 and argv[:2] in (['setup', 'worlds'], ['publish', 'world'])) or (argv and argv[0] == 'worlds'):
+        from host.lifecycle.craftmaster_dependency import craftmaster_world_command
+        craftmaster_world_command(BUILDS, argv)
+        return 0
     if argv == ['setup', 'win']:
         # A Windows-only lifecycle must not provision LinuxKit/Bedrock,
         # fetch Lagomorph media or build unrelated applications. It uses the
@@ -385,6 +390,8 @@ def main(argv: list[str]) -> int:
         BUILDS.mkdir(parents=True, exist_ok=True)
         from host.lifecycle.craftmaster_dependency import ensure_craftmaster_sources, setup_craftmaster
         ensure_craftmaster_sources(BUILDS)
+        from host.lifecycle.craftmaster_dependency import craftmaster_world_command
+        craftmaster_world_command(BUILDS, ['setup', 'worlds', os.environ.get('CINTER_CRAFTMASTER_WORLD_CHANNEL', 'release')], optional=True)
         from host.lifecycle.setup_dirty import is_current, invalidate, commit
         from host.lifecycle.craftmaster_dependency import setup_receipts_present
         from host.lifecycle.assets_dependency import (media_toolchains_ready,
@@ -437,6 +444,8 @@ def main(argv: list[str]) -> int:
             raise RuntimeError('Invalid CraftMaster Setup target selection')
         craft_targets = ('mac', 'linux', 'win') if requested == 'all' else (requested,)
         ensure_craftmaster_sources(BUILDS)
+        from host.lifecycle.craftmaster_dependency import craftmaster_world_command
+        craftmaster_world_command(BUILDS, ['setup', 'worlds', os.environ.get('CINTER_CRAFTMASTER_WORLD_CHANNEL', 'release')], optional=True)
         from host.lifecycle.setup_dirty import is_current, invalidate, commit
         from host.lifecycle.craftmaster_dependency import setup_receipts_present
         from host.lifecycle.assets_dependency import (asset_dependencies_ready,
@@ -913,6 +922,9 @@ def main(argv: list[str]) -> int:
         return 0
     raise ValueError('Usage: ./Cinter host <legacy-host-action> [options]\n'
                      '       ./Cinter setup all\n'
+                     '       ./Cinter setup worlds [internal|beta|release]\n'
+                     '       ./Cinter worlds [internal|beta|release]\n'
+                     '       ./Cinter publish world ["<worldname>" <internal|beta|release|all>]\n'
                      '       ./Cinter toolchain check\n'
                      '       ./Cinter build cfterminal all # 3 native apps + DevTools, unpacked\n'
                      '       ./Cinter reboot server|docker|colima|app # restart only, no build\n'

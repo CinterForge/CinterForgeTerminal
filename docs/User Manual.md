@@ -237,6 +237,24 @@ CraftMaster uses its existing incremental conversion and fingerprints to decide 
 
 When exporting a world, the `.mcworld` includes valid Bedrock world content. Terminal-owned state, private selection records and intermediate conversion files remain outside the exported gameplay archive.
 
+### Publishing and installing complete Java worlds
+
+CraftMaster owns `data/PublishedWorlds.json` in its source repository, with each approved world's name, exact Java save folder and authorized publication channels. Candlewood is approved for internal, beta and release. Terminal delegates these commands to the native host CraftMaster lifecycle:
+
+```text
+./Cinter publish world
+./Cinter publish world Candlewood all
+./Cinter worlds release
+./Cinter setup worlds release
+./Cinter setup worlds beta
+./Cinter setup worlds internal
+```
+
+A publication contains the complete Java save and whatever portable `CinterForge` conversion data already exists, not only the `.mcworld`. Publish never runs CraftMaster conversion or requires a current or completed conversion. Convert explicitly before publication if desired. Setup installs the save in the platform's standard Minecraft Java saves directory and never overwrites an independently authored or locally modified save. Ordinary product Setup also checks the release world catalog before its dependency-cache early return; `CINTER_CRAFTMASTER_WORLD_CHANNEL=internal` or `beta` selects another channel. Explicit `setup worlds` installs worlds only, without rebuilding Terminal. Internal requires the private R2 credentials. Quit Java and stop Bedrock before publication or Setup. Local private packs, diagnostics, machine-specific logs and writable serving caches are not distributed.
+
+After Setup, select the world in Terminal and start Bedrock using its existing converted archive. A newer archive is imported when necessary; no freshness gate is introduced. The live server still uses its separate runtime save. The previous standalone public `.mcworld` download fallback is no longer used to install worlds.
+
+
 ## 7. Real terminals on three platforms
 
 CinterForge Terminal supports native platform shells and integrated developer sessions; the available options depend on the host operating system and installed support runtimes.
@@ -432,3 +450,10 @@ writable only within that emulator session; the Cloudflare master is immutable.
 If the CinterForge volume is absent, use
 `./Cinter publish cfterminal 68k beta` after Build/Stage and confirm the
 application CDN permits ranged requests and Infinite Mac CORS.
+
+
+### World map web service
+
+Terminal serves its available Java world maps on port 20330 independently of the active Bedrock server. Open `http://server:20330/` for the inventory or `http://server:20330/Candlewood` for a world. Use **Update map** to request an incremental conversion; this does not restart the running Bedrock server. The map follows Terminal’s LAN access and `setpass` login policy. On trusted networks configure `CINTER_MAP_TLS_CERT` and `CINTER_MAP_TLS_KEY` before starting Terminal to enable HTTPS with a certificate trusted for the server hostname. Do not expose the service to the Internet without authentication.
+
+The People and Places panels use the saved Java player and village POIs. Unnamed villages use a nearby matching welcome/town/village sign within their bounds or a stable generated name. Selecting a marker animates to its location; the clickable PiP overview shows the viewport. Escape fits the map. Edit a village name or a marker color to save the annotation with the world. Java players are numbered persistently; unknown names and unavailable skins are not invented. Bedrock-only player tracking is not yet supported. Hover to inspect X/Y/Z and double-click to copy `tp @s X Y Z` with Y one block above the signed terrain depth (current dimension; not a safe-landing check). Missing elevation requires a map update.
