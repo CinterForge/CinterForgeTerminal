@@ -464,6 +464,17 @@ class CinterForgeSidecarPorts:
         except Exception:
             self.stop()
             raise
+        # World-map service is independent of the Terminal/guest interfaces.
+        # A port conflict or invalid host TLS configuration is explicit but
+        # must not prevent the primary Terminal from opening.
+        try:
+            from runtime.CinterForgeCraftMasterMap import CraftMasterMapHTTPServer
+            maps = CraftMasterMapHTTPServer(self.owner)
+            self.servers.append(maps)
+            threading.Thread(target=maps.serve_forever, name='cinter-world-maps', daemon=True).start()
+            self.owner.log_event('CraftMaster map service listening on ' + maps.scheme + '://' + maps.server_address[0] + ':' + str(maps.server_port))
+        except (OSError, ValueError) as error:
+            self.owner.log_event('CraftMaster map service unavailable: ' + str(error))
 
     def disconnect_clients(self):
         for sidecar in self.servers:

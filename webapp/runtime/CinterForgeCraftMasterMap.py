@@ -60,17 +60,32 @@ def write_map_annotation(handler, path):
     scheme = getattr(server,'scheme','http')
     origin = handler.headers.get('Origin')
     expected = scheme + '://' + handler.headers.get('Host', '')
-    site = handler.headers.get('Sec-Fetch-Site', 'same-origin')
-    # WebKit can omit or null the Origin under a no-referrer policy. For that
-    # case require the issued opaque map ID in a non-simple request header.
-    # Cross-origin browser requests cannot set it without a CORS preflight,
-    # which these map endpoints do not authorize. Never accept a foreign origin.
-    issued_header = secrets.compare_digest(handler.headers.get('X-Cinter-Map-Write', ''), match.group(1))
-    origin_ok = origin == expected or (origin in (None, 'null') and issued_header)
+    site = handler.headers.get('Sec-Fetch-Site', '').strip().lower()
+    # Fetch Metadata describes the embedding context, not a credential. Native
+    # WebViews may report "none" or "same-site" for legitimate map requests.
+    # An exact Origin (or an issued map ID in a non-simple header when Origin
+    # is opaque/absent) is the proof; explicit foreign origins and cross-site
+    # requests remain forbidden. No CORS preflight is allowed for this route.
+    supplied = handler.headers.get('X-Cinter-Map-Write', '')
+    issued_header = supplied.isascii() and secrets.compare_digest(supplied, match.group(1))
     json_body = handler.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() == 'application/json'
-    if not (handler._local() and handler._lan_logged_in() and origin_ok and site == 'same-origin' and json_body):
-        server.log_event('Rejected map annotation write (host/login/origin/request headers)')
-        handler._json(403, {'error': 'Same-origin map access required'}); return True
+    reason = None
+    if not handler._local():
+        reason = 'Map access requires a permitted local or LAN connection'
+    elif not handler._lan_logged_in():
+        reason = 'Map access requires Terminal login'
+    elif site == 'cross-site':
+        reason = 'Cross-site map writes are not allowed'
+    elif origin not in (None, 'null', expected):
+        reason = 'Map request Origin does not match this listener'
+    elif origin in (None, 'null') and not issued_header:
+        reason = 'Map write token missing or invalid; reload the updated atlas'
+    elif not json_body:
+        reason = 'Map writes require application/json'
+    if reason:
+        # Never log header values, credentials, annotations or map tokens.
+        server.log_event('Rejected map annotation write: ' + reason)
+        handler._json(403, {'error': reason}); return True
     with server.craftmaster_map_lock:
         state = server.craftmaster_maps.get(match.group(1))
         if state is not None: state = dict(state)

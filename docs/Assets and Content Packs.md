@@ -151,9 +151,8 @@ No ZIP bundle is generated or uploaded. The terminal prints file and byte
 progress, downloads each newly uploaded object to confirm its SHA-256, then
 commits `assets/index.json` with schema `cinterforge.assets-files.v1`.
 Unchanged previously verified direct objects can be reused on later uploads.
-Files previously indexed but now absent from the local tree are deleted from
-that channel when publishing the new snapshot. Unindexed remote objects are
-left untouched.
+Publishing refuses to drop files from an existing direct inventory merely
+because the local tree is incomplete.
 
 `assets setup` reads that **direct-file** index, fetches individual objects,
 checks every size and SHA-256, and merges them into the local library without

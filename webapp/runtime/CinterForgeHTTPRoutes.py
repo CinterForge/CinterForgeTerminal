@@ -807,6 +807,8 @@ class CinterForgeHTTPRoutes:
         from runtime import CinterForgeSettings as _CinterForgeSettings
         from runtime import CinterForgeVMOperations as _CinterForgeVMOperations
         route = urlsplit(self.path).path
+        if _CinterForgeCraftMasterMap.write_map_annotation(self, route):
+            return
         if route == '/_native_orphan_shutdown':
             # An orphan can terminate ITSELF, never a PID supplied by a caller.
             # Only a loopback caller with the private grant/instance may ask.
@@ -1411,7 +1413,11 @@ class CinterForgeHTTPRoutes:
             if route == '/api/craftmaster/map/close':
                 map_id = str(body.get('id', ''))
                 with self.server.craftmaster_map_lock:
-                    self.server.craftmaster_maps.pop(map_id, None)
+                    state = self.server.craftmaster_maps.get(map_id)
+                    if state is not None:
+                        state['tab_open'] = False
+                        if not state.get('remote') and not state.get('working'):
+                            self.server.craftmaster_maps.pop(map_id, None)
                     self.server.craftmaster_map_requests = deque(
                         request for request in self.server.craftmaster_map_requests
                         if request['id'] != map_id
