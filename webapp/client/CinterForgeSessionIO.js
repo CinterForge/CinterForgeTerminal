@@ -93,8 +93,8 @@ CinterForgeState.closeTerminalSocket = function closeTerminalSocket(tab) {
         if (message.bedrock_eula_requested && CinterForgeState.activeTab === tab) CinterForgeState.requestLicense();
         if (message.closed) {
           CinterForgeState.closeTerminalSocket(tab);
-          if (tab.kind === 'bedrock') void CinterForgeState.api('/api/terminal/close', {id}).catch(() => {});
-          if (CinterForgeState.activeTab === tab) CinterForgeState.notice(tab.kind === 'bedrock' ? 'Bedrock server exited' : 'Shell exited');
+          if (['bedrock','java'].includes(tab.kind)) void CinterForgeState.api('/api/terminal/close', {id}).catch(() => {});
+          if (CinterForgeState.activeTab === tab) CinterForgeState.notice(['bedrock','java'].includes(tab.kind) ? tab.label + ' Session exited' : 'Shell exited');
           tab.session = null;
           if (CinterForgeState.activeTab === tab) CinterForgeState.session = null;
           CinterForgeState.renderTabs();
@@ -271,9 +271,9 @@ CinterForgeState.adoptBedrockSession = async function adoptBedrockSession(create
     const buffer = CinterForgeState.makeBuffer();
     const tab = {
       key: ++CinterForgeState.tabSerial,
-      label: 'Bedrock',
+      label: created.kind === 'java' ? 'Java' : 'Bedrock',
       profileId: 'modern',
-      kind: 'bedrock',
+      kind: created.kind === 'java' ? 'java' : 'bedrock',
       session: created,
       closed: false,
       display: new CinterForgeState.VTOutput(buffer),
@@ -282,8 +282,8 @@ CinterForgeState.adoptBedrockSession = async function adoptBedrockSession(create
     tab.display.target = tab.buffer;
     CinterForgeState.tabs.push(tab);
     await CinterForgeState.activateTab(tab);
-    CinterForgeState.$('terminal-shell').textContent = 'Bedrock · live server console';
-    CinterForgeState.notice('Bedrock has its own live two-way terminal; the previous session is unchanged');
+    CinterForgeState.$('terminal-shell').textContent = tab.label + ' · live server console';
+    CinterForgeState.notice(tab.label + ' has its own live terminal; the previous session is unchanged');
     void CinterForgeState.pollTab(tab);
   };
 
@@ -317,8 +317,8 @@ CinterForgeState.reconnectTab = async function reconnectTab() {
       void CinterForgeState.pollServerTab(tab);
       return;
     }
-    if (tab.kind === 'bedrock') {
-      CinterForgeState.notice('Bedrock is a dedicated server Session. Start a new world with bedrock run from a regular terminal.');
+    if (['bedrock','java'].includes(tab.kind)) {
+      CinterForgeState.notice(tab.label + ' is a dedicated server Session. Start it from a regular terminal.');
       return;
     }
     if (tab.kind === 'if') {

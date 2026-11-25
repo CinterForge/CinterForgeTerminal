@@ -17,6 +17,8 @@ The [release manifest](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribu
 Build Status Details can be found here:
 [CinterForgeTerminal Beta Checklist](docs/CinterForgeTerminal%20Beta%20Checklist.md)
 
+[Java / Minecraft Terminal integration — project plan and acceptance status](docs/ServerProject.md)
+
 <!-- CINTERFORGE:DOWNLOADS:END -->
 
 **Play the classics. Explore computer history. Run real terminals. Build something new.**

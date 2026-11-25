@@ -61,8 +61,8 @@ if os.name != 'nt':
     import termios
 
 from runtime import CinterForgeSettings as _CinterForgeSettings
-from runtime.CinterForgeBedrockAccess import BedrockServerAccess
-from runtime.CinterForgeBedrockProperties import BedrockProperties, read_world_settings
+from runtime.CinterForgeBedrockAccess import BedrockServerAccess, install_world_status_bridge
+from runtime.CinterForgeBedrockProperties import BedrockProperties, read_world_settings, _atomic_write, _merge_text
 from runtime.CinterForgeCode import CinterForgeCodeWorkspace
 from runtime.CinterForgeGuest import CinterForgeGuestSupervisor
 from runtime.CinterForgeLogging import CinterForgeRuntimeLog
@@ -372,6 +372,8 @@ def discover_lan_bedrock(*, timeout: float = 1.5, ports=(19132, 19133)) -> list[
             server['name'].casefold(), server['address'], server['port']
         ),
     )
+
+
 
 
 class CinterForgeBedrockManager:
@@ -976,6 +978,9 @@ class CinterForgeBedrockManager:
         name = str(requested or '').strip()
         if not name:
             raise ValueError('Expected a world name')
+        testgrounds = name.casefold() == 'testgrounds'
+        if testgrounds:
+            name = 'CinterForge TestGrounds'
         _, assets = self._craftmaster_cli()  # includes SHA-256 of the canonical installer
         spec = importlib.util.spec_from_file_location('cinter_craftmaster_world_artifacts', assets / 'world_artifacts.py')
         if spec is None or spec.loader is None:
@@ -997,13 +1002,32 @@ class CinterForgeBedrockManager:
             warning = 'Beta world catalog unavailable; latest revision not verified: ' + str(error)
             self._append_log(warning)
             try:
-                result = self.select_world(name, require_idle_or_current=True)
+                if testgrounds:
+                    candidates = []
+                    for world in self.list_java_worlds():
+                        receipt = Path(world['path']) / 'CinterForge/InstalledPublication.json'
+                        if not receipt.is_file() or receipt.is_symlink():
+                            continue
+                        try:
+                            publication = json.loads(receipt.read_text('utf-8'))
+                        except (OSError, ValueError):
+                            continue
+                        if (publication.get('world') == name and publication.get('channel') == 'beta' and
+                                publication.get('schema') == 'cinterforge.craftmaster.java-install.v1'):
+                            candidates.append(world)
+                    if len(candidates) != 1:
+                        raise ValueError('Expected one installed beta TestGrounds publication')
+                    result = self.select_world(candidates[0]['id'], require_idle_or_current=True)
+                else:
+                    result = self.select_world(name, require_idle_or_current=True)
             except ValueError:
                 raise RuntimeError(warning + '; no matching local world: ' + name) from error
             return {**result, 'publication_warning': warning}
         matches = [(key, entry) for key, entry in entries.items()
                    if name.casefold() in (key.casefold(), entry['folder'].casefold())]
         if not matches:
+            if testgrounds:
+                raise RuntimeError('CinterForge TestGrounds is missing from the beta catalog')
             return self.select_world(name, require_idle_or_current=True)
         if len(matches) != 1:
             raise ValueError('Ambiguous beta world: ' + name)
@@ -1013,7 +1037,8 @@ class CinterForgeBedrockManager:
         try:
             # Do not replace Java data while BDS or a native conversion is active.
             with self._craftmaster_conversion_lock:
-                if not installer.installed_world_current(destination, entry):
+                if not installer.installed_world_current(destination, entry,
+                        allow_exact_local=(published_name == 'CinterForge TestGrounds')):
                     with self._lock:
                         if self._live_session_locked()[0] is not None:
                             raise RuntimeError('Stop Bedrock before downloading a newer beta Java world')
@@ -1030,7 +1055,7 @@ class CinterForgeBedrockManager:
         if world is None:
             raise RuntimeError('Published Java save was not discovered: ' + str(destination))
         result = self.select_world(world['id'], require_idle_or_current=True)
-        readiness = self.conversion_status(world) if warning is None else None
+        readiness = self.conversion_status(world) if warning is None and not testgrounds else None
         if readiness and readiness.get('needs_update'):
             with self._lock:
                 if self._live_session_locked()[0] is not None:
@@ -1441,7 +1466,7 @@ class CinterForgeBedrockManager:
 
     def _convert_java_world(
         self, world: dict, progress: Callable[[str], None] | None = None,
-        *, force: bool = False,
+        *, force: bool = False, sync_managed: bool = True, expected_archive_sha256: str | None = None,
     ) -> Path:
         """Import the world-local conversion; only convert on explicit update or no archive."""
         source = Path(world['path']).resolve(strict=True)
@@ -1456,6 +1481,9 @@ class CinterForgeBedrockManager:
         archive = self.craftmaster_output_root(world) / 'Worlds' / export_name / (export_name + '.mcworld')
         if archive.is_symlink():
             raise RuntimeError('Linked CraftMaster archive')
+        if expected_archive_sha256 is not None:
+            if force or not archive.is_file() or _sha256(archive) != expected_archive_sha256:
+                raise RuntimeError('Published TestGrounds Bedrock conversion missing or changed; reinstall beta publication')
         if not force:
             if not archive.is_file():
                 if prior or legacy_receipt:
@@ -1473,8 +1501,12 @@ class CinterForgeBedrockManager:
                     return destination if prior else legacy
                 raise RuntimeError('Stop Bedrock before replacing its converted world')
         if force or not archive.is_file():
+            if expected_archive_sha256 is not None:
+                raise RuntimeError('Published TestGrounds archive disappeared; no conversion permitted')
             archive = self.run_native_craftmaster(world, progress=progress)
         digest = _sha256(archive)
+        if expected_archive_sha256 is not None and digest != expected_archive_sha256:
+            raise RuntimeError('Published TestGrounds archive changed before import')
         destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='craftmaster-import-', dir=destination.parent) as temp:
             extracted = Path(temp) / 'world'
@@ -1497,10 +1529,10 @@ class CinterForgeBedrockManager:
                 # A different archive is an explicit conversion/publication update.
                 managed = self._managed_world_path(destination)
                 old_managed = self._managed_world_path(legacy)
-                if (not force and not managed.exists() and legacy_receipt and
+                if (sync_managed and not force and not managed.exists() and legacy_receipt and
                         legacy_receipt.get('archive_sha256') == digest and old_managed.is_dir()):
                     self._safe_world_copy(old_managed, managed)
-                elif not force:
+                elif sync_managed and not force:
                     self.refresh_managed_world(destination)
             except BaseException:
                 if destination.exists():
@@ -1548,6 +1580,207 @@ class CinterForgeBedrockManager:
         finally:
             if fresh.exists():
                 shutil.rmtree(fresh)
+
+    def prepare_testgrounds(self, world: dict, *, verify_server: bool = False,
+                            progress: Callable[[str], None] | None = None) -> dict:
+        """Install TestGrounds materials into the exact managed save used for play.
+
+        The special command never generates or reconverts the published world.
+        A one-time native BDS boot runs the existing console-only fixture event;
+        a clean shutdown commits its LevelDB changes before the normal PTY launch.
+        Test calls this same method with verify_server to exercise a real boot even
+        when materials were previously installed. Never replenish a played chest.
+        """
+        def report(message: str) -> None:
+            self._append_log(message)
+            if progress is not None:
+                progress(message)
+        if world.get('edition') != 'java':
+            raise RuntimeError('TestGrounds preparation received a non-Java save: '
+                               + repr(world.get('folder')) + '; edition=' + repr(world.get('edition')))
+        source = Path(world['path']).resolve(strict=True)
+        data = source / 'CinterForge'
+        publication_file = data / 'InstalledPublication.json'
+        manifest_file = data / 'PublishedPackage.json'
+        if data.is_symlink() or any(p.is_symlink() or not p.is_file() for p in (publication_file, manifest_file)):
+            raise RuntimeError('TestGrounds requires the installed beta publication receipts')
+        publication = json.loads(publication_file.read_text('utf-8'))
+        manifest = json.loads(manifest_file.read_text('utf-8'))
+        if (publication.get('schema') != 'cinterforge.craftmaster.java-install.v1' or
+                publication.get('world') != 'CinterForge TestGrounds' or publication.get('channel') != 'beta' or
+                publication.get('folder') != source.name or
+                manifest.get('schema') != 'cinterforge.craftmaster.java-package.v1' or
+                manifest.get('world') != 'CinterForge TestGrounds' or manifest.get('folder') != source.name):
+            raise RuntimeError('TestGrounds requires a verified beta publication')
+        # The public identity is stable, but the original Java save and its
+        # conversion can be numbered. Use the native CraftMaster export name.
+        name = self.java_world_export_name(world)
+        if manifest.get('conversion_export', 'CinterForge TestGrounds') != name:
+            raise RuntimeError('Published TestGrounds conversion does not match its native export name')
+        report('Verified beta CinterForge TestGrounds publication: ' + source.name + '; native export: ' + name)
+        archive = self.craftmaster_output_root(world) / 'Worlds' / name / (name + '.mcworld')
+        record = manifest.get('files', {}).get(archive.relative_to(source).as_posix(), {})
+        digest = record.get('sha256')
+        if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
+            raise RuntimeError('Published TestGrounds Bedrock conversion receipt is missing')
+        with self._craftmaster_conversion_lock:
+            converted = self._convert_java_world(world, progress=report, expected_archive_sha256=digest)
+        state = self.run_world(converted.name, launch=False, selected_world=world)
+        target = Path(state['active_world'])
+        conversion = self._conversion_receipt(target, source)
+        if not conversion or conversion.get('archive_sha256') != digest:
+            raise RuntimeError('Managed TestGrounds does not match the verified published conversion')
+        receipt = target / 'cinter-testgrounds.json'
+        if receipt.is_symlink():
+            raise RuntimeError('Linked TestGrounds preparation receipt')
+        prior = json.loads(receipt.read_text('utf-8')) if receipt.is_file() else None
+        def valid_fixture(proof) -> bool:
+            return (isinstance(proof, dict) and proof.get('item') == 'cinter:terminal' and
+                    proof.get('amount') == 1 and proof.get('columns') == 5 and proof.get('rows') == 4 and
+                    isinstance(proof.get('chest'), dict) and proof.get('layout') == 2 and
+                    isinstance(proof.get('spawn'), dict) and
+                    all(type(proof.get(k)) is int and type(proof['spawn'].get(k)) is int for k in ('x','y','z')) and
+                    abs(proof['x'] - proof['spawn']['x']) <= 4 and abs(proof['z'] - proof['spawn']['z']) <= 4 and
+                    proof['y'] == proof['spawn']['y'] and
+                    proof['chest'] == {'x': proof['x']+4, 'y': proof['y'], 'z': proof['z']-5})
+        prepared = (isinstance(prior, dict) and prior.get('schema') == 'cinterforge.terminal.testgrounds.v1'
+                    and prior.get('archive_sha256') == digest and prior.get('graceful_stop') is True
+                    and prior.get('native_server_verified') is True and valid_fixture(prior.get('fixture')))
+        if prepared and not verify_server:
+            report('TestGrounds materials already installed; preserving gameplay. Spawn: ' +
+                   str(prior['fixture']['spawn']) + '; chest: ' + str(prior['fixture']['chest']))
+            return {**state, 'testgrounds': prior}
+        if state.get('running'):
+            raise RuntimeError('Stop Bedrock before preparing or testing TestGrounds')
+        # Temporary settings are only needed for this preparation boot. Restore
+        # the actual user policy before normal hosting. No LAN clients admitted
+        # during installation: enable an empty temporary allowlist.
+        overrides = {'allow-cheats': 'true', 'content-log-console-output-enabled': 'true',
+                     'enable-lan-visibility': 'false', 'allow-list': 'true', 'level-name': target.name}
+        if self.platform == 'mac':
+            overrides['transport'] = 'nethernet'
+        if verify_server:
+            # Acceptance remains independent of external Microsoft account services.
+            overrides['online-mode'] = 'false'
+        log = self._log_path()
+        output = ''
+        process = None
+        cursor = 0
+        pending = b''
+        last_heartbeat = time.monotonic()
+        def read_output() -> None:
+            nonlocal cursor, output, pending, last_heartbeat
+            with log.open('rb') as stream:
+                stream.seek(cursor)
+                chunk = stream.read()
+                cursor = stream.tell()
+            pending += chunk
+            parts = pending.split(b'\n')
+            pending = parts.pop()
+            for raw in parts:
+                line = raw.decode('utf-8', errors='replace').rstrip('\r')
+                output += line + '\n'
+                if progress is not None:
+                    progress(line)
+            if time.monotonic() - last_heartbeat >= 15:
+                report('Installing TestGrounds: waiting for native Bedrock response')
+                last_heartbeat = time.monotonic()
+        def wait_for(predicate, label: str, timeout: float = 45) -> None:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                read_output()
+                for failure in ('CINTERFORGE_TERMINAL_WALL_FAILED:', 'CINTER_VM_ERROR',
+                                'CINTER_BDS_ERROR', 'CINTER_BDS_NETHERNET_FAIL'):
+                    if failure in output:
+                        raise RuntimeError(failure + output.split(failure, 1)[1].splitlines()[0])
+                if predicate():
+                    return
+                if process is not None and _owned_bedrock_exit_code(process) is not None:
+                    break
+                time.sleep(.15)
+            raise RuntimeError('TestGrounds ' + label + ' not verified; see ' + str(log) + '\n' + output[-4000:])
+        report('Installing TestGrounds materials in ' + str(target))
+        proof = prior.get('fixture') if prepared else None
+        areas_added = []
+        try:
+            self.start(preparation_properties=overrides)
+            process = self._process
+            cursor = self._launch_offset
+            if process is None:
+                raise RuntimeError('TestGrounds preparation does not own its Bedrock server')
+            wait_for(lambda: 'Server started.' in output and
+                     (self.platform != 'mac' or ('CINTER_BDS_NETHERNET_PASS' in output and
+                                                  'CINTER_BDS_ROSETTA_REGISTERED' in output)),
+                     'native server readiness', 180)
+            if self._server_configuration().get('level-name') != target.name:
+                raise RuntimeError('TestGrounds native server selected the wrong managed save')
+            report('TestGrounds native Bedrock server ready; verifying console')
+            self.console_command('list')
+            try:
+                wait_for(lambda: bool(re.search(r'\bplayers? online\b|\bThere are \d+/', output, re.I)), 'console list', 10)
+            except RuntimeError:
+                self.console_command('list')
+                wait_for(lambda: bool(re.search(r'\bplayers? online\b|\bThere are \d+/', output, re.I)), 'console list', 15)
+            self.console_command('cinter:help')
+            wait_for(lambda: 'CINTERFORGE_NATIVE_COMMAND_HELP_READY' in output, 'native commands')
+            if not prepared:
+                # Query native spawn before loading any chunks. Its Y may be a
+                # sentinel; ticking areas load entire columns, not a height slice.
+                self.console_command('scriptevent cinter:terminal_spawn TestGrounds')
+                spawn_marker = 'CINTERFORGE_TERMINAL_SPAWN:'
+                wait_for(lambda: spawn_marker in output, 'native spawn')
+                locations = json.JSONDecoder().raw_decode(output.split(spawn_marker, 1)[1].strip())[0]
+                spawn = locations['spawn']
+                def load_area(point, area):
+                    if not all(type(point.get(k)) is int for k in ('x','y','z')):
+                        raise RuntimeError('Invalid native TestGrounds coordinates')
+                    self.console_command('tickingarea remove ' + area)
+                    after = len(output)
+                    self.console_command(f"tickingarea add circle {point['x']} {max(-64, min(319, point['y']))} {point['z']} 2 {area} true")
+                    areas_added.append(area)
+                    wait_for(lambda: 'Added ticking area' in output[after:], 'spawn chunks loaded')
+                load_area(spawn, 'cinter_terminal_smoke')
+                previous = locations.get('previous')
+                if previous and (abs(previous['x']-spawn['x']) > 4 or abs(previous['z']-spawn['z']) > 4):
+                    load_area(previous, 'cinter_terminal_legacy')
+                time.sleep(3)
+                self.console_command('scriptevent cinter:terminal_smoke TestGrounds')
+                marker = 'CINTERFORGE_TERMINAL_WALL_READY:'
+                wait_for(lambda: marker in output, 'wall and chest')
+                proof = json.JSONDecoder().raw_decode(output.split(marker, 1)[1].strip())[0]
+                if not valid_fixture(proof) or any(proof['spawn'][k] != spawn[k] for k in ('x','z')):
+                    raise RuntimeError('TestGrounds did not verify a 5x4 Terminal chest near native spawn')
+                report('TestGrounds spawn surface: ' + str(proof['spawn']) + '; chest: ' + str(proof['chest']))
+                while areas_added:
+                    after_fixture = len(output)
+                    self.console_command('tickingarea remove ' + areas_added[-1])
+                    wait_for(lambda: 'Removed ticking area' in output[after_fixture:], 'temporary ticking area removal')
+                    areas_added.pop()
+            self.stop()
+            read_output()
+            if (_owned_bedrock_exit_code(process) != 0 or 'Stopping server' not in output or
+                    (self.platform == 'mac' and ('Server stop requested.' not in output or
+                                                 'Quit correctly' not in output or 'CINTER_BDS_EXIT rc=0' not in output))):
+                raise RuntimeError('TestGrounds graceful shutdown not verified; see ' + str(log))
+            if not (target / 'db/CURRENT').is_file():
+                raise RuntimeError('TestGrounds LevelDB missing after native shutdown')
+            result = {'schema': 'cinterforge.terminal.testgrounds.v1', 'archive_sha256': digest,
+                      'fixture': proof, 'native_server_verified': True, 'graceful_stop': True}
+            _atomic_write(receipt, (json.dumps(result, indent=2) + '\n').encode('utf-8'))
+            report('TestGrounds materials ready in installed world: ' + str(target))
+        finally:
+            try:
+                if self._process is not None and self._terminal_session is None:
+                    try:
+                        if self._live_session_locked()[0] is not None:
+                            for area in areas_added:
+                                self.console_command('tickingarea remove ' + area)
+                    finally:
+                        self.stop()
+            finally:
+                self._restore_testgrounds_policy()
+        return {**state, **self.status(), 'testgrounds': result,
+                'fixture_previously_installed': prepared or proof.get('previouslyPrepared') is True}
 
     def prepare_selected_java_world(self, world: dict, progress: Callable[[str], None] | None = None) -> str:
         """Use the last validated conversion, regardless of Java freshness."""
@@ -1642,50 +1875,7 @@ class CinterForgeBedrockManager:
                 shutil.rmtree(temp)
 
     def _install_world_status_bridge(self, target: Path) -> None:
-        """Attach the packaged, console-only chat relay to the managed COPY.
-
-        Other world packs and the source save are never modified. The bridge
-        only prints prefixed structured text into the existing PTY; it opens
-        no network listener and executes no JavaScript received from players.
-        """
-        authored = ASSET_LOCATION / 'bedrock_status_bridge'
-        manifest_file = authored / 'manifest.json'
-        script_file = authored / 'scripts' / 'main.js'
-        if any(not f.is_file() or f.is_symlink() for f in (manifest_file, script_file)):
-            raise RuntimeError('Packaged CinterForge Minecraft status bridge is missing')
-        manifest = json.loads(manifest_file.read_text('utf-8'))
-        pack_id = manifest['header']['uuid']
-        version = manifest['header']['version']
-        destination = self.run_root / 'behavior_packs' / 'cinterforge-status-bridge'
-        if destination.parent.is_symlink():
-            raise RuntimeError('Refusing symlinked Bedrock behavior-packs root')
-        for folder in (destination, destination / 'scripts'):
-            if folder.is_symlink():
-                raise RuntimeError('Refusing symlinked Bedrock status bridge directory')
-            folder.mkdir(parents=True, exist_ok=True)
-        for source, output in ((manifest_file, destination / 'manifest.json'),
-                               (script_file, destination / 'scripts' / 'main.js')):
-            if output.is_symlink():
-                raise RuntimeError('Refusing symlinked Bedrock status bridge asset')
-            if not output.is_file() or output.read_bytes() != source.read_bytes():
-                output.write_bytes(source.read_bytes())
-
-        registry_path = target / 'world_behavior_packs.json'
-        if registry_path.is_symlink():
-            raise RuntimeError('Refusing symlinked world behavior-pack registry')
-        entries = json.loads(registry_path.read_text('utf-8')) if registry_path.is_file() else []
-        if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
-            raise RuntimeError('Invalid existing Bedrock world behavior-pack registry: ' + str(registry_path))
-        entry = {'pack_id': pack_id, 'version': version}
-        current = [item for item in entries if item.get('pack_id') != pack_id]
-        current.append(entry)
-        if entries != current:
-            temporary = registry_path.with_name(registry_path.name + '-' + uuid.uuid4().hex + '.tmp')
-            try:
-                temporary.write_text(json.dumps(current, indent=2) + '\n', encoding='utf-8')
-                os.replace(temporary, registry_path)
-            finally:
-                temporary.unlink(missing_ok=True)
+        install_world_status_bridge(self.run_root, target, ASSET_LOCATION / 'bedrock_status_bridge')
 
     def _install_selected_world_pack(self, target: Path, world: dict) -> None:
         """Install verified selected .mcaddon modules on the managed Bedrock COPY.
@@ -2021,8 +2211,29 @@ class CinterForgeBedrockManager:
             return {**result, 'source_world': str(source), 'active_world': str(target),
                     'world_name': world['name']}
 
+    def _restore_testgrounds_policy(self) -> None:
+        recovery = self.run_root / 'cinter-testgrounds-preparation.json'
+        if recovery.is_symlink():
+            raise RuntimeError('Linked TestGrounds preparation recovery file')
+        if not recovery.is_file():
+            return
+        if self._live_session_locked()[0] is not None:
+            raise RuntimeError('Stop the interrupted TestGrounds server before restoring its settings')
+        saved = json.loads(recovery.read_text('utf-8'))
+        if saved.get('schema') != 'cinterforge.terminal.testgrounds-policy.v1':
+            raise RuntimeError('Invalid TestGrounds settings recovery file')
+        props = self.run_root / 'server.properties'
+        allowlist = self.run_root / 'allowlist.json'
+        _atomic_write(props, base64.b64decode(saved['server_properties'], validate=True))
+        if saved['allowlist'] is None:
+            allowlist.unlink(missing_ok=True)
+        else:
+            _atomic_write(allowlist, base64.b64decode(saved['allowlist'], validate=True))
+        recovery.unlink()
+
     def _prepare_run_tree(self) -> None:
         self.run_root.mkdir(parents=True, exist_ok=True)
+        self._restore_testgrounds_policy()
         for source in self.package.rglob('*'):
             relative = source.relative_to(self.package)
             if relative == Path('receipt.json'):
@@ -2397,54 +2608,64 @@ class CinterForgeBedrockManager:
             checksum = _sha256(archive)
             if checksum != entry['sha256'].lower():
                 raise RuntimeError('Bedrock archive checksum mismatch; installation aborted')
-            # No redundant archive copy: the verified extracted installation and
-            # its receipt are the durable package; every fresh install fetches Mojang.
-            report('SHA-256 verified; extracting official package...')
-            payload = root / 'payload'
-            payload.mkdir()
-            _safe_extract(archive, payload)
-            executable = payload / ('bedrock_server.exe' if self.target == 'win' else 'bedrock_server')
-            if not executable.is_file():
-                raise RuntimeError('Official Bedrock binary missing from verified archive')
-            if self.target == 'linux':
-                executable.chmod(executable.stat().st_mode | 0o111)
-            if self.platform == 'mac':
-                # LinuxKit runs Bedrock under Rosetta using the same guest
-                # runtime closure already staged by `./Cinter stage mac`.
-                # Do not copy LinuxKit source or invent another guest installer.
-                guest = self.builds / 'CinterForgeTerminal/Dependencies/LinuxKit/mac/arm64'
-                tools = guest / 'GuestRuntime'
-                for required in ('CinterBDSVM', 'cinter-bds-kernel',
-                                 'cinter-bds-initrd.img', 'cinter-bds-cmdline'):
-                    if not (guest / required).is_file():
-                        raise RuntimeError('LinuxKit/Rosetta guest not staged: ' + str(guest / required))
-                for required in ('glibc-x86_64/ld-linux-x86-64.so.2',
-                                 'cinter-nethernet-probe'):
-                    if not (tools / required).is_file():
-                        raise RuntimeError('LinuxKit guest dependency missing: ' + str(tools / required))
-                shutil.copytree(tools, payload / '.cinter')
-            (payload / 'receipt.json').write_text(json.dumps({
-                'schema': 'cinterforge.bedrock.package.v1', 'sha256': checksum,
-                'source': entry['url'], 'platform': self.target,
-                'version': entry.get('version')}, indent=2) + '\n')
-            # A damaged prior application download can be replaced only after
-            # the new official ZIP is fully verified. Preserve rollback until
-            # the new payload has been promoted; no user worlds live here.
-            previous = self.package_dir / 'previous-incomplete'
-            if self.package.exists():
-                if previous.exists():
-                    raise RuntimeError('Prior incomplete Bedrock package needs inspection: ' + str(previous))
-                self.package.rename(previous)
-            try:
-                payload.rename(self.package)
-            except Exception:
-                if previous.exists(): previous.rename(self.package)
-                raise
-            if previous.exists(): shutil.rmtree(previous)
+            self._install_archive_payload(archive, root, entry, checksum, report)
         # The immutable receipt inside the installed tree pins these bytes;
         # there is no separate package manifest for users to create or maintain.
         report('Bedrock installed at ' + str(self.package))
         return self.status()
+
+    def _install_archive_payload(self, archive: Path, root: Path, entry: dict,
+                                 checksum: str, report: Callable[[str], None]) -> None:
+        """Promote an already-verified official package using the normal installation path."""
+        if not self.accepted():
+            raise PermissionError('Bedrock EULA acceptance required')
+        if self._live_session_locked()[0] is not None:
+            raise RuntimeError('Stop Bedrock before installing its package')
+        self.package_dir.mkdir(parents=True, exist_ok=True)
+        # No redundant archive copy: the verified extracted installation and
+        # its receipt are the durable package; every fresh install fetches Mojang.
+        report('Extracting official Bedrock package...')
+        payload = root / 'payload'
+        payload.mkdir()
+        _safe_extract(archive, payload)
+        executable = payload / ('bedrock_server.exe' if self.target == 'win' else 'bedrock_server')
+        if not executable.is_file():
+            raise RuntimeError('Official Bedrock binary missing from verified archive')
+        if self.target == 'linux':
+            executable.chmod(executable.stat().st_mode | 0o111)
+        if self.platform == 'mac':
+            # LinuxKit runs Bedrock under Rosetta using the same guest
+            # runtime closure already staged by `./Cinter stage mac`.
+            # Do not copy LinuxKit source or invent another guest installer.
+            guest = self.builds / 'CinterForgeTerminal/Dependencies/LinuxKit/mac/arm64'
+            tools = guest / 'GuestRuntime'
+            for required in ('CinterBDSVM', 'cinter-bds-kernel',
+                             'cinter-bds-initrd.img', 'cinter-bds-cmdline'):
+                if not (guest / required).is_file():
+                    raise RuntimeError('LinuxKit/Rosetta guest not staged: ' + str(guest / required))
+            for required in ('glibc-x86_64/ld-linux-x86-64.so.2',
+                             'cinter-nethernet-probe'):
+                if not (tools / required).is_file():
+                    raise RuntimeError('LinuxKit guest dependency missing: ' + str(tools / required))
+            shutil.copytree(tools, payload / '.cinter')
+        (payload / 'receipt.json').write_text(json.dumps({
+            'schema': 'cinterforge.bedrock.package.v1', 'sha256': checksum,
+            'source': entry['url'], 'platform': self.target,
+            'version': entry.get('version')}, indent=2) + '\n')
+        # A damaged prior application download can be replaced only after
+        # the new official ZIP is fully verified. Preserve rollback until
+        # the new payload has been promoted; no user worlds live here.
+        previous = self.package_dir / 'previous-incomplete'
+        if self.package.exists():
+            if previous.exists():
+                raise RuntimeError('Prior incomplete Bedrock package needs inspection: ' + str(previous))
+            self.package.rename(previous)
+        try:
+            payload.rename(self.package)
+        except Exception:
+            if previous.exists(): previous.rename(self.package)
+            raise
+        if previous.exists(): shutil.rmtree(previous)
 
     # --- Server launch and shutdown ------------------------------------------
     def _run_command(self) -> tuple[list[str], dict[str,str]]:
@@ -2474,7 +2695,7 @@ class CinterForgeBedrockManager:
         executable = self.run_root / ('bedrock_server.exe' if self.platform == 'win' else 'bedrock_server')
         return [str(executable)], {}
 
-    def start(self) -> dict:
+    def start(self, *, preparation_properties: dict | None = None) -> dict:
         with self._lock:
             if not self.accepted():
                 raise PermissionError('Bedrock EULA acceptance required')
@@ -2484,6 +2705,19 @@ class CinterForgeBedrockManager:
             if self._live_session_locked()[0] is not None:
                 return self.status()
             self._prepare_run_tree()
+            if preparation_properties is not None:
+                props = self.run_root / 'server.properties'
+                allowlist = self.run_root / 'allowlist.json'
+                recovery = self.run_root / 'cinter-testgrounds-preparation.json'
+                if props.is_symlink() or allowlist.is_symlink() or recovery.is_symlink() or recovery.exists():
+                    raise RuntimeError('Unsafe TestGrounds temporary server settings')
+                saved = {'schema': 'cinterforge.terminal.testgrounds-policy.v1',
+                         'server_properties': base64.b64encode(props.read_bytes()).decode('ascii'),
+                         'allowlist': base64.b64encode(allowlist.read_bytes()).decode('ascii') if allowlist.is_file() else None}
+                # Persist rollback data before editing settings, even if the app is force-quit.
+                _atomic_write(recovery, (json.dumps(saved) + '\n').encode('utf-8'))
+                _atomic_write(props, _merge_text(props.read_text('utf-8'), preparation_properties).encode('utf-8'))
+                _atomic_write(allowlist, b'[]\n')
             command, extra = self._run_command()
             log_path = self._log_path()
             log_path.parent.mkdir(parents=True, exist_ok=True)

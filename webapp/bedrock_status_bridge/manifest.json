@@ -2,20 +2,29 @@
   "format_version": 2,
   "header": {
     "name": "CinterForge Terminal Event Relay",
-    "description": "Relay Minecraft status and commands to the existing Terminal host",
+    "description": "CinterForge Terminal native commands and event relay",
     "uuid": "a7d28648-798d-4328-a91e-917b65aa2fea",
     "version": [
       1,
       0,
-      2
+      6
     ],
     "min_engine_version": [
       1,
       21,
-      0
+      100
     ]
   },
   "modules": [
+    {
+      "type": "data",
+      "uuid": "3073664f-332b-40f0-9d6b-345355c7c32e",
+      "version": [
+        1,
+        0,
+        6
+      ]
+    },
     {
       "type": "script",
       "language": "javascript",
@@ -24,14 +33,14 @@
       "version": [
         1,
         0,
-        2
+        6
       ]
     }
   ],
   "dependencies": [
     {
       "module_name": "@minecraft/server",
-      "version": "2.0.0"
+      "version": "2.1.0"
     }
   ]
 }

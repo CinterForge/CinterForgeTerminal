@@ -1342,6 +1342,10 @@ class CinterForgeHTTPRoutes:
                 _CinterForgeIF._if_store_save(self.server, unquote(route[len('/api/if/save/'):]), body)
                 self._json(200, {'saved':True})
                 return
+            if route == '/api/java':
+                from runtime.CinterForgeJava import session_action
+                self._json(200, session_action(self.server, body))
+                return
             if route == '/api/bedrock/report/open':
                 self._json(200, _CinterForgeCraftMasterMap.open_world_report(self.server))
                 return
@@ -1433,7 +1437,9 @@ class CinterForgeHTTPRoutes:
                 if chosen is None:
                     raise ValueError('Select a Current World before running Bedrock')
                 self._json(200, _CinterForgeSessions.open_bedrock_terminal(self.server,
-                    '', body.get('cols', 80), body.get('rows', 24)))
+                    '', body.get('cols', 80), body.get('rows', 24),
+                    testgrounds=body.get('testgrounds') is True,
+                    testgrounds_world_id=body.get('world_id')))
                 return
             if route == '/api/bedrock/restart':
                 selected = (self.server.bedrock._world_settings().get('selected') or {})

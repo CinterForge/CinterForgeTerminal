@@ -576,7 +576,8 @@ class WindowsCrossEnvironment:
 
     def execute(self, command: list[str], *, cwd: Path, timeout: int = 600,
                 graphical: bool = False, network: bool = False,
-                diagnostic_log: Path | None = None) -> subprocess.CompletedProcess:
+                diagnostic_log: Path | None = None,
+                stream_output: bool = False) -> subprocess.CompletedProcess:
         if self.provider == 'host':
             # A host Wine run must not put its prefix, caches or runtime state
             # under ~/.wine, ~/.cache, or /tmp; keep all generated files in Builds.
@@ -634,7 +635,7 @@ class WindowsCrossEnvironment:
         guest_command = (['python3', '-u', IMAGE_SCRIPT, '--platform', 'windows', '--']
                          if graphical else []) + [str(part) for part in command]
         return _run(docker_command + [self.image] + guest_command,
-                    cwd=cwd, timeout=timeout, quiet=True, output_log=diagnostic_log)
+                    cwd=cwd, timeout=timeout, quiet=not stream_output, output_log=diagnostic_log)
 
     def version_probes(self, cwd: Path) -> dict[str, dict]:
         result = {}

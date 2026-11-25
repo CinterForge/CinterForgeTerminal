@@ -83,6 +83,7 @@ BEDROCK_HELP = '''bedrock [command]
   bedrock report                Open the Java and Bedrock worlds report
   bedrock packs                 Open Minecraft behavior pack gallery
   bedrock <name>                Fetch latest beta Java world if published; start it
+  bedrock testgrounds           Install TestGrounds materials and host the beta world
   bedrock world <name>          Select the Current World
   bedrock pack <name>           Select a pack for the Current World
   bedrock pack none             Clear the Current World's pack
@@ -97,6 +98,20 @@ BEDROCK_HELP = '''bedrock [command]
   bedrock help                  Show these commands
   Each world remembers its own current pack.
   Operators and allowlist entries persist across worlds.'''
+
+JAVA_HELP = '''java [command]
+  java                           List native Java worlds and server installation status
+  java install                   Install the official Java server after EULA consent
+  java <name>                    Serve an existing Java world in a dedicated Session
+  java world <name>              Select the Current Java World
+  java start | run               Serve the Current Java World
+  java generate <name>           Generate a new 1024 x 1024 Java world
+  java generate <name> --size N --seed SEED
+  java stop                      Stop the Java server cleanly
+  java status                    Report installation and active Session
+  java report                    Open the existing combined Minecraft worlds report
+  java help                      Show these commands
+  Use the Java server console for native op, whitelist and other server commands.'''
 
 DEVTOOLS_HELP = '''devtools [install|update|uninstall|version|list|report|help]
     devtools                          Ask to start installed DevTools or install them
@@ -150,7 +165,7 @@ def _cfdev_config_present() -> bool:
 def _visible_help(capabilities: dict[str, bool], *, devtools_installed: bool,
                    cfdev_config: bool) -> str:
     """The single conditional main-help ordering, independent of game details."""
-    lines = [HELP, '', '  devtools                      Manage Developer Tools. See devtools help']
+    lines = [HELP, '', '  java                          Generate and host Java worlds. See java help', '  devtools                      Manage Developer Tools. See devtools help']
     if cfdev_config:
         if capabilities.get('assets'):
             lines.append('  assets                        Manage the Assets library. See assets help')
@@ -370,7 +385,7 @@ def _api(path: str, *, body: dict | None = None) -> dict:
                       data=json.dumps(body).encode('utf-8') if body is not None else None,
                       headers=headers, method='POST' if body is not None else 'GET')
     try:
-        with urlopen(request, timeout=1800 if path == '/api/bedrock/run' or (path == '/api/bedrock/world/select' and body and body.get('published') is True) else 120 if path in ('/api/bedrock/install', '/api/craftmaster/map/run') else 90 if path in ('/api/bedrock/stop', '/api/bedrock/restart') else 10) as response:
+        with urlopen(request, timeout=1800 if path == '/api/bedrock/run' or (path == '/api/bedrock/world/select' and body and body.get('published') is True) else 120 if path in ('/api/bedrock/install', '/api/craftmaster/map/run') else 120 if path == '/api/java' else 90 if path in ('/api/bedrock/stop', '/api/bedrock/restart') else 10) as response:
             return json.loads(response.read().decode('utf-8'))
     except HTTPError as error:
         try:
@@ -598,8 +613,10 @@ def _bedrock_request_with_progress(world_name: str, path: str, body: dict) -> di
     return result
 
 
-def _open_bedrock_with_progress(world_name: str) -> dict:
-    return _bedrock_request_with_progress(world_name, '/api/bedrock/run', {})
+def _open_bedrock_with_progress(world_name: str, *, testgrounds: bool = False,
+                                world_id: str | None = None) -> dict:
+    body = {'testgrounds': True, 'world_id': world_id} if testgrounds else {}
+    return _bedrock_request_with_progress(world_name, '/api/bedrock/run', body)
 
 
 def _games_download() -> int:
@@ -654,16 +671,16 @@ def execute(args: list[str]) -> int:
         elif len(option) == 1 and option[0] in ('infinitemac', 'infinite-mac'):
             print('infinitemac — Open a searchable gallery of Macintosh, NeXTSTEP and BeOS emulators.')
             print('Select a thumbnail to open that machine in a new Session tab.')
-        elif len(option) == 1 and (option[0] in ('bedrock', 'devtools', 'setpass') or option[0] in ('debugger', 'code') and bool(_api('/api/status').get('devtools_installed'))
+        elif len(option) == 1 and (option[0] in ('bedrock', 'java', 'devtools', 'setpass') or option[0] in ('debugger', 'code') and bool(_api('/api/status').get('devtools_installed'))
                                    or option[0] == 'assets'
                                    or option[0] == 'discord' and capabilities.get('discord')):
-            print({'debugger': DEBUGGER_HELP, 'bedrock': BEDROCK_HELP,
+            print({'debugger': DEBUGGER_HELP, 'bedrock': BEDROCK_HELP, 'java': JAVA_HELP,
                    'devtools': DEVTOOLS_HELP, 'code': CODE_HELP,
                    'assets': ASSETS_HELP,
                    'discord': DISCORD_HELP, 'setpass': SETPASS_HELP}[option[0]])
         else:
             permitted = [name for name in ('assets', 'discord') if capabilities.get(name)]
-            print('Usage: help [debugger|bedrock|devtools|code|setpass' +
+            print('Usage: help [debugger|bedrock|java|devtools|code|setpass' +
                   ''.join('|' + name for name in permitted) + ']', file=sys.stderr)
             return 2
         return 0
@@ -924,6 +941,7 @@ def execute(args: list[str]) -> int:
         print('  infinitemac                   Search historical Macintosh, NeXTSTEP and BeOS emulators')
         print('  infinitemac list              List installed classic Mac games and play commands')
         print('  bedrock                       Serve any Java or Bedrock world with CinterForge Behavior Packs')
+        print('  java                          Generate or serve Java worlds')
         return 0
     if command in ('infinitemac', 'infinite-mac') and options == ['list']:
         print('Infinite Mac games on the installed 68K catalog:')
@@ -1030,6 +1048,40 @@ def execute(args: list[str]) -> int:
             if sys.platform == 'darwin':
                 print('If no Inspector appears, open Safari > Develop > CinterForge Terminal.')
         return 0
+    if command == 'java':
+        if options in (['help'], ['--help'], ['-h']):
+            print(JAVA_HELP)
+            return 0
+        if options == ['report']:
+            _api('/api/bedrock/report/open', body={})
+            return 0
+        if not options or options == ['status']:
+            state = _api('/api/java', body={'action':'status'})
+            print('Java ' + state['version'] + ': ' + ('installed' if state['installed'] else 'not installed; type java install'))
+            print('Current World: ' + str(state.get('selected') or '(none)'))
+            print('Active Session: ' + str(state.get('running') or '(none)'))
+            if not options:
+                for world in state['worlds']:
+                    print('  ' + world['folder'])
+            return 0
+        action = options[0].casefold()
+        if action == 'generate':
+            import argparse
+            parser = argparse.ArgumentParser(prog='java generate')
+            parser.add_argument('name')
+            parser.add_argument('--size',type=int,default=1024)
+            parser.add_argument('--seed',default='')
+            params = vars(parser.parse_args(options[1:]))
+            request = {'action':'generate', **params}
+        elif action == 'world' and len(options)>1:
+            request = {'action':'select','name':' '.join(options[1:])}
+        elif action in ('start','run','stop','install') and len(options)==1:
+            request = {'action':'serve' if action in ('start','run') else action}
+        else:
+            request = {'action':'serve','name':' '.join(options)}
+        result = _api('/api/java',body=request)
+        print(result.get('message','Java Session requested.'),flush=True)
+        return 0
     if command == 'bedrock':
         if options == ['packs']:
             _api('/api/assets/packs/open', body={})
@@ -1114,6 +1166,7 @@ def execute(args: list[str]) -> int:
             'report', 'world', 'pack', 'start', 'run', 'stop', 'help', 'packs',
             'install', 'status', 'restart', 'properties')
         if named_launch or (action in ('start', 'run') and len(options) == 1):
+            testgrounds = named_launch and options[0].strip().casefold() == 'testgrounds'
             if named_launch:
                 requested = options[0].strip()
                 selection = _bedrock_request_with_progress(requested, '/api/bedrock/world/select',
@@ -1123,7 +1176,7 @@ def execute(args: list[str]) -> int:
                 current = selection['world']
                 if selection.get('publication_matched') and not selection.get('publication_warning'):
                     print('[bedrock] Beta Java world ready: ' + current['folder'], flush=True)
-                if selection.get('publication_matched') and not selection.get('publication_warning'):
+                if not testgrounds and selection.get('publication_matched') and not selection.get('publication_warning'):
                     readiness = selection.get('conversion') or {}
                     if readiness.get('needs_update'):
                         print('[bedrock] Updating the beta Java world for Bedrock.', flush=True)
@@ -1175,7 +1228,8 @@ def execute(args: list[str]) -> int:
                     print('[bedrock] ' + str(progress), flush=True)
                     last_progress = progress
             print('[bedrock] Starting ' + current['command_name'] + ' in an interactive tab…', flush=True)
-            started_server = _open_bedrock_with_progress(current['command_name'])
+            started_server = _open_bedrock_with_progress(current['command_name'], testgrounds=testgrounds,
+                                                         world_id=current['id'] if testgrounds else None)
             if not started_server.get('terminal_session'):
                 raise RuntimeError('Bedrock failed to create its interactive console tab')
             print('[bedrock] Opened ' + current['command_name'] + '; close its tab or use bedrock stop.', flush=True)

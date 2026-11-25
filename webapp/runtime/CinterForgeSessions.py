@@ -135,7 +135,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     python = str(Path(sys.executable).resolve())
     functions = '\n'.join(
         f'{name}() {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
-        for name in ('help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'setpass', 'code', 'htmlmenus', 'craftmaster', 'joshua', 'infinitemac'))
+        for name in ('help', 'play', 'devtools', 'debugger', 'bedrock', 'java', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'setpass', 'code', 'htmlmenus', 'craftmaster', 'joshua', 'infinitemac'))
     permitted = set(env.get('CINTER_TERMINAL_ALLOWED_COMMANDS', '').split(','))
     functions += '\n' + '\n'.join(
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
@@ -163,7 +163,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
     if len(set(short_names)) != 16:
         raise RuntimeError('Duplicate short IF commands')
     story_names = list(dict.fromkeys(story_names))
-    reserved = {'help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft',
+    reserved = {'help', 'play', 'devtools', 'debugger', 'bedrock', 'java', 'minecraft',
                 'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories',
                 'install', 'craftmaster', 'assets', 'discord', 'joshua',
                 'infinitemac', 'yes', 'code', 'htmlmenus', 'setpass'}
@@ -174,7 +174,7 @@ def _install_shell_commands(root: Path, system: str, env: dict[str, str]) -> Pat
         for name in ['games', 'stories'] + story_names)
     functions += '\nyes() { games "$@"; }'  # Startup yes is exactly the games command.
     mac_names = list(_mac_catalog())
-    if set(mac_names) & set(['help', 'play', 'devtools', 'debugger', 'bedrock', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories', 'install', 'craftmaster', 'assets', 'discord', 'joshua', 'infinitemac', 'yes'] + story_names):
+    if set(mac_names) & set(['help', 'play', 'devtools', 'debugger', 'bedrock', 'java', 'minecraft', 'lagomorph', 'infinite-mac', 'wargames', 'games', 'stories', 'install', 'craftmaster', 'assets', 'discord', 'joshua', 'infinitemac', 'yes'] + story_names):
         raise RuntimeError('Mac game command collides with existing Terminal command')
     functions += '\n' + '\n'.join(
         f'function {name} {{ {shlex.quote(python)} {shlex.quote(str(cli))} --terminal-cli {name} "$@"; }}'
@@ -576,6 +576,31 @@ class CinterForgeTerminalSession:
             self.lock.notify_all()
 
 
+class CinterForgeJavaTerminalSession(CinterForgeTerminalSession):
+    """Use the native PTY and stop the actual Java console before releasing it."""
+    def __init__(self, *args, action, **kwargs):
+        self.kind = 'java'
+        self.java_action = action
+        self._java_close_lock = threading.Lock()
+        self._java_released = False
+        super().__init__(*args, **kwargs)
+
+    def close(self):
+        with self._java_close_lock:
+            if self._java_released:
+                return
+            if _terminal_process_exit_code(self.process) is None and self.java_action == 'serve':
+                try:
+                    self.write('stop\r\n')
+                    _terminal_process_wait(self.process, 90)
+                except (OSError, RuntimeError, subprocess.TimeoutExpired):
+                    # Do not force a live world server closed after a failed
+                    # graceful stop; caller can inspect its actual console.
+                    raise RuntimeError('Java did not stop cleanly; inspect its console')
+            super().close()
+            self._java_released = True
+
+
 class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
     """One real PTY, using the same Setup acceptance VM launcher.
 
@@ -966,7 +991,8 @@ if str(_CinterForgeSettings.ASSETS) not in sys.path:
 
 
 def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
-                          *, restart: bool = False) -> dict:
+                          *, restart: bool = False, testgrounds: bool = False,
+                          testgrounds_world_id: str | None = None) -> dict:
     """Create one visible Session PTY using the same command as Setup acceptance.
 
     A run request never steals the requesting shell. Switching sessions never
@@ -987,13 +1013,22 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
         requested = name.strip().casefold()
         # The chosen Java identity takes precedence over a same-named Bedrock
         # folder: converted Bedrock saves must be associated by source receipt.
-        java_world = (current_selection if current_selection and
-                      current_selection['edition'] == 'java' and requested in
-                      (current_selection['folder'].casefold(),
-                       current_selection['name'].casefold(),
-                       current_selection['command_name'].casefold()) else None)
-        if java_world is None:
-            java_world = server.bedrock.find_java_world(name)
+        if testgrounds:
+            # The beta resolver already selected the exact Java save by its ID.
+            # Never resolve TestGrounds again by a display/export/folder name.
+            if current_selection is None or current_selection.get('edition') != 'java':
+                raise RuntimeError('TestGrounds requires a selected beta Java save; run bedrock testgrounds again')
+            if testgrounds_world_id is not None and current_selection['id'] != testgrounds_world_id:
+                raise RuntimeError('TestGrounds selection changed before launch; run bedrock testgrounds again')
+            java_world = current_selection
+        else:
+            java_world = (current_selection if current_selection and
+                          current_selection['edition'] == 'java' and requested in
+                          (current_selection['folder'].casefold(),
+                           current_selection['name'].casefold(),
+                           current_selection['command_name'].casefold()) else None)
+            if java_world is None:
+                java_world = server.bedrock.find_java_world(name)
         existing = [world for world in server.bedrock.list_worlds()['worlds']
                     if requested in (world['name'].casefold(), world['folder'].casefold(),
                                      _world_command_name(world).casefold())]
@@ -1004,7 +1039,7 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
                                       _world_command_name(world).casefold())]
         from runtime import CinterForgeCraftMasterMap as _CinterForgeCraftMasterMap
         map_request = (_CinterForgeCraftMasterMap.open_map_tab(server, java_world)
-                       if java_world is not None and not existing else None)
+                       if java_world is not None and not existing and not testgrounds else None)
 
         def report_progress(message: str) -> None:
             if map_request is None:
@@ -1014,9 +1049,16 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
 
         # Preparation is synchronous. The Bedrock PTY must not start until a missing
         # Java world has been fully converted, validated and imported.
+        special_state = None
         try:
-            prepared_name = (server.bedrock.prepare_selected_java_world(java_world, progress=report_progress)
-                             if java_world is not None else server.bedrock.prepare_world(name, progress=report_progress))
+            if testgrounds:
+                if java_world is None:
+                    raise RuntimeError('Select the published CinterForge TestGrounds before installing its materials')
+                special_state = server.bedrock.prepare_testgrounds(java_world)
+                prepared_name = Path(special_state['source_world']).name
+            else:
+                prepared_name = (server.bedrock.prepare_selected_java_world(java_world, progress=report_progress)
+                                 if java_world is not None else server.bedrock.prepare_world(name, progress=report_progress))
         except Exception as error:
             if map_request is not None:
                 _CinterForgeCraftMasterMap.mark_finished(server, map_request['id'], error)
@@ -1030,7 +1072,7 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
             if live and not restart:
                 # Select the existing Bedrock tab only for the same saved world.
                 selected = (server.bedrock._world_settings().get('selected') or {})
-                if prepared_name.strip() and prepared_name.strip().casefold() not in (
+                if special_state is None and prepared_name.strip() and prepared_name.strip().casefold() not in (
                         str(selected.get('name', '')).casefold(),
                         str(selected.get('folder', '')).casefold()):
                     raise RuntimeError('A different Bedrock world is already running; stop it before switching')
@@ -1055,7 +1097,7 @@ def open_bedrock_terminal(server, name: str, cols: int = 80, rows: int = 24,
         with server.sessions_lock:
             if len(server.sessions) >= _CinterForgeSettings.MAX_SESSIONS:
                 raise ValueError('Maximum terminal sessions reached')
-        state = server.bedrock.run_world(prepared_name, launch=False, selected_world=java_world)
+        state = special_state if special_state is not None else server.bedrock.run_world(prepared_name, launch=False, selected_world=java_world)
         if state.get('running'):
             raise RuntimeError('Bedrock already running outside a Session; stop it explicitly first')
         terminal = CinterForgeBedrockTerminalSession(server.bedrock, server.mutable_builds,

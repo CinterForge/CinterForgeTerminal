@@ -98,6 +98,175 @@ def _host_environment(builds: Path) -> dict[str, str]:
     return env
 
 
+
+SERVER_TEST_NAME = 'CinterForge TestGrounds'
+
+
+def _world_artifacts(builds: Path):
+    # Delegate package validation and installation to the owning CraftMaster
+    # implementation; never implement a second world generator or converter.
+    import importlib.util
+    source = builds.parent / 'cinterforge-craftmaster/lifecycle/world_artifacts.py'
+    spec = importlib.util.spec_from_file_location('_terminal_test_world_artifacts', source)
+    module = importlib.util.module_from_spec(spec)
+    exec(compile(source.read_bytes(), str(source), 'exec'), module.__dict__)
+    return module
+
+
+def server_test_fixture(builds: Path) -> tuple[Path, dict]:
+    """Verify the one immutable Setup snapshot; Test never downloads or generates."""
+    root = builds / 'Acceptance/CinterForgeTerminal/TestGrounds'
+    path = root / 'fixture.json'
+    if root.is_symlink() or root.resolve() != root.absolute() or path.is_symlink() or not path.is_file():
+        raise RuntimeError('Server test fixture missing; run ./Cinter setup testgrounds: ' + str(path))
+    receipt = json.loads(path.read_text('utf-8'))
+    java = root / 'Java'
+    bedrock = root / 'TestGrounds.mcworld'
+    artifacts = _world_artifacts(builds)
+    if (receipt.get('schema') != 'cinterforge.terminal.server-fixture.v1' or
+            receipt.get('name') != SERVER_TEST_NAME or receipt.get('channel') != 'beta' or
+            not str(receipt.get('source', '')).startswith('beta publication ') or java.is_symlink() or
+            not (java / 'level.dat').is_file() or bedrock.is_symlink() or
+            not bedrock.is_file() or
+            artifacts.java_content_hashes(java) != receipt.get('java_files') or
+            _digest(bedrock) != receipt.get('mcworld_sha256')):
+        raise RuntimeError('Server test fixture changed; run ./Cinter setup testgrounds: ' + str(root))
+    return root, receipt
+
+
+def read_native_test_fixture_receipt(path: Path) -> dict:
+    """Read the native-install binding; never promote an unverified snapshot."""
+    repair = 'run ./Cinter setup testgrounds (world-only Setup)'
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError('TestGrounds fixture receipt missing; ' + repair)
+    receipt = json.loads(path.read_text('utf-8'))
+    entry = receipt.get('catalog_entry')
+    if (receipt.get('schema') != 'cinterforge.terminal.server-fixture.v1' or
+            receipt.get('name') != SERVER_TEST_NAME or receipt.get('channel') != 'beta' or
+            not isinstance(entry, dict) or not entry.get('folder') or not entry.get('sha256') or
+            receipt.get('source') != 'beta publication ' + str(entry['sha256']) or
+            not isinstance(receipt.get('installed_java'), str) or not receipt['installed_java']):
+        raise RuntimeError('TestGrounds native install receipt missing or outdated; ' + repair)
+    return receipt
+
+
+def _verify_installed_testgrounds(artifacts, installed: Path, entry: dict, receipt: dict) -> None:
+    """Bind the Setup snapshot to the existing verified native publication.
+
+    Compare publisher hashes, not the possibly played Java save's current bytes.
+    Neither this check nor a receipt upgrade replaces local gameplay.
+    """
+    publication_path = installed / artifacts.INSTALL_RECEIPT
+    manifest_path = installed / artifacts.PACKAGE_MANIFEST
+    for path in (publication_path, manifest_path):
+        if (not path.is_file() or any(p.is_symlink() for p in (path, *path.parents))):
+            raise RuntimeError('Installed beta TestGrounds artifact missing or linked: ' + str(path))
+    publication = json.loads(publication_path.read_text('utf-8'))
+    manifest = json.loads(manifest_path.read_text('utf-8'))
+    export = manifest.get('conversion_export', SERVER_TEST_NAME)
+    if export not in (SERVER_TEST_NAME, installed.name):
+        raise RuntimeError('Invalid published TestGrounds conversion export name: ' + str(export))
+    archive = installed / 'CinterForge/Worlds' / export / (export + '.mcworld')
+    if (not archive.is_file() or any(p.is_symlink() for p in (archive, *archive.parents))):
+        raise RuntimeError('Installed beta TestGrounds archive missing or linked: ' + str(archive))
+    record = manifest.get('files', {}).get(archive.relative_to(installed).as_posix(), {})
+    if (publication.get('schema') != 'cinterforge.craftmaster.java-install.v1' or
+            publication.get('world') != SERVER_TEST_NAME or publication.get('channel') != 'beta' or
+            publication.get('folder') != entry['folder'] or publication.get('sha256') != entry['sha256'] or
+            publication.get('java_files') != receipt['java_files'] or
+            manifest.get('schema') != 'cinterforge.craftmaster.java-package.v1' or
+            manifest.get('world') != SERVER_TEST_NAME or manifest.get('folder') != entry['folder'] or
+            record.get('sha256') != receipt['mcworld_sha256'] or
+            _digest(archive) != receipt['mcworld_sha256']):
+        raise RuntimeError('Installed beta TestGrounds does not match the verified fixture: ' + str(installed))
+
+
+def prepare_server_test_fixture(builds: Path) -> None:
+    """Acquire the single published beta smoke world; never generate a replacement."""
+    artifacts = _world_artifacts(builds)
+    print('[SERVER FIXTURE] Checking beta ' + SERVER_TEST_NAME, flush=True)
+    entries = artifacts.fetch_public_catalog('beta')
+    if SERVER_TEST_NAME not in entries:
+        raise RuntimeError('Publish the successful CraftMaster TestGrounds to beta first')
+    entry = entries[SERVER_TEST_NAME]
+    provenance = 'beta publication ' + entry['sha256']
+    try:
+        root, receipt = server_test_fixture(builds)
+    except (OSError, ValueError, RuntimeError, KeyError):
+        pass
+    else:
+        installed = _host_saves_root(builds) / entry['folder']
+        if (receipt['source'] == provenance and
+                artifacts.installed_world_current(installed, entry, allow_exact_local=True)):
+            _verify_installed_testgrounds(artifacts, installed, entry, receipt)
+            # Older Setup snapshots have the verified Java and MCWorld bytes
+            # but no binding to the actual native install. Only upgrade when
+            # the existing native publication independently matches them.
+            binding = {'catalog_entry': entry, 'installed_java': str(installed.resolve())}
+            if any(receipt.get(key) != value for key, value in binding.items()):
+                receipt.update(binding)
+                with tempfile.TemporaryDirectory(prefix='Receipt-', dir=root.parent) as temp:
+                    updated = Path(temp) / 'fixture.json'
+                    updated.write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+                    os.replace(updated, root / 'fixture.json')
+                print('[SERVER FIXTURE] Upgraded existing verified native install binding', flush=True)
+            print('[SERVER FIXTURE] Reusing verified ' + str(root) + ' (' + provenance + ')', flush=True)
+            return
+    root = builds / 'Acceptance/CinterForgeTerminal/TestGrounds'
+    if root.is_symlink() or root.resolve() != root.absolute() or (root.exists() and not root.is_dir()):
+        raise RuntimeError('Unsafe server fixture destination: ' + str(root))
+    root.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='TestGrounds-', dir=root.parent) as temp:
+        pending = Path(temp) / 'Fixture'
+        pending.mkdir()
+        package = Path(temp) / entry['archive']
+        artifacts.download_public_package('beta', SERVER_TEST_NAME, entry, package, report=lambda line: print(line, flush=True))
+        world = artifacts.install_java_package(package, Path(temp)/'Published', SERVER_TEST_NAME,
+                                                entry, 'beta', report=lambda line: print(line, flush=True))
+        manifest = json.loads((world / artifacts.PACKAGE_MANIFEST).read_text('utf-8'))
+        export = manifest.get('conversion_export', SERVER_TEST_NAME)
+        archive = world / 'CinterForge/Worlds' / export / (export + '.mcworld')
+        record = manifest['files'].get(archive.relative_to(world).as_posix())
+        if not record or not archive.is_file() or _digest(archive) != record['sha256']:
+            raise RuntimeError('Published TestGrounds lacks its verified Bedrock conversion')
+        # Install the same verified publication in the normal native Java saves
+        # directory. Test and the installed app must resolve the same source.
+        installed = artifacts.install_catalog_world(
+            _host_saves_root(builds), SERVER_TEST_NAME, entry, 'beta',
+            report=lambda line: print(line, flush=True),
+            download=lambda target: shutil.copy2(package, target))
+        selected = (world, archive, artifacts.java_content_hashes(world), record['sha256'], provenance)
+        world, archive, files, digest, provenance = selected
+        _verify_installed_testgrounds(artifacts, installed, entry,
+                                     {'java_files': files, 'mcworld_sha256': digest})
+        print('[SERVER FIXTURE] Copying verified Java and Bedrock saves: ' + provenance, flush=True)
+        for relative in files:
+            target = pending / 'Java' / artifacts.safe_member(relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(world / relative, target)
+        shutil.copy2(archive, pending / 'TestGrounds.mcworld')
+        if (artifacts.java_content_hashes(pending / 'Java') != files or
+                _digest(pending / 'TestGrounds.mcworld') != digest):
+            raise RuntimeError('Server fixture source changed during copy')
+        (pending / 'fixture.json').write_text(json.dumps({
+            'schema': 'cinterforge.terminal.server-fixture.v1', 'name': SERVER_TEST_NAME,
+            'source': provenance, 'channel': 'beta', 'java_files': files, 'mcworld_sha256': digest,
+            'catalog_entry': entry, 'installed_java': str(installed.resolve()),
+        }, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+        if root.exists():
+            # Only replace this generated snapshot, never the source save.
+            retired = Path(temp) / 'Retired'
+            root.rename(retired)
+            try:
+                pending.rename(root)
+            except BaseException:
+                retired.rename(root)
+                raise
+        else:
+            pending.rename(root)
+    server_test_fixture(builds)
+    print('[SERVER FIXTURE] Verified reusable snapshot: ' + str(root), flush=True)
+
 def setup_receipts_present(builds: Path, targets: tuple[str, ...]) -> bool:
     """Ask the owning lifecycle to validate current shared data hashes.
 
@@ -114,8 +283,21 @@ def setup_receipts_present(builds: Path, targets: tuple[str, ...]) -> bool:
         result = subprocess.run(
             [sys.executable, '-B', str(source / 'Cinter'), 'setup', 'status', *targets],
             cwd=source, env=_host_environment(builds), check=False)
-        return result.returncode == 0
-    except (OSError, RuntimeError, ValueError):
+        if result.returncode != 0:
+            return False
+        from webapp.runtime.CinterForgeJava import provider, verify_jdk, server_jar
+        cm = provider(source / 'lifecycle', staged=False)
+        root = builds / 'CinterForgeCraftMaster/Server/Java'
+        if not cm.java_eula_accepted(root):
+            return False
+        server_jar(root, cm)
+        for target in targets:
+            if target == 'mac':
+                cm.verify_mac_jdk(builds)
+            else:
+                verify_jdk(root, target, 'x64', cm)
+        return True
+    except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError):
         return False
 
 
@@ -245,8 +427,8 @@ def _guest_lifecycle(builds: Path, action: str, target: str, *, docker: str | No
 def craftmaster_world_command(builds: Path, args: list[str], *, optional: bool = False) -> None:
     """Delegate world publication/installation to its owning checkout on the host.
 
-    Setup invokes the documented CraftMaster CLI, never a guest or an embedded
-    duplicate. Missing catalog is optional only for ordinary product Setup.
+    Explicit world commands invoke the documented CraftMaster CLI, never a guest
+    or an embedded duplicate. Ordinary Setup acquires only the server fixture.
     """
     source = Path(__file__).resolve().parents[2].parent / 'cinterforge-craftmaster'
     if source.is_symlink() or not (source / 'Cinter').is_file():
@@ -275,6 +457,18 @@ def setup_craftmaster(builds: Path, *, targets: tuple[str, ...] = TARGETS,
             if not guest:
                 raise RuntimeError('Linux/Windows CraftMaster Setup requires the managed AMD64 guest')
             _guest_lifecycle(builds, 'setup', target, docker=docker)
+    # Terminal owns non-Mac JDK acquisition; standalone CraftMaster Setup stays Mac-only.
+    if targets:
+        from webapp.runtime.CinterForgeJava import provider, provision_jdk, server_jar
+        source, _ = _source_roots(builds)
+        cm = provider(source / 'lifecycle', staged=False)
+        root = builds / 'CinterForgeCraftMaster/Server/Java'
+        cm.require_java_eula(root)
+        cache = _host_saves_root(builds) / 'CinterForge/ReferenceData/Java' / cm.JAVA_VERSION
+        server_jar(root, cm, acquire=True, cached=cache / f'minecraft_server_{cm.JAVA_VERSION}.jar')
+        for target in targets:
+            if target != 'mac':
+                provision_jdk(root, target, 'x64', cm)
 
 
 def build_craftmaster(builds: Path, *, targets: tuple[str, ...] = TARGETS,
@@ -316,7 +510,7 @@ def staged_craftmaster(builds: Path, target: str) -> Path:
             files = manifest.get('files')
             if not isinstance(files, dict) or not files:
                 raise RuntimeError('Stage has no file inventory')
-            if not {'data/world_artifacts.py', 'data/ResourcesNew.json', 'data/AuxValueToBlockStateMap.md',
+            if not {'data/world_artifacts.py', 'data/minecraft_data.py', 'data/java_server.py', 'data/JavaGenerate.mcfunction', 'data/ResourcesNew.json', 'data/AuxValueToBlockStateMap.md',
                     'data/IntrinsicBlockStatesList.md', 'data/BlockStateAndTraitListings.md'} <= set(files):
                 raise RuntimeError('Stage lacks restored Bedrock mappings or the Java publication installer; rebuild CraftMaster')
             expected = {'manifest.json', *files}
@@ -506,7 +700,7 @@ def verify_embedded_craftmaster(app_root: Path, target: str) -> Path:
                ('Resources.json', 'Contours.json', 'MCTemplate.mcworld',
                 'world-template.htm', 'zoomify-viewer.min.js', 'CinterForgeAtlas.js', 'TownNames.json', 'preview.py', 'world_artifacts.py',
                 'AuxValueToBlockStateMap.md', 'IntrinsicBlockStatesList.md', 'BlockStateAndTraitListings.md',
-                'ResourcesNew.json')):
+                'ResourcesNew.json', 'minecraft_data.py', 'java_server.py', 'JavaGenerate.mcfunction')):
         raise RuntimeError('Installed CraftMaster runtime data is incomplete')
     if target == 'win':
         verify_packaged_windows_runtime(folder, binary)

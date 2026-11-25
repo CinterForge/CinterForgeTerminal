@@ -181,8 +181,8 @@ CinterForgeState.activateTab = async function activateTab(tab) {
       CinterForgeState.$('terminal-input').disabled = false;
       CinterForgeState.$('terminal-keys').hidden = false;
       CinterForgeState.$('terminal-shell').textContent = tab.session
-        ? (tab.kind === 'bedrock'
-          ? 'Bedrock · live server console'
+        ? (['bedrock','java'].includes(tab.kind)
+          ? tab.label + ' · live server console'
           : `${CinterForgeState.platform} · ${tab.label}`)
         : 'Disconnected';
       CinterForgeState.focusTerminal();

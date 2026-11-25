@@ -9,10 +9,8 @@
 # KEY CLASSES / METHODS:
 #   _run: Run run for this module.
 #   _sha256: Handle sha256 through this component's established interfaces.
-#   _install_prepared_runtime: Populate a disposable Bedrock test fixture using Setup's verified closure.
 #   test_linuxkit: Handle test linuxkit through this component's established interfaces.
-#   _remove_acceptance_workspace: Remove only this test's generated workspace after the VM has exited.
-#   _execute_acceptance: Execute execute acceptance for this module.
+#   _test_installed_testgrounds: Exercise the normal installed TestGrounds preparation.
 #   run_managed_guest_acceptance: Run run managed guest acceptance for this module.
 #   _run_with_guest_test_environment: Run run with guest test environment for this module.
 #   RepositoryContractSmoke: class responsible for repositorycontractsmoke
@@ -24,7 +22,8 @@
 """Single real-system smoke/acceptance suite for CinterForge Terminal.
 
 The Test phase consumes completed Setup, Build and Stage artifacts. Bedrock
-acceptance uses an isolated disposable server, never a player's world.
+acceptance uses the installed application's normal TestGrounds preparation
+path. Other worlds and previously prepared gameplay are untouched.
 """
 from __future__ import annotations
 
@@ -55,7 +54,6 @@ from __future__ import annotations
 # =============================================================================
 # =============================================================================
 
-import errno
 import hashlib
 import os
 import json
@@ -78,7 +76,6 @@ from host.linux.build_linux import verify_shared_bootstrap
 from host.linux.lifecycle import verify_guest
 
 HERE = LINUXOS
-from host.linux.guest_inputs import _require_elf
 
 
 def _run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -165,132 +162,198 @@ def verify_staged_zeroconf_library(app: Path, target: str, release: str) -> None
     print(f'[TEST STAGE] PASS {target} retail Zeroconf native library: {required}', flush=True)
 
 
-def _install_prepared_runtime(server: Path, guest: Path) -> dict:
-    """Populate a disposable Bedrock test fixture using Setup's verified closure.
+def run_staged_java_smoke(builds: Path, app: Path, target: str, release: str) -> dict:
+    """Host a disposable copy of the verified TestGrounds; no generation or conversion.
 
-    No Docker, network, glibc extraction or C compilation occurs here.
+    Foreign Java acceptance uses the existing AMD64 Linux/Wine guest.
+    This is NOT certification of a native Windows/Linux desktop application.
     """
-    _require_elf(server / 'bedrock_server', 62)
-    cinter = server / '.cinter'
-    if cinter.exists():
-        raise RuntimeError('Isolated acceptance server unexpectedly contains a runtime')
-    cinter.mkdir()
-    loader_source = guest / 'GuestRuntime/glibc-x86_64/ld-linux-x86-64.so.2'
-    probe_source = guest / 'GuestRuntime/cinter-nethernet-probe'
-    _require_elf(loader_source, 62)
-    _require_elf(probe_source, 183)
-    shutil.copytree(loader_source.parent, cinter / 'glibc-x86_64', symlinks=False)
-    shutil.copy2(probe_source, cinter / 'cinter-nethernet-probe')
-    _require_elf(cinter / 'glibc-x86_64/ld-linux-x86-64.so.2', 62)
-    _require_elf(cinter / 'cinter-nethernet-probe', 183)
-    manifest = {
-        'bedrock_sha256': _sha256(server / 'bedrock_server'),
-        'glibc_loader_sha256': _sha256(cinter / 'glibc-x86_64/ld-linux-x86-64.so.2'),
-        'probe_sha256': _sha256(cinter / 'cinter-nethernet-probe'),
-        'source': 'verified-setup-guest-runtime',
-    }
-    (cinter / 'acceptance-inputs.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
-    return manifest
+    import uuid
+    from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster, server_test_fixture
+    from host.lifecycle.universal_package import FOUR_ARCH
+    from webapp.runtime.CinterForgeJava import provider, verify_jdk, server_jar
+    binary = verify_embedded_craftmaster(app, target)
+    data = binary.parent.parent / 'data'
+    cm = provider(data)
+    root = builds / 'CinterForgeCraftMaster/Server/Java'
+    cm.require_java_eula(root, interactive=False)
+    jar = server_jar(root, cm)
+    java = Path(cm.verify_mac_jdk(builds)['java']) if target == 'mac' else verify_jdk(root,target,'x64',cm)
+    embedded = app / 'Contents/Resources/Builds' if target == 'mac' else app / 'Builds'
+    service = embedded / 'Python/Host' / target / FOUR_ARCH[target] / release / 'webapp'
+    for name in ('runtime/CinterForgeJava.py', 'bedrock_status_bridge/manifest.json', 'bedrock_status_bridge/scripts/main.js', 'bedrock_status_bridge/items/terminal.json'):
+        if _sha256(service/name) != _sha256(REPO/'webapp'/name):
+            raise RuntimeError('Stale staged Java/communications asset: '+name)
+    scratch = builds/'Acceptance/CinterForgeTerminal/Java'/target/uuid.uuid4().hex
+    fixture, provenance = server_test_fixture(builds)
+    scratch.mkdir(parents=True)
+    world = scratch/'CinterForge TestGrounds'
+    shutil.copytree(fixture/'Java', world)
+    logs = builds/'Logs/CinterForgeTerminal/JavaAcceptance'/target/scratch.name
+    logs.mkdir(parents=True)
+    def exercise(run, path, python, assets):
+        common = ['--world',path(world),'--data-dir',path(assets),'--server-root',path(root),
+                  '--java',path(java),'--server-jar',path(jar)]
+        run([python,'-B',path(assets/'java_server.py'),'serve',*common,'--check'],'serve')
+    if target == 'mac':
+        def run(command,label):
+            print('[JAVA SMOKE] '+label, flush=True)
+            # Reuse the existing streamed lifecycle process runner for a bounded real test.
+            from host.windows.windows_environment import _run as streamed_run
+            result = streamed_run(command,cwd=scratch,timeout=900,output_log=logs/(label+'.log'))
+            result.check_returncode()
+        python = embedded/'Python/Environments/mac/arm64/cinterterminalenv/bin/python'
+        exercise(run,str,str(python),data)
+    else:
+        from host.lifecycle.amd64_backend import managed_amd64_backend
+        from host.windows.windows_environment import WindowsCrossEnvironment
+        assets = scratch/'CraftMaster/data'
+        assets.mkdir(parents=True)
+        for name in ('java_server.py', 'minecraft_data.py', 'world_artifacts.py'):
+            shutil.copy2(data/name, assets/name)
+        interpreter = scratch/'Python'
+        shutil.copytree(embedded/'Python/Environments'/target/'x64/cinterterminalenv',interpreter)
+        with managed_amd64_backend(builds,setup=False):
+            cross = WindowsCrossEnvironment(builds).ensure_portable_image()
+            def path(p):
+                mapped = cross.path(Path(p))
+                return 'Z:'+mapped.replace('/','\\') if target=='win' else mapped
+            def run(command,label):
+                print('[JAVA SMOKE] '+target+' '+label+' log='+str(logs/(label+'.log')),flush=True)
+                prefix = ['wine'] if target=='win' else []
+                result = cross.execute(prefix+command,cwd=scratch,timeout=900,
+                                       diagnostic_log=logs/(label+'.log'),stream_output=True)
+                if result.returncode:
+                    raise RuntimeError(f'{target} Java {label} failed (exit {result.returncode}); '
+                                       f'log: {logs/(label+".log")}\n{result.stdout[-4000:]}')
+            python = path(interpreter/('python.exe' if target=='win' else 'bin/python'))
+            exercise(run,path,python,assets)
+    report = {'status':'PASS','target':target,'world':str(world),
+              'source':provenance['source'], 'fixture_mcworld_sha256':provenance['mcworld_sha256'],
+              'binary_sha256':_sha256(binary), 'checks':['server-ready','console-list','clean-shutdown']}
+    (logs/'JavaSmoke.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
+    print('[JAVA SMOKE] PASS '+target+' '+str(logs/'JavaSmoke.json'),flush=True)
+    shutil.rmtree(scratch)
+    return report
 
 
 def test_linuxkit(repo: Path, *, offline: bool = False) -> None:
+    """Exercise the installed application's TestGrounds installer on the actual save."""
     repo = repo.resolve()
     if not (repo / 'Cinter').is_file():
         raise RuntimeError(f'Expected CinterForgeTerminal checkout: {repo}')
     if platform.system() != 'Darwin' or platform.machine() != 'arm64':
         raise RuntimeError('CFOS LinuxKit Bedrock/Rosetta Test requires Apple Silicon macOS')
-    # Direct developer test invocation uses the same explicit CLI consent gate.
-    # Packaged applications collect consent in the WebView and share the receipt.
     from host.linux.bedrock_consent import require_bedrock_eula
-    require_bedrock_eula(repo.parent / 'Builds', 'mac')
-    server_repo = repo
-    verify_shared_bootstrap(repo, require_launcher=False)
+    from host.lifecycle.craftmaster_dependency import server_test_fixture
+    from host.lifecycle.unpacked_release import status_four
+    from host.lifecycle.universal_package import APP_ROOTS, FOUR_ARCH, HOST_RELEASE
     root = repo.parent / 'Builds'
-    if not root.is_dir():
-        raise RuntimeError(f'Shared Builds directory missing: {root}')
-    tmp_parent = root / 'Intermediates/CinterForgeTerminal/LinuxKit'
-    tmp_parent.mkdir(parents=True, exist_ok=True)
-    build = HERE
-    installer = build / 'craftmaster/build_craftmaster_server.py'
-    validator = build / 'craftmaster/validate_minecraft_server.py'
-    if not installer.is_file() or not validator.is_file():
-        raise RuntimeError(f'CinterForge Bedrock installer/validator missing under {build}')
-    # Setup has already built and verified the dedicated `c` guest closure.
-    # Acceptance uses that closure directly; Test must not start either VM
-    # builder or acquire toolchains and images.
-    # Keep a durable Test receipt outside the disposable test installation.
+    require_bedrock_eula(root, 'mac')
+    verify_shared_bootstrap(repo, require_launcher=False)
+    guest = verify_guest()
+    fixture, provenance = server_test_fixture(root)
+    location = status_four(root)['targets']['mac']
+    if not location['steam_receipt_matches']:
+        raise RuntimeError('Bedrock acceptance requires the verified installed Mac app')
+    embedded = Path(location['steam_root']) / APP_ROOTS['mac'] / 'Contents/Resources/Builds'
+    service = embedded / 'Python/Host' / 'mac' / FOUR_ARCH['mac'] / HOST_RELEASE / 'webapp'
+    pack = service / 'bedrock_status_bridge'
+    for asset in ('manifest.json', 'scripts/main.js', 'items/terminal.json'):
+        if _sha256(pack / asset) != _sha256(repo / 'webapp/bedrock_status_bridge' / asset):
+            raise RuntimeError('Stale staged communications asset: ' + asset)
+    for asset in ('CinterForgeBedrock.py', 'CinterForgeCommands.py', 'CinterForgeHTTPRoutes.py', 'CinterForgeSessions.py'):
+        if _sha256(service / 'runtime' / asset) != _sha256(repo / 'webapp/runtime' / asset):
+            raise RuntimeError('Stale staged TestGrounds runtime: ' + asset)
+    python = embedded / 'Python/Environments/mac/arm64/cinterterminalenv/bin/python'
     receipt = root / 'Logs/CinterForgeTerminal/linuxkit-bedrock-acceptance.json'
     receipt.parent.mkdir(parents=True, exist_ok=True)
-    guest = verify_guest()
     evidence = {'schema': 'cinterforge.cfos.linuxkit-bedrock-test.v1',
                 'bootstrap_sha256': {name: _sha256(guest / name) for name in
-                   ('cinter-bds-kernel', 'cinter-bds-initrd.img', 'cinter-bds-cmdline', 'CinterBDSVM')},
+                    ('cinter-bds-kernel', 'cinter-bds-initrd.img', 'cinter-bds-cmdline', 'CinterBDSVM')},
                 'status': 'failed', 'checked_at': datetime.now(timezone.utc).isoformat(),
-                'test': 'real-official-bedrock-rosetta-nethernet-console-stop'}
+                'test': 'real-official-bedrock-rosetta-nethernet-console-stop',
+                'world': {'name': provenance['name'], 'source': provenance['source'],
+                          'mcworld_sha256': provenance['mcworld_sha256']}}
     try:
-        _execute_acceptance(repo, server_repo, installer, validator, tmp_parent, evidence, offline,
-                            guest)
+        with tempfile.TemporaryDirectory(prefix='TestGrounds-', dir=receipt.parent) as temp:
+            result = Path(temp) / 'InstalledWorld.json'
+            helper = ('import sys; from pathlib import Path; '
+                      'sys.path.append(sys.argv[1]); '
+                      'from host.lifecycle.test import _test_installed_testgrounds; '
+                      '_test_installed_testgrounds(*map(Path, sys.argv[2:]))')
+            _run([str(python), '-B', '-u', '-c', helper, str(repo), str(embedded),
+                  str(root), str(fixture / 'fixture.json'), str(result)], cwd=service)
+            evidence['installed_bedrock'] = json.loads(result.read_text('utf-8'))
+        evidence['status'] = 'passed'
     except Exception as exc:
         evidence['error'] = str(exc)
-        receipt.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n')
         raise
-    evidence['status'] = 'passed'
-    receipt.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n')
-    print(f'[CFOS LinuxKit Test] Evidence: {receipt}', flush=True)
-    print('[CFOS LinuxKit Test] PASS: official Bedrock installed and executed via ARM64 LinuxKit/Rosetta; NetherNet, list, stop, exit verified', flush=True)
-
-
-def _remove_acceptance_workspace(workspace: Path) -> None:
-    """Remove only this test's generated workspace after the VM has exited.
-
-    macOS filesystem observers can create entries while rmtree traverses the
-    large Bedrock world directory, causing a transient ENOTEMPTY. Retry the
-    *whole* disposal, never suppress an incomplete cleanup or alter user data.
-    """
-    for attempt in range(1, 7):
-        if workspace.is_symlink():
-            raise RuntimeError(f'Unsafe Bedrock acceptance cleanup symlink: {workspace}')
-        if not workspace.exists():
-            print('[CFOS LinuxKit Test] Generated Bedrock acceptance cleanup PASS', flush=True)
-            return
-        try:
-            shutil.rmtree(workspace)
-        except OSError as exc:
-            if exc.errno != errno.ENOTEMPTY:
-                raise
-            if attempt == 6:
-                remaining = ', '.join(p.name for p in list(workspace.iterdir())[:10]) if workspace.is_dir() else '(removed)'
-                raise RuntimeError(
-                    f'Bedrock acceptance passed but generated workspace cleanup failed '
-                    f'after {attempt} attempts: {workspace}; remaining: {remaining}'
-                ) from exc
-            print(f'[CFOS LinuxKit Test] Cleanup retry {attempt}/5: '
-                  f'generated Bedrock workspace changed during removal ({workspace})', flush=True)
-            time.sleep(0.2 * attempt)
-    if workspace.exists():
-        raise RuntimeError(f'Bedrock acceptance cleanup left generated files: {workspace}')
-    print('[CFOS LinuxKit Test] Generated Bedrock acceptance cleanup PASS', flush=True)
-
-
-def _execute_acceptance(repo: Path, server_repo: Path, installer: Path, validator: Path,
-                        tmp_parent: Path, evidence: dict, offline: bool,
-                        guest: Path) -> None:
-    workspace = Path(tempfile.mkdtemp(prefix='Acceptance-', dir=tmp_parent))
-    try:
-        server = workspace / 'Server'
-        command = [sys.executable, '-u', str(installer), '--repo-root', str(server_repo),
-                   '--linuxkit-test-install', str(server)]
-        # Setup has already acquired and validated this official archive.
-        # Acceptance must never repair missing inputs by downloading them.
-        command.append('--offline')
-        _run(command)
-        evidence['runtime'] = _install_prepared_runtime(server, guest)
-        _run([sys.executable, '-u', str(validator), '--repo-root', str(server_repo),
-              '--cfos-linuxkit-test-server', str(server), '--cfos-root', str(repo)])
     finally:
-        _remove_acceptance_workspace(workspace)
+        receipt.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+    print(f'[CFOS LinuxKit Test] Evidence: {receipt}', flush=True)
+    print('[BEDROCK TEST] PASS installed TestGrounds; native Rosetta, NetherNet, list, stop, exit verified', flush=True)
 
 
+def _test_installed_testgrounds(embedded: Path, builds: Path, fixture_receipt: Path, result: Path) -> None:
+    """Offline acceptance of the staged runtime, using the Setup-verified publication.
+
+    No new world/server copy is created for acceptance. Explicit Setup consent
+    and its cached official ZIP permit the same normal package installation on
+    a clean developer machine without downloading during Test.
+    """
+    import zipfile
+    from runtime.CinterForgeBedrock import CinterForgeBedrockManager
+    from host.lifecycle.CinterForgeLifecycleBedrock import CinterForgeLifecycleBedrock
+    from host.lifecycle.craftmaster_dependency import read_native_test_fixture_receipt
+    receipt = read_native_test_fixture_receipt(fixture_receipt)
+    entry = receipt['catalog_entry']
+    manager = CinterForgeBedrockManager(embedded, 'mac', user_install=True)
+    if manager.app != 'CinterForgeTerminal':
+        raise RuntimeError('TestGrounds acceptance must use the normal Terminal server root')
+    if manager._live_session_locked()[0] is not None:
+        raise RuntimeError('Stop the installed Bedrock server before running TestGrounds acceptance')
+    source = manager._java_saves_destination() / entry['folder']
+    if source.resolve() != Path(receipt['installed_java']).resolve():
+        raise RuntimeError('TestGrounds Setup and installed runtime disagree on the Java saves root')
+    publication = source / 'CinterForge/InstalledPublication.json'
+    if (not publication.is_file() or publication.is_symlink() or
+            json.loads(publication.read_text('utf-8')).get('sha256') != entry['sha256']):
+        raise RuntimeError('Installed TestGrounds publication does not match Setup; run ./Cinter setup testgrounds')
+    java = next((item for item in manager.list_java_worlds()
+                 if Path(item['path']) == source.resolve()), None)
+    if java is None:
+        raise RuntimeError('Installed TestGrounds Java save is not discoverable: ' + str(source))
+    export = manager.java_world_export_name(java)
+    archive = manager.craftmaster_output_root(java) / 'Worlds' / export / (export + '.mcworld')
+    if not archive.is_file() or archive.is_symlink() or _sha256(archive) != receipt['mcworld_sha256']:
+        raise RuntimeError('Installed TestGrounds MCWorld does not match verified Setup input')
+    if not manager.accepted():
+        if not CinterForgeLifecycleBedrock(builds, 'mac').accepted():
+            raise PermissionError('Bedrock EULA consent missing; rerun interactive Setup')
+        manager.accept(True)
+    if not manager.installed():
+        cached = builds / 'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-linux.zip'
+        if cached.is_symlink() or not cached.is_file():
+            raise RuntimeError('Official Bedrock Setup archive missing: ' + str(cached))
+        with zipfile.ZipFile(cached) as bundle:
+            if bundle.testzip() is not None or 'bedrock_server' not in bundle.namelist():
+                raise RuntimeError('Official Bedrock Setup archive failed CRC validation')
+        digest = _sha256(cached)
+        print('[BEDROCK TEST] Setup official ZIP CRC validated; local SHA-256: ' + digest, flush=True)
+        manager.package_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='bedrock-stage-', dir=manager.package_dir) as temp:
+            manager._install_archive_payload(cached, Path(temp),
+                {'url': 'Setup official Linux Bedrock archive', 'version': None}, digest, lambda line: print(line, flush=True))
+    state = manager.prepare_testgrounds(java, verify_server=True, progress=lambda line: print(line, flush=True))
+    proof = state['testgrounds']
+    if (proof['archive_sha256'] != receipt['mcworld_sha256'] or not proof['graceful_stop'] or
+            not proof['native_server_verified'] or state['running']):
+        raise RuntimeError('Installed TestGrounds native acceptance proof incomplete')
+    result.write_text(json.dumps({'source_world': state['source_world'], 'active_world': state['active_world'],
+                                  'mcworld_sha256': proof['archive_sha256'], 'fixture': proof['fixture'],
+                                  'fixture_previously_installed': state['fixture_previously_installed']},
+                                 indent=2) + '\n', encoding='utf-8')
 
 
 GUEST_SCHEMA = 'cinterforge.terminal.guest-test-acceptance.v1'
@@ -491,6 +554,8 @@ class RepositoryContractSmoke(unittest.TestCase):
         self.assertNotIn("'host/lifecycle/test.py'", body)
         self.assertNotIn("'test', selected", body)
         self.assertIn('managed_amd64_backend', body)
+        self.assertIn('prepare_server_test_fixture(BUILDS)', body)
+        self.assertNotIn("craftmaster_world_command(BUILDS, ['setup', 'worlds'", body)
 
     def test_06_build_and_stage_do_not_call_smoke_suite(self):
         """The only root-suite launcher is the explicit Test dispatcher."""
@@ -499,6 +564,13 @@ class RepositoryContractSmoke(unittest.TestCase):
         self.assertIn("'stage', selected", source)
         self.assertIn("'test', selected", source)
         self.assertIn("'-B', '-m', 'host.lifecycle.test', '-q'", source)
+        import inspect
+        smoke = inspect.getsource(run_staged_java_smoke)
+        self.assertIn("'serve',*common,'--check'", smoke)
+        self.assertNotIn("'generate'", smoke)
+        self.assertNotIn("'convert'", smoke)
+        self.assertNotIn('--verify-generated-spawn', smoke)
+        self.assertNotIn('validated_worlds(', smoke)
 
 
 class RealStagedSystemSmoke(unittest.TestCase):
@@ -564,11 +636,7 @@ class RealStagedSystemSmoke(unittest.TestCase):
                     # and `Cinter test win`, including during `test all`.
                     if target == 'mac':
                         verify_staged_asset_modules(app, target, self.release)
-                        # Executable functionality, not just a magic header or
-                        # a copied receipt, is required on the native host.
-                        subprocess.run([str(binary), 'self-test', '--data-dir',
-                                        str(binary.parent.parent / 'data')],
-                                       timeout=45, check=True)
+                        run_staged_java_smoke(self.builds, app, target, self.release)
 
     def test_08_real_signed_mac_app_and_codeoss_lagomorph(self):
         """Verify the exact signed staged native app and real bundled assets."""
@@ -624,7 +692,7 @@ class RealStagedSystemSmoke(unittest.TestCase):
                          steamapps=steam)
 
     def test_09_real_bedrock_rosetta_network_console_and_shutdown(self):
-        """Execute the actual official Bedrock server; never a player's world."""
+        """Exercise the installed TestGrounds server and preserve existing gameplay."""
         test_linuxkit(REPO, offline=True)
         receipt = self.builds / 'Logs/CinterForgeTerminal/linuxkit-bedrock-acceptance.json'
         self.assertEqual(json.loads(receipt.read_text())['status'], 'passed')

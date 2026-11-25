@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import uuid
 
 _SCHEMA = 'cinterforge.bedrock.server-access.v1'
@@ -114,6 +115,47 @@ def _atomic_json(path: Path, data) -> None:
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def install_world_status_bridge(server_root: Path, target: Path, authored: Path) -> None:
+    """Install the same packaged communications assets into an isolated managed world."""
+    manifest_file = authored / 'manifest.json'
+    assets = ('manifest.json', 'scripts/main.js', 'items/terminal.json')
+    if any(not (authored / name).is_file() or (authored / name).is_symlink() for name in assets):
+        raise RuntimeError('Packaged CinterForge Minecraft status bridge is missing')
+    manifest = json.loads(manifest_file.read_text('utf-8'))
+    pack_id = manifest['header']['uuid']
+    version = manifest['header']['version']
+    destination = server_root / 'behavior_packs' / 'cinterforge-status-bridge'
+    if destination.parent.is_symlink():
+        raise RuntimeError('Refusing symlinked Bedrock behavior-packs root')
+    for folder in (destination, destination / 'scripts', destination / 'items'):
+        if folder.is_symlink():
+            raise RuntimeError('Refusing symlinked Bedrock status bridge directory')
+        folder.mkdir(parents=True, exist_ok=True)
+    for name in assets:
+        source, output = authored / name, destination / name
+        if output.is_symlink():
+            raise RuntimeError('Refusing symlinked Bedrock status bridge asset')
+        if not output.is_file() or output.read_bytes() != source.read_bytes():
+            output.write_bytes(source.read_bytes())
+
+    registry_path = target / 'world_behavior_packs.json'
+    if registry_path.is_symlink():
+        raise RuntimeError('Refusing symlinked world behavior-pack registry')
+    entries = json.loads(registry_path.read_text('utf-8')) if registry_path.is_file() else []
+    if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
+        raise RuntimeError('Invalid existing Bedrock world behavior-pack registry: ' + str(registry_path))
+    entry = {'pack_id': pack_id, 'version': version}
+    current = [item for item in entries if item.get('pack_id') != pack_id]
+    current.append(entry)
+    if entries != current:
+        temporary = registry_path.with_name(registry_path.name + '-' + uuid.uuid4().hex + '.tmp')
+        try:
+            temporary.write_text(json.dumps(current, indent=2) + '\n', encoding='utf-8')
+            os.replace(temporary, registry_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 class BedrockServerAccess:
@@ -297,6 +339,20 @@ class BedrockServerAccess:
                                 len(command.encode('utf-8')) <= 2048 and
                                 not any(c in command for c in '\r\n\x00')):
                             self.command(sender, command)
+                    elif kind == 'native-command':
+                        name, argument = payload.get('name'), payload.get('argument')
+                        # Native commands are typed single game/world names, never
+                        # arbitrary shell fragments or CraftMaster CLI switches.
+                        if (name in ('play', 'craftmaster') and isinstance(argument, str)
+                                and 0 < len(argument) <= 160 and argument == argument.strip()
+                                and not argument.startswith('-') and argument.isprintable()
+                                and all(ord(c) >= 32 and ord(c) != 127 for c in argument)
+                                and (name != 'craftmaster' or argument.casefold() not in
+                                     {'worlds', 'players', 'convert', 'export-name', 'self-test',
+                                      'capabilities', 'help'})):
+                            self.command(sender, name + ' ' + shlex.quote(argument))
+                        else:
+                            self.event(sender + ': Invalid CinterForge command argument', kind='minecraft-say')
                     elif kind in ('chat', 'status'):
                         message = str(payload.get('message', ''))[:240].strip()
                         if message and not any(ord(c) < 32 for c in message):
