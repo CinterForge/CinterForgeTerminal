@@ -16,6 +16,7 @@ import json
 import mimetypes
 import os
 import ssl
+import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import re
 import secrets
@@ -53,8 +54,25 @@ def _map_provider(server):
         return module
 
 
+def _local_java_source(server, state):
+    # The map ID is server-issued; no browser-supplied filesystem paths.
+    directory = Path(state['directory'])
+    source = directory.parent.parent.parent.parent
+    try:
+        if (directory != source / 'CinterForge' / 'Maps' / source.name / 'Overworld' or
+                any(p.is_symlink() for p in (source / 'level.dat', directory, *directory.parents)) or
+                not (source / 'level.dat').is_file() or (source / 'db').is_dir() or
+                source.parent.resolve() not in server.bedrock._java_world_roots()):
+            return None
+        if server.bedrock._world_id({'edition': 'java', 'path': str(source)}) != state['world_id']:
+            return None
+        return source
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
 def write_map_annotation(handler, path):
-    match = re.fullmatch(r'/craftmaster-map/([0-9a-f]{32})/MapAnnotations\.json',path)
+    match = re.fullmatch(r'/craftmaster-map/([0-9a-f]{32})/(MapAnnotations|MapPlayers)\.json',path)
     if not match: return False
     server = handler.server
     scheme = getattr(server,'scheme','http')
@@ -91,14 +109,35 @@ def write_map_annotation(handler, path):
         if state is not None: state = dict(state)
     if state is None or (hasattr(server,'scheme') and not state.get('remote')):
         handler._json(404,{'error':'Unknown map'});return True
+    source = _local_java_source(server, state)
+    if source is None:
+        handler._json(403, {'error':'Editing requires a local Java save'}); return True
     try:
         n=int(handler.headers.get('Content-Length','0'))
-        if not 1<=n<=4096: raise ValueError('Invalid annotation request')
+        provider = _map_provider(server)
+        if not 1<=n<=getattr(provider, 'MAP_ANNOTATION_MAX_REQUEST', 4096): raise ValueError('Invalid annotation request')
         edit=json.loads(handler.rfile.read(n))
-        result=_map_provider(server).map_annotations(state['directory'].parent,edit)
+        if match.group(2) == 'MapPlayers':
+            if handler.client_address[0] not in ('127.0.0.1','::1') and getattr(server,'lan_login',None) is None:
+                handler._json(403,{'error':'Player changes over LAN require Terminal login'}); return True
+            # Serialize with existing native world conversions and recheck the
+            # map job after acquiring its operation lock.
+            if not server.bedrock_terminal_lock.acquire(blocking=False):
+                handler._json(409,{'error':'World operation in progress; try again when complete'}); return True
+            try:
+                with server.craftmaster_map_lock:
+                    if server.craftmaster_maps.get(match.group(1),{}).get('working'):
+                        handler._json(409,{'error':'Map conversion in progress'}); return True
+                binary,_ = server.bedrock._craftmaster_cli()
+                result=provider.edit_map_player(source,state['directory'].parent,binary,edit)
+            finally:
+                server.bedrock_terminal_lock.release()
+        else:
+            result=provider.map_annotations(state['directory'].parent,edit)
         handler._json(200,result)
-    except (OSError,ValueError,RuntimeError,TypeError):
-        handler._json(400,{'error':'Could not save map annotation'})
+    except (OSError,ValueError,RuntimeError,TypeError,subprocess.SubprocessError) as error:
+        server.log_event('Map edit failed: ' + str(error))
+        handler._json(400,{'error':str(error) if isinstance(error,(ValueError,RuntimeError)) else 'Could not save map edit'})
     return True
 
 
@@ -382,6 +421,9 @@ def serve_map_asset(handler, path: str) -> bool:
         return True
     # World-level manifest and explicit canonical dimensions only; no raw save access.
     world_root = state['directory'].parent
+    if relative_text == 'MapCapabilities.json':
+        handler._json(200, {'editable': _local_java_source(handler.server, state) is not None})
+        return True
     if relative_text in ('MapAnnotations.json','MapPlayers.json') or (len(parts)==2 and parts[0]=='Profiles'):
         try:
             provider=_map_provider(handler.server)
@@ -411,7 +453,17 @@ def serve_map_asset(handler, path: str) -> bool:
                    else _find_zoomify_root(dimension))
     else:
         dimension, zoomify = _map_layout(state)
-    if relative_text in ('Live Map.htm', 'zoomify-viewer.min.js', 'CinterForgeAtlas.js', 'TownNames.json', 'LiveMap.status', 'LiveMap POIs.json', world_root.name + ' POIs.json'):
+    if relative_text in ('zoomify-viewer.min.js', 'CinterForgeAtlas.js', 'TownNames.json'):
+        # Serve the verified current authored resources together, even when a
+        # save's existing portable map was generated by an older version.
+        try:
+            _, data = handler.server.bedrock._craftmaster_cli()
+            asset = data / relative_text
+            handler._send(200, asset.read_bytes(), 'application/javascript' if asset.suffix == '.js' else 'application/json')
+        except (OSError, ValueError, RuntimeError):
+            handler._json(503, {'error':'Verified CraftMaster viewer unavailable'})
+        return True
+    if relative_text in ('Live Map.htm', 'LiveMap.status', 'LiveMap POIs.json', world_root.name + ' POIs.json'):
         allowed = True
     else:
         # Only serve a true Zoomify tile/metadata file under the discovered
