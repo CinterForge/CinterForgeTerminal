@@ -254,5 +254,6 @@ def publish(builds: Path, release: str, channel: str, *, config: Path,
     _, _, verified = r2._request(cfg, 'GET', key=pointer_key)
     if hashlib.sha256(verified).digest() != hashlib.sha256(_canonical(pointer)).digest():
         raise RuntimeError(f'Cloudflare channel pointer verification failed: {pointer_key}')
+    r2.purge_bucket_cache(cfg)
     print(f'[CPH publish] VERIFIED bucket={BUCKETS[channel]} manifest={pointer["manifest"]}', flush=True)
     return manifest

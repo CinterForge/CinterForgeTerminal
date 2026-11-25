@@ -2750,6 +2750,7 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
     if os.environ.get('CINTERFORGE_SETUP_DISABLE_UPLOADS') == '1':
         raise RuntimeError('Publishing disabled on this setup/test machine')
     cfg = _cloudflare_config(config, channel=channel)
+    r2._cache_purge_settings(cfg)
     remote = r2._list_remote(cfg, prefix)
     if channel in ('public', 'release'):
         # The Lagomorph ISO is a separate versioned sidecar, not a stable app ZIP.
@@ -2854,8 +2855,9 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
             verified = _download_four_to(builds, release, cfg, downloaded, prefix=prefix)
         if verified != report:
             raise RuntimeError('Cloudflare round-trip release manifest differs')
-        if channel in ('public', 'release'):
-            _download_lagomorph_public(cfg, legacy_media_prefix, files[LAGOMORPH_PUBLIC_NAME], downloaded)
+    r2.purge_bucket_cache(cfg)
+    if channel in ('public', 'release'):
+        _download_lagomorph_public(cfg, legacy_media_prefix, files[LAGOMORPH_PUBLIC_NAME], downloaded)
     public_urls = (_release_public_urls(release, include_lagomorph=channel in ('public', 'release'),
                                         include_windows_msi=bool(report.get('installers')),
                                         prefix=prefix) if provider == 'public' else {})
@@ -2910,6 +2912,7 @@ def publish_lagomorph(builds: Path, *, release: str = HOST_RELEASE,
     source_size = source.stat().st_size
     source_sha = _hash(source, progress_label='Hash Lagomorph ISO')
     cfg = _cloudflare_config(config, channel='public')
+    r2._cache_purge_settings(cfg)
     prefix = f'{CLOUDFLARE_OBJECT_ROOT}/{release}'
     key = f'{prefix}/{LAGOMORPH_PUBLIC_NAME}'
     from host.publishing.release import PUBLIC_URLS
@@ -2938,7 +2941,6 @@ def publish_lagomorph(builds: Path, *, release: str = HOST_RELEASE,
     # Re-read the object over the public HTTP origin; authenticated R2 alone is
     # insufficient for cross-origin Infinite Mac media attachment.
     print(f'[LAGOMORPH PUBLISH] checking public URL: {url}', flush=True)
-    _verify_public_lagomorph_range(url, source_size)
     # Publishing Lagomorph explicitly also publishes its TWO separate floppy
     # tests. The four application/DevTools ZIPs are never touched.
     floppy_receipts = {}
@@ -2955,9 +2957,12 @@ def publish_lagomorph(builds: Path, *, release: str = HOST_RELEASE,
         r2._get_file(cfg, floppy_key, roundtrip, expected_size=size)
         if _hash(roundtrip) != digest:
             raise RuntimeError('Lagomorph floppy failed R2 SHA-256 round-trip: ' + name)
-        _verify_public_lagomorph_range(floppy_url, size)
         floppy_receipts[name] = {'url': floppy_url, 'bytes': size, 'sha256': digest}
-        print(f'[LAGOMORPH PUBLISH] verified 1.44 MB HFS floppy: {floppy_url}', flush=True)
+    r2.purge_bucket_cache(cfg)
+    _verify_public_lagomorph_range(url, source_size)
+    for detail in floppy_receipts.values():
+        _verify_public_lagomorph_range(detail["url"], detail["bytes"])
+        print(f'[LAGOMORPH PUBLISH] verified 1.44 MB HFS floppy: {detail["url"]}', flush=True)
     receipt = {'release': release, 'bucket': cfg['bucket'], 'key': key, 'url': url,
                'floppies': floppy_receipts,
                'bytes': source_size, 'sha256': source_sha,

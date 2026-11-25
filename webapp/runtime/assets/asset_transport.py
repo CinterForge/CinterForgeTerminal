@@ -396,6 +396,12 @@ def _run_cloudflare(mode: str, local: Path, *, allow_upload: bool=False, no_dele
         raise FileNotFoundError(f'Cloudflare sync helper is missing: {script}')
     if not config.is_file():
         raise FileNotFoundError(f'Cloudflare config is missing: {config}')
+    purge_transport = purge_cfg = None
+    if mode == 'upload-sync' and allow_upload:
+        from runtime.assets.CinterForgeAssetCloudflare import _transport
+        purge_transport = _transport()
+        purge_cfg = purge_transport._load_config(config, _cloudflare_provider())
+        purge_transport._cache_purge_settings(purge_cfg)
     remote_prefix = str(prefix or _cloudflare_prefix()).strip('/')
     args = [sys.executable, str(script), mode, '--config', str(config), '--provider', _cloudflare_provider(), '--prefix', remote_prefix, '--local', str(local), '--extension', '']
     if allow_upload:
@@ -460,6 +466,8 @@ def _run_cloudflare(mode: str, local: Path, *, allow_upload: bool=False, no_dele
             log(f'cloudflare-bucket-missing provider={_cloudflare_provider()} prefix={_cloudflare_prefix()} action=skip')
             return '__CINTERFORGE_BUCKET_MISSING__'
         raise RuntimeError(f'Cloudflare {mode} failed rc={rc}: {output[-4000:]}')
+    if purge_transport is not None:
+        purge_transport.purge_bucket_cache(purge_cfg)
     return output
 
 @contextmanager

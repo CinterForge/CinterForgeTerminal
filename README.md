@@ -61,6 +61,8 @@ Type `code` to open the Code-OSS development workbench. Work with local folders 
 
 For developers, `./Cinter` manages **Setup → Build → Stage → Test** for the macOS, Windows and Linux applications and the separate optional DevTools package. Setup provisions required tools and performs preflight checks; lifecycle results are written to persistent logs. Publishing is a **separate explicit command** and can use Cloudflare R2/CDN to distribute versioned application releases and selected content.
 
+Successful Cloudflare publication purges the entire CDN hostname for the destination bucket. In the existing external `cfdev/config.json` R2 provider, set `cache_zone_id` and `cache_api_token` (a Cloudflare API token with **Cache Purge** permission for that zone), or supply `CLOUDFLARE_ZONE_ID` and `CLOUDFLARE_API_TOKEN` in the environment. The existing public `cinterforge` and internal `cdn-assets-dev` buckets map to `cinterforge.ucreg.io` and `cdn-dev.ucreg.io` respectively. Other buckets must explicitly configure `cache_hostnames` (comma-separated CDN hostnames in the selected zone). Publish refuses missing purge configuration before upload and reports failed purges; dry runs and downloads do not purge. Never commit tokens.
+
 ### Reuse the application foundation
 
 The same foundation can host other interactive applications: a **native cross-platform WebView shell**, an **authenticated local HTTP service**, a **customizable Python backend**, native menus and process/terminal services, and a JavaScript-to-native bridge. The C++ Host library and stable `cph_*` ABI are available to integrators; `./Cinter` is the public lifecycle CLI. This is infrastructure for builders, not a claim that arbitrary web pages receive unrestricted local-machine access.

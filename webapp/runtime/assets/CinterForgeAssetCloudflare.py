@@ -246,6 +246,7 @@ def publish(channel: str, assets_root: Path, *, transport=None) -> dict:
     if os.environ.get('CINTERFORGE_SETUP_DISABLE_UPLOADS') == '1':
         raise RuntimeError('Cloudflare publishing disabled during Setup/Test')
     r2, cfg, prefix = _credential_config(channel, transport)
+    r2._cache_purge_settings(cfg)
     root = Path(assets_root).resolve()
     # A previously generated gallery must match the currently present UCI
     # folders before it is included in the published file inventory. Otherwise
@@ -350,6 +351,7 @@ def publish(channel: str, assets_root: Path, *, transport=None) -> dict:
         remaining = r2._list_remote(cfg, prefix)
         if any(name in remaining for name in legacy_zips):
             raise RuntimeError('Direct Assets published but old generated ZIPs remain in R2')
+    r2.purge_bucket_cache(cfg)
     print(f'[assets publish] PASS direct_files={len(files)} uploaded={new_files} '
           f'reused={reused_files} deleted_files={len(deleted_files)} '
           f'deleted_old_zips={len(legacy_zips)} '

@@ -245,6 +245,9 @@ def _provider_from_config(data: dict, provider: str) -> dict | None:
 
 def _extract_canonical_fields(cfg: dict) -> dict[str, str]:
     aliases = {
+        "cache_zone_id": ["cache_zone_id", "zone_id", "CLOUDFLARE_ZONE_ID"],
+        "cache_api_token": ["cache_api_token", "CLOUDFLARE_API_TOKEN"],
+        "cache_hostnames": ["cache_hostnames"],
         "endpoint_url": [
             "endpoint_url", "endpointUrl", "endpoint",
             "CINTERFORGE_CLOUDFLARE_R2_JSON_ENDPOINT_URL",
@@ -440,6 +443,42 @@ def _load_config(path: Path, provider: str, *, required_bucket: str = "") -> dic
         f"object_prefix={out.get('object_prefix', '') or '(root)'}"
     )
     return out
+
+def _cache_purge_settings(cfg: dict) -> tuple[str, str, list[str]]:
+    """Resolve the full CDN hostname(s) for the selected R2 bucket."""
+    zone = (cfg.get("cache_zone_id") or os.environ.get("CLOUDFLARE_ZONE_ID") or "").strip()
+    token = (cfg.get("cache_api_token") or os.environ.get("CLOUDFLARE_API_TOKEN") or "").strip()
+    bucket = cfg.get("bucket", "")
+    default_hosts = {"cinterforge": "cinterforge.ucreg.io", "cdn-assets-dev": "cdn-dev.ucreg.io"}
+    hosts = [h.strip().lower() for h in (cfg.get("cache_hostnames") or default_hosts.get(bucket, "")).split(",") if h.strip()]
+    if len(zone) != 32 or any(ch not in "0123456789abcdefABCDEF" for ch in zone) or not token:
+        raise RuntimeError("Cloudflare cache purge requires cache_zone_id and cache_api_token in the R2 provider, or CLOUDFLARE_ZONE_ID and CLOUDFLARE_API_TOKEN (Cache Purge permission)")
+    if not hosts or any("." not in h or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789-." for ch in h) for h in hosts):
+        raise RuntimeError("Cloudflare cache purge requires valid cache_hostnames for bucket " + bucket)
+    return zone, token, hosts
+
+
+def purge_bucket_cache(cfg: dict) -> None:
+    """Purge ALL cached content for the bucket's CDN hostname(s), not R2 objects."""
+    zone, token, hosts = _cache_purge_settings(cfg)
+    if os.environ.get("CINTERFORGE_SETUP_DISABLE_UPLOADS") == "1":
+        raise RuntimeError("Cloudflare cache purge disabled on Setup/test machine")
+    url = "https://api.cloudflare.com/client/v4/zones/" + zone + "/purge_cache"
+    payload = json.dumps({"hosts": hosts}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, method="POST", headers={
+        "Authorization": "Bearer " + token, "Content-Type": "application/json"})
+    _log("cache purge START bucket=" + cfg["bucket"] + " hosts=" + ",".join(hosts))
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Cloudflare cache purge failed HTTP {exc.code}; uploads may already be committed. Check Cache Purge permission and retry Publish.") from None
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Cloudflare cache purge failed (" + type(exc).__name__ + "); uploads may already be committed. Retry Publish.") from None
+    if not isinstance(result, dict) or result.get("success") is not True:
+        raise RuntimeError("Cloudflare rejected cache purge; uploads may already be committed. Retry Publish.")
+    _log("cache purge PASS bucket=" + cfg["bucket"] + " hosts=" + ",".join(hosts))
+
 
 def _sign(key: bytes, msg: str) -> bytes:
     return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
@@ -826,6 +865,7 @@ def upload_sync(
     preserve_remote_subprefixes: tuple[str, ...] = (),
     exclude_relative: tuple[str, ...] = (),
 ) -> None:
+    _cache_purge_settings(cfg)
     prefix = _trim_slashes(prefix or cfg.get("object_prefix") or "assets")
     # Bucket CORS is infrastructure policy, not content publication.  Content
     # publishers may have object-write permission without PutBucketCors.
@@ -928,6 +968,7 @@ def upload_sync(
         raise RuntimeError(
             f"upload-sync remote verification failed for {cfg['bucket']}/{prefix}: {preview}"
         )
+    purge_bucket_cache(cfg)
     _log(
         f"upload-sync complete remote={cfg['bucket']}/{prefix} "
         f"uploaded={uploaded} added={added} changed={changed} unchanged={unchanged} deleted={deleted} local_files={len(local)} "

@@ -388,6 +388,7 @@ def publish_private_source(builds: Path, *, media: dict[str, Path],
     if stage_manifest.is_symlink() or not stage_manifest.is_file():
         raise FileNotFoundError('Missing staged Lagomorph HFS manifest: ' + str(stage_manifest))
     cfg = _cloudflare_config(config, channel='dev')
+    r2._cache_purge_settings(cfg)
     if cfg['bucket'] != 'cdn-assets-dev':
         raise RuntimeError('Private Lagomorph content must use internal cdn-assets-dev')
     scratch = builds / 'Intermediates/CinterForgeTerminal/LagomorphPublish'
@@ -420,6 +421,7 @@ def publish_private_source(builds: Path, *, media: dict[str, Path],
              'mac_metadata': mac_metadata,
              'stage_manifest': stage_entry, 'media': media_entries}
     _write_index(cfg, INDEX_KEY, index, scratch)
+    r2.purge_bucket_cache(cfg)
     print(f'[LAGOMORPH INTERNAL] verified one ZIP ({len(entries)} files) in '
           f'{cfg["bucket"]}/{SOURCE_ARCHIVE_KEY}; snapshot committed', flush=True)
     return index

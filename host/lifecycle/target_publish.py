@@ -149,6 +149,7 @@ def _publish_files(builds: Path, *, channel: str, target: str, files: dict[str, 
     if os.environ.get('CINTERFORGE_SETUP_DISABLE_UPLOADS') == '1':
         raise RuntimeError('Publishing disabled on Setup/test machine')
     cfg = _cloudflare_config(config, channel=channel)
+    r2._cache_purge_settings(cfg)
     provider, prefix = _publish_destination(channel)
     remote = r2._list_remote(cfg, prefix)
     manifest_name = f'{target}-artifacts.json'
@@ -181,6 +182,7 @@ def _publish_files(builds: Path, *, channel: str, target: str, files: dict[str, 
     _, _, payload = r2._request(cfg, 'GET', key=f'{prefix}/{manifest_name}')
     if hashlib.sha256(payload).hexdigest() != _sha(manifest):
         raise RuntimeError('R2 manifest roundtrip SHA-256 mismatch: ' + manifest_name)
+    r2.purge_bucket_cache(cfg)
     urls = {}
     if provider == 'public':
         base = 'https://cinterforge.ucreg.io'
