@@ -221,6 +221,17 @@ def run_staged_java_smoke(builds: Path, app: Path, target: str, release: str) ->
             def run(command,label):
                 print('[JAVA SMOKE] '+target+' '+label+' log='+str(logs/(label+'.log')),flush=True)
                 prefix = ['wine'] if target=='win' else []
+                # HotSpot 25 has crashed during Linux and Windows/Wine Java
+                # acceptance in the Mac ARM64 managed x86-64 QEMU guest.
+                # Limit compilation to C1 for these acceptance processes only.
+                # Keep Wine in the Windows prefix so its managed volume and
+                # Windows Python/JVM are still used. Retail JVMs are unchanged.
+                if (target in ('linux', 'win') and platform.system() == 'Darwin' and
+                        platform.machine().lower() in ('arm64', 'aarch64')):
+                    prefix = ['env', 'JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1', *prefix]
+                    guest = 'Windows x64/Wine' if target == 'win' else 'Linux x64'
+                    print(f'[JAVA SMOKE] {guest} under Apple Silicon QEMU: '
+                          'JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1', flush=True)
                 result = cross.execute(prefix+command,cwd=scratch,timeout=900,
                                        diagnostic_log=logs/(label+'.log'),stream_output=True)
                 if result.returncode:

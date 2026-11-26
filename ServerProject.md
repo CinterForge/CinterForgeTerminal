@@ -155,7 +155,16 @@ receipts remain under `Builds/Logs/CinterForgeTerminal/JavaAcceptance`.
 
 
 The existing Linux and Windows Java checks use the managed AMD64 Linux/Wine
-execution environment; they are not native Windows GUI certification. This
+execution environment; they are not native Windows GUI certification. On Apple
+Silicon only, both foreign Java acceptance processes use
+`JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1` to limit HotSpot compilation to C1.
+The November 25 lifecycle log shows Linux Java acceptance passed with this
+setting, but Windows HotSpot crashed in `jvm.dll` and emitted compiler replay
+data without it. Windows now uses the same acceptance-only setting before
+launching Wine; native and installed JVMs are unchanged. This is a targeted
+workaround, not a confirmed diagnosis or a verified Windows pass. The existing
+`./Cinter test win` gate must still observe real server readiness, console
+`list` and clean shutdown before acceptance succeeds. This
 drop does not add Linux/Windows native Bedrock acceptance or claim client login
 on any target. Ordinary Minecraft startup may load/generate missing chunks as
 part of normal server operation; Terminal does not request terrain generation.
