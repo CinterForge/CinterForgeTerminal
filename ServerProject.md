@@ -171,6 +171,14 @@ part of normal server operation; Terminal does not request terrain generation.
 The real installed-app server/PTY lifetime and in-game Terminal acceptance
 remain separate pending gates. No native runtime was available here.
 
+The November 25 retry passed Mac and Linux Test. Windows picked up the C1
+setting and reached Minecraft server initialization, then CraftMaster's
+Python stdout reader failed on Unicode under CP1252. The owning controller
+now uses UTF-8 for redirected stdout and reports reader failures to the
+waiter. Rebuild and stage Terminal to package that verified CraftMaster
+resource; the existing Windows readiness, list and shutdown gate is unchanged
+and remains pending. No world or asset publication is required for this fix.
+
 ## In-world Terminal: current fixture and next steps
 
 The existing communications pack retains its UUID and console transport. Native
