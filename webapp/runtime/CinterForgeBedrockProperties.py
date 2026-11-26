@@ -414,7 +414,7 @@ class BedrockProperties:
         # Preserve the status bridge's historical first-run default, but
         # never overwrite an actual native setting or an explicit override.
         if 'content-log-console-output-enabled' not in current:
-            updates.setdefault('content-log-console-output-enabled','true')
+            updates['content-log-console-output-enabled']='true'
         updates.update(self._policy()['server'])
         if level_name is not None: updates['level-name']=level_name
         if updates:

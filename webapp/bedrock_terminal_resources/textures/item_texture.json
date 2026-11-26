@@ -1,0 +1,30 @@
+{
+  "resource_pack_name": "cinterforge_terminal",
+  "texture_name": "atlas.items",
+  "texture_data": {
+    "cinter_terminal_1": {
+      "textures": "textures/items/cinter_terminal_1"
+    },
+    "cinter_terminal_2": {
+      "textures": "textures/items/cinter_terminal_2"
+    },
+    "cinter_terminal_3": {
+      "textures": "textures/items/cinter_terminal_3"
+    },
+    "cinter_terminal_4": {
+      "textures": "textures/items/cinter_terminal_4"
+    },
+    "cinter_terminal_sm": {
+      "textures": "textures/items/cinter_terminal_sm"
+    },
+    "cinter_terminal_med": {
+      "textures": "textures/items/cinter_terminal_med"
+    },
+    "cinter_terminal_lg": {
+      "textures": "textures/items/cinter_terminal_lg"
+    },
+    "cinter_terminal_xl": {
+      "textures": "textures/items/cinter_terminal_xl"
+    }
+  }
+}

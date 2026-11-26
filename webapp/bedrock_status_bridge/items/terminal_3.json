@@ -1,0 +1,19 @@
+{
+  "format_version": "1.21.100",
+  "minecraft:item": {
+    "description": {
+      "identifier": "cinter:terminal_3"
+    },
+    "components": {
+      "minecraft:display_name": {
+        "value": "CinterForge Terminal 3x3"
+      },
+      "minecraft:icon": {
+        "textures": {
+          "default": "cinter_terminal_3"
+        }
+      },
+      "minecraft:max_stack_size": 64
+    }
+  }
+}

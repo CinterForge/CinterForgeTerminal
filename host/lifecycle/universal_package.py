@@ -358,6 +358,23 @@ def _progress(label: str, done: int, total: int) -> None:
     print(f'[TERMINAL PROGRESS] {label} {percent:.1f}% '
           f'({done / 1048576:.1f}/{total / 1048576:.1f} MiB)', flush=True)
 
+def _terminal_resource_members() -> tuple[str, ...]:
+    from webapp.runtime.CinterForgeBedrockAccess import TERMINAL_RESOURCE_PACK_MEMBERS
+    return tuple('bedrock_terminal_resources/' + name for name in TERMINAL_RESOURCE_PACK_MEMBERS)
+
+
+def _require_terminal_resource_pack(files: dict, target: str, release: str) -> None:
+    """Require the new pack in the native Build inventory, even on Stage cache hits."""
+    if target not in FOUR_ARCH:
+        return
+    prefix = APP_ROOTS[target] + ('/Contents/Resources/Builds' if target == 'mac' else '/Builds')
+    prefix += f'/Python/Host/{target}/{FOUR_ARCH[target]}/{release}/webapp/'
+    for name in _terminal_resource_members():
+        if prefix + name not in files:
+            raise RuntimeError(f'{target} Build missing Terminal resource: {name}; '
+                               f'apply the complete showroom update and run ./Cinter build {target}')
+
+
 def _authored_webapp_assets(repo: Path) -> tuple[str, ...]:
     """Inventory the entire authored webapp once, with no filename allowlist.
 
@@ -379,7 +396,7 @@ def _authored_webapp_assets(repo: Path) -> tuple[str, ...]:
         if not item.is_file():
             raise RuntimeError('Unsupported authored webapp resource: ' + str(item))
         members.append(relative.as_posix())
-    for required in ('index.html', 'CinterForgeTerminal.py'):
+    for required in ('index.html', 'CinterForgeTerminal.py', *_terminal_resource_members()):
         if required not in members:
             raise FileNotFoundError('Authored webapp resource missing: ' + required)
     return tuple(members)
@@ -755,6 +772,10 @@ exec "$HERE/CinterForge Terminal" --builds "$BUILDS" --python "$BUILDS/Python/En
     if target != 'mac':
         runtime = _runtime_for_release(builds, target)
         assets.update(_files_under(runtime, builds_prefix + f'/Python/Environments/{target}/{arch}/cinterterminalenv'))
+        display = builds / 'CinterForgeTerminal/Dependencies/BedrockDisplay' / target
+        if not (display / 'receipt.json').is_file():
+            raise RuntimeError('Missing Setup-provisioned Bedrock display runtime: ' + str(display))
+        assets.update(_files_under(display, builds_prefix + '/CinterForgeTerminal/Dependencies/BedrockDisplay/' + target))
         # Stage authored service code (no CPH SDK/toolchain in lightweight apps).
         host_root = builds_prefix + f'/Python/Host/{target}/{arch}/{release}'
         repo = Path(__file__).resolve().parents[2]

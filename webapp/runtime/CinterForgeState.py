@@ -177,7 +177,7 @@ def _if_story(server, name: str) -> bytes:
     raise ValueError('ZBlorb has no ZCOD executable')
 
 
-def _if_save_path(server, name: str) -> Path:
+def _if_save_path(server, name: str, *, screen=None) -> Path:
     if name not in _if_catalog():
         raise ValueError('Unknown IF title')
     steam = getattr(getattr(server, 'bedrock', None), 'steamapps', None)
@@ -186,12 +186,18 @@ def _if_save_path(server, name: str) -> Path:
     root = steam / 'common/CinterForge/InteractiveFiction/Saves' / name
     if root.is_symlink() or root.parent.is_symlink():
         raise ValueError('Unsafe IF save location')
+    if screen is not None:
+        if not isinstance(screen, str) or not re.fullmatch(r'cinter_[0-9a-f]{32}', screen):
+            raise ValueError('Invalid in-world story save scope')
+        root = root / 'Bedrock' / screen
+        if root.is_symlink() or root.parent.is_symlink():
+            raise ValueError('Unsafe in-world IF save location')
     return root / 'autosave.conv.json'
 
 
-def _if_load_save(server, name: str) -> dict:
+def _if_load_save(server, name: str, *, screen=None) -> dict:
     story_hash = hashlib.sha256(_if_story(server, name)).hexdigest()
-    path = _if_save_path(server, name)
+    path = _if_save_path(server, name, screen=screen)
     if path.is_symlink():
         raise ValueError('Unsafe IF autosave link')
     if not path.is_file():
@@ -206,8 +212,8 @@ def _if_load_save(server, name: str) -> dict:
     return {'found': True, 'story_sha256': story_hash, 'save': saved}
 
 
-def _if_store_save(server, name: str, saved: dict) -> None:
-    path = _if_save_path(server, name)
+def _if_store_save(server, name: str, saved: dict, *, screen=None) -> None:
+    path = _if_save_path(server, name, screen=screen)
     story_hash = hashlib.sha256(_if_story(server, name)).hexdigest()
     if (saved.get('schema') != 'cinterforge.conv.if.v1' or
             saved.get('card_type') != 'CONV' or saved.get('story') != name or

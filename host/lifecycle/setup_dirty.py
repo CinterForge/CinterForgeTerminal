@@ -56,11 +56,13 @@ ALL_OUTPUTS = (
     'Toolchains/WebView',
     'Toolchains/WebView2',
     'CinterForgeTerminal/Dependencies/LinuxKit/mac/arm64',
+    'CinterForgeTerminal/Dependencies/BedrockDisplay',
     'CinterForgeTerminal/Dependencies/ZMachine/0.3.2',
     'CreativeSuite/CFOS/LinuxKit',
     'Intermediates/CinterForgeTerminal/ForeignPython',
     'Intermediates/CinterForgeTerminal/WebView2',
     'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-linux.zip',
+    'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-win.zip',
     'Python/Environments/mac/arm64/cinterterminalenv',
     'InteractiveFiction/CodeOSS/Web',
     'CinterForgeTerminal/Dependencies/Voxel/Web',
@@ -70,6 +72,8 @@ ALL_OUTPUTS = (
     'Run/CinterForgeTerminal/WindowsCross/WineVolume.json',
 )
 WIN_OUTPUTS = (
+    'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-win.zip',
+    'CinterForgeTerminal/Dependencies/BedrockDisplay/win',
     'Toolchains/mac',
     'Toolchains/WindowsCross',
     'Toolchains/Windows',

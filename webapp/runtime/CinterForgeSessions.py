@@ -489,18 +489,23 @@ class CinterForgeTerminalSession:
                     break
             except (OSError, EOFError):
                 break
-            # Never acquire the Bedrock manager's lock while holding this
-            # Session's output lock: shutdown takes them in the other order.
-            bedrock_manager = getattr(self, 'manager', None)
-            if bedrock_manager is not None and getattr(self, 'kind', None) == 'bedrock':
-                bedrock_manager.observe_console_output(data)
+            # Persist raw bytes before observers/filtering, including boot and
+            # script diagnostics. Never hold the Session lock while observing
+            # the Bedrock manager (shutdown takes these locks in reverse order).
             with self.lock:
                 if self.output_log is not None:
                     try:
                         self.output_log.write(data)
                         self.output_log.flush()
-                    except (OSError, ValueError):
-                        pass  # The terminal itself remains readable if logging fails.
+                    except (OSError, ValueError) as error:
+                        if not getattr(self, '_output_log_failed', False):
+                            self._output_log_failed = True
+                            print(f'[Terminal] Console log write failed: {self.output_log.name}: {error}',
+                                  file=sys.stderr, flush=True)
+            bedrock_manager = getattr(self, 'manager', None)
+            if bedrock_manager is not None and getattr(self, 'kind', None) == 'bedrock':
+                bedrock_manager.observe_console_output(data)
+            with self.lock:
                 # Bedrock keeps the complete native VM trace in its persistent
                 # log, but presents a *console*, not the VM's kernel debugger.
                 visible = self._visible_output(data)
@@ -610,6 +615,8 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
     def __init__(self, manager, builds: Path, system: str, cols: int, rows: int,
                  *, url: str, token: str, internal_token: str):
         # This state must exist before the parent starts the PTY reader thread.
+        from runtime.CinterForgeBedrockDisplay import DisplayFiction
+        self.display_fiction = DisplayFiction()
         self._bedrock_console_live = False
         self._bedrock_console_announced = False
         self._bedrock_boot_buffer = b''
@@ -620,6 +627,9 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
         if extra:
             raise RuntimeError('Bedrock Session needs an unsupported environment override')
         path = manager._log_path()
+        if path.is_symlink() or path.parent.is_symlink():
+            raise RuntimeError('Refusing linked Bedrock console log: ' + str(path))
+        self._bedrock_log_path = path
         manager._launch_offset = path.stat().st_size if path.is_file() else 0
         super().__init__(builds, system, cols, rows, url=url, token=token,
                          command=command, working_directory=manager.run_root,
@@ -656,6 +666,13 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
                     shell.close()
                     raise RuntimeError('Bedrock exited while host Bash was starting')
                 self.host_shell = shell
+            from runtime.CinterForgeBedrockDisplay import serve as serve_display
+            display_env = _session_environment(builds, system)
+            display_env.update(CINTER_TERMINAL_URL=url, CINTER_TERMINAL_TOKEN=token,
+                               CINTER_TERMINAL_CLI_TOKEN=internal_token or '',
+                               CINTER_TERMINAL_SESSION_ID=self.id, CINTER_TARGET_PLATFORM=system)
+            threading.Thread(target=serve_display, args=(self, manager, display_env),
+                             name='bedrock-display-'+self.id[:8], daemon=True).start()
             threading.Thread(target=self._relay_host_output,
                              name='bedrock-host-bash-' + self.id[:8],
                              daemon=True).start()
@@ -731,8 +748,8 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
         heading = b''
         if not self._bedrock_console_announced:
             self._bedrock_console_announced = True
-            heading = (b'[Bedrock] Starting server. Full VM boot output is in '
-                       b'the persistent Bedrock log.\r\n')
+            heading = ('[Bedrock] Starting server. Console log: ' +
+                       str(self._bedrock_log_path) + '\r\n').encode('utf-8')
         pending = self._bedrock_boot_buffer + data
         marker = pending.find(b'Server started.')
         if marker != -1:
@@ -762,7 +779,8 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
         self._bedrock_boot_buffer = lines.pop()[-512:]
         important = (b'CINTER_VM_ERROR', b'CINTER_BDS_ERROR',
                      b'CINTER_BDS_NETHERNET_FAIL',
-                     b'CINTER_BDS_LAN_RELAY_ERROR')
+                     b'CINTER_BDS_LAN_RELAY_ERROR', b'CINTERFORGE_DISPLAY_PROVIDER_READY',
+                     b'CINTERFORGE_TERMINAL_PROVIDER_FAILED')
         for line in lines:
             if b'CINTERFORGE_MC_STATUS_BRIDGE_READY' in line:
                 heading += b'[Bedrock] cinter: script-event bridge ready.\r\n'
@@ -775,6 +793,7 @@ class CinterForgeBedrockTerminalSession(CinterForgeTerminalSession):
             if getattr(self, 'manager', None) is not None and self.manager._terminal_session is self:
                 self.manager.stop()  # Deliver `stop` through this PTY first.
         finally:
+            self.display_fiction.close()
             self._close_host_shell()
             super().close()
 

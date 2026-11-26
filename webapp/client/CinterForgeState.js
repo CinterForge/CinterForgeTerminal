@@ -193,7 +193,7 @@ CinterForgeState.stopGame = async function stopGame(tab, notifyServer = true) {
       } catch (_) {/* already exited */ }
     }
     tab.finished = true;
-    CinterForgeState.updateCodeZMachineSubscribers();
+    if (!current.displayScreen) CinterForgeState.updateCodeZMachineSubscribers();
     tab.statusText = tab.label + ' stopped · close this tab to return to the shell';
     tab.buffer.append(document.createTextNode('\n[IF] ' + tab.label + ' stopped\n'));
     if (CinterForgeState.activeTab === tab) {
@@ -271,7 +271,8 @@ CinterForgeState.startGame = async function startGame(tab, current) {
      */
     const alive = () => !tab.closed && tab.game === current;
     const output = tab.buffer;
-    const saveURL = '/api/if/save/' + encodeURIComponent(name);
+    const saveURL = '/api/if/save/' + encodeURIComponent(name) +
+      (current.displayScreen ? '?screen=' + encodeURIComponent(current.displayScreen) : '');
     try {
       const response = await fetch('/api/if/story/' + encodeURIComponent(name),
         { headers: { 'X-CPH-Token': CinterForgeState.token }, cache: 'no-store', signal: current.abort.signal });
@@ -410,9 +411,11 @@ method: 'POST', headers: {
       current.releaseDisplay = releaseDisplay;
       const readyReadLine = io.readLine.bind(io);
       io.readLine = (...args) => {
+        if (current.displayScreen && !alive()) throw new Error('In-world story session closed');
         const pending = readyReadLine(...args);
         if (alive()) {
           current.statusElement.textContent = 'Playing ' + name + ' · Ctrl+C to exit';
+          if (current.displayBoundary) queueMicrotask(() => { if (alive()) current.displayBoundary(); });
           if (CinterForgeState.activeTab === tab) {
             CinterForgeState.$('terminal-input').disabled = false;
             CinterForgeState.focusTerminal();
@@ -434,8 +437,94 @@ method: 'POST', headers: {
         CinterForgeState.scheduleIFPaint(tab);
       }
     } finally {
-      if (alive()) await CinterForgeState.stopGame(tab);
+      if (alive()) {
+        if (current.displayFinished) {
+          current.displayFinished();
+          await CinterForgeState.stopGame(tab, false);
+        } else await CinterForgeState.stopGame(tab);
+      }
     }
   };
+
+  // Bedrock owns the game lifetime; the installed native WebView supplies the
+  // very same browser Z-machine and WebIOAdapter, using detached DOM nodes.
+  // Never publish these sessions into tabs or the desktop IF action queue.
+  const displayGames = new Map();
+  // The native host may retry a turn until its result is acknowledged.
+  // Never run the same game input twice, and retain a result until accepted.
+  let displayHandled = null;
+  let displayResult = null;
+  const displayReply = (job, tab, finished, error = '') => {
+    const text = (tab?.buffer.textContent || '') + (error ? '\n[IF] ' + error + '\n' : '');
+    displayResult = {id: job.id, game: job.game, output: text.slice(-16384), finished};
+  };
+  function displayTurn(job) {
+    let tab = displayGames.get(job.game);
+    if (job.start) {
+      if (tab) throw new Error('Duplicate in-world story start');
+      const current = {
+        name: job.start, launchId: job.game, displayScreen: job.screen,
+        abort: new AbortController(), io: null, draft: '',
+        inputElement: document.createElement('textarea'),
+        statusElement: document.createElement('span'), releaseDisplay: null,
+        observer: null
+      };
+      tab = {label: job.start, buffer: CinterForgeState.makeBuffer(),
+        game: current, closed: false, paintPending: false, job};
+      const report = finished => {
+        const pending = tab.job;
+        tab.job = null;
+        if (finished) displayGames.delete(job.game);
+        if (pending) displayReply(pending, tab, finished);
+      };
+      current.displayBoundary = () => report(false);
+      current.displayFinished = () => report(true);
+      displayGames.set(job.game, tab);
+      void CinterForgeState.startGame(tab, current);
+      return;
+    }
+    if (!tab || !tab.game?.io?.lineResolver || tab.job)
+      throw new Error('The in-world story is no longer waiting for input');
+    tab.job = job;
+    // Use exactly the same adapter input event as the desktop story and Code-OSS.
+    const input = tab.game.inputElement;
+    input.value = job.command;
+    input.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:false}));
+  }
+
+  let pollingDisplay = false;
+  setInterval(async () => {
+    // Native bridge is present in the installed WebView, not a LAN browser.
+    // Do not gate on visibility: the host can be playing in Minecraft.
+    if (window.top !== window || typeof window.cinterNative !== 'function' || pollingDisplay) return;
+    // The host may own a Bedrock session before its tab is painted.
+    pollingDisplay = true;
+    try {
+      const state = await CinterForgeState.api('/api/if/display/next');
+      const active = new Set(state.active || []);
+      for (const [id, tab] of displayGames) {
+        if (!active.has(id)) {
+          displayGames.delete(id);
+          tab.closed = true;
+          tab.job = null;
+          await CinterForgeState.stopGame(tab, false);
+        }
+      }
+      if (state.action && displayHandled !== state.action.id) {
+        displayHandled = state.action.id;
+        try { displayTurn(state.action); }
+        catch (error) { displayReply(state.action, null, true, error.message); }
+      }
+      if (displayResult) {
+        const result = displayResult;
+        // A stale reply after a closed session is discarded; network failures
+        // leave the result in place to retry on the next poll.
+        const response = await CinterForgeState.api('/api/if/display/result', result);
+        if (displayResult === result && (response.accepted || state.action?.id !== result.id))
+          displayResult = null;
+      }
+    } catch (error) { console.error('Bedrock IF bridge:', error); }
+    finally { pollingDisplay = false; }
+  }, 500);
 
 })();

@@ -171,14 +171,14 @@ def run_staged_java_smoke(builds: Path, app: Path, target: str, release: str) ->
     import uuid
     from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster, server_test_fixture
     from host.lifecycle.universal_package import FOUR_ARCH
-    from webapp.runtime.CinterForgeJava import provider, verify_jdk, server_jar
+    from webapp.runtime.CinterForgeJava import provider, ensure_runtime, native_target
     binary = verify_embedded_craftmaster(app, target)
     data = binary.parent.parent / 'data'
     cm = provider(data)
     root = builds / 'CinterForgeCraftMaster/Server/Java'
-    cm.require_java_eula(root, interactive=False)
-    jar = server_jar(root, cm)
-    java = Path(cm.verify_mac_jdk(builds)['java']) if target == 'mac' else verify_jdk(root,target,'x64',cm)
+    java, jar = ensure_runtime(root, cm, target=target,
+                               arch=native_target()[1] if target == 'mac' else 'x64',
+                               offline=True, setup_mac_builds=builds if target == 'mac' else None)
     embedded = app / 'Contents/Resources/Builds' if target == 'mac' else app / 'Builds'
     service = embedded / 'Python/Host' / target / FOUR_ARCH[target] / release / 'webapp'
     for name in ('runtime/CinterForgeJava.py', 'bedrock_status_bridge/manifest.json', 'bedrock_status_bridge/scripts/main.js', 'bedrock_status_bridge/items/terminal.json'):
@@ -332,20 +332,9 @@ def _test_installed_testgrounds(embedded: Path, builds: Path, fixture_receipt: P
         if not CinterForgeLifecycleBedrock(builds, 'mac').accepted():
             raise PermissionError('Bedrock EULA consent missing; rerun interactive Setup')
         manager.accept(True)
-    if not manager.installed():
-        cached = builds / 'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-linux.zip'
-        if cached.is_symlink() or not cached.is_file():
-            raise RuntimeError('Official Bedrock Setup archive missing: ' + str(cached))
-        with zipfile.ZipFile(cached) as bundle:
-            if bundle.testzip() is not None or 'bedrock_server' not in bundle.namelist():
-                raise RuntimeError('Official Bedrock Setup archive failed CRC validation')
-        digest = _sha256(cached)
-        print('[BEDROCK TEST] Setup official ZIP CRC validated; local SHA-256: ' + digest, flush=True)
-        manager.package_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='bedrock-stage-', dir=manager.package_dir) as temp:
-            manager._install_archive_payload(cached, Path(temp),
-                {'url': 'Setup official Linux Bedrock archive', 'version': None}, digest, lambda line: print(line, flush=True))
-    state = manager.prepare_testgrounds(java, verify_server=True, progress=lambda line: print(line, flush=True))
+    cached = builds / 'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-linux.zip'
+    state = manager.prepare_testgrounds(java, verify_server=True, server_archive=cached,
+                                        progress=lambda line: print(line, flush=True))
     proof = state['testgrounds']
     if (proof['archive_sha256'] != receipt['mcworld_sha256'] or not proof['graceful_stop'] or
             not proof['native_server_verified'] or state['running']):

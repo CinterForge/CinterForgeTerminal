@@ -117,10 +117,25 @@ def _atomic_json(path: Path, data) -> None:
         tmp.unlink(missing_ok=True)
 
 
+TERMINAL_RESOURCE_PACK_MEMBERS = (
+    'manifest.json', 'textures/item_texture.json', 'ui/server_form.json',
+    *(f'textures/items/cinter_terminal_{size}.png'
+      for size in ('1', '2', '3', '4', 'sm', 'med', 'lg', 'xl')),
+)
+
+
 def install_world_status_bridge(server_root: Path, target: Path, authored: Path) -> None:
     """Install the same packaged communications assets into an isolated managed world."""
+    # Validate the full authored resource pack before changing either world registry.
+    resources = authored.parent / 'bedrock_terminal_resources'
+    for member in TERMINAL_RESOURCE_PACK_MEMBERS:
+        path = resources / member
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError('Packaged Terminal resource missing: ' + str(path) +
+                               '; apply the complete showroom update and rebuild/stage Terminal (not Setup)')
+    resource_manifest = json.loads((resources / 'manifest.json').read_text('utf-8'))['header']
     manifest_file = authored / 'manifest.json'
-    assets = ('manifest.json', 'scripts/main.js', 'items/terminal.json')
+    assets = ('manifest.json', 'scripts/main.js', 'items/terminal.json', *(f'items/terminal_{key}.json' for key in ('1','2','3','4','sm','med','lg','xl')))
     if any(not (authored / name).is_file() or (authored / name).is_symlink() for name in assets):
         raise RuntimeError('Packaged CinterForge Minecraft status bridge is missing')
     manifest = json.loads(manifest_file.read_text('utf-8'))
@@ -156,6 +171,32 @@ def install_world_status_bridge(server_root: Path, target: Path, authored: Path)
             os.replace(temporary, registry_path)
         finally:
             temporary.unlink(missing_ok=True)
+
+    resource_destination = server_root / 'resource_packs' / 'cinterforge-terminal-resources'
+    if resource_destination.parent.is_symlink() or resource_destination.is_symlink():
+        raise RuntimeError('Refusing linked Terminal resource pack')
+    for source in resources.rglob('*'):
+        if source.is_symlink(): raise RuntimeError('Linked authored Terminal resource')
+        if not source.is_file(): continue
+        output = resource_destination / source.relative_to(resources)
+        for parent in (output, *output.parents):
+            if parent == resource_destination.parent: break
+            if parent.is_symlink(): raise RuntimeError('Linked installed Terminal resource')
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if not output.is_file() or output.read_bytes() != source.read_bytes(): output.write_bytes(source.read_bytes())
+    registry_path = target / 'world_resource_packs.json'
+    if registry_path.is_symlink(): raise RuntimeError('Linked world resource registry')
+    entries = json.loads(registry_path.read_text('utf-8')) if registry_path.is_file() else []
+    if not isinstance(entries,list) or any(not isinstance(item,dict) for item in entries): raise RuntimeError('Invalid resource registry')
+    entry = {'pack_id':resource_manifest['uuid'],'version':resource_manifest['version']}
+    # The built-in form and item atlas must take precedence over other packs.
+    current = [entry] + [item for item in entries if item.get('pack_id') != entry['pack_id']]
+    if current != entries:
+        temporary = registry_path.with_name(registry_path.name + '-' + uuid.uuid4().hex + '.tmp')
+        try:
+            temporary.write_text(json.dumps(current,indent=2)+'\n',encoding='utf-8')
+            os.replace(temporary,registry_path)
+        finally: temporary.unlink(missing_ok=True)
 
 
 class BedrockServerAccess:

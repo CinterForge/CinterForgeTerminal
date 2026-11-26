@@ -28,6 +28,7 @@ VERSION = '25.0.5.1+2'
 TAG = 'jdk-' + VERSION
 RELEASE = 'https://api.github.com/repos/adoptium/temurin25-binaries/releases/tags/' + quote(TAG, safe='')
 BASE = 'https://github.com/adoptium/temurin25-binaries/releases/download/' + quote(TAG, safe='') + '/'
+VERIFY_ERRORS = (OSError, KeyError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError)
 
 
 def log(message):
@@ -134,7 +135,10 @@ def _extract(archive, directory, target):
 
 def verify_jdk(root, target, arch, cm, *, execute=False):
     path = _root(root,target,arch)
-    receipt = cm.json_read(path/'Runtime.json')
+    receipt_path = path/'Runtime.json'
+    if receipt_path.is_symlink() or (path/'Runtime').is_symlink():
+        raise RuntimeError('Linked native Java receipt or runtime')
+    receipt = cm.json_read(receipt_path)
     filename = archive_name(target,arch)
     digest = receipt['archive_sha256']
     if receipt['version'] != VERSION or not re.fullmatch(r'[0-9a-f]{64}',digest):
@@ -156,7 +160,7 @@ def verify_jdk(root, target, arch, cm, *, execute=False):
 def provision_jdk(root, target, arch, cm, *, execute=False):
     try:
         return verify_jdk(root,target,arch,cm,execute=execute)
-    except (OSError,KeyError,ValueError,RuntimeError,subprocess.SubprocessError):
+    except VERIFY_ERRORS:
         pass
     path = _root(root,target,arch)
     path.mkdir(parents=True,exist_ok=True)
@@ -174,14 +178,27 @@ def provision_jdk(root, target, arch, cm, *, execute=False):
         java = pending/relative
         if execute:
             cm.java_command(java)
+            output = subprocess.check_output([str(java), '-version'], stderr=subprocess.STDOUT, text=True, timeout=30)
+            if VERSION not in output:
+                raise RuntimeError('Unexpected downloaded Java runtime version')
         receipt = {'version':VERSION,'archive_sha256':entry['sha256'],'java':relative,'java_sha256':cm.digest(java)}
         destination = path/'Runtime'
-        if destination.is_symlink():
-            raise RuntimeError('Linked Java runtime destination')
+        receipt_path = path/'Runtime.json'
+        if destination.is_symlink() or receipt_path.is_symlink():
+            raise RuntimeError('Linked Java runtime destination or receipt')
+        # Do not destroy the previous runtime if publishing its replacement fails.
+        retired = Path(tmp)/'PreviousRuntime'
         if destination.exists():
-            shutil.rmtree(destination)
-        os.replace(pending,destination)
-        cm.json_write(path/'Runtime.json',receipt)
+            os.replace(destination, retired)
+        try:
+            os.replace(pending,destination)
+            cm.json_write(receipt_path,receipt)
+        except BaseException:
+            if destination.exists():
+                shutil.rmtree(destination)
+            if retired.exists():
+                os.replace(retired,destination)
+            raise
     return verify_jdk(root,target,arch,cm,execute=execute)
 
 
@@ -195,10 +212,15 @@ def server_jar(root, cm, *, acquire=False, cached=None):
     if target.is_file() and cm.digest(target,'sha1') == cm.SERVER_SHA1:
         return target
     if not acquire:
-        raise RuntimeError('Java server is not installed; type java install')
+        raise RuntimeError(f'Official Minecraft Java {cm.JAVA_VERSION} server JAR missing or checksum mismatch')
     if cached and cached.is_file() and not cached.is_symlink() and cm.digest(cached,'sha1') == cm.SERVER_SHA1:
         root.mkdir(parents=True,exist_ok=True)
-        shutil.copy2(cached,target)
+        with tempfile.TemporaryDirectory(prefix='ServerJar-', dir=root) as tmp:
+            pending = Path(tmp)/target.name
+            shutil.copy2(cached,pending)
+            if cm.digest(pending,'sha1') != cm.SERVER_SHA1:
+                raise RuntimeError('Cached Java server JAR changed during copy')
+            os.replace(pending,target)
     else:
         metadata = root/'version.json'
         cm._download(cm.VERSION_URL,metadata,log,sha1=cm.VERSION_SHA1)
@@ -227,26 +249,55 @@ def java_status(root,data):
             verify_jdk(root,target,arch,cm)
             server_jar(root,cm)
             installed = True
-        except (OSError,ValueError,KeyError,RuntimeError):
+        except VERIFY_ERRORS:
             pass
     return {'accepted':accepted,'installed':installed,'version':cm.JAVA_VERSION}
 
 
-def install(root,data,*,staged=True,cached=None):
-    cm = provider(data,staged=staged)
-    cm.require_java_eula(root)
-    target,arch = native_target()
-    java = provision_jdk(root,target,arch,cm,execute=True)
-    jar = server_jar(root,cm,acquire=True,cached=cached)
-    log('Installed verified Java '+cm.JAVA_VERSION)
+def ensure_runtime(root, cm, *, target, arch, execute=False, offline=False,
+                   cached=None, setup_mac_builds=None):
+    """One compatibility gate for retail launch, Setup and offline acceptance.
+
+    Developer Mac Setup keeps its existing shared CraftMaster JDK location;
+    installed Terminal uses the installation-scoped JDK directory instead.
+    A different Minecraft or Java release is never substituted for the pins.
+    """
+    cm.require_java_eula(root, interactive=False if offline else None)
+    log(f'Checking Minecraft Java {cm.JAVA_VERSION}, JDK {VERSION} ({target}/{arch})')
+    if setup_mac_builds is not None:
+        if target != 'mac' or not offline:
+            raise ValueError('Shared Mac Setup JDK is only for offline validation')
+        java = Path(cm.verify_mac_jdk(setup_mac_builds)['java'])
+    else:
+        try:
+            java = verify_jdk(root,target,arch,cm,execute=execute)
+        except VERIFY_ERRORS as exc:
+            if offline:
+                raise RuntimeError(f'Java {target}/{arch} runtime missing or incompatible; rerun Setup: {exc}') from exc
+            log(f'Installing or repairing required JDK {VERSION}: {exc}')
+            java = provision_jdk(root,target,arch,cm,execute=execute)
+    log(f'JDK {VERSION} verified')
+    try:
+        jar = server_jar(root,cm)
+    except VERIFY_ERRORS as exc:
+        if offline:
+            raise RuntimeError(f'Java server dependency missing or incompatible; rerun Setup: {exc}') from exc
+        log(f'Installing or updating Minecraft Java server to {cm.JAVA_VERSION}: {exc}')
+        jar = server_jar(root,cm,acquire=True,cached=cached)
+    log(f'Minecraft Java {cm.JAVA_VERSION} server verified; ready')
     return java,jar
 
 
-def controller_command(binary,data,root,world,action,*,extra=()):
-    cm=provider(data)
-    target,arch=native_target()
-    java=verify_jdk(root,target,arch,cm,execute=True)
-    jar=server_jar(root,cm)
+def install(root,data,*,staged=True,cached=None):
+    cm = provider(data,staged=staged)
+    target,arch = native_target()
+    return ensure_runtime(root,cm,target=target,arch=arch,execute=True,cached=cached)
+
+
+def controller_command(binary,data,root,world,action,*,prepared,extra=()):
+    # The worker just verified/acquired both dependencies. No second installer,
+    # no duplicate version probe; CraftMaster still verifies the JAR at launch.
+    java,jar=prepared
     return [sys.executable,'-B',str(data/'java_server.py'),action,'--world',str(world),'--data-dir',str(data),'--server-root',str(root),'--java',str(java),'--server-jar',str(jar),'--native-cli',str(binary),*extra]
 
 
@@ -262,14 +313,14 @@ def main(argv=None):
     parser.add_argument('--cached-jar',type=Path)
     args=parser.parse_args(argv)
     try:
-        install(args.root,args.data,cached=args.cached_jar)
+        if args.action!='install' and args.world is None: raise ValueError('World path required')
+        prepared=install(args.root,args.data,cached=args.cached_jar)
         if args.action=='install': return 0
-        if args.world is None: raise ValueError('World path required')
-        command=controller_command(args.binary,args.data,args.root,args.world,args.action,extra=('--size',str(args.size),'--seed',args.seed) if args.action=='generate' else ())
+        command=controller_command(args.binary,args.data,args.root,args.world,args.action,prepared=prepared,extra=('--size',str(args.size),'--seed',args.seed) if args.action=='generate' else ())
         if os.name != 'nt':
             os.execv(sys.executable,command)
         return subprocess.call(command)
-    except (OSError,RuntimeError,ValueError,KeyError,subprocess.SubprocessError) as exc:
+    except VERIFY_ERRORS as exc:
         log('FAIL: '+str(exc));return 1
 
 

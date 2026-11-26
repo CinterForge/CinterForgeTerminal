@@ -388,7 +388,7 @@ def main(argv: list[str]) -> int:
         prepare_server_test_fixture(BUILDS)
         return 0
     if argv == ['setup', 'win']:
-        # A Windows-only lifecycle must not provision LinuxKit/Bedrock,
+        # A Windows-only lifecycle must not provision LinuxKit,
         # fetch Lagomorph media or build unrelated applications. It uses the
         # same pinned Windows cross toolchain and WiX smoke as full Setup.
         if platform.system() not in ('Darwin', 'Linux'):
@@ -410,6 +410,10 @@ def main(argv: list[str]) -> int:
 
             return 0
         invalidate(BUILDS, 'win')
+        from host.linux.bedrock_consent import require_bedrock_eula
+        from host.linux.guest_inputs import prepare_official_bedrock_archive
+        require_bedrock_eula(BUILDS, 'win')
+        prepare_official_bedrock_archive(REPO, 'win')
         if platform.system() == 'Darwin':
             invoke(sys.executable, '-B', '-m', 'host.mac.mac_bootstrap', '--builds', str(BUILDS))
             from host.mac.mac_bootstrap import managed_environment
@@ -423,6 +427,9 @@ def main(argv: list[str]) -> int:
             from host.lifecycle.webview import provision
             provision(BUILDS)
             setup_craftmaster(BUILDS, targets=('win',), guest=True)
+            from host.lifecycle.universal_package import _provision_runtime_for_release
+            from host.lifecycle.bedrock_display import provision as provision_display
+            provision_display(BUILDS, {'win': _provision_runtime_for_release(BUILDS, 'win')})
             invoke(sys.executable, '-B', '-m', 'host.windows.msi_installer', '--builds', str(BUILDS))
         commit(REPO, BUILDS, 'win')
         print('[CinterForgeTerminal] Windows Setup complete: cross-runtime and WiX tools provisioned', flush=True)
@@ -491,6 +498,10 @@ def main(argv: list[str]) -> int:
         # builds its ARM64 kernel and guest closure, then releases c before
         # later Test-stage Bedrock acceptance. No w cross-builder is started.
         invoke(sys.executable, '-B', str(REPO / 'host/linux/lifecycle.py'), 'setup')
+        # LinuxKit Setup already acquired the pinned Linux server after EULA
+        # consent. Acquire the corresponding Windows archive for offline Test.
+        from host.linux.guest_inputs import prepare_official_bedrock_archive
+        prepare_official_bedrock_archive(REPO, 'win')
         if platform.system() == 'Darwin':
             # Release the producer before Bedrock's LinuxKit VM acceptance.
             from host.mac.mac_bootstrap import stop_linuxkit_build_backend
@@ -529,7 +540,9 @@ def main(argv: list[str]) -> int:
             from host.python.portable_python import provision
             provision(BUILDS, 'mac', 'arm64')
             from host.lifecycle.universal_package import provision_release_runtimes
-            provision_release_runtimes(BUILDS)
+            runtimes = provision_release_runtimes(BUILDS)
+            from host.lifecycle.bedrock_display import provision as provision_display
+            provision_display(BUILDS, runtimes)
             invoke(sys.executable, '-B', str(REPO / 'host/codeoss/setup.py'),
                    '--workspace', str(REPO.parent))
             invoke(sys.executable, '-B', '-m', 'host.lagomorph.lagomorph_setup', '--builds', str(BUILDS))
@@ -862,6 +875,9 @@ def main(argv: list[str]) -> int:
         from host.lifecycle.unpacked_release import _load, _installed_state
         from host.lifecycle.universal_package import _steam_release_path, steamapps_root, APP_ROOTS
         target = argv[1]
+        from host.linux.guest_inputs import official_bedrock_archive
+        archive = official_bedrock_archive(REPO, target)
+        print(f'[BEDROCK TEST] Verified offline {target} official server archive: {archive}', flush=True)
         record = _load(BUILDS, __import__('host.lifecycle.universal_package', fromlist=['HOST_RELEASE']).HOST_RELEASE)
         info = record.get('targets', {}).get(target)
         if not info:

@@ -209,6 +209,7 @@ def build_four(builds: Path, *, release: str | None = None,
     for target in selected:
         print(f'[TERMINAL BUILD] Gathering unpacked {target} inputs...', flush=True)
         assets = up._devtools_assets(builds) if target == 'devtools' else up._app_assets(builds, target, release)
+        up._require_terminal_resource_pack(assets, target, release)
         if target == 'win':
             up._require_windows_discovery(assets, release)
         identity = _fingerprint(_input_identity(assets, target))
@@ -431,6 +432,7 @@ def stage_four(builds: Path, *, release: str | None = None,
     for target in selected:
         info = record['targets'][target]
         files = info['files']
+        up._require_terminal_resource_pack(files, target, release)
         root = up._steam_release_path(steam, target, release)
         if root.is_symlink():
             raise RuntimeError('Unsafe Steam Stage target: ' + str(root))

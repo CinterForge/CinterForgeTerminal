@@ -158,6 +158,31 @@ def _player_script_tags(index: Path) -> str:
 
 
 class CinterForgeHTTPRoutes:
+    def _native_if_display(self):
+        """Only the native host WebView may drive an in-world interpreter."""
+        import http.cookies
+        try:
+            cookies = http.cookies.SimpleCookie(self.headers.get('Cookie', ''))
+            native = cookies['cinter_native'].value if 'cinter_native' in cookies else ''
+        except (KeyError, http.cookies.CookieError):
+            native = ''
+        return (self.client_address[0] in ('127.0.0.1', '::1') and
+                bool(native) and secrets.compare_digest(native, self.server.native_cookie))
+
+    def _display_fiction(self):
+        manager = getattr(self.server, 'bedrock', None)
+        session = getattr(manager, '_terminal_session', None)
+        return getattr(session, 'display_fiction', None) if session and not session.closed else None
+
+    def _if_save_screen(self):
+        screen = parse_qs(urlsplit(self.path).query).get('screen')
+        if screen is None:
+            return None
+        if (not self._native_if_display() or len(screen) != 1 or
+                not re.fullmatch(r'cinter_[0-9a-f]{32}', screen[0])):
+            raise ValueError('Invalid in-world story save scope')
+        return screen[0]
+
     def do_GET(self) -> None:
         from runtime import CinterForgeAuthentication as _CinterForgeAuthentication
         from runtime import CinterForgeCraftMasterMap as _CinterForgeCraftMasterMap
@@ -506,12 +531,19 @@ class CinterForgeHTTPRoutes:
             # Only the dedicated player document may be embedded by this same-origin Terminal.
             self._send(200, markup.encode(), 'text/html; charset=utf-8', same_origin_frame=True)
             return
+        if path == '/api/if/display/next':
+            if not self._authorized() or not self._native_if_display():
+                self._json(403, {'error': 'Native Terminal WebView required'})
+                return
+            fiction = self._display_fiction()
+            self._json(200, fiction.next() if fiction else {'action': None, 'active': []})
+            return
         if path.startswith('/api/if/save/'):
             if not self._authorized():
                 self._json(403, {'error':'not authorized'})
                 return
             try:
-                self._json(200, _CinterForgeIF._if_load_save(self.server, unquote(path[len('/api/if/save/'):])))
+                self._json(200, _CinterForgeIF._if_load_save(self.server, unquote(path[len('/api/if/save/'):]), screen=self._if_save_screen()))
             except (ValueError, FileNotFoundError, OSError, RuntimeError, json.JSONDecodeError) as exc:
                 self._json(400, {'error':str(exc)})
             return
@@ -1338,8 +1370,15 @@ class CinterForgeHTTPRoutes:
                 _CinterForgeDiscord._discord_api('/channels/' + channel_id + '/messages', 'POST', {'content': message, 'allowed_mentions': {'parse': []}})
                 self._json(200, {'sent': True})
                 return
+            if route == '/api/if/display/result':
+                if not self._native_if_display():
+                    self._json(403, {'error': 'Native Terminal WebView required'})
+                    return
+                fiction = self._display_fiction()
+                self._json(200, {'accepted': bool(fiction and fiction.complete(body))})
+                return
             if route.startswith('/api/if/save/'):
-                _CinterForgeIF._if_store_save(self.server, unquote(route[len('/api/if/save/'):]), body)
+                _CinterForgeIF._if_store_save(self.server, unquote(route[len('/api/if/save/'):]), body, screen=self._if_save_screen())
                 self._json(200, {'saved':True})
                 return
             if route == '/api/java':

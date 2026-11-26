@@ -402,8 +402,9 @@ class CinterForgeBedrockManager:
         self.run_root = (self.root / 'Run' / self.app if user_install
                          else self.builds / 'Run' / 'Bedrock' / self.app)
         self.receipt = self.run_root / 'eula-acceptance.json'
-        self.install_log = (self.root / 'Logs/bedrock-install.log' if user_install
-                            else self.builds / 'Logs/CinterForgeTerminal/bedrock-install.log')
+        self.logs_root = (self.steamapps / 'common/CinterForge/Logs/CinterForgeTerminal/Bedrock'
+                          if user_install else self.builds / 'Logs/CinterForgeTerminal/Bedrock')
+        self.install_log = self.logs_root / 'bedrock-install.log'
         self._install_thread: threading.Thread | None = None
         self._install_progress = ''
         self._install_error = ''
@@ -424,6 +425,7 @@ class CinterForgeBedrockManager:
         self._lock = threading.RLock()
         self._craftmaster_process: subprocess.Popen | None = None
         self._craftmaster_conversion_lock = threading.Lock()
+        self._package_install_lock = threading.RLock()
         # Server access rules belong to this installation, not any selected
         # level. All world launches reuse this one policy and Run directory.
         self.properties = BedrockProperties(self.root, self.run_root, self.package)
@@ -601,7 +603,7 @@ class CinterForgeBedrockManager:
 
     def _install_worker(self) -> None:
         try:
-            self.install(progress=self._set_install_progress)
+            self.ensure_display_server(progress=self._set_install_progress)
         except Exception as exc:
             with self._lock:
                 self._install_error = str(exc)
@@ -618,7 +620,7 @@ class CinterForgeBedrockManager:
                 # Recheck after service startup; never redirect user data to Builds.
                 if not self.steamapps.is_dir() or self.steamapps.name.lower() != 'steamapps':
                     raise OSError('Host Steam library disappeared during session: ' + str(self.steamapps))
-                if self.root.is_symlink() or self.install_log.is_symlink():
+                if self.root.is_symlink() or self.install_log.is_symlink() or self.logs_root.is_symlink():
                     raise OSError('Refusing linked Bedrock installation/log directory')
             elif self.builds.name != 'Builds':
                 raise OSError(f'Invalid host Builds root: {self.builds}')
@@ -1582,7 +1584,8 @@ class CinterForgeBedrockManager:
                 shutil.rmtree(fresh)
 
     def prepare_testgrounds(self, world: dict, *, verify_server: bool = False,
-                            progress: Callable[[str], None] | None = None) -> dict:
+                            progress: Callable[[str], None] | None = None,
+                            server_archive: Path | None = None) -> dict:
         """Install TestGrounds materials into the exact managed save used for play.
 
         The special command never generates or reconverts the published world.
@@ -1623,10 +1626,15 @@ class CinterForgeBedrockManager:
         digest = record.get('sha256')
         if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
             raise RuntimeError('Published TestGrounds Bedrock conversion receipt is missing')
+        self.ensure_display_server(progress=report, archive=server_archive)
         with self._craftmaster_conversion_lock:
             converted = self._convert_java_world(world, progress=report, expected_archive_sha256=digest)
         state = self.run_world(converted.name, launch=False, selected_world=world)
         target = Path(state['active_world'])
+        if not (self.run_root / '.cinter/display-runtime/enabled').is_file():
+            raise RuntimeError('TestGrounds requires a compatible installed Bedrock display provider: ' +
+                               (getattr(self, '_display_unavailable_reason', '') or 'provider was not installed') +
+                               '; log: ' + str(self.install_log))
         conversion = self._conversion_receipt(target, source)
         if not conversion or conversion.get('archive_sha256') != digest:
             raise RuntimeError('Managed TestGrounds does not match the verified published conversion')
@@ -1636,7 +1644,10 @@ class CinterForgeBedrockManager:
         prior = json.loads(receipt.read_text('utf-8')) if receipt.is_file() else None
         def valid_fixture(proof) -> bool:
             return (isinstance(proof, dict) and proof.get('item') == 'cinter:terminal' and
-                    proof.get('amount') == 1 and proof.get('columns') == 5 and proof.get('rows') == 4 and
+                    proof.get('amount') == 1 and proof.get('stockVersion') == 1 and proof.get('showroomVersion') == 1 and
+                    isinstance(proof.get('walls'), list) and len(proof['walls']) == 8 and
+                    {(w.get('size'),w.get('width'),w.get('height')) for w in proof['walls'] if isinstance(w,dict)} ==
+                    {('1',1,1),('2',2,2),('3',3,3),('4',4,4),('sm',2,1),('med',3,2),('lg',4,3),('xl',5,4)} and proof.get('columns') == 5 and proof.get('rows') == 4 and
                     isinstance(proof.get('chest'), dict) and proof.get('layout') == 2 and
                     isinstance(proof.get('spawn'), dict) and
                     all(type(proof.get(k)) is int and type(proof['spawn'].get(k)) is int for k in ('x','y','z')) and
@@ -1652,16 +1663,15 @@ class CinterForgeBedrockManager:
             return {**state, 'testgrounds': prior}
         if state.get('running'):
             raise RuntimeError('Stop Bedrock before preparing or testing TestGrounds')
-        # Temporary settings are only needed for this preparation boot. Restore
-        # the actual user policy before normal hosting. No LAN clients admitted
-        # during installation: enable an empty temporary allowlist.
+        # Use authenticated connections without allowlist enforcement for both
+        # retail preparation and native acceptance. Do not clear player lists.
+        # Restore the actual user policy before normal hosting.
         overrides = {'allow-cheats': 'true', 'content-log-console-output-enabled': 'true',
-                     'enable-lan-visibility': 'false', 'allow-list': 'true', 'level-name': target.name}
+                     'enable-lan-visibility': 'false', 'allow-list': 'false',
+                     'online-mode': 'true', 'level-name': target.name}
         if self.platform == 'mac':
             overrides['transport'] = 'nethernet'
-        if verify_server:
-            # Acceptance remains independent of external Microsoft account services.
-            overrides['online-mode'] = 'false'
+        report('TestGrounds temporary policy: online-mode=true, allow-list=false; original settings restored after shutdown')
         log = self._log_path()
         output = ''
         process = None
@@ -1714,7 +1724,10 @@ class CinterForgeBedrockManager:
                      'native server readiness', 180)
             if self._server_configuration().get('level-name') != target.name:
                 raise RuntimeError('TestGrounds native server selected the wrong managed save')
-            report('TestGrounds native Bedrock server ready; verifying console')
+            wait_for(lambda: 'CINTERFORGE_DISPLAY_PROVIDER_READY' in output, 'Endstone/MediaPlayer pixel commit', 45)
+            if verify_server:
+                wait_for(lambda: 'CINTERFORGE_TERMINAL_MOUNT_READY' in output, 'native live structure loading', 45)
+            report('TestGrounds native Bedrock server and display provider ready; verifying console')
             self.console_command('list')
             try:
                 wait_for(lambda: bool(re.search(r'\bplayers? online\b|\bThere are \d+/', output, re.I)), 'console list', 10)
@@ -2143,6 +2156,14 @@ class CinterForgeBedrockManager:
 
     # --- Bedrock world selection and managed server copy ---------------------
     def run_world(self, name: str, *, launch: bool = True, selected_world: dict | None = None) -> dict:
+        # The visible PTY and direct manager launch both prepare here. Serialize
+        # package changes before touching Run, but leave the state lock free
+        # during downloads so the requesting terminal can poll progress.
+        with self._package_install_lock:
+            self._ensure_server_for_launch()
+            return self._run_world(name, launch=launch, selected_world=selected_world)
+
+    def _run_world(self, name: str, *, launch: bool, selected_world: dict | None) -> dict:
         with self._lock:
             # `bedrock run ""` explicitly reuses the previously chosen save;
             # never guess a world when no selection has been made.
@@ -2207,7 +2228,7 @@ class CinterForgeBedrockManager:
             # The desktop API prepares the managed copy first, then starts the
             # EXACT Setup-tested launcher in its own visible PTY Session.
             # Keep launch=True for existing non-UI callers of run_world().
-            result = self.start() if launch else self.status()
+            result = self._start() if launch else self.status()
             return {**result, 'source_world': str(source), 'active_world': str(target),
                     'world_name': world['name']}
 
@@ -2231,21 +2252,75 @@ class CinterForgeBedrockManager:
             _atomic_write(allowlist, base64.b64decode(saved['allowlist'], validate=True))
         recovery.unlink()
 
-    def _prepare_run_tree(self) -> None:
-        self.run_root.mkdir(parents=True, exist_ok=True)
-        self._restore_testgrounds_policy()
+    def _sync_package_run_tree(self) -> None:
+        """Refresh official runtime files on package changes, never user state.
+
+        A pre-existing Run directory used to keep the old executable even
+        after the verified package changed. The receipt is committed only
+        after all package-owned runtime files have been copied successfully.
+        """
+        receipt = json.loads((self.package / 'receipt.json').read_text('utf-8'))
+        digest = receipt.get('sha256')
+        if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
+            raise RuntimeError('Invalid Bedrock package digest')
+        marker = self.run_root / '.cinter/run-package.json'
+        if marker.is_symlink():
+            raise RuntimeError('Linked Bedrock run package receipt')
+        previous = json.loads(marker.read_text('utf-8')) if marker.is_file() else {}
+        executable = 'bedrock_server.exe' if self.target == 'win' else 'bedrock_server'
+        current_binary = self.run_root / executable
+        if current_binary.is_symlink():
+            raise RuntimeError('Linked Bedrock run executable')
+        # A legacy or interrupted Run tree has no matching receipt. Refresh
+        # every package-owned file, not just the executable (which may have
+        # already been copied before an interruption).
+        refresh = previous.get('sha256') != digest or not current_binary.is_file()
+        if refresh and self._live_session_locked()[0] is not None:
+            raise RuntimeError('Stop Bedrock before refreshing its runtime files')
+        mutable_roots = {'worlds', 'plugins', 'logs', 'config', 'development_behavior_packs',
+                         'development_resource_packs', 'server.properties', 'allowlist.json',
+                         'whitelist.json', 'permissions.json', 'valid_known_packs.json'}
         for source in self.package.rglob('*'):
             relative = source.relative_to(self.package)
             if relative == Path('receipt.json'):
                 continue
             destination = self.run_root / relative
+            if destination.is_symlink() or not destination.resolve().is_relative_to(self.run_root.resolve()):
+                raise RuntimeError('Linked Bedrock runtime destination: ' + str(destination))
             if source.is_dir():
                 destination.mkdir(parents=True, exist_ok=True)
-            elif source.is_file() and not destination.exists():
+            elif source.is_file():
+                if destination.exists() and (not refresh or relative.parts[0] in mutable_roots):
+                    continue
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
+                # Atomic per-file promotion preserves executable mode and makes
+                # an interrupted upgrade retryable without touching world data.
+                fd, temp_name = tempfile.mkstemp(prefix='bedrock-runtime-', dir=destination.parent)
+                os.close(fd)
+                temp = Path(temp_name)
+                try:
+                    shutil.copy2(source, temp)
+                    os.replace(temp, destination)
+                finally:
+                    temp.unlink(missing_ok=True)
+        _atomic_write(marker, (json.dumps({'sha256': digest, 'version': receipt.get('version')})+'\n').encode('utf-8'))
+        if refresh:
+            self._append_log('Bedrock run package refreshed; preserving worlds and server settings: ' + str(receipt.get('version')))
+
+    def _prepare_run_tree(self) -> None:
+        self.run_root.mkdir(parents=True, exist_ok=True)
+        self._restore_testgrounds_policy()
+        first_properties = not (self.run_root / 'server.properties').exists()
+        self._sync_package_run_tree()
+        if first_properties:
+            props = self.run_root / 'server.properties'
+            if props.is_file():
+                _atomic_write(props, _merge_text(props.read_text('utf-8'),
+                    {'content-log-console-output-enabled': 'true'}).encode('utf-8'))
         self.access.apply_before_launch()
         self.properties.apply_server()
+        from runtime.CinterForgeBedrockDisplay import install
+        install(self)
 
     def property_snapshot(self) -> dict:
         with self._lock:
@@ -2303,7 +2378,7 @@ class CinterForgeBedrockManager:
                     if line and not line.startswith('#') and '=' in line:
                         key, value = line.split('=', 1)
                         if key.strip() in ('server-name', 'level-name', 'server-port',
-                                           'server-portv6', 'enable-lan-visibility'):
+                                           'server-portv6', 'enable-lan-visibility', 'content-log-console-output-enabled'):
                             settings[key.strip()] = value.strip()
             except OSError:
                 pass
@@ -2323,8 +2398,7 @@ class CinterForgeBedrockManager:
                 'relay_events': [], 'scope': 'host UDP scan, not a guest readiness test'}
 
     def _log_path(self) -> Path:
-        base = self.root / 'Logs' if self.user_install else self.builds / 'Logs/Bedrock'
-        return base / f'{self.app}.log'
+        return self.logs_root / f'{self.app}.log'
 
     def _session_record(self) -> dict:
         try:
@@ -2504,12 +2578,69 @@ class CinterForgeBedrockManager:
                     'pid': pid,
                     'installing': bool(self._install_thread and self._install_thread.is_alive()),
                     'install_progress': self._install_progress, 'install_error': self._install_error,
-                    'log_path': str(self.install_log), 'log_error': self._log_error,
+                    'log_path': str(self.install_log), 'console_log_path': str(self._log_path()),
+                    'log_error': self._log_error,
                     'event_cursor': self._event_id,
                     'install_root': str(self.root), 'steamapps': str(self.steamapps) if self.steamapps else None}
 
     # --- Official EULA-gated Mojang server installation ----------------------
-    def install(self, progress: Callable[[str], None] | None = None) -> dict:
+    def _ensure_server_for_launch(self) -> None:
+        """Check every new launch, without replacing a server already running.
+
+        Call with the package lock held, not the state lock: the install
+        worker and launch paths must use the same lock order.
+        """
+        with self._lock:
+            if not self.accepted():
+                raise PermissionError('Bedrock EULA acceptance required')
+            if self._live_session_locked()[0] is not None:
+                return
+        self.ensure_display_server(progress=self._append_log)
+
+    def ensure_display_server(self, *, progress: Callable[[str], None],
+                              archive: Path | None = None) -> None:
+        """Use the same EULA-gated installer for the required provider release.
+
+        Test supplies Setup's verified archive; retail obtains the exact
+        official package on demand. No unrelated server or save is deleted.
+        """
+        from runtime.CinterForgeBedrockDisplay import compatible_bds_entry, verified_bds_receipt
+        entry = compatible_bds_entry(self.target)
+        with self._package_install_lock:
+            if self.installed():
+                package_receipt = self.package / 'receipt.json'
+                if package_receipt.is_symlink():
+                    raise RuntimeError('Linked Bedrock package receipt')
+                try:
+                    verified_bds_receipt(json.loads(package_receipt.read_text('utf-8')), self.target)
+                    return
+                except (OSError, ValueError, TypeError) as exc:
+                    progress('Bedrock package update required: ' + str(exc))
+            if not self.accepted():
+                raise PermissionError('Bedrock EULA acceptance required')
+            with self._lock:
+                if self._live_session_locked()[0] is not None:
+                    raise RuntimeError('Stop Bedrock before installing the display-compatible server')
+            progress('Installing display-compatible official Bedrock ' + entry['version'] + '; preserving worlds and server settings')
+            if archive is None:
+                self.install(progress=progress, required_entry=entry)
+            else:
+                if archive.is_symlink() or not archive.is_file() or _sha256(archive) != entry['sha256']:
+                    raise RuntimeError('Setup Bedrock archive does not match the pinned display-provider release; rerun Setup')
+                self.package_dir.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(prefix='bedrock-stage-', dir=self.package_dir) as temp:
+                    with self._lock:
+                        self._install_archive_payload(archive, Path(temp), entry, entry['sha256'], progress)
+            # The package receipt must describe the newly installed bytes.
+            verified_bds_receipt(json.loads((self.package/'receipt.json').read_text('utf-8')), self.target)
+
+    def install(self, progress: Callable[[str], None] | None = None, *,
+                required_entry: dict | None = None) -> dict:
+        with self._package_install_lock:
+            return self._install_official_package(progress, required_entry=required_entry)
+
+    def _install_official_package(self, progress: Callable[[str], None] | None = None, *,
+                                  required_entry: dict | None = None) -> dict:
         from runtime import CinterForgeSettings as _CinterForgeSettings
         def report(message: str) -> None:
             if progress is not None:
@@ -2517,10 +2648,13 @@ class CinterForgeBedrockManager:
 
         if not self.accepted():
             raise PermissionError('Review and accept the Bedrock EULA in the WebView before downloading')
-        if self.installed():
+        if self.installed() and required_entry is None:
             return self.status()
-        report('Resolving latest stable Bedrock server and verified SHA-256...')
-        entry = self._manifest()
+        if required_entry is None:
+            report('Resolving latest stable Bedrock server and verified SHA-256...')
+            entry = self._manifest()
+        else:
+            entry = required_entry
         self.package_dir.mkdir(parents=True, exist_ok=True)
         self.run_root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='bedrock-stage-', dir=self.package_dir) as temp:
@@ -2608,7 +2742,8 @@ class CinterForgeBedrockManager:
             checksum = _sha256(archive)
             if checksum != entry['sha256'].lower():
                 raise RuntimeError('Bedrock archive checksum mismatch; installation aborted')
-            self._install_archive_payload(archive, root, entry, checksum, report)
+            with self._lock:
+                self._install_archive_payload(archive, root, entry, checksum, report)
         # The immutable receipt inside the installed tree pins these bytes;
         # there is no separate package manifest for users to create or maintain.
         report('Bedrock installed at ' + str(self.package))
@@ -2692,10 +2827,21 @@ class CinterForgeBedrockManager:
                 if not (self.run_root / name).is_file():
                     raise RuntimeError('LinuxKit server runtime incomplete: ' + str(self.run_root / name))
             return ['/bin/sh', str(launcher), str(self.run_root)], {}
-        executable = self.run_root / ('bedrock_server.exe' if self.platform == 'win' else 'bedrock_server')
-        return [str(executable)], {}
+        display = self.run_root / '.cinter/display-runtime'
+        if not (display / 'enabled').is_file():
+            executable = self.run_root / ('bedrock_server.exe' if self.platform == 'win' else 'bedrock_server')
+            return [str(executable)], {}
+        python = display / 'python' / ('python.exe' if self.platform == 'win' else 'bin/python3')
+        return [str(python), '-B', '-s', str(display / 'launch.py')], {}
 
     def start(self, *, preparation_properties: dict | None = None) -> dict:
+        # Direct launches (including restart and native acceptance) have the
+        # same compatibility requirement as the visible Bedrock PTY.
+        with self._package_install_lock:
+            self._ensure_server_for_launch()
+            return self._start(preparation_properties=preparation_properties)
+
+    def _start(self, *, preparation_properties: dict | None = None) -> dict:
         with self._lock:
             if not self.accepted():
                 raise PermissionError('Bedrock EULA acceptance required')
@@ -2717,10 +2863,11 @@ class CinterForgeBedrockManager:
                 # Persist rollback data before editing settings, even if the app is force-quit.
                 _atomic_write(recovery, (json.dumps(saved) + '\n').encode('utf-8'))
                 _atomic_write(props, _merge_text(props.read_text('utf-8'), preparation_properties).encode('utf-8'))
-                _atomic_write(allowlist, b'[]\n')
             command, extra = self._run_command()
             log_path = self._log_path()
             log_path.parent.mkdir(parents=True, exist_ok=True)
+            if log_path.is_symlink() or log_path.parent.is_symlink():
+                raise RuntimeError('Refusing linked Bedrock console log: ' + str(log_path))
             self._launch_offset = log_path.stat().st_size if log_path.exists() else 0
             self._ready = False
             self._startup_error = ''
@@ -2950,14 +3097,15 @@ class CinterForgeBedrockManager:
 
     def restart(self) -> dict:
         """Operator-requested recovery of the same managed world and console."""
-        with self._lock:
-            if not self.accepted() or not self.installed():
-                raise RuntimeError('Bedrock must be installed and EULA accepted before restart')
-            # Never overwrite a live world. Stop precisely this managed VM and
-            # wait for it to disappear before allowing start() to reuse Run/.
-            self.stop()
-            if self._live_session_locked()[0] is not None:
-                raise RuntimeError('Previous Bedrock VM is still alive; restart aborted')
+        with self._package_install_lock:
+            with self._lock:
+                if not self.accepted() or not self.installed():
+                    raise RuntimeError('Bedrock must be installed and EULA accepted before restart')
+                # Never overwrite a live world. Stop precisely this managed VM
+                # before allowing start() to reuse Run/.
+                self.stop()
+                if self._live_session_locked()[0] is not None:
+                    raise RuntimeError('Previous Bedrock VM is still alive; restart aborted')
             state = self.start()
             if not state.get('running') or not state.get('console_available'):
                 raise RuntimeError('Bedrock replacement did not establish a live console input')

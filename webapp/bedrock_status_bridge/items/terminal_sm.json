@@ -1,0 +1,19 @@
+{
+  "format_version": "1.21.100",
+  "minecraft:item": {
+    "description": {
+      "identifier": "cinter:terminal_sm"
+    },
+    "components": {
+      "minecraft:display_name": {
+        "value": "CinterForge Terminal SM 2x1"
+      },
+      "minecraft:icon": {
+        "textures": {
+          "default": "cinter_terminal_sm"
+        }
+      },
+      "minecraft:max_stack_size": 64
+    }
+  }
+}

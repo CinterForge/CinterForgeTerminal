@@ -170,7 +170,15 @@ files:
     # This deliberately avoids the former FIFO/cat relay, which put Rosetta BDS behind
     # a Linux pipe and native runs eventually wedged in pipe_read.
     echo "CINTER_BDS_CONSOLE_MODE direct-serial-console"
-    ./bedrock_server </dev/console >/dev/console 2>&1 &
+    if [ -f "$BDS_ROOT/.cinter/display-runtime/enabled" ]; then
+      DISPLAY_ROOT="$BDS_ROOT/.cinter/display-runtime"
+      export PYTHONHOME="$DISPLAY_ROOT/python"
+      export PYTHONPATH="$DISPLAY_ROOT/site"
+      export LD_LIBRARY_PATH="$GLIBC_ROOT:$BDS_ROOT:$DISPLAY_ROOT/python/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+      "$DISPLAY_ROOT/python/bin/python3" -B -s "$DISPLAY_ROOT/launch.py" </dev/console >/dev/console 2>&1 &
+    else
+      ./bedrock_server </dev/console >/dev/console 2>&1 &
+    fi
     BDS_PID=$!
     (
       # Keep this deadline comfortably inside the host-side smoke deadline.

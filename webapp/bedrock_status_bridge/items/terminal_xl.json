@@ -1,0 +1,19 @@
+{
+  "format_version": "1.21.100",
+  "minecraft:item": {
+    "description": {
+      "identifier": "cinter:terminal_xl"
+    },
+    "components": {
+      "minecraft:display_name": {
+        "value": "CinterForge Terminal XL 5x4"
+      },
+      "minecraft:icon": {
+        "textures": {
+          "default": "cinter_terminal_xl"
+        }
+      },
+      "minecraft:max_stack_size": 64
+    }
+  }
+}

@@ -285,19 +285,17 @@ def setup_receipts_present(builds: Path, targets: tuple[str, ...]) -> bool:
             cwd=source, env=_host_environment(builds), check=False)
         if result.returncode != 0:
             return False
-        from webapp.runtime.CinterForgeJava import provider, verify_jdk, server_jar
+        from webapp.runtime.CinterForgeJava import provider, ensure_runtime, native_target
         cm = provider(source / 'lifecycle', staged=False)
         root = builds / 'CinterForgeCraftMaster/Server/Java'
         if not cm.java_eula_accepted(root):
             return False
-        server_jar(root, cm)
         for target in targets:
-            if target == 'mac':
-                cm.verify_mac_jdk(builds)
-            else:
-                verify_jdk(root, target, 'x64', cm)
+            ensure_runtime(root, cm, target=target,
+                           arch=native_target()[1] if target == 'mac' else 'x64',
+                           offline=True, setup_mac_builds=builds if target == 'mac' else None)
         return True
-    except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError):
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return False
 
 
@@ -459,16 +457,21 @@ def setup_craftmaster(builds: Path, *, targets: tuple[str, ...] = TARGETS,
             _guest_lifecycle(builds, 'setup', target, docker=docker)
     # Terminal owns non-Mac JDK acquisition; standalone CraftMaster Setup stays Mac-only.
     if targets:
-        from webapp.runtime.CinterForgeJava import provider, provision_jdk, server_jar
+        from webapp.runtime.CinterForgeJava import provider, ensure_runtime, native_target, server_jar
         source, _ = _source_roots(builds)
         cm = provider(source / 'lifecycle', staged=False)
         root = builds / 'CinterForgeCraftMaster/Server/Java'
         cm.require_java_eula(root)
         cache = _host_saves_root(builds) / 'CinterForge/ReferenceData/Java' / cm.JAVA_VERSION
-        server_jar(root, cm, acquire=True, cached=cache / f'minecraft_server_{cm.JAVA_VERSION}.jar')
+        cached = cache / f'minecraft_server_{cm.JAVA_VERSION}.jar'
+        if 'mac' in targets:
+            # CraftMaster already provisioned the shared Mac JDK above.
+            server_jar(root, cm, acquire=True, cached=cached)
+            ensure_runtime(root, cm, target='mac', arch=native_target()[1],
+                           offline=True, setup_mac_builds=builds)
         for target in targets:
             if target != 'mac':
-                provision_jdk(root, target, 'x64', cm)
+                ensure_runtime(root, cm, target=target, arch='x64', cached=cached)
 
 
 def build_craftmaster(builds: Path, *, targets: tuple[str, ...] = TARGETS,

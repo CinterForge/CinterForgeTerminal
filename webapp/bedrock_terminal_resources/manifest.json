@@ -1,0 +1,29 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "CinterForge Terminal Resources",
+    "description": "Sized Terminal inventory items and command input",
+    "uuid": "a9d1b811-cc14-4eca-a6a4-a165bd507e3f",
+    "version": [
+      1,
+      0,
+      3
+    ],
+    "min_engine_version": [
+      1,
+      21,
+      100
+    ]
+  },
+  "modules": [
+    {
+      "type": "resources",
+      "uuid": "8658b89d-0958-4410-8f01-03e79b4d989b",
+      "version": [
+        1,
+        0,
+        3
+      ]
+    }
+  ]
+}

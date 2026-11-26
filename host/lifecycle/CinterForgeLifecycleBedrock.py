@@ -211,7 +211,7 @@ class CinterForgeLifecycleBedrock:
         self.package = self.package_dir / 'current'
         self.run_root = self.builds / 'Run' / 'Bedrock' / self.app
         self.receipt = self.run_root / 'eula-acceptance.json'
-        self.install_log = self.builds / 'Logs/CinterForgeTerminal/bedrock-install.log'
+        self.install_log = self.builds / 'Logs/CinterForgeTerminal/Bedrock/bedrock-install.log'
         self._install_thread: threading.Thread | None = None
         self._install_progress = ''
         self._install_error = ''
@@ -666,7 +666,7 @@ class CinterForgeLifecycleBedrock:
                 'relay_events': [], 'scope': 'host UDP scan, not a guest readiness test'}
 
     def _log_path(self) -> Path:
-        base = self.builds / 'Logs/Bedrock'
+        base = self.builds / 'Logs/CinterForgeTerminal/Bedrock'
         return base / f'{self.app}.log'
 
     def _session_record(self) -> dict:

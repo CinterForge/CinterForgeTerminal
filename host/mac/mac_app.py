@@ -198,6 +198,8 @@ def _stage_complete_resources(builds: Path, app: Path) -> None:
          payload / 'Applications/CinterForgeCode/Emulators/Quadra650/Lagomorph'),
         (builds / 'CinterForgeTerminal/Dependencies/LinuxKit/mac/arm64',
          payload / 'CinterForgeTerminal/Dependencies/LinuxKit/mac/arm64'),
+        (builds / 'CinterForgeTerminal/Dependencies/BedrockDisplay/linux',
+         payload / 'CinterForgeTerminal/Dependencies/BedrockDisplay/linux'),
         (builds / 'CinterForgeTerminal/Dependencies/ZMachine/0.3.2',
          payload / 'CinterForgeTerminal/Dependencies/ZMachine/0.3.2'),
     )

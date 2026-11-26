@@ -90,6 +90,7 @@ BEDROCK_HELP = '''bedrock [command]
   bedrock start                 Start the Current World and its selected pack
   bedrock run                   Start the Current World, including an older conversion
   bedrock stop                  Stop the running Bedrock server
+  bedrock log                   Show persistent install and server console log paths
   bedrock op [name|remove name]  List or manage persistent operators
   bedrock allowlist [name|remove name]  List or manage allowed players
   bedrock properties            Show all server and world property values
@@ -101,7 +102,7 @@ BEDROCK_HELP = '''bedrock [command]
 
 JAVA_HELP = '''java [command]
   java                           List native Java worlds and server installation status
-  java install                   Install the official Java server after EULA consent
+  java install                   Install or update the managed Java server after EULA consent
   java <name>                    Serve an existing Java world in a dedicated Session
   java world <name>              Select the Current Java World
   java start | run               Serve the Current Java World
@@ -111,6 +112,7 @@ JAVA_HELP = '''java [command]
   java status                    Report installation and active Session
   java report                    Open the existing combined Minecraft worlds report
   java help                      Show these commands
+  Every launch checks and updates the managed JDK and server if required.
   Use the Java server console for native op, whitelist and other server commands.'''
 
 DEVTOOLS_HELP = '''devtools [install|update|uninstall|version|list|report|help]
@@ -301,13 +303,13 @@ def _if_path(name, entry):
     return _if_root() / Path(entry['file']).stem / entry['file']
 
 
-def _if_command(name, operation, entry):
+def _if_command(name, operation, entry, *, path=None):
     import hashlib
     from pathlib import Path
     import shutil
     import subprocess
     import tempfile
-    path = _if_path(name, entry)
+    path = _if_path(name, entry) if path is None else Path(path)
     if operation == 'install':
         if path.is_symlink() or path.parent.is_symlink():
             raise RuntimeError('Refusing linked story installation path')
@@ -357,7 +359,7 @@ def _if_command(name, operation, entry):
             if temp is not None: temp.unlink(missing_ok=True)
     if operation == 'play':
         if not path.is_file():
-            result = _if_command(name, 'install', entry)
+            result = _if_command(name, 'install', entry, path=path)
             if result:
                 return result
         # HTTP IF sessions and their autosaves retain the original story identity.
@@ -385,7 +387,7 @@ def _api(path: str, *, body: dict | None = None) -> dict:
                       data=json.dumps(body).encode('utf-8') if body is not None else None,
                       headers=headers, method='POST' if body is not None else 'GET')
     try:
-        with urlopen(request, timeout=1800 if path == '/api/bedrock/run' or (path == '/api/bedrock/world/select' and body and body.get('published') is True) else 120 if path in ('/api/bedrock/install', '/api/craftmaster/map/run') else 120 if path == '/api/java' else 90 if path in ('/api/bedrock/stop', '/api/bedrock/restart') else 10) as response:
+        with urlopen(request, timeout=1800 if path in ('/api/bedrock/run', '/api/bedrock/start', '/api/bedrock/restart') or (path == '/api/bedrock/world/select' and body and body.get('published') is True) else 120 if path in ('/api/bedrock/install', '/api/craftmaster/map/run') else 120 if path == '/api/java' else 90 if path == '/api/bedrock/stop' else 10) as response:
             return json.loads(response.read().decode('utf-8'))
     except HTTPError as error:
         try:
@@ -597,7 +599,7 @@ def _bedrock_request_with_progress(world_name: str, path: str, body: dict) -> di
                 if any(word in message.lower() for word in (
                     'convert dimension', 'stream ', 'map ', 'download',
                     'install', 'reuse', 'reus', 'ready', 'packag', 'converting',
-                    'craftmaster conversion', 'failed', 'beta', 'preserv', 'verifying',
+                    'craftmaster conversion', 'failed', 'beta', 'preserv', 'verifying', 'update required',
                 )):
                     print('[bedrock] ' + message, flush=True)
                     last_output = time.monotonic()
@@ -1057,7 +1059,7 @@ def execute(args: list[str]) -> int:
             return 0
         if not options or options == ['status']:
             state = _api('/api/java', body={'action':'status'})
-            print('Java ' + state['version'] + ': ' + ('installed' if state['installed'] else 'not installed; type java install'))
+            print('Java ' + state['version'] + ': ' + ('installed' if state['installed'] else 'not installed or update required; installed automatically on launch'))
             print('Current World: ' + str(state.get('selected') or '(none)'))
             print('Active Session: ' + str(state.get('running') or '(none)'))
             if not options:
@@ -1122,6 +1124,15 @@ def execute(args: list[str]) -> int:
             print(BEDROCK_HELP)
             return 0
         action = options[0].casefold()
+        if action == 'log' and len(options) == 1:
+            state = _api('/api/bedrock/status')
+            print('Bedrock installation log: ' + state['log_path'])
+            print('Bedrock console log: ' + state['console_log_path'])
+            if state.get('log_error'):
+                print('Logging error: ' + state['log_error'], file=sys.stderr)
+            if state.get('server_configuration', {}).get('content-log-console-output-enabled') == 'false':
+                print('Script diagnostics are disabled. Set bedrock content-log-console-output-enabled true and restart Bedrock.')
+            return 0
         if action == 'properties' and len(options) <= 2:
             detailed = len(options) == 2 and options[1].casefold() == 'list'
             if len(options) == 2 and not detailed:
@@ -1233,6 +1244,10 @@ def execute(args: list[str]) -> int:
             if not started_server.get('terminal_session'):
                 raise RuntimeError('Bedrock failed to create its interactive console tab')
             print('[bedrock] Opened ' + current['command_name'] + '; close its tab or use bedrock stop.', flush=True)
+            if started_server.get('console_log_path'):
+                print('[bedrock] Console log: ' + started_server['console_log_path'], flush=True)
+            if started_server.get('server_configuration', {}).get('content-log-console-output-enabled') == 'false':
+                print('[bedrock] Script diagnostics disabled. Set bedrock content-log-console-output-enabled true and restart Bedrock.', flush=True)
             return 0
         if len(options) == 2:
             result = _api('/api/bedrock/properties', body={'name':options[0], 'value':options[1]})
