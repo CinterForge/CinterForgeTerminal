@@ -21,8 +21,9 @@ class CIFBlockifyMinecraftServer extends CIFBlockifyBatch {
             throw new Error('Blockify this asset before exporting an Add-On.');
         }
         this.SetProgress(card,`Downloading ${folder.name||version.file} Minecraft Add-On\u2026`);
-        const payload=await CIFRuntime.assetCommand({operation:'saved-blockify-export',folder:folder.folder,file:version.file,product_name:String(card?.dataset?.productName||folder.name||version.file||'').trim()});
-        const url=CIFRuntime.assetUrl(payload.url||'');
+        const uci=String(card?.dataset?.assignmentUci||version.uci||folder.uci||'').trim();
+        const payload=await CIFRuntime.assetCommand({operation:'saved-blockify-export',uci,folder:folder.folder,file:version.file,product_name:String(card?.dataset?.productName||folder.name||version.file||'').trim()});
+        const url=payload.path?await CIFRuntime.stagedAssetUrl('saved-file',{path:payload.path}):CIFRuntime.assetUrl(payload.url||'');
         if (!url) {
             throw new Error('Minecraft Add-On export did not return a file.');
         }
@@ -34,8 +35,8 @@ class CIFBlockifyMinecraftServer extends CIFBlockifyBatch {
         document.body.appendChild(link);
         link.click();
         link.remove();
-        if(payload.exported){version.blockify.mcaddon_file=payload.exported.file;
-            version.blockify.minecraft_identifier=payload.exported.identifier;
+        if(payload.exported){if(!uci)version.blockify.mcaddon_file=payload.exported.file;
+            if(payload.exported.identifier)version.blockify.minecraft_identifier=payload.exported.identifier;
             }
         this.SetProgress(card,`Downloaded ${payload.file||'Minecraft Add-On'}${payload.exported?.identifier?` \u00b7 ${payload.exported.identifier}`:''}.`);
     }

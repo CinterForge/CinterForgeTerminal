@@ -291,27 +291,32 @@ def authoring_command(server, body: dict) -> dict:
             resolved = api.resolve_uci_asset(str(body.get('uci') or ''))
             if operation == 'local-blockify-load':
                 representation = (resolved['manifest'].get('representations') or {}).get(f"block_{resolved['block_resolution']}") or {}
-                if representation.get('blockbench_edited'):
+                if representation.get('data') and representation.get('data_sha256'):
                     # Voxel edits belong to the exact Block representation opened by
                     # the editor (including higher-density migrated assets).
                     folder = (api.assets_root() / resolved['folder']).resolve()
                     data_path = (folder / str(representation.get('data') or '')).resolve()
                     data_path.relative_to(folder)
                     if not data_path.is_file() or api._sha256(data_path) != representation.get('data_sha256'):
-                        raise ValueError('Edited Blockify data is missing or failed its checksum')
+                        raise ValueError('Saved Blockify data is missing or failed its checksum')
                     blockify = json.loads(data_path.read_text(encoding='utf-8'))
                     return {'ok': True, 'uci': resolved['uci'], 'model_path': resolved['block_model'],
-                            'resolution': int(blockify.get('resolution') or 16), 'blockify': blockify}
+                            'resolution': int(blockify.get('resolution') or 16),
+                            'blockify': {**blockify, 'file': representation['data'], 'blockbench_edited': bool(representation.get('blockbench_edited'))}}
                 try:
                     blockify = load_uci_blockify(resolved['uci'])
                 except FileNotFoundError:
                     if not resolved.get('block_model'):
+                        if body.get('allow_missing'):
+                            return {'ok': True, 'uci': resolved['uci'], 'blockify': {}}
                         raise
                     # Original CSV migration stores its GLTF in manifest
                     # representations; the original saved-editor terrain cache
                     # is an optional *different* artifact, not a prerequisite.
-                    blockify = {'file': resolved['block_model'],
-                                'resolution': resolved['block_resolution']}
+                    blocks = max(1, resolved['block_resolution'] // 16)
+                    blockify = {'file': representation.get('model') or resolved['block_model'],
+                                'resolution': resolved['block_resolution'],
+                                **{axis: int(representation.get(axis) or blocks) for axis in ('width', 'height', 'depth')}}
                 return {'ok': True, 'uci': resolved['uci'], 'model_path': str(resolved.get('block_model') or ''),
                         'resolution': int(blockify.get('resolution') or resolved.get('block_resolution') or 16),
                         'blockify': blockify}
@@ -332,9 +337,15 @@ def authoring_command(server, body: dict) -> dict:
                           'behavior_profile', 'behavior_signature', 'source_up_normalized'):
                 if field in body:
                     meta[field] = body[field]
-            saved = save_uci_blockify(resolved['uci'], meta)
+            with server.asset_actions_lock:
+                if body.get('regenerate_base'):
+                    from runtime.assets.asset_blockify import regenerate_uci_blockify
+                    saved = regenerate_uci_blockify(resolved['uci'], meta,
+                        source_file=str(body.get('source_file') or ''), preview_files=body.get('preview_files') or [])
+                else:
+                    saved = save_uci_blockify(resolved['uci'], meta)
             return {'ok': True, 'uci': resolved['uci'],
-                    'blockify': {**saved, 'file': 'block_16/blockify.json'}, 'local_paths': []}
+                    'blockify': {**saved, 'file': saved.get('file') or 'block_16/blockify.json'}, 'local_paths': []}
         if operation in ('saved-blockify-save', 'saved-blockify-export'):
             from runtime.assets.asset_blockify import save_blockify, regenerate_blockify_addon
             if operation == 'saved-blockify-save':
@@ -347,6 +358,27 @@ def authoring_command(server, body: dict) -> dict:
                     source_up_normalized=bool(body.get('source_up_normalized')),
                     product_name=str(body.get('product_name') or ''), regenerate_base=bool(body.get('regenerate_base')))
                 return {'ok': True, 'blockify': result}
+            if body.get('uci'):
+                from runtime.assets.asset_blockify import _uci_blockbench_addon
+                with server.asset_actions_lock:
+                    resolved, addon = _uci_blockbench_addon(str(body['uci']))
+                    rep = resolved['manifest']['representations'][f"block_{resolved['block_resolution']}"]
+                    if rep.get('data') and rep.get('data_sha256'):
+                        folder = api.assets_root() / resolved['folder']
+                        data = (folder / str(rep['data'])).resolve()
+                        if not data.is_relative_to(folder.resolve()) or not data.is_file() or api._sha256(data) != rep['data_sha256']:
+                            raise ValueError('Saved Blockify data failed its checksum')
+                        # Older dimension saves wrote only JSON, leaving the existing
+                        # Add-On untouched. Never export that stale package. Historical
+                        # complete migrations (no data JSON) and Voxel Save Back remain
+                        # valid; new full saves bind both artifacts to the same generation.
+                        bound = rep.get('minecraft_data_sha256')
+                        if (bound and bound != rep['data_sha256']) or (not bound and not rep.get('blockbench_edited')):
+                            raise ValueError('Saved Blockify data and Minecraft Add-On are out of sync. Re-Blockify and save the asset before exporting.')
+                    if rep.get('minecraft_sha256') and api._sha256(addon) != rep['minecraft_sha256']:
+                        raise ValueError('Saved Minecraft Add-On failed its checksum')
+                    return {'ok': True, 'path': addon.relative_to(api.assets_root().resolve()).as_posix(),
+                            'file': addon.name, 'exported': {'file': addon.name}}
             result = regenerate_blockify_addon(str(body.get('folder') or ''), str(body.get('file') or ''),
                          product_name=str(body.get('product_name') or ''))
             folder = safe_relative(str(body.get('folder') or ''))

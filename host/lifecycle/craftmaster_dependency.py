@@ -482,6 +482,10 @@ def read_native_test_fixture_receipt(path: Path) -> dict:
     return receipt
 
 
+class NativeTestGroundsMismatch(RuntimeError):
+    """The native playable save no longer matches the published fixture."""
+
+
 def _verify_installed_testgrounds(artifacts, installed: Path, entry: dict, receipt: dict) -> None:
     """Bind the Setup snapshot to the existing verified native publication.
 
@@ -510,11 +514,15 @@ def _verify_installed_testgrounds(artifacts, installed: Path, entry: dict, recei
             manifest.get('world') != SERVER_TEST_NAME or manifest.get('folder') != entry['folder'] or
             record.get('sha256') != receipt['mcworld_sha256'] or
             _digest(archive) != receipt['mcworld_sha256']):
-        raise RuntimeError('Installed beta TestGrounds does not match the verified fixture: ' + str(installed))
+        raise NativeTestGroundsMismatch('Installed beta TestGrounds does not match the verified fixture: ' + str(installed))
 
 
-def prepare_server_test_fixture(builds: Path) -> None:
-    """Acquire the single published beta smoke world; never generate a replacement."""
+def prepare_server_test_fixture(builds: Path, *, require_native: bool = False) -> None:
+    """Acquire the verified beta smoke world; ordinary Setup preserves played saves.
+
+    The immutable snapshot is still required. Explicit world-only Setup and
+    native acceptance remain strict about the installed publication binding.
+    """
     artifacts = _world_artifacts(builds)
     print('[SERVER FIXTURE] Checking beta ' + SERVER_TEST_NAME, flush=True)
     entries = artifacts.fetch_public_catalog('beta')
@@ -530,7 +538,18 @@ def prepare_server_test_fixture(builds: Path) -> None:
         installed = _host_saves_root(builds) / entry['folder']
         if (receipt['source'] == provenance and
                 artifacts.installed_world_current(installed, entry, allow_exact_local=True)):
-            _verify_installed_testgrounds(artifacts, installed, entry, receipt)
+            try:
+                _verify_installed_testgrounds(artifacts, installed, entry, receipt)
+            except NativeTestGroundsMismatch as error:
+                if require_native:
+                    raise
+                # The verified snapshot is current, but a developer may have
+                # reconverted the native world. Do not overwrite its export,
+                # alter its receipts, or certify the changed save for Test.
+                print('[SERVER FIXTURE] WARNING: ' + str(error), flush=True)
+                print('[SERVER FIXTURE] Preserving local save; reusing verified cached snapshot. '
+                      'Native Bedrock Test requires a matching publication.', flush=True)
+                return
             # Older Setup snapshots have the verified Java and MCWorld bytes
             # but no binding to the actual native install. Only upgrade when
             # the existing native publication independently matches them.

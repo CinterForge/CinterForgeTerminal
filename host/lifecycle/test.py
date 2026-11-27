@@ -300,7 +300,8 @@ def _test_installed_testgrounds(embedded: Path, builds: Path, fixture_receipt: P
     """
     import zipfile
     from runtime.CinterForgeBedrock import CinterForgeBedrockManager
-    from host.lifecycle.craftmaster_dependency import craftmaster_bedrock_module, read_native_test_fixture_receipt
+    from host.lifecycle.craftmaster_dependency import (craftmaster_bedrock_module,
+        read_native_test_fixture_receipt, _verify_installed_testgrounds, _world_artifacts)
     receipt = read_native_test_fixture_receipt(fixture_receipt)
     entry = receipt['catalog_entry']
     manager = CinterForgeBedrockManager(embedded, 'mac', user_install=True)
@@ -311,6 +312,7 @@ def _test_installed_testgrounds(embedded: Path, builds: Path, fixture_receipt: P
     source = manager._java_saves_destination() / entry['folder']
     if source.resolve() != Path(receipt['installed_java']).resolve():
         raise RuntimeError('TestGrounds Setup and installed runtime disagree on the Java saves root')
+    _verify_installed_testgrounds(_world_artifacts(builds), source, entry, receipt)
     publication = source / 'CinterForge/InstalledPublication.json'
     if (not publication.is_file() or publication.is_symlink() or
             json.loads(publication.read_text('utf-8')).get('sha256') != entry['sha256']):

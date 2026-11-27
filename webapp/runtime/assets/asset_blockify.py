@@ -910,7 +910,7 @@ def _write_blockify_mcaddon(
     }
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="cinterforge-blockify-addon-") as td:
+    with tempfile.TemporaryDirectory(dir=destination.parent, prefix="cinterforge-blockify-addon-") as td:
         td_path = Path(td); rp_pack = td_path / f"{slug}_RP.mcpack"; bp_pack = td_path / f"{slug}_BP.mcpack"
         with zipfile.ZipFile(rp_pack, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             zf.writestr("manifest.json", as_json(rp_manifest)); zf.writestr("pack_icon.png", pack_icon_png)
@@ -1602,6 +1602,156 @@ def _uci_blockbench_addon(uci: str) -> tuple[dict[str, Any], Path]:
     return resolved, addon
 
 
+def regenerate_uci_blockify(uci: str, payload: dict[str, Any], *, source_file: str,
+                            preview_files: list[dict[str, Any]]) -> dict[str, Any]:
+    """Commit one complete generated Block representation, not just its voxel JSON.
+
+    Reuse the existing migration GLTF exporter and Minecraft package producer.
+    The selected representation keeps its paths and public command identity.
+    Terrain brush saves remain on their existing data-only path.
+    """
+    import shutil
+    from .asset_management import resolve_uci_asset, _runtime_descriptor_filename
+    from .asset_migration_commands import BLOCKIFY_RUNTIME_RECIPE, BLOCKIFY_RUNTIME_RECIPE_FINGERPRINT
+
+    resolved = resolve_uci_asset(uci)
+    root = assets_root().resolve()
+    folder = (root / resolved["folder"]).resolve()
+    folder.relative_to(root)
+    manifest = resolved["manifest"]
+    source = folder / source_file
+    if source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(folder):
+        raise ValueError("Blockify requires an owned saved source file")
+    dimensions = {axis: payload.get(axis) for axis in ("width", "height", "depth")}
+    if any(type(value) is not int or not 1 <= value <= 64 for value in dimensions.values()):
+        raise ValueError("Blockify dimensions must be integers from 1 to 64 blocks")
+    for field in ("voxels", "character_voxels"):
+        for voxel in payload.get(field) or []:
+            if not isinstance(voxel, dict) or any(type(voxel.get(coord)) is not int or not 0 <= voxel[coord] < dimensions[axis] * 16
+                    for coord, axis in zip(("x", "y", "z"), dimensions)):
+                raise ValueError("Blockify voxel lies outside its authored dimensions")
+    if not payload.get("voxels"):
+        raise ValueError("Cannot save empty Blockify geometry")
+    if payload.get("character_animations") and not (payload.get("character_voxels") and payload.get("character_rig", {}).get("bones")):
+        raise ValueError("Animated Blockify cannot lose its character rig")
+    resolution_key = int(resolved.get("block_resolution") or 16)
+    # Migrated higher-density representations keep their existing storage key;
+    # the actual Bedrock voxel grid always contains 16 units per block.
+    block_folder = folder / f"block_{resolution_key}"
+    if block_folder.is_symlink():
+        raise ValueError("Symlinked Blockify representation is not writable")
+    block_folder.mkdir(parents=True, exist_ok=True)
+    reps = manifest.setdefault("representations", {})
+    rep = reps.setdefault(block_folder.name, {})
+    name = _safe_token(str(manifest.get("name") or source.stem), "asset")
+    def owned(field: str, default: str, suffix: str) -> Path:
+        target = folder / str(rep.get(field) or f"{block_folder.name}/{default}")
+        if target.parent != block_folder or target.suffix.lower() != suffix or target.is_symlink():
+            raise ValueError(f"Invalid owned Blockify {field} path")
+        return target
+    model = owned("model", f"{name}_block.gltf", ".gltf")
+    addon = owned("minecraft", f"{name}.mcaddon", ".mcaddon")
+    thumbnail = owned("thumbnail", f"{name}_block_thumbnail.png", ".png")
+    data_path = block_folder / "blockify.json"
+    if any(path != addon for path in block_folder.glob("*.mcaddon")):
+        raise ValueError("Multiple Minecraft Add-Ons exist in the selected Blockify representation")
+    # Verify the complete browser exporter result before touching saved files.
+    artifacts: dict[Path, bytes] = {}
+    document = None
+    for row in preview_files or []:
+        filename = str(row.get("name") or "")
+        suffix = Path(filename).suffix.lower()
+        if not filename or Path(filename).name != filename or "\\" in filename or suffix not in (".gltf", ".bin", ".png", ".jpg", ".jpeg"):
+            raise ValueError("Invalid Blockify GLTF export resource")
+        if suffix == ".gltf":
+            if document is not None or row.get("encoding") != "text":
+                raise ValueError("Expected exactly one readable Blockify GLTF")
+            document = json.loads(row["data"])
+            target, data = model, row["data"].encode("utf-8")
+        else:
+            if row.get("encoding") != "base64":
+                raise ValueError("Blockify GLTF resource must be binary")
+            target, data = block_folder / filename, base64.b64decode(row["data"], validate=True)
+        if target in artifacts or target in (addon, thumbnail, data_path) or target.is_symlink():
+            raise ValueError("Conflicting Blockify GLTF export resource")
+        artifacts[target] = data
+    if not isinstance(document, dict) or document.get("asset", {}).get("version") != "2.0" or not document.get("meshes") or not document.get("accessors") or not document.get("buffers"):
+        raise ValueError("Blockify export has no GLTF mesh")
+    for entry in (document.get("buffers") or []) + (document.get("images") or []):
+        uri = entry.get("uri")
+        if not isinstance(uri, str) or Path(uri).name != uri or block_folder / uri not in artifacts:
+            raise ValueError("Blockify GLTF references an unowned resource")
+        if "byteLength" in entry and len(artifacts[block_folder / uri]) != int(entry["byteLength"]):
+            raise ValueError("Blockify GLTF buffer length does not match its document")
+    if payload.get("character_rig", {}).get("bones") and (not document.get("skins") or len(document.get("animations") or []) != len(payload.get("character_animations") or {})):
+        raise ValueError("Blockify export lost character rig or animations")
+    relative = lambda path: path.relative_to(folder).as_posix()
+    source_sha = _sha256(source)
+    payload = {**payload, "source_file": source_file, "source_sha256": source_sha,
+               "file": relative(data_path), "thumbnail": relative(thumbnail), "resolution": 16}
+    png = _blockify_hero_icon_png(payload["voxels"], size=512, transparent=False)
+    artifacts[thumbnail] = png
+    with tempfile.TemporaryDirectory(dir=block_folder, prefix="blockify-") as scratch:
+        staging = Path(scratch)
+        staged_addon = staging / addon.name
+        meta = _write_blockify_mcaddon(staged_addon, source=source, source_sha256=source_sha,
+            **dimensions, voxels=payload["voxels"], character_voxels=payload.get("character_voxels"),
+            character_rig=payload.get("character_rig"), character_animations=payload.get("character_animations"),
+            behavior_profile=payload.get("behavior_profile"),
+            product_name=str(manifest.get("minecraft_name") or payload.get("product_name") or resolved["name"]),
+            command_name=str(manifest.get("command_name") or resolved["name"]), item_icon_png=png)
+        payload["mcaddon_file"] = relative(addon)
+        payload["minecraft_identifier"] = meta["identifier"]
+        payload["minecraft_entity_identifier"] = meta["entity_identifier"]
+        payload["minecraft_egg_item_identifier"] = meta["egg_item_identifier"]
+        payload["minecraft_statue_entity_identifier"] = meta["statue_entity_identifier"]
+        artifacts[data_path] = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        data_digest = hashlib.sha256(artifacts[data_path]).hexdigest()
+        rep.update(**dimensions, resolution=resolution_key, model=relative(model), thumbnail=relative(thumbnail),
+                   minecraft=relative(addon), minecraft_sha256=_sha256(staged_addon), minecraft_data_sha256=data_digest,
+                   data=relative(data_path), data_sha256=data_digest, voxel_count=len(payload["voxels"]),
+                   files=[relative(path) for path in artifacts if path not in (data_path, thumbnail)],
+                   source_up_normalized=bool(payload.get("source_up_normalized")),
+                   runtime_recipe=BLOCKIFY_RUNTIME_RECIPE, runtime_recipe_fingerprint=BLOCKIFY_RUNTIME_RECIPE_FINGERPRINT)
+        rep.pop("blockbench_edited", None)
+        rep.pop("blockbench_export_frame", None)
+        summary = {key: value for key, value in payload.items() if key not in ("voxels", "character_voxels", "character_rig", "character_animations")}
+        for version in manifest.get("versions") or []:
+            if version.get("file") == source_file:
+                version["blockify"] = summary
+        # Stage the real generated artifacts and back up every file that the
+        # original manifest writer can replace, including runtime descriptors.
+        staged = {addon: staged_addon}
+        for index, (target, data) in enumerate(artifacts.items()):
+            temp = staging / f"new-{index}"
+            temp.write_bytes(data)
+            staged[target] = temp
+        manifest_path = folder / "manifest.json"
+        descriptors = [folder / _runtime_descriptor_filename(v) for v in manifest.get("versions") or [] if isinstance(v, dict)]
+        targets = list(dict.fromkeys([*staged, manifest_path, *descriptors]))
+        backups = {}
+        for index, target in enumerate(targets):
+            if target.is_symlink() or not target.resolve().is_relative_to(folder):
+                raise ValueError("Invalid Blockify replacement target")
+            if target.exists():
+                backup = staging / f"old-{index}"
+                shutil.copy2(target, backup)
+                backups[target] = backup
+        try:
+            for target, temp in staged.items():
+                temp.replace(target)
+            _write_manifest(folder, manifest)
+        except BaseException:
+            for target in reversed(targets):
+                if target in backups:
+                    backups[target].replace(target)
+                else:
+                    target.unlink(missing_ok=True)
+            raise
+    log(f"asset-blockify-uci-regenerated uci={uci} blocks={dimensions} addon={addon.name}")
+    return payload
+
+
 def blockbench_resource_session_for_uci(uci: str, *, product_name: str = "") -> dict[str, Any]:
     """Open the existing local Blockify resource pack for a UCI without regenerating it.
 
@@ -1872,7 +2022,8 @@ def save_blockbench_override_for_uci(
     payload["thumbnail"] = thumbnail.relative_to(folder).as_posix()
     artifacts[data_path] = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     artifacts[thumbnail] = _blockify_hero_icon_png(payload["voxels"], size=512, transparent=False)
-    rep.update(data=payload["file"], data_sha256=hashlib.sha256(artifacts[data_path]).hexdigest(),
+    rep.update(width=payload["width"], height=payload["height"], depth=payload["depth"],
+               data=payload["file"], data_sha256=hashlib.sha256(artifacts[data_path]).hexdigest(),
                voxel_count=len(payload["voxels"]), thumbnail=thumbnail.relative_to(folder).as_posix(),
                files=[path.relative_to(folder).as_posix() for path in artifacts if path not in (data_path, thumbnail)],
                blockbench_edited=True, blockbench_export_frame=export_frame)
@@ -1913,6 +2064,9 @@ def save_blockbench_override_for_uci(
         with zipfile.ZipFile(staged_addon, "w", compression=zipfile.ZIP_DEFLATED) as outer:
             for info, data in outer_rows:
                 outer.writestr(info, updated.getvalue() if info.filename == rp_name else data)
+        rep["minecraft_sha256"] = _sha256(staged_addon)
+        rep["minecraft_data_sha256"] = rep["data_sha256"]
+        artifacts[manifest_path] = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
         staged = {addon: staged_addon}
         for index, (target, data) in enumerate(artifacts.items()):
             staged_file = staging / f"new-{index}"

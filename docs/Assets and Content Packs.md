@@ -213,3 +213,7 @@ The original Pack gallery generator was observed refusing absent pinned
 Babylon in the source-only test; staged Babylon and all required pack artwork
 were not supplied for a complete Pack-gallery acceptance. WebGL voxelization
 and signed native macOS/Windows/Linux acceptance remain unverified.
+
+## Saving dimensions on a local UCI asset
+
+In Asset View, use **Re-Blockify** on a saved Block representation to enter the desired block dimensions and regenerate its preview and Minecraft Add-On. **Block Preview** opens the existing representation without changing it. Width, height and depth specify a bounding box; the conversion preserves the asset aspect ratio, so another dimension may limit its achieved height. The saved representation retains the source and Solid asset and binds its voxel data and generated Add-On by SHA-256. Export downloads the committed UCI Add-On and rejects known out-of-sync data; re-Blockify and save to repair an older split save. Reopen the asset to verify its dimensions and inspect the exported geometry and collision bounds before deployment.

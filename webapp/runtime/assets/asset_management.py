@@ -1145,6 +1145,15 @@ def list_local_uci_assets() -> dict[str, Any]:
                                         "resolution": resolved["block_resolution"]})
                 if saved_block.get("file"):
                     saved_version["blockify"] = saved_block
+            if block.get("model"):
+                blocks = max(1, resolved["block_resolution"] // 16)
+                saved_block.update({axis: int(block.get(axis) or saved_block.get(axis) or blocks)
+                                    for axis in ("width", "height", "depth")})
+                if block.get("data") and block.get("data_sha256"):
+                    saved_block["file"] = block["data"]
+                if block.get("minecraft"):
+                    saved_block["mcaddon_file"] = block["minecraft"]
+                saved_version["blockify"] = saved_block
         entry = {
             "folder": resolved["folder"], "name": resolved["name"], "uci": resolved["uci"],
             "category": category, "subgroup": str(manifest.get("subgroup") or ""),

@@ -107,7 +107,7 @@ class CIFBlockify {
         if (path.startsWith('Animated/Fixed/')) {
             return Array.isArray(version?.inspection?.animation_names)&&version.inspection.animation_names.length>0;
         }
-        return false;
+        return Boolean(version?.inspection?.has_skin || folder?.import_animation);
     }
 
     static BlockifyQuaternionToBedrockXYZ(q){
@@ -331,7 +331,7 @@ class CIFBlockify {
     }
 
     static BlockifyDimensions(card){
-        const value=axis=>Math.max(1,Math.min(64,Math.round(Number(card?.querySelector(`.asset-blockify-dimension[data-axis="${axis}"]`)?.value||1))));
+        const value=axis=>{const number=Number(card?.querySelector(`.asset-blockify-dimension[data-axis="${axis}"]`)?.value||1);if(!Number.isFinite(number))throw new Error('Invalid Blockify dimension');return Math.max(1,Math.min(64,Math.round(number)));};
         return {width:value('width'),height:value('height'),depth:value('depth')};
     }
 
@@ -1468,21 +1468,11 @@ class CIFBlockify {
         // Bedrock block geometry is always authored in the canonical 16×16×16 voxel space.
         // W/H/D select the asset's size in blocks; resolution is not an authoring control.
         const requestedResolution=16;
-        let existingBlockify=version.blockify||{};
-        const localPath=String(card?.dataset?.localAssetPath||'').replace(/\\/g,'/').replace(/^\/+/, '');
-        if (localPath) {
-            try {
-                const response=await CIFRuntime.assetCommand({operation:'local-blockify-load',uci:String(card?.dataset?.assignmentUci||version.uci||folder.uci||'').trim()});
-                if (response?.blockify) {
-                    existingBlockify=response.blockify;
-                    version.blockify=existingBlockify;
-                }
-            } catch (error) {
-                if (!String(error?.message||error).includes('Blockify artifact')) {
-                    throw error;
-                }
-            }
-        }
+        const assetUCI=String(card?.dataset?.assignmentUci||version.uci||folder.uci||'').trim();
+        if (!assetUCI) throw new Error('Blockify requires a UCI-native local asset identity.');
+        const current=await CIFRuntime.assetCommand({operation:'local-blockify-load',uci:assetUCI,allow_missing:true});
+        const existingBlockify=current?.blockify||{};
+        version.blockify=existingBlockify;
         const hasDimensionControls=Boolean(card?.querySelector('.asset-blockify-dimension'));
         if (!hasDimensionControls && existingBlockify?.file) {
             dimensions={
@@ -1501,7 +1491,7 @@ class CIFBlockify {
             const warning=`A Blockify representation already exists at ${dimensions.width}×${dimensions.height}×${dimensions.depth} blocks. Re-Blockifying will replace it and any Blockbench edits to that representation will be lost. Continue?`;
             if (!window.confirm(warning)) {
                 this.SetProgress(card,'Blockify cancelled; existing representation was preserved.');
-                return existingBlockify;
+                return null;
             }
         }
             this.SetProgress(card,`Blockifying ${folder.name||version.file} at ${dimensions.width}\u00d7${dimensions.height}\u00d7${dimensions.depth} blocks in Bedrock 16\u00d716\u00d716 voxel space\u2026`);
@@ -1514,18 +1504,19 @@ class CIFBlockify {
             workCanvas.height=Math.max(1,canvas.height||canvas.clientHeight||512);
             const engine=new BABYLON.Engine(workCanvas,true,{preserveDrawingBuffer:true,stencil:false}),scene=new BABYLON.Scene(engine);
         try{
-            const url=await CIFRuntime.stagedAssetUrl('saved-file',{path:rel}),sourceExtension=this.AssetLoaderExtension(version.file),beforeCharacterNodes=new Set(scene.getNodes()),character=await BABYLON.SceneLoader.ImportMeshAsync('','',url,scene,undefined,sourceExtension);
+            const sourcePath=folder.import_animation&&!version.inspection?.animation_names?.length&&folder.solid_model?folder.solid_model:rel;
+            const url=await CIFRuntime.stagedAssetUrl('saved-file',{path:sourcePath}),sourceExtension=this.AssetLoaderExtension(sourcePath),beforeCharacterNodes=new Set(scene.getNodes()),character=await BABYLON.SceneLoader.ImportMeshAsync('','',url,scene,undefined,sourceExtension);
                 await scene.whenReadyAsync?.();
                 const characterNodes=scene.getNodes().filter(n=>!beforeCharacterNodes.has(n));
                 this.NormalizeStaticPreviewUp(scene,characterNodes);
-            const embeddedGroups=[...(character.animationGroups||[])];
+            const embeddedGroups=(character.animationGroups||[]).filter(group=>group?.targetedAnimations?.length);
                 const statueResult=await this.VoxelizeBlockifyScene(scene,dimensions,'frame0');
                 let characterResult={voxels:[],rig:null},animationPayload={};
             if(isAnimated){characterResult=await this.VoxelizeBlockifyScene(scene,dimensions,'rigrest',{requireHumanoid:String(folder.folder||'').startsWith('Animated/Mixamo/')});
                 if (!characterResult.rig?.bones?.length) {
                     throw new Error('Animated Blockify requires a real source rig; no source skeleton was found.');
                 }
-                if(String(folder.folder||'').startsWith('Animated/Mixamo/')){const refs=Array.isArray(folder.assigned_animations)?folder.assigned_animations.filter(row=>row?.folder&&row?.file):[];
+                if(String(folder.folder||'').startsWith('Animated/Mixamo/')&&!embeddedGroups.length){const refs=Array.isArray(folder.assigned_animations)?folder.assigned_animations.filter(row=>row?.folder&&row?.file):[];
                     if(!refs.length&&folder.default_animation?.folder&&folder.default_animation?.file)refs.push({...folder.default_animation,name:'Idle'});
                     for(let i=0;
                     i<refs.length;
@@ -1536,19 +1527,31 @@ class CIFBlockify {
                     }}
                 else {const rest=this.BlockifyRestRotationMap(character,characterNodes);
                     let i=0;
-                    for(const group of embeddedGroups){const clip=this.BlockifyClipFromAnimationGroup(group,characterResult.rig,rest,group.name);
+                    for(const group of embeddedGroups){const clip=this.BlockifyClipFromAnimationGroup(group,characterResult.rig,rest,group.name,{allowExactEmbeddedRig:true});
                     if(clip)animationPayload[`clip_${++i}`]=clip;
                     }}
-            }
-            const assetUCI=String(card?.dataset?.assignmentUci||folder.uci||version.uci||'').trim();
-            if (!assetUCI) {
-                throw new Error('Blockify requires a UCI-native local asset identity.');
             }
             if (!statueResult.voxels.length) {
                 throw new Error('Blockify produced no occupied voxels; source preview was preserved.');
             }
-            const behaviorProfile=this.BlockifyBehaviorProfile(animationPayload),saved=await CIFRuntime.assetCommand({operation:'local-blockify-save',uci:assetUCI,...dimensions,resolution:requestedResolution,voxels:statueResult.voxels,character_voxels:characterResult.voxels,character_rig:characterResult.rig||{},character_animations:animationPayload,behavior_profile:behaviorProfile,behavior_signature:behaviorSignature,source_up_normalized:true,product_name:String(card?.dataset?.productName||folder.name||version.file||'').trim(),regenerate_base:true});
-                version.blockify=saved.blockify||{...dimensions,resolution:requestedResolution,file:saved.file,behavior_signature:behaviorSignature};
+            if (isAnimated && embeddedGroups.length && Object.keys(animationPayload).length !== embeddedGroups.filter(group=>group?.targetedAnimations?.length).length) {
+                throw new Error('Blockify did not capture the source animations; previous asset preserved.');
+            }
+            const behaviorProfile=this.BlockifyBehaviorProfile(animationPayload);
+            // Use the existing migration exporter so the persisted GLTF, add-on
+            // and preview all come from the very same voxel/rig generation.
+            const animated=characterResult.voxels.length&&characterResult.rig?.bones?.length;
+            const result=animated?characterResult:statueResult;
+            const scale=1/Math.max(1e-9,Number(result.source_to_voxel_scale||result.rig?.source_to_voxel_scale||16));
+            let blockScene=null, previewFiles;
+            try {
+                blockScene=animated?this.MigrationAnimatedBlockScene(result.voxels,result.rig,animationPayload,dimensions,engine,scale,result.source_center,result.voxel_y_offset)
+                    :this.MigrationBlockScene(result.voxels,dimensions,engine,scale,result.source_center,result.voxel_y_offset);
+                previewFiles=await this.MigrationExportGltf(blockScene,'model');
+            } finally { blockScene?.dispose(); }
+            const saved=await CIFRuntime.assetCommand({operation:'local-blockify-save',uci:assetUCI,source_file:version.file,preview_files:previewFiles,...dimensions,resolution:requestedResolution,voxels:statueResult.voxels,character_voxels:characterResult.voxels,character_rig:characterResult.rig||{},character_animations:animationPayload,behavior_profile:behaviorProfile,behavior_signature:behaviorSignature,source_up_normalized:true,product_name:String(card?.dataset?.productName||folder.name||version.file||'').trim(),regenerate_base:true});
+            if (!saved?.blockify?.mcaddon_file || !['width','height','depth'].every(axis=>Number(saved.blockify[axis])===dimensions[axis])) throw new Error('Blockify save did not commit the requested representation.');
+            version.blockify=saved.blockify;
             /* Re-Blockify changed the canonical managed Terrain asset. Reload any live Build instance immediately; the same canonical artifact is also what collaboration publishes, so every collaborator receives the identical base+authored-edit result. */
             const collaborationPaths=Array.isArray(saved.collaboration_asset_paths)?saved.collaboration_asset_paths:[];
             /* Re-Blockify is a local authored world change: keep the complete managed asset
@@ -1569,11 +1572,12 @@ class CIFBlockify {
             }
             if(isAnimated&&characterResult.voxels.length&&Object.keys(animationPayload).length)this.RenderAnimatedBlockifiedBehavior(card,characterResult.voxels,characterResult.rig,animationPayload,behaviorProfile,dimensions,`blockify:${rel}:${dimensions.width}x${dimensions.height}x${dimensions.depth}:animated`);
                 else this.RenderBlockifiedVoxels(card,statueResult.voxels,dimensions,`blockify:${rel}:${dimensions.width}x${dimensions.height}x${dimensions.depth}`);
-            this.SetProgress(card,isAnimated?`Blockified frame-0 statue ${statueResult.voxels.length.toLocaleString()} voxels + source-rig character ${characterResult.voxels.length.toLocaleString()} voxels + ${Object.keys(animationPayload).length} animations.`:`Blockified ${statueResult.voxels.length.toLocaleString()} occupied voxels at ${dimensions.width}\u00d7${dimensions.height}\u00d7${dimensions.depth} blocks.`);
+            this.SetProgress(card,isAnimated?`Saved Blockify ${dimensions.width}×${dimensions.height}×${dimensions.depth} blocks · ${characterResult.voxels.length.toLocaleString()} character voxels · ${Object.keys(animationPayload).length} animations.`:`Blockified ${statueResult.voxels.length.toLocaleString()} occupied voxels at ${dimensions.width}\u00d7${dimensions.height}\u00d7${dimensions.depth} blocks.`);
             const button=card.querySelector('[data-action="saved-blockify"]');
                 if(button){button.textContent='Re-Blockify';
                 button.disabled=false;
                 }
+            return version.blockify;
         }catch(error){try{scene.dispose();
         }catch(_){}try{engine.dispose();
         }catch(_){}
@@ -1592,34 +1596,24 @@ class CIFBlockify {
 
     static async EnsureBlockified(card){
         const folder=this.SavedFolderForCard(card),versions=folder?.versions||[],version=versions[Number(card?.dataset?.versionIndex||0)]||versions[0];
-            if (!folder||!version?.file) {
-                throw new Error('No 3D asset version is available.');
-            }
-            const localPath=String(card?.dataset?.localAssetPath||'').replace(/\\/g,'/').replace(/^\/+/, '');
-            if (localPath) {
-                try {
-                    const response=await CIFRuntime.assetCommand({operation:'local-blockify-load',uci:String(card?.dataset?.assignmentUci||version.uci||folder.uci||'').trim()});
-                    if (response?.blockify) {
-                        version.blockify=response.blockify;
-                        return version.blockify;
-                    }
-                } catch (error) {
-                    if (!String(error?.message||error).includes('Blockify artifact')) {
-                        throw error;
-                    }
-                }
-            }
-            if(version.blockify?.blockbench_edited===true){
-                const uci=String(card?.dataset?.assignmentUci||version.uci||folder.uci||'').trim();
-                const response=await CIFRuntime.assetCommand({operation:'local-blockify-load',uci});
-                version.blockify=response.blockify;
-                return version.blockify;
-            }
-            const requested=this.BlockifyDimensions(card),cached=version.blockify||{},dimensionsMatch=Number(cached.width||0)===requested.width&&Number(cached.height||0)===requested.height&&Number(cached.depth||0)===requested.depth,isAnimated=this.BlockifyWantsAnimation(folder,version),behaviorSignature=this.BlockifyBehaviorSignature(folder,version),behaviorMatch=!isAnimated||String(cached.behavior_signature||'')===behaviorSignature,upnessCurrent=cached.source_up_normalized===true;
-            if (!cached.file||!dimensionsMatch||!behaviorMatch||!upnessCurrent) {
-                await this.BlockifySavedAsset(card);
-            }
-            return version.blockify;
+        if (!folder||!version?.file) throw new Error('No 3D asset version is available.');
+        const uci=String(card?.dataset?.assignmentUci||version.uci||folder.uci||'').trim();
+        if (!uci) throw new Error('Saved asset UCI is unavailable.');
+        const response=await CIFRuntime.assetCommand({operation:'local-blockify-load',uci,allow_missing:true});
+        const cached=response?.blockify||{};
+        version.blockify=cached;
+        const hasControls=Boolean(card?.querySelector('.asset-blockify-dimension'));
+        const requested=hasControls?this.BlockifyDimensions(card):cached;
+        const dimensionsMatch=['width','height','depth'].every(axis=>Number(cached[axis])===Number(requested[axis]));
+        const behaviorChanged=!cached.blockbench_edited&&this.BlockifyWantsAnimation(folder,version)&&cached.behavior_signature&&cached.behavior_signature!==this.BlockifyBehaviorSignature(folder,version);
+        if (!cached.file || !dimensionsMatch || behaviorChanged) {
+            const result=await this.BlockifySavedAsset(card);
+            if (!result) throw new Error('Blockify cancelled; existing Add-On was not exported.');
+            return result;
+        }
+        // Export/reopen must not regenerate already-authored Blockbench edits
+        // or replace an existing migration merely because a cache field is absent.
+        return cached;
     }
 
     static async PrepareSavedBlockifyPayload(card,purpose='Blockify'){

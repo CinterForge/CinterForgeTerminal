@@ -389,7 +389,7 @@ def main(argv: list[str]) -> int:
         if not _local_craftmaster(BUILDS):
             native = {'Darwin': 'mac', 'Linux': 'linux', 'Windows': 'win'}[platform.system()]
             acquire_published_craftmaster(BUILDS, (native,))
-        prepare_server_test_fixture(BUILDS)
+        prepare_server_test_fixture(BUILDS, require_native=True)
         return 0
     if len(argv) >= 2 and argv[1] == 'devtools' and argv[0] in ('setup', 'build', 'stage', 'test', 'all'):
         action = argv[0]

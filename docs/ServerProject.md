@@ -97,6 +97,14 @@ reported and the existing save is preserved. The stable public name is not
 the native folder or conversion export name; numbered exports remain intact.
 Test checks the binding before the native suite and remains offline.
 
+Ordinary application Setup can reuse a current, independently hash-verified
+beta snapshot even if the native playable save's conversion no longer matches
+that publication. It warns, preserves the save and both receipts unchanged,
+and continues provisioning. Explicit `./Cinter setup testgrounds` and native
+Bedrock Test still reject that mismatch; neither resets the played world.
+This exception does not cover missing/corrupt cached fixtures, unsafe paths,
+or unrelated package/acquisition failures.
+
 Setup prepares one reusable, verified TestGrounds snapshot at
 `Builds/Acceptance/CinterForgeTerminal/TestGrounds` (Java save files,
 `TestGrounds.mcworld`, and `fixture.json`). It reuses the unchanged snapshot
