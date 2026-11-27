@@ -755,6 +755,37 @@ def _retire_previous_host_stages(builds: Path, product: Path, *, system: str, ar
         shutil.rmtree(previous)
 
 
+def retire_removed_host_members(product: Path, receipt: dict) -> int:
+    """Remove only files recorded in the previous same-release managed inventory.
+
+    Never follow a symlink, remove an untracked file, or touch sibling caches.
+    """
+    old_path = product / 'manifest.json'
+    if product.is_symlink() or old_path.is_symlink() or not old_path.is_file():
+        return 0
+    try:
+        old = json.loads(old_path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return 0
+    if (not isinstance(old, dict) or not isinstance(old.get('files'), dict) or
+            any(old.get(key) != receipt.get(key) for key in ('schema', 'platform', 'arch', 'release'))):
+        return 0
+    retired = 0
+    for rel in sorted(set(old['files']) - set(receipt['files'])):
+        relative = Path(rel)
+        if (not rel or relative.is_absolute() or '\\' in rel or ':' in rel or
+                '..' in relative.parts or not relative.parts or rel == 'manifest.json'):
+            raise RuntimeError('Unsafe retired Host path: ' + repr(rel))
+        target = product / relative
+        if any((product.joinpath(*relative.parts[:i])).is_symlink()
+               for i in range(1, len(relative.parts) + 1)):
+            raise RuntimeError('Unsafe retired Host symlink: ' + str(target))
+        if target.is_file():
+            target.unlink()
+            retired += 1
+    return retired
+
+
 def stage_host(builds: Path) -> dict:
     """Build and reconcile a version-labelled Host working stage.
 
@@ -901,6 +932,9 @@ def stage_host(builds: Path) -> dict:
                 finally:
                     temporary_file.unlink(missing_ok=True)
                 refreshed += 1
+            retired = retire_removed_host_members(product, receipt)
+            if retired:
+                print(f'[CPH stage] Retired {retired} obsolete managed files', flush=True)
             # Commit the inventory last, after the build-owned payload is in
             # place; any interrupted Stage can be repaired by running it again.
             manifest_target = product / 'manifest.json'

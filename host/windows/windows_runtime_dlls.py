@@ -33,7 +33,7 @@ import subprocess
 SYSTEM_DLLS = frozenset('''
 advapi32 bcrypt cabinet cfgmgr32 clbcatq comctl32 comdlg32 crypt32 cryptnet
 cryptui d2d1 d3d10 d3d11 d3d12 d3d9 dbghelp dcomp ddraw dhcpcsvc dnsapi
-dwmapi dxgi gdi32 hid imm32 iphlpapi kernel32 kernelbase mpr msimg32
+dwmapi dxgi gdi32 gdiplus hid imm32 iphlpapi kernel32 kernelbase mpr msimg32
 msvcrt ncrypt netapi32 normaliz ntdll ole32 oleaut32 opengl32 propsys
 psapi rpcrt4 secur32 setupapi shell32 shlwapi user32 userenv ucrtbase
 version winhttp wininet winmm winspool wintrust ws2_32 wtsapi32

@@ -5,6 +5,7 @@ If you want to get started right away:
 ```bash
 ./Cinter all all               # Setup -> Build -> Stage -> Test
 ./Cinter all all publish       # Same phases, then dryrun Publish; never uploads
+./Cinter all all publish beta  # Complete beta publication
 ./Cinter all win publish internal  # Only Windows: MSI-only ZIP to private R2
 ./Cinter all mac publish beta     # macOS only to beta
 ./Cinter all linux publish internal  # Linux only to private R2
@@ -13,6 +14,12 @@ If you want to get started right away:
 CinterForge Terminal is a reproducibly source-built product for **macOS, Windows and Linux**, with a separate optional unified DevTools distribution. A clean developer producer can regenerate its required outputs from an authored checkout and an empty sibling `Builds` tree; a consumer who installs the app does **not** run developer Setup.
 
 This chapter describes the **repository build driver**. The Game Terminal's game commands and the `code` command are described in the [User Manual](User%20Manual.md). When this repository is loaded in Code-OSS, these same `./Cinter` commands run from real integrated platform terminals.
+
+## Owner boundaries
+
+Terminal is the desktop consumer. CraftMaster owns the native converter, Minecraft hosting dependencies, report and pack assets. Server owns the shared hosted runtime. Setup acquires their current verified inputs (using existing sibling source when available); Build assembles the target-specific owner Stage into the native Terminal. The raw Terminal checkout deliberately does not contain copies of the owner report, Bedrock access/properties or server lifecycle controller. Python Setup validates the interpreter, not an incomplete application checkout. Installed-app acceptance belongs to Test.
+
+Use the full source replacement for Drop 72: an overlay alone does not retire deleted source files. Keep sibling Builds and its verified dependency caches.
 
 ## Dirty-checked Setup
 

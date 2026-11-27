@@ -62,8 +62,8 @@ ALL_OUTPUTS = (
     'CinterForgeTerminal/Dependencies/ZMachine/0.3.2',
     'CreativeSuite/CFOS/LinuxKit',
     'Intermediates/CinterForgeTerminal/ForeignPython',
-    'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-linux.zip',
-    'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-win.zip',
+    'CinterForgeCraftMaster/Server/Bedrock/Downloads/bedrock-server-linux.zip',
+    'CinterForgeCraftMaster/Server/Bedrock/Downloads/bedrock-server-win.zip',
     'Python/Environments/mac/arm64/cinterterminalenv',
     'InteractiveFiction/CodeOSS/code-setup.json',
     'CinterForgeTerminal/Dependencies/Voxel/voxel-setup.json',
@@ -74,7 +74,7 @@ ALL_OUTPUTS = (
 )
 WIN_OUTPUTS = (
     'InteractiveFiction/CodeOSS/code-setup.json',
-    'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-win.zip',
+    'CinterForgeCraftMaster/Server/Bedrock/Downloads/bedrock-server-win.zip',
     'CinterForgeTerminal/Dependencies/BedrockDisplay/win',
     'Toolchains/mac',
     'Toolchains/WindowsCross',

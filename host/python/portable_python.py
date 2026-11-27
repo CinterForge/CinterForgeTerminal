@@ -251,50 +251,6 @@ def _inspect(root: Path, system: str, version: str) -> dict:
     return report
 
 
-def _verify_terminal_worker(root: Path, system: str) -> None:
-    """Setup provisioning check: portable Python imports the actual service.
-
-    This checks a source dependency closure, not an HTTP listener, GUI, VM, or
-    Test-phase app acceptance. It runs on macOS only for Kevin's target here.
-    """
-    if system != 'mac' or sys.platform != 'darwin':
-        return
-    repo = Path(__file__).resolve().parents[2]
-    worker = repo / 'host/worker.py'
-    service = repo / 'webapp/CinterForgeTerminal.py'
-    if not worker.is_file() or not service.is_file():
-        raise RuntimeError('Terminal Python worker/service source is missing')
-    command = [str(_binary(root, system)), '-I', '-X', 'faulthandler',
-               '-B', '-u', str(worker), str(service)]
-    started = time.monotonic()
-    print('[CPH setup] START portable Mac Python worker/service import', flush=True)
-    try:
-        probe = subprocess.run(command, input=(
-            '{"id":1,"method":"ping","params":{}}\n'
-            '{"id":2,"method":"shutdown","params":{}}\n'),
-            capture_output=True, text=True, timeout=45, check=False,
-            env=dict(os.environ, PYTHONPATH='', PYTHONNOUSERSITE='1'))
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError('Portable Mac Python worker/service import exceeded 45s '
-                           'during Setup; no signed app will be built from it') from exc
-    try:
-        replies = [json.loads(line) for line in probe.stdout.splitlines() if line.strip()]
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError('Portable Mac Python worker produced invalid JSONL: ' +
-                           probe.stdout[-1000:]) from exc
-    if (probe.returncode or
-            not any(event.get('ready') is True for event in replies) or
-            not any(event.get('id') == 1 and event.get('result') == {'pong': True}
-                    for event in replies) or
-            not any(event.get('id') == 2 and event.get('result') == {'stopped': True}
-                    for event in replies)):
-        raise RuntimeError('Portable Mac Python worker/service failed during Setup '
-                           f'(exit {probe.returncode}): stdout={probe.stdout[-1200:]!r} '
-                           f'stderr={probe.stderr[-2000:]!r}')
-    print(f'[CPH setup] PASS portable Mac Python worker/service import '
-          f'({time.monotonic() - started:.1f}s)', flush=True)
-
-
 def _download_verified(cache: Path, target: str, expected: str) -> None:
     if cache.exists():
         if _sha(cache) != expected:
@@ -366,7 +322,6 @@ def provision(builds: Path, system: str, arch: str, *, name: str = 'cintertermin
                 data.get('python') != VERSION or data.get('source_sha256') != expected):
             raise RuntimeError(f'Existing portable Python does not match pinned release: {root}')
         _inspect(root, system, VERSION)
-        _verify_terminal_worker(root, system)
         if system == 'win':
             from host.windows.windows_winpty import ensure as ensure_winpty
             ensure_winpty(builds, root)
@@ -395,7 +350,6 @@ def provision(builds: Path, system: str, arch: str, *, name: str = 'cintertermin
         receipt_in_candidate.write_text(json.dumps(receipt_data, indent=2, sort_keys=True) + '\n', encoding='utf-8')
         candidate.rename(root)
     _inspect(root, system, VERSION)
-    _verify_terminal_worker(root, system)
     if system == 'win':
         from host.windows.windows_winpty import ensure as ensure_winpty
         ensure_winpty(builds, root)

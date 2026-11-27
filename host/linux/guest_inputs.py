@@ -50,54 +50,20 @@ def _require_elf(path: Path, machine: int) -> None:
 
 
 def official_bedrock_archive(repo: Path, target: str = 'linux') -> Path:
-    """Read-only lookup of the pinned, Setup-provisioned official ZIP."""
-    from host.linux.craftmaster.build_craftmaster_server import sha
+    """Read-only lookup through the CraftMaster-owned archive cache."""
     from host.lifecycle.craftmaster_dependency import craftmaster_bedrock_module
-    compatible_bds_entry = craftmaster_bedrock_module(
-        repo.resolve().parent / 'Builds', 'CinterForgeBedrockAccess').compatible_bds_entry
-    if target not in ('linux', 'win'):
-        raise ValueError('Unsupported Bedrock archive target: ' + target)
-    entry = compatible_bds_entry(target)
-    archive = repo.resolve().parent / 'Builds/Intermediates/CinterForgeTerminal/LinuxKit/Downloads' / f'bedrock-server-{target}.zip'
-    if archive.is_symlink() or not archive.is_file() or sha(archive) != entry['sha256']:
-        raise RuntimeError(f'Missing or incompatible Setup Bedrock archive: {archive}; run ./Cinter setup all')
-    return archive
+    builds = repo.resolve().parent / 'Builds'
+    return craftmaster_bedrock_module(builds, 'CinterForgeLifecycleBedrock').official_bedrock_archive(builds, target)
 
 
 def prepare_official_bedrock_archive(repo: Path, target: str = 'linux') -> Path:
-    """Setup-only acquisition of official Bedrock acceptance bytes.
-
-    macOS uses the Linux x64 package via LinuxKit; native Windows uses its
-    own official ZIP. Neither ZIP is redistributed with the application.
-    Callers must first obtain explicit EULA acceptance.
-    """
-    from host.linux.craftmaster.build_craftmaster_server import _download, sha
+    """Delegate Setup-only acquisition, verification and legacy-cache reuse."""
+    import platform
     from host.lifecycle.craftmaster_dependency import craftmaster_bedrock_module
-    compatible_bds_entry = craftmaster_bedrock_module(
-        repo.resolve().parent / 'Builds', 'CinterForgeBedrockAccess').compatible_bds_entry
-    if target not in ('linux', 'win'):
-        raise ValueError('Unsupported Bedrock archive target: ' + target)
-    entry = compatible_bds_entry(target)
     builds = repo.resolve().parent / 'Builds'
-    cache = builds / 'Intermediates/CinterForgeTerminal/LinuxKit/Downloads'
-    cache.mkdir(parents=True, exist_ok=True)
-    archive = cache / f'bedrock-server-{target}.zip'
-    if archive.is_symlink():
-        raise RuntimeError(f'Unsafe linked Setup Bedrock archive: {archive}')
-    if archive.is_file() and sha(archive) == entry['sha256']:
-        print(f'[BEDROCK SETUP] Verified {target} official archive {entry["version"]}', flush=True)
-        return archive
-    import zipfile
-    print(f'[BEDROCK SETUP] Acquiring {target} display-compatible official BDS {entry["version"]}', flush=True)
-    _download(entry['url'], archive)
-    if sha(archive) != entry['sha256']:
-        archive.unlink(missing_ok=True)
-        raise RuntimeError(f'Official {target} Bedrock display-compatible archive SHA-256 mismatch')
-    executable = 'bedrock_server.exe' if target == 'win' else 'bedrock_server'
-    with zipfile.ZipFile(archive) as package:
-        if package.testzip() is not None or executable not in package.namelist():
-            raise RuntimeError(f'Official {target} Bedrock archive is missing its server executable')
-    return archive
+    system = {'Darwin': 'mac', 'Linux': 'linux', 'Windows': 'win'}[platform.system()]
+    return craftmaster_bedrock_module(builds, 'CinterForgeLifecycleBedrock').prepare_official_bedrock_archive(
+        builds, target, system=system, app='CinterForgeTerminal')
 
 
 def provision_guest_runtime(destination: Path, docker: str, docker_env: dict[str, str]) -> None:

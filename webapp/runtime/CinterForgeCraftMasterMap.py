@@ -266,12 +266,16 @@ def run_map_conversion(server, name: str, *, enqueue: bool = True, update_served
                 # A map-only web request updates the portable Java-derived assets.
                 # It must never stop or replace the live Bedrock server's save.
                 with server.bedrock_terminal_lock:
+                    from runtime.CinterForgeJava import require_stopped_source
+                    require_stopped_source(server, world)
                     manager.run_native_craftmaster(world, progress=progress)
                 mark_finished(server, request['id'])
                 return
             # The same operation lock guards missing-world import and startup.
             # An explicit update never overlaps a live server for that world.
             with server.bedrock_terminal_lock:
+                from runtime.CinterForgeJava import require_stopped_source
+                require_stopped_source(server, world)
                 export_name = manager.java_world_export_name(world)
                 selected = manager._world_settings().get('selected') or {}
                 selected_names = {str(selected.get(key, '')).casefold()

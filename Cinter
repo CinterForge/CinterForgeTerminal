@@ -34,7 +34,7 @@ PUBLIC INTERFACES
     status / toolchain / install         — read-only diagnostics or SDK install
 
 BUILD SAFETY
-    Setup prepares pinned dependencies and runs real Bedrock acceptance.
+    Setup prepares pinned dependencies; Test owns real Bedrock acceptance.
     Build produces three unpacked apps and the 68K disk; DevTools is independent.
     Stage installs and checks unpacked Build outputs; ``all all`` never publishes unless
     the user explicitly requests ``all all publish``.
@@ -725,7 +725,7 @@ def main(argv: list[str]) -> int:
         else:
             if action == 'test':
                 # Only Test exercises staged real Bedrock, Linux/Windows guests,
-                # native MSI compiler and root smoke suite. No provisioning.
+                # verified MSI compiler evidence and root smoke suite. No provisioning.
                 # Diagnose an old Setup snapshot before the expensive native suite.
                 from host.lifecycle.craftmaster_dependency import read_native_test_fixture_receipt
                 read_native_test_fixture_receipt(BUILDS / 'Acceptance/CinterForgeTerminal/TestGrounds/fixture.json')
@@ -972,8 +972,8 @@ def main(argv: list[str]) -> int:
         from host.lifecycle.test import verify_staged_asset_modules, verify_staged_zeroconf_library
         verify_staged_asset_modules(app, target, record['release'])
         verify_staged_zeroconf_library(app, target, record['release'])
-        from host.lifecycle.test import run_staged_java_smoke
-        run_staged_java_smoke(BUILDS, app, target, record['release'])
+        from host.lifecycle.test import verify_staged_java_runtime
+        verify_staged_java_runtime(BUILDS, app, target, record['release'])
         if target == 'win':
             from host.windows.msi_installer import _check_tools, test as test_msi
             try:
@@ -988,11 +988,12 @@ def main(argv: list[str]) -> int:
                     test_msi(BUILDS)
                 _check_tools(BUILDS)
         print(f'[Cinter test] PASS {target}: staged executable, Build receipt and tools verified; '
-              'native GUI/install acceptance is separate', flush=True)
+              'native GUI/install/Java hosting acceptance is separate', flush=True)
         return 0
     if argv == ['test', 'all']:
-        # Test all available deliverables without launching an application.
-        # This is not native Windows/Linux GUI certification.
+        # Native Mac UI/hosting and shared guest sessions run once. Foreign
+        # staged artifacts are verified separately, without repeating hosting.
+        # This is not native Windows/Linux GUI or hosting certification.
         if platform.system() != 'Darwin':
             raise RuntimeError('The four-artifact automated Test orchestrator requires macOS')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'test', 'mac')
@@ -1015,8 +1016,8 @@ def main(argv: list[str]) -> int:
         if not all(item['build_present'] and item['steam_app_root_present']
                    for item in result['targets'].values()):
             raise RuntimeError('Automated Test found missing unpacked native builds or staged apps')
-        print('[Cinter test] PASS three unpacked native Build/Stage receipts plus 68K and Mac '
-              'signature/resources (interactive native GUI acceptance deferred)', flush=True)
+        print('[Cinter test] PASS Mac native UI/hosting, shared guest sessions, three verified '
+              'native Build/Stage receipts and 68K disk; Windows/Linux native GUI/hosting separate', flush=True)
         return 0
     raise ValueError('Usage: ./Cinter host <legacy-host-action> [options]\n'
                      '       ./Cinter all devtools [publish <channel>] # independent SDK product\n'

@@ -363,7 +363,9 @@ def _terminal_resource_members() -> tuple[str, ...]:
     # Resource packs are authored in CraftMaster and embedded from its Stage.
     # Its installation policy is owned by CraftMaster; verify the complete pack
     # inventory here without importing an application runtime at build time.
-    return ('bedrock_status_bridge/manifest.json', 'bedrock_status_bridge/scripts/main.js',
+    return ('runtime/CinterForgeBedrockAccess.py', 'runtime/CinterForgeBedrockProperties.py',
+            'views/BedrockReport.html', 'client/minecraft/CinterForgeBedrockReport.js',
+            'bedrock_status_bridge/manifest.json', 'bedrock_status_bridge/scripts/main.js',
             'bedrock_testgrounds/manifest.json', 'bedrock_testgrounds/scripts/main.js',
             'bedrock_terminal_resources/manifest.json',
             'bedrock_terminal_resources/textures/item_texture.json',
@@ -405,7 +407,8 @@ def _authored_webapp_assets(repo: Path) -> tuple[str, ...]:
         if not item.is_file():
             raise RuntimeError('Unsupported authored webapp resource: ' + str(item))
         members.append(relative.as_posix())
-    for required in ('index.html', 'CinterForgeTerminal.py', *_terminal_resource_members()):
+    for required in ('index.html', 'CinterForgeTerminal.py', 'runtime/CinterForgeBedrock.py',
+                     'client/minecraft/CinterForgeBedrock.js', 'client/minecraft/CinterForgeJavaReport.js'):
         if required not in members:
             raise FileNotFoundError('Authored webapp resource missing: ' + required)
     return tuple(members)
@@ -580,6 +583,11 @@ def _verify_mac_if_runtime(app: Path) -> None:
         member = shell / 'runtime' / name
         if not source.is_file() or not member.is_file() or source.read_bytes() != member.read_bytes():
             raise RuntimeError('Mac ZIP refused: stale CraftMaster runtime: ' + name)
+    for relative in ('views/BedrockReport.html', 'client/minecraft/CinterForgeBedrockReport.js'):
+        source = embedded / 'CinterForgeCraftMaster/mac/data/BedrockReport' / relative
+        member = shell / relative
+        if not source.is_file() or not member.is_file() or source.read_bytes() != member.read_bytes():
+            raise RuntimeError('Mac ZIP refused: stale CraftMaster report: ' + relative)
     for pack in ('bedrock_status_bridge', 'bedrock_terminal_resources', 'bedrock_testgrounds'):
         owner = embedded / 'CinterForgeCraftMaster/mac/data' / pack
         if not (owner / 'manifest.json').is_file():

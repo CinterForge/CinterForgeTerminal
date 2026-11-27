@@ -161,14 +161,14 @@
       return;
     }
     const frame = document.createElement('iframe');
-    frame.title = request.kind === 'bedrock-report' ? 'Bedrock and CraftMaster world report' : request.kind === 'packs' ? 'CinterForge Minecraft Packs' : request.kind === 'report' ? 'CinterForge Assets library report' : request.kind === 'blockify' ? 'CinterForge original Blockify authoring' : 'CinterForge asset ' + identity;
+    frame.title = request.kind === 'bedrock-report' ? 'CraftMaster Java and Bedrock worlds report' : request.kind === 'packs' ? 'CinterForge Minecraft Packs' : request.kind === 'report' ? 'CinterForge Assets library report' : request.kind === 'blockify' ? 'CinterForge original Blockify authoring' : 'CinterForge asset ' + identity;
     frame.referrerPolicy = 'no-referrer';
     frame.hidden = true;
     state.computerView.append(frame);
     const buffer = state.makeBuffer();
     const tab = {
       key: ++state.tabSerial,
-      label: request.kind === 'bedrock-report' ? 'Bedrock · Worlds' : request.kind === 'packs' ? 'Bedrock · Packs' : request.kind === 'report' ? 'Assets · Report' : request.kind === 'blockify' ? 'Assets · Blockify' : 'Asset · ' + (request.name || identity),
+      label: request.kind === 'bedrock-report' ? 'CraftMaster · Worlds' : request.kind === 'packs' ? 'Bedrock · Packs' : request.kind === 'report' ? 'Assets · Report' : request.kind === 'blockify' ? 'Assets · Blockify' : 'Asset · ' + (request.name || identity),
       kind: 'asset-view', assetKey: identity, mapFrame: frame, profileId: 'modern',
       session: null, closed: false, display: new state.VTOutput(buffer), buffer
     };

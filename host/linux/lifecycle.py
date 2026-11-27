@@ -144,7 +144,7 @@ def prepare_guest() -> Path:
     # This does not touch the guest kernel or the player's worlds.
     if platform.system() == 'Darwin':
         import json
-        from host.linux.craftmaster.craftmaster_mac_bootstrap import LAN_RELAY_C
+        from host.linux.bedrock_launcher import LAN_RELAY_C
         receipt = output / 'relay-source-sha256.json'
         relay_binary = output / 'CinterBDSNetRelay'
         source_digest = hashlib.sha256(LAN_RELAY_C.encode('utf-8')).hexdigest()
@@ -183,7 +183,7 @@ def prepare_guest() -> Path:
         docker, env = managed_setup_docker()
         provision_guest_runtime(output / 'GuestRuntime', docker, env)
     # Assemble the existing NAT VM launcher with its owned host LAN relay.
-    from host.linux.craftmaster.craftmaster_mac_bootstrap import RUN_SH
+    from host.linux.bedrock_launcher import RUN_SH
     original = RUN_SH
     runner = original.replace(
         '[ -d "$HERE/glibc-x86_64" ]',
@@ -233,7 +233,7 @@ def verify_guest() -> Path:
             if not file.is_file() or file.is_symlink():
                 raise RuntimeError(f'Setup-produced Bedrock guest dependency missing: {file}')
             _require_elf(file, machine)
-        from host.linux.craftmaster.craftmaster_mac_bootstrap import LAN_RELAY_C
+        from host.linux.bedrock_launcher import LAN_RELAY_C
         runner = output / 'run-mac-bds.sh'
         relay = output / 'CinterBDSNetRelay'
         receipt = output / 'relay-source-sha256.json'

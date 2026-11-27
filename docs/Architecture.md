@@ -33,6 +33,12 @@ flowchart TB
     Host --> Code
 ```
 
+## Minecraft ownership
+
+- **CraftMaster** owns conversion, world management and portable report resources, server acquisition, Java hosting and the standalone Minecraft service.
+- **CinterForgeServer** owns shared hosted runtime and portable execution environments.
+- **Terminal** owns desktop commands, native console sessions, UI integration and the existing platform launch infrastructure. It packages the verified CraftMaster Stage rather than maintaining another copy of the report or lifecycle controller. Its desktop report uses the same world cards and per-world pack data, with independent Java and Bedrock console controls. Conversion refuses a source currently being served by its own Java console. The separate standalone CraftMaster service is not started merely to open the desktop report.
+
 ## Terminal Session backends and typed games
 
 | Mode | Entry point | Responsibility |

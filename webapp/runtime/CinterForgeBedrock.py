@@ -237,6 +237,7 @@ class CinterForgeBedrockManager:
         self._lock = threading.RLock()
         self._craftmaster_process: subprocess.Popen | None = None
         self._craftmaster_conversion_lock = threading.Lock()
+        self.java_source_guard = None
         self._package_install_lock = threading.RLock()
         # Server access rules belong to this installation, not any selected
         # level. All world launches reuse this one policy and Run directory.
@@ -1213,6 +1214,8 @@ class CinterForgeBedrockManager:
         ]
         report = progress or self._append_log
         with self._craftmaster_conversion_lock:
+            if self.java_source_guard is not None:
+                self.java_source_guard(world)
             source_before, _ = self._java_source_files(source)
             report(f'{export_name}: starting native CraftMaster conversion')
             process = subprocess.Popen(

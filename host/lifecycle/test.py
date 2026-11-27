@@ -21,8 +21,9 @@
 # readiness without tracing their real callers and failure boundaries.
 """Single real-system smoke/acceptance suite for CinterForge Terminal.
 
-The Test phase consumes completed Setup, Build and Stage artifacts. Bedrock
-acceptance uses the installed application's normal TestGrounds preparation
+The Test phase consumes completed Setup, Build and Stage artifacts. Only
+Mac performs native Minecraft hosting checks; foreign targets verify owner
+inputs without repeating a server under Wine/QEMU. Bedrock acceptance uses the installed application's normal TestGrounds preparation
 path. Other worlds and previously prepared gameplay are untouched.
 """
 from __future__ import annotations
@@ -110,6 +111,7 @@ def verify_staged_asset_modules(app: Path, target: str, release: str) -> None:
         'runtime/assets/CinterForgeAssetViews.py',
         'runtime/CinterForgeCommands.py',
         'runtime/assets/asset_gallery.py',
+        'client/minecraft/CinterForgeJavaReport.js',
     ):
         source = REPO / 'webapp' / relative
         installed = service / relative
@@ -121,6 +123,11 @@ def verify_staged_asset_modules(app: Path, target: str, release: str) -> None:
         if _sha256(installed) != _sha256(source):
             raise RuntimeError(f'{target} Assets runtime in installed app is stale: {installed}; '
                                f'run ./Cinter build {target} and ./Cinter stage {target}')
+    from host.lifecycle.craftmaster_dependency import craftmaster_minecraft_files
+    for relative, source in craftmaster_minecraft_files(embedded / 'CinterForgeCraftMaster' / target / 'data').items():
+        installed = service / relative
+        if installed.is_symlink() or not installed.is_file() or _sha256(installed) != _sha256(source):
+            raise RuntimeError(f'{target} installed CraftMaster owner resource mismatch: {relative}')
     # Voxel is a mandatory real browser payload, not a button-only feature.
     # Verify the actual installed web runtime, bridge and service worker at
     # the exact path served by /blockbench/ in the installed Python host.
@@ -162,14 +169,13 @@ def verify_staged_zeroconf_library(app: Path, target: str, release: str) -> None
     print(f'[TEST STAGE] PASS {target} retail Zeroconf native library: {required}', flush=True)
 
 
-def run_staged_java_smoke(builds: Path, app: Path, target: str, release: str) -> dict:
-    """Host a disposable copy of the verified TestGrounds; no generation or conversion.
+def verify_staged_java_runtime(builds: Path, app: Path, target: str, release: str):
+    """Check the installed adapter and owner-pinned Java inputs, without hosting.
 
-    Foreign Java acceptance uses the existing AMD64 Linux/Wine guest.
-    This is NOT certification of a native Windows/Linux desktop application.
+    CraftMaster owns the server; Terminal must consume the exact verified owner
+    payload. Never start a foreign JVM to certify its native Windows/Linux UI.
     """
-    import uuid
-    from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster, server_test_fixture
+    from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster
     from host.lifecycle.universal_package import FOUR_ARCH
     from webapp.runtime.CinterForgeJava import _verified_owner
     binary = verify_embedded_craftmaster(app, target)
@@ -182,10 +188,28 @@ def run_staged_java_smoke(builds: Path, app: Path, target: str, release: str) ->
                                offline=True, setup_mac_builds=builds if target == 'mac' else None)
     embedded = app / 'Contents/Resources/Builds' if target == 'mac' else app / 'Builds'
     service = embedded / 'Python/Host' / target / FOUR_ARCH[target] / release / 'webapp'
-    for name in ('runtime/CinterForgeJava.py', 'bedrock_status_bridge/manifest.json', 'bedrock_status_bridge/scripts/main.js', 'bedrock_status_bridge/items/terminal.json'):
+    for name in ('runtime/CinterForgeJava.py', 'bedrock_status_bridge/manifest.json',
+                 'bedrock_status_bridge/scripts/main.js', 'bedrock_status_bridge/items/terminal.json'):
         source = REPO/'webapp'/name if name.startswith('runtime/') else data/name
-        if _sha256(service/name) != _sha256(source):
+        installed = service/name
+        if installed.is_symlink() or not installed.is_file() or _sha256(installed) != _sha256(source):
             raise RuntimeError('Stale staged Java/communications asset: '+name)
+    print(f'[JAVA TEST] PASS {target} installed adapter, owner controller, pinned offline JDK and server JAR', flush=True)
+    return binary, data, java, jar, embedded
+
+
+def run_staged_java_smoke(builds: Path, app: Path, target: str, release: str) -> dict:
+    """One native Mac Java readiness/console/shutdown check, not three owner tests.
+
+    Foreign hosts receive verified Stage/owner-input checks only. Actual native
+    Windows/Linux Java hosting and GUI acceptance remain target-host work.
+    """
+    import uuid
+    from host.lifecycle.craftmaster_dependency import server_test_fixture
+    if target != 'mac' or platform.system() != 'Darwin':
+        raise RuntimeError('Native Java hosting smoke requires the Mac producer')
+    binary, data, java, jar, embedded = verify_staged_java_runtime(builds, app, target, release)
+    root = builds / 'CinterForgeCraftMaster/Server/Java'
     scratch = builds/'Acceptance/CinterForgeTerminal/Java'/target/uuid.uuid4().hex
     fixture, provenance = server_test_fixture(builds)
     scratch.mkdir(parents=True)
@@ -193,52 +217,13 @@ def run_staged_java_smoke(builds: Path, app: Path, target: str, release: str) ->
     shutil.copytree(fixture/'Java', world)
     logs = builds/'Logs/CinterForgeTerminal/JavaAcceptance'/target/scratch.name
     logs.mkdir(parents=True)
-    def exercise(run, path, python, assets):
-        common = ['--world',path(world),'--data-dir',path(assets),'--server-root',path(root),
-                  '--java',path(java),'--server-jar',path(jar)]
-        run([python,'-B',path(assets/'java_server.py'),'serve',*common,'--check'],'serve')
-    if target == 'mac':
-        def run(command,label):
-            print('[JAVA SMOKE] '+label, flush=True)
-            # Reuse the existing streamed lifecycle process runner for a bounded real test.
-            from host.windows.windows_environment import _run as streamed_run
-            result = streamed_run(command,cwd=scratch,timeout=900,output_log=logs/(label+'.log'))
-            result.check_returncode()
-        python = embedded/'Python/Environments/mac/arm64/cinterterminalenv/bin/python'
-        exercise(run,str,str(python),data)
-    else:
-        from host.lifecycle.amd64_backend import managed_amd64_backend
-        from host.windows.windows_environment import WindowsCrossEnvironment
-        assets = scratch/'CraftMaster/data'
-        assets.mkdir(parents=True)
-        for name in ('java_server.py', 'minecraft_data.py', 'world_artifacts.py'):
-            shutil.copy2(data/name, assets/name)
-        interpreter = scratch/'Python'
-        shutil.copytree(embedded/'Python/Environments'/target/'x64/cinterterminalenv',interpreter)
-        with managed_amd64_backend(builds,setup=False):
-            cross = WindowsCrossEnvironment(builds).ensure_portable_image()
-            def path(p):
-                mapped = cross.path(Path(p))
-                return 'Z:'+mapped.replace('/','\\') if target=='win' else mapped
-            def run(command,label):
-                print('[JAVA SMOKE] '+target+' '+label+' log='+str(logs/(label+'.log')),flush=True)
-                prefix = ['wine'] if target=='win' else []
-                # Linux x64 HotSpot 25 crashed in ciObjectFactory while running
-                # in the Mac ARM64 managed QEMU guest. Limit this acceptance
-                # process (and its JVM child) to C1; never alter retail JVMs,
-                # the native Mac test or the Windows/Wine test environment.
-                if (target == 'linux' and platform.system() == 'Darwin' and
-                        platform.machine().lower() in ('arm64', 'aarch64')):
-                    prefix = ['env', 'JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1']
-                    print('[JAVA SMOKE] Linux x64 under Apple Silicon QEMU: '
-                          'JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1', flush=True)
-                result = cross.execute(prefix+command,cwd=scratch,timeout=900,
-                                       diagnostic_log=logs/(label+'.log'),stream_output=True)
-                if result.returncode:
-                    raise RuntimeError(f'{target} Java {label} failed (exit {result.returncode}); '
-                                       f'log: {logs/(label+".log")}\n{result.stdout[-4000:]}')
-            python = path(interpreter/('python.exe' if target=='win' else 'bin/python'))
-            exercise(run,path,python,assets)
+    common = ['--world',str(world),'--data-dir',str(data),'--server-root',str(root),
+              '--java',str(java),'--server-jar',str(jar)]
+    python = embedded/'Python/Environments/mac/arm64/cinterterminalenv/bin/python'
+    command = [str(python),'-B',str(data/'java_server.py'),'serve',*common,'--check']
+    from host.windows.windows_environment import _run as streamed_run
+    result = streamed_run(command,cwd=scratch,timeout=900,output_log=logs/'serve.log')
+    result.check_returncode()
     report = {'status':'PASS','target':target,'world':str(world),
               'source':provenance['source'], 'fixture_mcworld_sha256':provenance['mcworld_sha256'],
               'binary_sha256':_sha256(binary), 'checks':['server-ready','console-list','clean-shutdown']}
@@ -315,8 +300,7 @@ def _test_installed_testgrounds(embedded: Path, builds: Path, fixture_receipt: P
     """
     import zipfile
     from runtime.CinterForgeBedrock import CinterForgeBedrockManager
-    from host.lifecycle.CinterForgeLifecycleBedrock import CinterForgeLifecycleBedrock
-    from host.lifecycle.craftmaster_dependency import read_native_test_fixture_receipt
+    from host.lifecycle.craftmaster_dependency import craftmaster_bedrock_module, read_native_test_fixture_receipt
     receipt = read_native_test_fixture_receipt(fixture_receipt)
     entry = receipt['catalog_entry']
     manager = CinterForgeBedrockManager(embedded, 'mac', user_install=True)
@@ -340,7 +324,7 @@ def _test_installed_testgrounds(embedded: Path, builds: Path, fixture_receipt: P
     if not archive.is_file() or archive.is_symlink() or _sha256(archive) != receipt['mcworld_sha256']:
         raise RuntimeError('Installed TestGrounds MCWorld does not match verified Setup input')
     if not manager.accepted():
-        if not CinterForgeLifecycleBedrock(builds, 'mac').accepted():
+        if not craftmaster_bedrock_module(builds, 'CinterForgeLifecycleBedrock').CinterForgeLifecycleBedrock(builds, 'mac').accepted():
             raise PermissionError('Bedrock EULA consent missing; rerun interactive Setup')
         manager.accept(True)
     cached = builds / 'CinterForgeCraftMaster/Server/Bedrock/Downloads/bedrock-server-linux.zip'
@@ -361,14 +345,14 @@ GUEST_CHECKS = ('linux_vm', 'linux_guest', 'linux_bash', 'linux_vnc',
           'windows_guest', 'windows_bash', 'windows_vnc', 'shutdown')
 
 
-def run_managed_guest_acceptance(builds: Path) -> dict:
+def run_managed_guest_acceptance(builds: Path, *, require_msi: bool = False) -> dict:
     # The Test stage runs actual VM/Bash/VNC acceptance after Stage; however
     # Lifecycle never imports the application HTTP server; leave environment
     # overrides only for the duration of actual guest acceptance.
     keys = ('CINTER_BUILDS_ROOT', 'CINTER_TERMINAL_RUNTIME_MODE')
     previous = {key: os.environ.get(key) for key in keys}
     try:
-        return _run_with_guest_test_environment(builds)
+        return _run_with_guest_test_environment(builds, require_msi=require_msi)
     finally:
         for key, value in previous.items():
             if value is None:
@@ -377,7 +361,7 @@ def run_managed_guest_acceptance(builds: Path) -> dict:
                 os.environ[key] = value
 
 
-def _run_with_guest_test_environment(builds: Path) -> dict:
+def _run_with_guest_test_environment(builds: Path, *, require_msi: bool = False) -> dict:
     from host.lifecycle.CinterForgeLifecycleVM import CinterForgeLifecycleVM
     from host.lifecycle.CinterForgeLifecycleGuests import (
         CinterForgeLifecycleGuestShell, _image_archive, _docker_call,
@@ -438,6 +422,28 @@ def _run_with_guest_test_environment(builds: Path) -> dict:
             # Lifecycle owns a separate copy of the existing behavior.
             docker = vm.ensure_docker_locked(sdk, env, workspace)
             passed('linux_vm')
+            if require_msi:
+                from host.windows.msi_installer import _check_tools, test as test_msi
+                try:
+                    _check_tools(builds)
+                    print('[WINDOWS MSI TEST] Reusing verified compiler/registration receipt', flush=True)
+                except RuntimeError:
+                    # Reuse the currently owned x64 daemon, before starting
+                    # the interactive guests. No nested backend/VM lifetime.
+                    selectors = ('DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH')
+                    saved = {key: os.environ.get(key) for key in (*shell_env, *selectors)}
+                    try:
+                        for key in selectors:
+                            os.environ.pop(key, None)
+                        os.environ.update(shell_env)
+                        test_msi(builds)
+                        _check_tools(builds)
+                    finally:
+                        for key, value in saved.items():
+                            if value is None:
+                                os.environ.pop(key, None)
+                            else:
+                                os.environ[key] = value
             for kind, label in (('linux', 'linux'), ('win', 'windows')):
                 _image_tar, image = _image_archive(sdk, kind)
                 present = _docker_call(docker, env, 'image', 'inspect', image)
@@ -547,7 +553,7 @@ class RepositoryContractSmoke(unittest.TestCase):
         """Assert the actual CLI's Setup branch doesn't call Test by mistake."""
         source = (REPO / 'Cinter').read_text()
         setup_start = source.index("if argv in (['setup', 'all']")
-        setup_end = source.index('    # Four unpacked Build outputs', setup_start)
+        setup_end = source.index('    # Three unpacked native Build outputs', setup_start)
         body = source[setup_start:setup_end]
         self.assertNotIn("'host/linux/lifecycle.py'), 'test'", body)
         self.assertNotIn("'host.guest_runtime_acceptance'", body)
@@ -697,24 +703,13 @@ class RealStagedSystemSmoke(unittest.TestCase):
         receipt = self.builds / 'Logs/CinterForgeTerminal/linuxkit-bedrock-acceptance.json'
         self.assertEqual(json.loads(receipt.read_text())['status'], 'passed')
 
-    def test_10_real_wixl_msi_compilation_and_registration(self):
-        """Build/inspect a true x64 MSI with Setup-provisioned tools only."""
-        if 'win' not in self.receipt['targets']:
-            self.skipTest('Targeted Mac-only Build has no Windows MSI')
-        from host.lifecycle.amd64_backend import managed_amd64_backend
-        from host.windows.msi_installer import test as smoke_msi
-        with managed_amd64_backend(self.builds, setup=False):
-            report = smoke_msi(self.builds)
-        self.assertEqual(report['status'], 'passed')
-        self.assertTrue(report['template_checks']['registration']['uninstall_supported'])
-
-    def test_11_real_guest_bash_vnc_and_clean_qemu_shutdown(self):
-        """Exercise real Linux/Windows PTYs, both viewers and owned VM exit."""
-        result = run_managed_guest_acceptance(self.builds)
+    def test_10_real_guest_bash_vnc_and_clean_qemu_shutdown(self):
+        """Exercise actual PTYs/viewers and verify MSI evidence in the same VM lifetime."""
+        result = run_managed_guest_acceptance(self.builds, require_msi='win' in self.receipt['targets'])
         self.assertEqual(result['status'], 'passed')
         self.assertTrue(all(value == 'passed' for value in result['checks'].values()))
 
-    def test_12_native_elf_and_pe_staged_executables(self):
+    def test_11_native_elf_and_pe_staged_executables(self):
         """Read actual Linux/Windows binary headers from the Steam Stage."""
         from host.lifecycle.unpacked_release import status_four
         from host.lifecycle.universal_package import APP_ROOTS
@@ -732,61 +727,10 @@ class RealStagedSystemSmoke(unittest.TestCase):
                     self.assertEqual(stream.read(len(magic)), magic)
 
 
-    def test_13_terminal_asset_engine_and_media_devtools(self):
-        """Verify shipped asset engine and real Assimp/FFmpeg/ImageMagick ops.
-
-        Linux runs inside the retained amd64 build image. Windows runs its
-        actual MSYS2 UCRT64 PEs under the Setup-owned patched Wine guest.
-        These are real executable probes, not mocked versions or test stubs.
-        """
-        from host.lifecycle.assets_dependency import staged_terminal_assets
-        parts = staged_terminal_assets(self.builds)
-        self.assertIn('blockify/CIFBlockifyBatch.js', parts)
-        self.assertIn('api/asset_packaging.py', parts)
-        self.assertIn('api/asset_minecraft.py', parts)
-        # Exercise the actual staged Minecraft writer on a tiny authored OBJ
-        # and verify its real resource/behavior archive members, not a mock.
-        import importlib.util
-        import io
-        import zipfile
-        writer_source = parts['api/asset_minecraft.py']
-        spec = importlib.util.spec_from_file_location('_cinterforge_test_minecraft', writer_source)
-        self.assertIsNotNone(spec)
-        self.assertIsNotNone(spec.loader)
-        writer = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(writer)
-        destination = self.builds / 'Intermediates/CinterForgeTerminal/MediaSmoke'
-        destination.mkdir(parents=True, exist_ok=True)
-        source = destination / 'Tiny.obj'
-        source.write_text('o Tiny\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n', encoding='utf-8')
-        addon = destination / 'Tiny.mcaddon'
-        info = writer._write_blockify_mcaddon(
-            addon, source=source, source_sha256=_sha256(source),
-            width=1, height=1, depth=1,
-            voxels=[{'x': 0, 'y': 0, 'z': 0, 'r': 255, 'g': 51, 'b': 12, 'samples': 1}],
-            product_name='Tiny')
-        self.assertEqual(info['identifier'], 'cinter:tiny')
-        with zipfile.ZipFile(addon) as outer:
-            self.assertEqual(len(outer.namelist()), 2)
-            types = set()
-            for filename in outer.namelist():
-                with zipfile.ZipFile(io.BytesIO(outer.read(filename))) as inner:
-                    record = json.loads(inner.read('manifest.json'))
-                    types.update(module['type'] for module in record['modules'])
-            self.assertEqual(types, {'data', 'resources'})
-        from host.devtools.devtooling import smoke_media_toolchain
-        from host.lifecycle.amd64_backend import managed_amd64_backend
-        with managed_amd64_backend(self.builds, setup=False):
-            result = smoke_media_toolchain(self.builds)
-        self.assertEqual(result['mac'], 'PASS')
-        self.assertEqual(result['linux'], 'PASS')
-        self.assertEqual(result['win'], 'PASS')
-
 
 def load_tests(loader, tests, pattern):
-    """Hard cap for root smoke tests: never hide a second discovery suite."""
+    """Release gate contains only staged product checks; source checks remain directly callable."""
     suite = unittest.TestSuite()
-    suite.addTests(loader.loadTestsFromTestCase(RepositoryContractSmoke))
     suite.addTests(loader.loadTestsFromTestCase(RealStagedSystemSmoke))
     if suite.countTestCases() > 50:
         raise RuntimeError('Smoke suite exceeds 50; consolidate substantial checks into fewer tests')

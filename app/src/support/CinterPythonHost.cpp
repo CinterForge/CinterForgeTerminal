@@ -186,6 +186,20 @@ namespace cinterforge
             close(toChild[1]);
             throw std::runtime_error("pipe stdout failed");
         }
+        // The startup splash initializes the OS GUI before this worker starts.
+        // Prepare every allocation before fork: the child of a multithreaded
+        // GUI process must only perform async-signal-safe work until execv.
+        std::vector<std::string> values{interpreter, "-X", "faulthandler", "-B", "-u", script};
+        values.insert(values.end(), arguments.begin(), arguments.end());
+        std::vector<char *> argv;
+        for (auto &value : values)
+            argv.push_back(value.data());
+        argv.push_back(nullptr);
+#ifdef __APPLE__
+        const char *workerLog = std::getenv("CINTER_PYTHON_WORKER_STDERR_LOG");
+#endif
+        const char *program = interpreter.c_str();
+        char **childArgv = argv.data();
         const pid_t child = fork();
         if (child < 0)
         {
@@ -203,9 +217,9 @@ namespace cinterforge
             // The native std::cerr tee does not redirect OS fd 2 inherited by
             // fork/exec. Preserve Python fatal signals/tracebacks in the same
             // developer-or-Steam Logs tree chosen by the native owner.
-            if (const char *log = std::getenv("CINTER_PYTHON_WORKER_STDERR_LOG")) {
-                if (*log) {
-                    const int fd = open(log, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0600);
+            if (workerLog) {
+                if (*workerLog) {
+                    const int fd = open(workerLog, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0600);
                     if (fd < 0)
                         _exit(126);
                     if (fd != STDERR_FILENO) {
@@ -220,13 +234,7 @@ namespace cinterforge
             close(toChild[1]);
             close(fromChild[0]);
             close(fromChild[1]);
-            std::vector<std::string> values{interpreter, "-X", "faulthandler", "-B", "-u", script};
-            values.insert(values.end(), arguments.begin(), arguments.end());
-            std::vector<char *> argv;
-            for (auto &value : values)
-                argv.push_back(value.data());
-            argv.push_back(nullptr);
-            execv(interpreter.c_str(), argv.data());
+            execv(program, childArgv);
             _exit(127);
         }
         close(toChild[0]);

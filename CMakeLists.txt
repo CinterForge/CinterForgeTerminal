@@ -114,6 +114,18 @@ if(CPH_BUILD_APPLICATION_SHELL)
     if(APPLE)
         target_link_libraries(CinterForgeApplicationShell PUBLIC "-framework Cocoa")
     endif()
+    # Embed the authored startup artwork in the existing native executable.
+    # No runtime file lookup, Python, browser, or new third-party dependency.
+    set(_cinter_splash "${CMAKE_CURRENT_SOURCE_DIR}/app/build/resources/splash.png")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_cinter_splash}")
+    file(READ "${_cinter_splash}" _cinter_splash_hex HEX)
+    string(REGEX REPLACE "(..)" "0x\\1,\n" _cinter_splash_bytes "${_cinter_splash_hex}")
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/CinterStartupSplashBytes.h"
+        CONTENT "#pragma once\nstatic constexpr unsigned char cinterStartupSplashBytes[] = {\n${_cinter_splash_bytes}};\n")
+    target_include_directories(CinterForgeApplicationShell PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+    if(WIN32)
+        target_link_libraries(CinterForgeApplicationShell PUBLIC gdiplus ole32 gdi32)
+    endif()
     target_include_directories(CinterForgeApplicationShell PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/app/include")
     target_compile_features(CinterForgeApplicationShell PUBLIC cxx_std_17)
     target_link_libraries(CinterForgeApplicationShell PUBLIC CinterForgePythonHost webview::core)

@@ -73,19 +73,12 @@ if [[ "$XCODE_ARCHIVE" == 0 ]]; then
   echo "[Xcode] Refreshing authored Code-OSS extension" >&2
   python3 -B -c 'from pathlib import Path; from host.codeoss.producer import _stage_cinterforge_extension; import sys; _stage_cinterforge_extension(Path(sys.argv[1]))' \
     "$BUILDS/InteractiveFiction/CodeOSS/Web"
-  # Reconcile foreign platform Build outputs against current authored sources.
-  # Their installed launchers run from Steam, not the Xcode Mac Host stage.
-  # This invokes only existing Build and copy-only Stage owners; provisioning,
-  # archive packaging, notarization and publishing are not permitted here.
-  echo "[Xcode] Rebuilding/repacking changed Linux and Windows app resources" >&2
-  python3 -B -m host.lifecycle.CinterForgeXcodeBuild --builds "$BUILDS"
   echo "[Xcode] Updating local app bundle resources" >&2
   mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
   /usr/bin/ditto "$SOURCE/Contents/Resources" "$DEST/Contents/Resources"
   /usr/bin/ditto "$HOST_STAGE" "$DEST/Contents/Resources/Builds/Python/Host/mac/arm64/$HOST_RELEASE"
   # The signed release app contains the last RELEASE Code-OSS snapshot. Debug
-  # must run the just-refreshed authored extension instead, for both the native
-  # Mac Code-OSS tab and the Linux/Windows staged launchers.
+  # must run the just-refreshed authored extension in the native Mac Code-OSS tab.
   /usr/bin/ditto "$BUILDS/InteractiveFiction/CodeOSS/Web" "$DEST/Contents/Resources/Builds/CodeOSS"
   if [[ "$REPO/app/build/resources/AppIcon.png" -nt "$DEST/Contents/Resources/AppIcon.icns" ]]; then
     echo "[Xcode] Refreshing authored Mac application icon" >&2
@@ -93,7 +86,7 @@ if [[ "$XCODE_ARCHIVE" == 0 ]]; then
       "$REPO/app/build/resources/AppIcon.png" "$DEST/Contents/Resources/AppIcon.icns" "$BUILDS"
   fi
   /usr/bin/ditto "$HOST_STAGE/bin/CinterForgeTerminal" "$DEST/Contents/MacOS/CinterForgeTerminal"
-  echo "[Xcode] Debug Build & Run refreshed macOS, Linux and Windows application sources; Builds=$BUILDS"
+  echo "[Xcode] Build & Run refreshed macOS application sources only; Builds=$BUILDS"
 else
   # Archive alone retains the existing signed Release Build producer.
   ./Cinter build mac

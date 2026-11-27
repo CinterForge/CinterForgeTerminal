@@ -304,8 +304,8 @@ def _smoke_linuxkit_bedrock(builds: Path, arch: str) -> dict:
 def _smoke_bedrock(builds: Path, stage: Path, system: str) -> dict:
     if system == 'mac':
         return _smoke_linuxkit_bedrock(builds, _native()[1])
-    from host.lifecycle.CinterForgeLifecycleBedrock import CinterForgeLifecycleBedrock
-    manager = CinterForgeLifecycleBedrock(builds, system)
+    from host.lifecycle.craftmaster_dependency import craftmaster_bedrock_module
+    manager = craftmaster_bedrock_module(builds, 'CinterForgeLifecycleBedrock').CinterForgeLifecycleBedrock(builds, system)
     if not manager.accepted():
         raise RuntimeError('Bedrock EULA not accepted in WebView; cannot download or smoke server during Setup')
     if not manager.installed():

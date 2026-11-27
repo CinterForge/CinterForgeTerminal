@@ -159,6 +159,8 @@ class CinterForgeHTTPServer(ThreadingHTTPServer):
         self.bedrock_error = ''
         try:
             self.bedrock = _CinterForgeSessions._load_bedrock_manager()(builds, self.system, user_install=True)
+            from runtime.CinterForgeJava import require_stopped_source
+            self.bedrock.java_source_guard = lambda world: require_stopped_source(self, world)
         except RuntimeError as exc:
             self.bedrock_error = str(exc)
             print('[CinterForgeTerminal] Bedrock unavailable: ' + self.bedrock_error,

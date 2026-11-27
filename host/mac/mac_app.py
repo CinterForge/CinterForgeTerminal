@@ -190,7 +190,6 @@ def _stage_complete_resources(builds: Path, app: Path) -> None:
     payload = app / 'Contents/Resources/Builds'
     host = builds / 'Python/Host/mac/arm64' / HOST_RELEASE
     sources = (
-        (host, payload / 'Python/Host/mac/arm64' / HOST_RELEASE),
         (builds / 'Python/Environments/mac/arm64/cinterterminalenv',
          payload / 'Python/Environments/mac/arm64/cinterterminalenv'),
         (builds / 'InteractiveFiction/CodeOSS/Web', payload / 'CodeOSS'),
@@ -217,6 +216,21 @@ def _stage_complete_resources(builds: Path, app: Path) -> None:
     catalog = json.loads((authored / 'data/mac_games.json').read_text(encoding='utf-8'))
     if catalog.get('schema') != 'cinterforge.terminal.macgames.v1' or len(catalog.get('games', [])) != 61:
         raise RuntimeError('Repository requires complete 61-game catalog')
+    # Ship only the current Host manifest, never unrelated caches or retired source.
+    from host.python.manager import _verify_host_stage, retire_removed_host_members
+    host_receipt = _verify_host_stage(host, system='mac', arch='arm64', release=HOST_RELEASE)
+    host_dest = payload / 'Python/Host/mac/arm64' / HOST_RELEASE
+    if host_dest.is_symlink():
+        raise RuntimeError('Unsafe embedded Host directory')
+    host_dest.mkdir(parents=True, exist_ok=True)
+    retire_removed_host_members(host_dest, host_receipt)
+    for relative in (*host_receipt['files'], 'manifest.json'):
+        dest = host_dest / relative
+        if any(p.is_symlink() for p in (dest, *dest.parents) if p.is_relative_to(host_dest)):
+            raise RuntimeError('Unsafe embedded Host member: ' + str(dest))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.is_file() or not filecmp.cmp(host / relative, dest, shallow=False):
+            shutil.copy2(host / relative, dest)
     for source, destination in sources:
         _copy_runtime_tree(source, destination)
     # CraftMaster is built/staged first by the Terminal Build orchestrator.

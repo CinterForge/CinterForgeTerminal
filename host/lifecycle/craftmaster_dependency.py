@@ -993,7 +993,8 @@ def staged_craftmaster(builds: Path, target: str, *, candidate: Path | None = No
                     'data/CinterForgeBedrockAccess.py', 'data/CinterForgeBedrockProperties.py', 'data/CinterForgeLifecycleBedrock.py',
                     'data/bedrock_status_bridge/manifest.json', 'data/bedrock_status_bridge/scripts/main.js',
                     'data/bedrock_terminal_resources/manifest.json', 'data/bedrock_testgrounds/manifest.json',
-                    'data/bedrock_testgrounds/scripts/main.js'} <= set(files):
+                    'data/bedrock_testgrounds/scripts/main.js', 'data/BedrockReport/views/BedrockReport.html',
+                    'data/BedrockReport/client/minecraft/CinterForgeBedrockReport.js'} <= set(files):
                 raise RuntimeError('Stage lacks restored Bedrock mappings or the Java publication installer; rebuild CraftMaster')
             expected = {'manifest.json', *files}
             # Re-evaluate the manifest and all file bytes, not merely a receipt
@@ -1136,7 +1137,11 @@ def craftmaster_minecraft_runtime(builds: Path, target: str) -> dict[str, Path]:
 
     This is distribution assembly, never a second authored implementation.
     """
-    data = staged_craftmaster(builds, target) / 'data'
+    return craftmaster_minecraft_files(staged_craftmaster(builds, target) / 'data')
+
+
+def craftmaster_minecraft_files(data: Path) -> dict[str, Path]:
+    """Exact owner-to-desktop assembly mapping for an already verified data tree."""
     import ast
     owner = ast.parse((data / 'CinterForgeBedrockAccess.py').read_bytes())
     exports = {node.name for node in owner.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
@@ -1150,6 +1155,12 @@ def craftmaster_minecraft_runtime(builds: Path, target: str) -> dict[str, Path]:
                            + '; rebuild the local owner or publish an updated CraftMaster package')
     files = {'runtime/' + name: data / name for name in (
         'CinterForgeBedrockAccess.py', 'CinterForgeBedrockProperties.py')}
+    # Use the actual owner report, not a second authored desktop copy.
+    for relative in ('views/BedrockReport.html', 'client/minecraft/CinterForgeBedrockReport.js'):
+        source = data / 'BedrockReport' / relative
+        if not source.is_file() or source.is_symlink():
+            raise RuntimeError('CraftMaster Stage missing report asset: ' + relative)
+        files[relative] = source
     for pack in ('bedrock_status_bridge', 'bedrock_terminal_resources', 'bedrock_testgrounds'):
         if not (data / pack / 'manifest.json').is_file():
             raise RuntimeError('CraftMaster Stage missing ' + pack)

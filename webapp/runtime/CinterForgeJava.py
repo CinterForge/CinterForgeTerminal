@@ -22,6 +22,37 @@ def _verified_owner(data: Path):
     return module
 
 
+def report_status(server):
+    """Lightweight desktop status; use the existing live PTY sessions and global world selection."""
+    from runtime import CinterForgeSessions as sessions
+    if server.bedrock is None:
+        return {'running': False, 'can_start': False}
+    with server.bedrock_terminal_lock:
+        selected = server.bedrock._world_settings().get('selected') or {}
+        with server.sessions_lock:
+            live = [s for s in server.sessions.values() if getattr(s, 'kind', None) == 'java'
+                    and sessions._terminal_process_exit_code(s.process) is None]
+        return {'running': bool(live), 'can_start': selected.get('edition') == 'java',
+                'action': getattr(live[0], 'java_action', None) if live else None}
+
+
+def report_action(server, body):
+    """Report uses the same selected world, Java console and stop path as Terminal."""
+    action = body.get('action')
+    if action not in ('start', 'stop'):
+        raise ValueError('Unknown Java report action')
+    if server.bedrock is None:
+        raise RuntimeError('Minecraft world infrastructure unavailable')
+    if action == 'stop':
+        return session_action(server, {'action': 'stop'})
+    # Resolve the global selected world by ID, never by an ambiguous display name.
+    with server.bedrock_terminal_lock:
+        selected = server.bedrock._world_settings().get('selected') or {}
+        if selected.get('edition') != 'java' or not selected.get('id'):
+            raise ValueError('Select a Java world first')
+        return session_action(server, {'action': 'serve', 'name': selected['id']})
+
+
 def session_action(server, body):
     """Authorized HTTP action; the existing session owner launches a native PTY."""
     from runtime import CinterForgeSessions as sessions
@@ -86,6 +117,19 @@ def session_action(server, body):
         with server.sessions_lock:
             if len(server.sessions)>=settings.MAX_SESSIONS: raise RuntimeError('Maximum terminal sessions reached')
             item=sessions.CinterForgeJavaTerminalSession(server.mutable_builds,server.system,80,24,url=server.origin,token=server.token,internal_token=server.cli_token,command=args,working_directory=settings.ASSETS,action=action)
+            item.java_world_path = str(world.resolve()) if world is not None else None
             server.sessions[item.id]=item
         server.bedrock_terminal_requests.append({'id':item.id,'label':'Java','kind':'java','shell':'Java','platform':server.system})
         return {'terminal_session':item.id,'message':'Opened Java '+action+' Session.'}
+
+
+def require_stopped_source(server, world):
+    """Never read a Java save while the desktop's Java server is writing it."""
+    from runtime import CinterForgeSessions as sessions
+    source = str(Path(world['path']).resolve())
+    with server.sessions_lock:
+        if any(getattr(item, 'kind', None) == 'java'
+               and getattr(item, 'java_world_path', None) == source
+               and sessions._terminal_process_exit_code(item.process) is None
+               for item in server.sessions.values()):
+            raise RuntimeError('Stop Java for this world before updating it for Bedrock.')

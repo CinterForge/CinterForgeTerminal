@@ -38,7 +38,8 @@ _NATIVE_EXECUTABLES = {
 
 def _native_inputs(repo: Path) -> list[Path]:
     """Inputs used by the Linux and Windows CMake application-shell targets."""
-    sources = [repo / 'CMakeLists.txt', repo / 'app/build/resources/AppIcon.png']
+    sources = [repo / 'CMakeLists.txt', repo / 'app/build/resources/AppIcon.png',
+               repo / 'app/build/resources/splash.png']
     for folder in ('app/src', 'app/include', 'app/build/terminal_bootstrap'):
         root = repo / folder
         sources.extend(p for p in root.rglob('*') if p.is_file() and p.suffix.lower() in _NATIVE_SUFFIXES)

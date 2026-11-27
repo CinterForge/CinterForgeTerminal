@@ -51,9 +51,9 @@ DevTools; the browser emulator only needs the published HFS image. See
 
 Browse **48 classic Macintosh emulator configurations** and **19 visual terminal styles** in the configured history collection. Discover the look and feel of systems such as **Apple II**, **VT100**, **IBM PC**, **BeOS**, **NeXTSTEP** and classic Macintosh models. Terminal styles recreate a visual experience; a bootable emulator uses its actual machine runtime and available media. They are not interchangeable.
 
-### Run a Minecraft Bedrock server—and control it live
+### Run Minecraft Java and Bedrock servers—and control them live
 
-Manage the official **Minecraft Bedrock Dedicated Server**, including world selection, start/stop and server status. The interactive Bedrock Session streams actual server output and accepts console commands. Run `minecraft` to attach an additional console to a server that is **already running**. On macOS, the managed LinuxKit/Rosetta environment hosts the server and the LAN relay exposes supported game traffic; other platforms use their supported runtime paths. The official server is obtained separately after license acceptance.
+Type `craftmaster` (or `craftmaster report`) to open the CraftMaster-owned illustrated world report, with a separate Java and Bedrock start/stop control using Terminal’s real console sessions. CraftMaster supplies conversion, report assets, world and pack data, and the Java and Bedrock hosting dependencies; Server owns the shared hosted runtime. Terminal retains its desktop UI and session integration. Manage the official **Minecraft Bedrock Dedicated Server**, including world selection, start/stop and server status. The interactive Bedrock Session streams actual server output and accepts console commands. Run `minecraft` to attach an additional console to a server that is **already running**. On macOS, the managed LinuxKit/Rosetta environment hosts the server and the LAN relay exposes supported game traffic; other platforms use their supported runtime paths. The official server is obtained separately after license acceptance.
 
 ### Open Code-OSS and work on local projects
 
@@ -109,7 +109,7 @@ On the supported macOS producer, with Xcode installed:
 ./Cinter all all
 ```
 
-This runs **Setup → Build → Stage → Test**. It does **not** publish. Setup owns preflight and dependency provisioning; Test owns automated regressions and the applicable native acceptance checks. Full logs and PASS/FAIL summaries are saved beneath sibling `Builds/Logs/CinterForgeTerminal/Lifecycle/` instead of disappearing from the console. Target-native Windows and Linux GUI acceptance require the actual target environments.
+This runs **Setup → Build → Stage → Test**. It does **not** publish. Setup owns preflight and dependency provisioning; Test owns concise staged-product acceptance: actual Mac UI and native Java/Bedrock hosting, one shared Linux/Windows Bash/VNC guest session check and clean shutdown, verified MSI compiler evidence, installed owner payloads and native launcher/68K disk integrity. Foreign Windows/Linux Java hosting is not repeated under Wine/QEMU; their native GUI and hosting acceptance is separate. Media toolchain execution belongs to the existing independent DevTools Test. Detailed source checks remain directly callable in `host/lifecycle/test.py`. Full logs and PASS/FAIL summaries are saved beneath sibling `Builds/Logs/CinterForgeTerminal/Lifecycle/` instead of disappearing from the console. Target-native Windows and Linux GUI acceptance require the actual target environments.
 
 ## Documentation
 

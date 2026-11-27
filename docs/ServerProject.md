@@ -494,3 +494,27 @@ input, existing screen/item IDs, pack policy, wall placement, mounting and
 networking remain unchanged. Sneak-click retains the existing repair path.
 Native client hit coordinates and provider rendering require in-game
 acceptance; local geometry and source checks do not substitute for it.
+
+## Drop 72 — complete Terminal source replacement, owner boundaries
+
+Scope: user requested a full Terminal repo, preserving the existing application and improving the CraftMaster report with Java controls. Based on the supplied Terminal source plus cumulative project drops, not a fresh comparison to remote main. Server and CraftMaster source are unchanged by this drop.
+
+- Removed the duplicate developer Bedrock lifecycle controller and obsolete standalone CraftMaster server builder/serve/validation tree from Terminal; retained the actual LinuxKit launch and LAN relay source. Delegate EULA and pinned archive acquisition/verification to CraftMaster. Preserve existing verified shared caches.
+- Removed the authored duplicate Bedrock report HTML and JS. Assemble the owner report, access/properties modules and existing packs from verified CraftMaster Stage on all native targets; keep Terminal desktop console and API adapters. Report exposes separate Java and Bedrock start/stop through the existing visible sessions. The desktop report is not the standalone management service; standalone-only controls are not asserted to have parity. Refuse conversion of a source served by Terminal’s own live Java session.
+- Fix portable Python Setup importing a raw, incomplete checkout. Setup checks Python itself; existing staged native Test still performs actual product acceptance. Correct authored vs assembled resource inventories, check owner bytes in staged Test, and retire only previously inventoried obsolete Host files, preserving unrelated files and sibling Builds.
+- No new public lifecycle commands, regression tests, cloud service, token or VM. Existing native acceptance tests retained.
+
+Verification performed in the Linux source workspace: six existing RepositoryContractSmoke checks passed; actual 28 owner resource files assembled beside 222 authored webapp assets with no path collision; both report scripts passed Node syntax checking; assembled real Terminal worker reached ready and returned ping/shutdown responses; managed retirement check preserved current and unrelated files. This is source/assembly evidence, not macOS, Windows, Linux native staged application, Minecraft client or beta publication acceptance. No HOPE-DEV execution, native signing, VM startup or CDN upload performed.
+
+Deployment: replace the old Terminal source tree rather than overlay, preserving Git metadata/local work separately and the existing sibling Builds directory. Use the already updated Server and CraftMaster sibling checkouts. Run `./Cinter all all publish beta` from Terminal.
+
+Retired authored paths:
+- `host/lifecycle/CinterForgeLifecycleBedrock.py`
+- `host/linux/craftmaster/__init__.py`
+- `host/linux/craftmaster/build_craftmaster_server.py`
+- `host/linux/craftmaster/craftmaster_mac_bootstrap.py`
+- `host/linux/craftmaster/craftmaster_serve.py`
+- `host/linux/craftmaster/validate_minecraft_server.py`
+- `host/linux/craftmaster/workspace_paths.py`
+- `webapp/client/minecraft/CinterForgeBedrockReport.js`
+- `webapp/views/BedrockReport.html`

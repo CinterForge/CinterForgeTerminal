@@ -79,6 +79,15 @@ CODE_HELP = '''code [open|status|help]
   code open <workspace>     Open the specified workspace in the CinterForge Code editor
 '''
 
+CRAFTMASTER_HELP = '''craftmaster [command|world]
+  craftmaster                   Open the Java and Bedrock worlds report
+  craftmaster report            Open the same report
+  craftmaster <world>           Convert a Java world and open its live map
+  craftmaster help              Show these commands
+  java help                     Java server commands
+  bedrock help                  Bedrock server commands
+'''
+
 BEDROCK_HELP = '''bedrock [command]
   bedrock report                Open the Java and Bedrock worlds report
   bedrock packs                 Open Minecraft behavior pack gallery
@@ -167,7 +176,7 @@ def _cfdev_config_present() -> bool:
 def _visible_help(capabilities: dict[str, bool], *, devtools_installed: bool,
                    cfdev_config: bool) -> str:
     """The single conditional main-help ordering, independent of game details."""
-    lines = [HELP, '', '  java                          Generate and host Java worlds. See java help', '  devtools                      Manage Developer Tools. See devtools help']
+    lines = [HELP, '', '  craftmaster                   Open the Java and Bedrock worlds report. See craftmaster help', '  java                          Generate and host Java worlds. See java help', '  devtools                      Manage Developer Tools. See devtools help']
     if cfdev_config:
         if capabilities.get('assets'):
             lines.append('  assets                        Manage the Assets library. See assets help')
@@ -673,16 +682,16 @@ def execute(args: list[str]) -> int:
         elif len(option) == 1 and option[0] in ('infinitemac', 'infinite-mac'):
             print('infinitemac — Open a searchable gallery of Macintosh, NeXTSTEP and BeOS emulators.')
             print('Select a thumbnail to open that machine in a new Session tab.')
-        elif len(option) == 1 and (option[0] in ('bedrock', 'java', 'devtools', 'setpass') or option[0] in ('debugger', 'code') and bool(_api('/api/status').get('devtools_installed'))
+        elif len(option) == 1 and (option[0] in ('craftmaster', 'bedrock', 'java', 'devtools', 'setpass') or option[0] in ('debugger', 'code') and bool(_api('/api/status').get('devtools_installed'))
                                    or option[0] == 'assets'
                                    or option[0] == 'discord' and capabilities.get('discord')):
-            print({'debugger': DEBUGGER_HELP, 'bedrock': BEDROCK_HELP, 'java': JAVA_HELP,
+            print({'debugger': DEBUGGER_HELP, 'bedrock': BEDROCK_HELP, 'java': JAVA_HELP, 'craftmaster': CRAFTMASTER_HELP,
                    'devtools': DEVTOOLS_HELP, 'code': CODE_HELP,
                    'assets': ASSETS_HELP,
                    'discord': DISCORD_HELP, 'setpass': SETPASS_HELP}[option[0]])
         else:
             permitted = [name for name in ('assets', 'discord') if capabilities.get(name)]
-            print('Usage: help [debugger|bedrock|java|devtools|code|setpass' +
+            print('Usage: help [debugger|craftmaster|bedrock|java|devtools|code|setpass' +
                   ''.join('|' + name for name in permitted) + ']', file=sys.stderr)
             return 2
         return 0
@@ -727,6 +736,13 @@ def execute(args: list[str]) -> int:
         print('Usage: devtools install <path/to/source> | update | uninstall | version | list | report | help', file=sys.stderr)
         return 2
     if args[0] == 'craftmaster':
+        if not args[1:] or args[1:] == ['report']:
+            _api('/api/bedrock/report/open', body={})
+            print('[CraftMaster] Opening Java and Bedrock Worlds report.', flush=True)
+            return 0
+        if args[1:] in (['help'], ['--help'], ['-h']):
+            print(CRAFTMASTER_HELP)
+            return 0
         # A world name opens the native incremental conversion and its live
         # Zoomify map in a separate tab. Retain the original CLI passthrough
         # for flags and subcommands such as worlds, players and convert.

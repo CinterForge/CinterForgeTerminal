@@ -286,7 +286,16 @@ class CinterForgeHTTPRoutes:
             if not self._code_authorized() or not page.is_file() or page.is_symlink():
                 self._json(403, {'error': 'Bedrock report unavailable'})
             else:
-                self._send(200, page.read_bytes(), 'text/html; charset=utf-8', same_origin_frame=True)
+                # The report is supplied by CraftMaster; only the desktop console adapter is ours.
+                body = page.read_bytes().replace(b'</body>', b'<script src="/client/minecraft/CinterForgeJavaReport.js" defer></script></body>', 1)
+                self._send(200, body, 'text/html; charset=utf-8', same_origin_frame=True)
+            return
+        if path == '/api/bedrock/report/java':
+            if not self._code_authorized():
+                self._json(403, {'error': 'Not authorized'})
+                return
+            from runtime.CinterForgeJava import report_status
+            self._json(200, report_status(self.server))
             return
         if path == '/api/bedrock/report':
             if not self._code_authorized() or self.server.bedrock is None:
@@ -1052,6 +1061,7 @@ class CinterForgeHTTPRoutes:
         browser_world_actions = ('/api/bedrock/world/select', '/api/bedrock/report/open',
                                  '/api/bedrock/run', '/api/bedrock/start', '/api/bedrock/stop',
                                  '/api/bedrock/eula', '/api/bedrock/pack/set', '/api/assets/packs/open',
+                                 '/api/bedrock/report/java',
                                  '/api/craftmaster/map/open', '/api/craftmaster/map/run',
                                  '/api/assets/packs/download')
         browser_asset_write = (route in (('/assets/command', '/api/assets/view',
@@ -1384,6 +1394,10 @@ class CinterForgeHTTPRoutes:
             if route == '/api/java':
                 from runtime.CinterForgeJava import session_action
                 self._json(200, session_action(self.server, body))
+                return
+            if route == '/api/bedrock/report/java':
+                from runtime.CinterForgeJava import report_action
+                self._json(200, report_action(self.server, body))
                 return
             if route == '/api/bedrock/report/open':
                 self._json(200, _CinterForgeCraftMasterMap.open_world_report(self.server))
