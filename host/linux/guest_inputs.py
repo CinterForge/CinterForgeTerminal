@@ -52,7 +52,9 @@ def _require_elf(path: Path, machine: int) -> None:
 def official_bedrock_archive(repo: Path, target: str = 'linux') -> Path:
     """Read-only lookup of the pinned, Setup-provisioned official ZIP."""
     from host.linux.craftmaster.build_craftmaster_server import sha
-    from webapp.runtime.CinterForgeBedrockDisplay import compatible_bds_entry
+    from host.lifecycle.craftmaster_dependency import craftmaster_bedrock_module
+    compatible_bds_entry = craftmaster_bedrock_module(
+        repo.resolve().parent / 'Builds', 'CinterForgeBedrockAccess').compatible_bds_entry
     if target not in ('linux', 'win'):
         raise ValueError('Unsupported Bedrock archive target: ' + target)
     entry = compatible_bds_entry(target)
@@ -70,7 +72,9 @@ def prepare_official_bedrock_archive(repo: Path, target: str = 'linux') -> Path:
     Callers must first obtain explicit EULA acceptance.
     """
     from host.linux.craftmaster.build_craftmaster_server import _download, sha
-    from webapp.runtime.CinterForgeBedrockDisplay import compatible_bds_entry
+    from host.lifecycle.craftmaster_dependency import craftmaster_bedrock_module
+    compatible_bds_entry = craftmaster_bedrock_module(
+        repo.resolve().parent / 'Builds', 'CinterForgeBedrockAccess').compatible_bds_entry
     if target not in ('linux', 'win'):
         raise ValueError('Unsupported Bedrock archive target: ' + target)
     entry = compatible_bds_entry(target)

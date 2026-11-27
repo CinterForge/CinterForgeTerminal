@@ -31,7 +31,7 @@ import tempfile
 from zipfile import BadZipFile, ZIP_STORED, ZipFile
 
 SCHEMA = 'cinterforge.terminal.scoped-distribution.v1'
-TARGETS = ('mac', 'linux', 'win', '68k')
+TARGETS = ('mac', 'linux', 'win', '68k', 'devtools')
 MSI_NAME = 'CinterForgeTerminal-win.msi'
 MSI_ZIP_NAME = 'CinterForgeTerminal-win-msi.zip'
 
@@ -221,6 +221,9 @@ def publish(builds: Path, *, target: str, channel: str = 'dryrun',
                               files={IMAGE_NAME: image},
                               document={'release': release, 'target': target,
                                         'artifacts': artifacts}, config=config)
+    if target == 'devtools':
+        from host.lifecycle.unpacked_release import require_devtools_test
+        require_devtools_test(builds)
     # Public Mac signing must fail before a 1GB Windows/SDK archive is built.
     if target == 'mac' and channel in ('beta', 'release'):
         identity = os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip()

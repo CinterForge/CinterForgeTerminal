@@ -318,6 +318,32 @@ def _download_verified(cache: Path, target: str, expected: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def archive_spec(builds: Path, system: str, arch: str) -> dict:
+    """Shared read-only specification for a pristine target interpreter archive."""
+    builds = builds.resolve()
+    if builds.name != 'Builds' or not builds.is_dir():
+        raise ValueError('Portable Python must be provisioned in existing sibling Builds')
+    try:
+        triplet, expected = PACKAGES[(system, arch)]
+    except KeyError as exc:
+        raise RuntimeError(f'Unsupported portable Python target: {system}/{arch}') from exc
+    filename = f'cpython-{VERSION}+{UPSTREAM}-{triplet}-install_only.tar.gz'
+    return {'path': builds / 'Intermediates/CinterForgeTerminal/PythonPackages' / filename,
+            'filename': filename, 'sha256': expected, 'python': VERSION,
+            'url': ROOT_URL + filename, 'platform': system, 'arch': arch}
+
+
+def acquire_archive(builds: Path, system: str, arch: str) -> Path:
+    """Setup-only: acquire verified CPython bytes without installing Terminal extras.
+
+    Server environment producers consume this prerequisite from macOS for all
+    targets. Acquisition alone does not certify a target interpreter or bundle.
+    """
+    spec = archive_spec(builds, system, arch)
+    _download_verified(spec['path'], spec['filename'], spec['sha256'])
+    return spec['path']
+
+
 def provision(builds: Path, system: str, arch: str, *, name: str = 'cinterterminalenv') -> Path:
     """Provision and execute the target-native runtime; never accept a foreign stub."""
     builds = builds.resolve()
@@ -345,9 +371,8 @@ def provision(builds: Path, system: str, arch: str, *, name: str = 'cintertermin
             from host.windows.windows_winpty import ensure as ensure_winpty
             ensure_winpty(builds, root)
         return root
-    filename = f'cpython-{VERSION}+{UPSTREAM}-{triplet}-install_only.tar.gz'
-    cache = builds / 'Intermediates/CinterForgeTerminal/PythonPackages' / filename
-    _download_verified(cache, filename, expected)
+    filename = archive_spec(builds, system, arch)['filename']
+    cache = acquire_archive(builds, system, arch)
     root.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='cinterterminalenv-', dir=root.parent) as scratch:
         candidate = Path(scratch) / name

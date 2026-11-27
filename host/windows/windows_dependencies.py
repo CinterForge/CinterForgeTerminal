@@ -261,7 +261,6 @@ def _mac_transfer_entries(builds: Path) -> dict[str, Path]:
         ('MacLimaRuntime', 'lima'),
         ('MacQEMU', 'qemu'),
         ('MacMicromamba', 'mamba'),
-        ('MacMicromambaCache', 'mamba-cache'),
         ('MacDownloads', 'downloads'),
         ('MacBootstrapManifest', 'bootstrap.json'),
         ('MacResolvedPackageManifest', 'mac-packages-explicit.txt'),
@@ -339,7 +338,7 @@ def ensure(builds: Path) -> dict:
         mac_entries = _mac_transfer_entries(builds) if platform.system() == 'Darwin' else {}
         # First create a real cross compiler + Wine runtime (all system libs in OCI layers).
         cross = WindowsCrossEnvironment(builds)
-        cross.ensure_portable_image()
+        cross.ensure_portable_image(acquire=True)
         # Confirm the actual image runs every cross-build tool, not just an
         # image inspect. Missing executables fail Windows Setup immediately.
         report['cross_tool_versions'] = cross.version_probes(Path(__file__).resolve().parents[2])

@@ -1,21 +1,23 @@
-"""CraftMaster Git source and native build integration for Terminal.
+"""Terminal dependency selection and verified CraftMaster Stage integration.
 
-Terminal Setup acquires Git source and provisions its toolchain. Terminal Build
-invokes the *standalone* CraftMaster Cinter lifecycle for mac/linux/win; the
-packager consumes its content-verified stages. No published binary fallback,
-no Build-time downloads, and no import of CraftMaster implementation sources.
+Only an existing developer sibling may be built. Otherwise Setup restores the
+owner's published native Stage into the same shared Builds layout. Build never
+clones, downloads or rebuilds an absent CraftMaster repository.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import urllib.request
+from zipfile import ZipFile
 
 TARGETS = ('mac', 'linux', 'win')
 WINDOWS_RUNTIME_SCHEMA = 'cinterforge.terminal.craftmaster.windows-runtime.v1'
@@ -23,6 +25,22 @@ SOURCES = {
     'cinterforge-craftmaster': ('Cinter', 'CMakeLists.txt', 'lifecycle/driver.py', 'data/MCTemplate.mcworld'),
     'cinterforge-leveldb': ('CMakeLists.txt', 'include/leveldb/db.h'),
 }
+
+
+# Existing local-source validation is shared by Terminal's maintained dependencies.
+# URLs agree with WebApp's existing web_setup.py source registry.
+TERMINAL_SOURCES = {
+    **SOURCES,
+    'CinterForgeServer': ('Cinter', 'cf/io/CinterIO.py', 'requirements.txt'),
+    'CinterForgeCode': ('package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.nvmrc'),
+    'CinterForgeVoxel': ('package.json', 'package-lock.json'),
+}
+
+
+def dependency_remote(name: str) -> str:
+    if name not in TERMINAL_SOURCES:
+        raise ValueError('Unknown Terminal source dependency: ' + name)
+    return 'https://github.com/CinterForge/' + name + '.git'
 
 
 def _digest(path: Path) -> str:
@@ -33,31 +51,344 @@ def _digest(path: Path) -> str:
     return h.hexdigest()
 
 
-def ensure_craftmaster_sources(builds: Path) -> tuple[Path, Path]:
-    """Setup-only: clone missing maintained repos, never reset existing work."""
+def _git_output(target: Path, *args: str) -> str:
+    return subprocess.check_output(['git', '-C', str(target), *args],
+                                   text=True, stderr=subprocess.STDOUT).strip()
+
+
+def _dependency_root(builds: Path, name: str) -> tuple[Path, bool]:
+    """Only an actual sibling checkout is local source; ignore managed clones."""
+    if name not in TERMINAL_SOURCES:
+        raise ValueError('Unknown Terminal source dependency: ' + name)
+    repo = Path(__file__).resolve().parents[2]
+    configured = os.environ.get('CINTER_LEVELDB_SOURCE', '').strip() if name == 'cinterforge-leveldb' else ''
+    sibling = Path(configured).expanduser().resolve() if configured else repo.parent / name
+    if sibling.exists() or sibling.is_symlink():
+        if (sibling.is_symlink() or not sibling.is_dir() or
+                any(not (sibling / relative).is_file() for relative in TERMINAL_SOURCES[name])):
+            raise RuntimeError('Incomplete or linked sibling dependency checkout: ' + str(sibling))
+        return sibling, True
+    return sibling, False
+
+
+def _local_craftmaster(builds: Path) -> bool:
+    return _dependency_root(builds, 'cinterforge-craftmaster')[1]
+
+
+def _craftmaster_channel() -> str:
+    channel = os.environ.get('CINTER_CRAFTMASTER_DISTRIBUTION_CHANNEL', 'beta')
+    if channel not in ('beta', 'release'):
+        raise ValueError('CraftMaster dependency channel must be beta or release')
+    return channel
+
+
+def _publication_receipt(builds: Path, target: str) -> Path:
+    if target not in TARGETS:
+        raise ValueError('Unknown CraftMaster target: ' + target)
+    return builds / 'CinterForgeCraftMaster/Setup/Published' / (target + '.json')
+
+
+def _publication_entry(doc: dict, target: str, channel: str) -> dict:
+    if (not isinstance(doc, dict) or doc.get('schema') != 'cinterforge.craftmaster.distribution.v1'
+            or doc.get('channel') != channel or not isinstance(doc.get('artifacts'), dict)):
+        raise RuntimeError('Invalid CraftMaster published distribution manifest')
+    entry = doc['artifacts'].get(target)
+    if not isinstance(entry, dict):
+        raise RuntimeError('CraftMaster has no published ' + target + ' artifact in ' + channel)
+    digest = entry.get('sha256')
+    version = entry.get('version')
+    if (entry.get('filename') != 'CinterForgeCraftMaster-' + target + '.zip'
+            or entry.get('platform') != target or entry.get('converter_linked') is not True
+            or not isinstance(version, str) or not version or version != doc.get('version')
+            or type(entry.get('bytes')) is not int or not 0 < entry['bytes'] <= 8 * 1024**3
+            or not isinstance(digest, str) or len(digest) != 64
+            or any(ch not in '0123456789abcdef' for ch in digest)):
+        raise RuntimeError('Invalid CraftMaster published artifact metadata for ' + target)
+    return entry
+
+
+def _published_stage(builds: Path, target: str) -> Path:
+    """Read-only: a local Stage is not a published dependency without its receipt."""
+    receipt = _publication_receipt(builds, target)
+    if (receipt.is_symlink() or not receipt.is_file() or
+            receipt.resolve() != receipt.absolute()):
+        raise RuntimeError('Missing verified published CraftMaster ' + target + '; run Terminal Setup')
+    doc = json.loads(receipt.read_text('utf-8'))
+    channel = _craftmaster_channel()
+    if doc.get('schema') != 'cinterforge.terminal.craftmaster.publication.v1':
+        raise RuntimeError('Invalid CraftMaster publication receipt')
+    entry = _publication_entry(doc.get('distribution'), target, channel)
+    stage = staged_craftmaster(builds, target, candidate=builds / 'CinterForgeCraftMaster/Stage' / target)
+    manifest = stage / 'manifest.json'
+    if (_digest(manifest) != doc.get('stage_sha256') or
+            json.loads(manifest.read_text('utf-8')).get('version') != entry['version']):
+        raise RuntimeError('Published CraftMaster Stage changed; rerun Setup for ' + target)
+    return stage
+
+
+# Scope of the current Setup invocation only; no new persistent state.
+_published_setup_targets: tuple[str, ...] | None = None
+
+
+def _published_data(builds: Path) -> Path:
+    # All target Stages contain the owner-authored Python data modules. Scoped
+    # Setup must use a target from the manifest it just acquired, never an old
+    # foreign Stage left over from an earlier release.
+    native = {'Darwin': 'mac', 'Linux': 'linux', 'Windows': 'win'}.get(platform.system())
+    targets = _published_setup_targets or TARGETS
+    order = tuple(dict.fromkeys((native, *targets))) if native in targets else targets
+    problems = []
+    for target in order:
+        if _publication_receipt(builds, target).is_file():
+            try:
+                return _published_stage(builds, target) / 'data'
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+                problems.append(str(exc))
+    raise RuntimeError('No verified published CraftMaster data available; run Terminal Setup. ' + '; '.join(problems))
+
+
+def _extract_published_stage(archive: Path, candidate: Path) -> None:
+    """Extract the existing owner ZIP layout, rejecting aliases and special files."""
+    with ZipFile(archive) as package:
+        seen = set()
+        total = 0
+        for info in package.infolist():
+            name = info.filename
+            parts = PurePosixPath(name).parts
+            mode = info.external_attr >> 16
+            if (not name or '\\' in name or ':' in name or name.startswith('/')
+                    or len(parts) < 2 or parts[0] != 'CinterForgeCraftMaster'
+                    or any(part in ('', '.', '..') or part.endswith((' ', '.'))
+                           or any(ord(ch) < 32 for ch in part) for part in name.split('/'))
+                    or (parts[1] not in ('bin', 'data') and parts[1:] != ('manifest.json',))
+                    or info.is_dir() or stat.S_IFMT(mode) not in (0, stat.S_IFREG)):
+                raise RuntimeError('Unsafe CraftMaster archive member: ' + name)
+            relative = PurePosixPath(*parts[1:]).as_posix()
+            if relative.casefold() in seen:
+                raise RuntimeError('Duplicate CraftMaster archive member: ' + name)
+            seen.add(relative.casefold())
+            total += info.file_size
+            if total > 16 * 1024**3:
+                raise RuntimeError('Oversized CraftMaster archive extraction')
+            output = candidate.joinpath(*parts[1:])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with package.open(info) as src, output.open('xb') as dst:
+                shutil.copyfileobj(src, dst, 1024 * 1024)
+            output.chmod(0o755 if mode & 0o111 else 0o644)
+
+
+def acquire_published_craftmaster(builds: Path, targets: tuple[str, ...]) -> None:
+    """Setup-only acquisition. Verify remote metadata, bytes and exact Stage."""
+    global _published_setup_targets
+    if _local_craftmaster(builds):
+        raise RuntimeError('Published CraftMaster acquisition must not replace a local source build')
+    if not targets or len(set(targets)) != len(targets) or any(target not in TARGETS for target in targets):
+        raise ValueError('Invalid CraftMaster published target selection')
+    channel = _craftmaster_channel()
+    base = 'https://cinterforge.ucreg.io/CinterForgeCraftMaster/Distribution' + ('/beta' if channel == 'beta' else '')
+    def request(url):
+        return urllib.request.Request(url, headers={'User-Agent': 'CinterForgeTerminal', 'Cache-Control': 'no-cache'})
+    try:
+        with urllib.request.urlopen(request(base + '/manifest.json'), timeout=90) as response:
+            raw = response.read(1024 * 1024 + 1)
+    except OSError as exc:
+        raise RuntimeError('CraftMaster owner publication unavailable: ' + base + '/manifest.json. '
+                           'Publish the accepted owner builds; no source fallback.') from exc
+    if len(raw) > 1024 * 1024:
+        raise RuntimeError('Oversized CraftMaster distribution manifest')
+    doc = json.loads(raw)
+    # Validate every requested target before replacing any existing output.
+    entries = {target: _publication_entry(doc, target, channel) for target in targets}
+    for target, entry in entries.items():
+        receipt = _publication_receipt(builds, target)
+        try:
+            _published_stage(builds, target)
+            previous = json.loads(receipt.read_text('utf-8'))
+            if _publication_entry(previous['distribution'], target, channel) == entry:
+                print('[CRAFTMASTER SETUP] Reusing verified published ' + target, flush=True)
+                continue
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            pass
+        stage = builds / 'CinterForgeCraftMaster/Stage' / target
+        if any(path.is_symlink() for path in (builds, stage, stage.parent, stage.parent.parent, receipt, receipt.parent, receipt.parent.parent)):
+            raise RuntimeError('Unsafe CraftMaster output or publication receipt')
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='Published-', dir=stage.parent) as temp:
+            scratch = Path(temp)
+            archive = scratch / entry['filename']
+            digest = hashlib.sha256()
+            size = 0
+            with urllib.request.urlopen(request(base + '/' + entry['filename']), timeout=90) as response, archive.open('xb') as out:
+                for block in iter(lambda: response.read(1024 * 1024), b''):
+                    size += len(block)
+                    if size > entry['bytes']:
+                        raise RuntimeError('CraftMaster download exceeds declared bytes')
+                    digest.update(block)
+                    out.write(block)
+            if size != entry['bytes'] or digest.hexdigest() != entry['sha256']:
+                raise RuntimeError('CraftMaster published archive checksum mismatch: ' + target)
+            candidate = scratch / 'Stage'
+            candidate.mkdir()
+            _extract_published_stage(archive, candidate)
+            staged_craftmaster(builds, target, candidate=candidate)
+            manifest = candidate / 'manifest.json'
+            if json.loads(manifest.read_text('utf-8')).get('version') != entry['version']:
+                raise RuntimeError('Published CraftMaster Stage version mismatch')
+            record = {'schema': 'cinterforge.terminal.craftmaster.publication.v1',
+                      'distribution': doc, 'stage_sha256': _digest(manifest)}
+            pending = scratch / 'publication.json'
+            pending.write_text(json.dumps(record, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+            # Keep the previously validated output until the complete candidate
+            # is verified. Roll back on an interrupted filesystem replacement.
+            retired = scratch / 'Retired'
+            if stage.exists():
+                stage.rename(retired)
+            try:
+                candidate.rename(stage)
+                pending.replace(receipt)
+            except BaseException:
+                if stage.exists():
+                    shutil.rmtree(stage)
+                if retired.exists():
+                    retired.rename(stage)
+                raise
+        _published_stage(builds, target)
+        print('[CRAFTMASTER SETUP] Installed verified published ' + target + ': ' + str(stage), flush=True)
+    _published_setup_targets = targets
+
+
+def _local_source_fingerprint(source: Path) -> str:
+    """Read file metadata, not file contents or a trial build.
+
+    Include tracked and nonignored untracked files, including deleted tracked
+    paths. Nanosecond mtime/ctime, size, mode and path catch ordinary local
+    edits, additions, deletions and renames, even without a Git commit.
+    """
+    digest = hashlib.sha256()
+    digest.update(str(source.resolve()).encode())
+    if (source / '.git').exists():
+        digest.update(_git_output(source, 'rev-parse', 'HEAD').encode())
+        raw = subprocess.check_output(['git', '--no-optional-locks', '-C', str(source),
+                                       'ls-files', '-z', '--cached', '--others', '--exclude-standard'])
+        names = sorted(set(os.fsdecode(name) for name in raw.split(b'\0') if name))
+    else:
+        # Source archives are also valid local development inputs. Do not
+        # follow symlinked directories or include interpreter/editor caches.
+        names = []
+        for folder, directories, files in os.walk(source, followlinks=False):
+            directories[:] = sorted(d for d in directories if d not in
+                                     {'.git', 'Builds', '__pycache__', '.pytest_cache', '.mypy_cache'})
+            for name in files + [d for d in directories if (Path(folder) / d).is_symlink()]:
+                if name != '.DS_Store' and not name.endswith(('.pyc', '.pyo')):
+                    names.append((Path(folder) / name).relative_to(source).as_posix())
+        names.sort()
+    for name in names:
+        path = source / name
+        digest.update(os.fsencode(name) + b'\0')
+        try:
+            meta = path.lstat()
+        except FileNotFoundError:
+            digest.update(b'missing\0')
+            continue
+        digest.update(f'{meta.st_mode}:{meta.st_size}:{meta.st_mtime_ns}:{meta.st_ctime_ns}'.encode() + b'\0')
+        if stat.S_ISLNK(meta.st_mode):
+            digest.update(os.fsencode(os.readlink(path)) + b'\0')
+    return digest.hexdigest()
+
+
+def craftmaster_source_identity(builds: Path, *, setup: bool = False) -> dict[str, str]:
+    if not _local_craftmaster(builds):
+        identities = {'cinterforge-craftmaster': 'published:' + _craftmaster_channel()}
+        for target in TARGETS:
+            receipt = _publication_receipt(builds, target)
+            if receipt.is_file() and not receipt.is_symlink():
+                identities['publication:' + target] = _digest(receipt)
+        return identities
+    identities = {}
+    for name in SOURCES:
+        target = dependency_source(builds, name)
+        identities[name] = ('local:' + str(target.resolve()) if setup else
+                            'local:' + _local_source_fingerprint(target))
+        if setup and name == 'cinterforge-craftmaster':
+            for relative in ('data/CinterForgeBedrockAccess.py', 'data/CinterForgeLifecycleBedrock.py', 'data/CinterForgeJava.py'):
+                identities[name] += ':' + _digest(target / relative)
+    return identities
+
+
+def _ensure_dependency_sources(builds: Path, names) -> dict[str, Path]:
+    """Existing local source only. The consumer never acquires another checkout."""
     repo = Path(__file__).resolve().parents[2]
     if builds.resolve() != (repo.parent / 'Builds').resolve():
-        raise RuntimeError('CraftMaster requires the same sibling Builds as Terminal')
-    resolved = {}
-    for name, required in SOURCES.items():
-        target = repo.parent / name
-        if target.is_symlink():
-            raise RuntimeError('Refusing symlinked CraftMaster source: ' + str(target))
-        if not target.exists():
-            git = shutil.which('git')
-            if not git:
-                raise RuntimeError('Terminal Setup needs Git to clone ' + name)
-            from host.lifecycle.setup_progress import progress_step
-            with progress_step('clone ' + name, prefix='[CRAFTMASTER SOURCE]'):
-                subprocess.run([git, '-c', 'http.version=HTTP/1.1', 'clone', '--progress',
-                                '--depth', '1', '--single-branch', '--no-tags',
-                                'https://github.com/CinterForge/' + name + '.git', str(target)],
-                               check=True)
-        if not target.is_dir() or any(not (target / relative).is_file() for relative in required):
-            raise RuntimeError('CraftMaster source checkout is incomplete: ' + str(target))
-        resolved[name] = target.resolve(strict=True)
-        print('[CRAFTMASTER SOURCE] PRESENT ' + name + ': ' + str(target), flush=True)
-    return resolved['cinterforge-craftmaster'], resolved['cinterforge-leveldb']
+        raise RuntimeError('Dependencies require the same shared Builds as Terminal')
+    paths = {name: dependency_source(builds, name) for name in names}
+    for target in paths.values():
+        print('[TERMINAL SOURCE] Using local sibling: ' + str(target), flush=True)
+    return paths
+
+
+def dependency_source(builds: Path, name: str) -> Path:
+    target, local = _dependency_root(builds, name)
+    if not local:
+        raise RuntimeError(name + ' has no local sibling checkout; published product integration is required. '
+                           'Terminal will not clone or build missing source.')
+    return target
+
+
+def craftmaster_bedrock_module(builds: Path, name: str):
+    """Load the acquired owner source for host lifecycle operations only.
+
+    Installed Terminal uses verified CraftMaster Stage data instead. A distinct
+    package name avoids importing an unrelated top-level ``data`` package.
+    """
+    import importlib
+    import sys
+    import types
+    if name not in ('CinterForgeBedrockAccess', 'CinterForgeLifecycleBedrock', 'CinterForgeJava'):
+        raise ValueError('Unknown CraftMaster Minecraft module: ' + name)
+    source = (dependency_source(builds, 'cinterforge-craftmaster') / 'data'
+              if _local_craftmaster(builds) else _published_data(builds))
+    package_name = '_cinterforge_craftmaster_bedrock'
+    package = sys.modules.get(package_name)
+    if package is None:
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(source.resolve())]
+        sys.modules[package_name] = package
+    elif package.__path__ != [str(source.resolve())]:
+        raise RuntimeError('CraftMaster source changed within the lifecycle process')
+    return importlib.import_module(package_name + '.' + name)
+
+
+def _prepare_local_leveldb(builds: Path) -> None:
+    """Delegate this source-library acquisition to the local CraftMaster owner.
+
+    Guest Setup mounts the verified checkout read-only; it cannot clone it.
+    """
+    source = dependency_source(builds, 'cinterforge-craftmaster')
+    subprocess.run([sys.executable, '-B', '-c',
+                    'from lifecycle.driver import leveldb_source; leveldb_source(acquire=True)'],
+                   cwd=source, env=_host_environment(builds), check=True)
+
+
+def ensure_craftmaster_sources(builds: Path) -> tuple[Path, Path]:
+    _prepare_local_leveldb(builds)
+    paths = _ensure_dependency_sources(builds, SOURCES)
+    return tuple(paths[name] for name in SOURCES)
+
+
+def ensure_terminal_sources(builds: Path, targets: tuple[str, ...] = TARGETS) -> dict[str, Path]:
+    """Setup: resolve CraftMaster before any host lifecycle consumes its data.
+
+    Other product handoffs still require local siblings until their owner
+    publication contracts are implemented. Never revive managed source clones.
+    """
+    if _local_craftmaster(builds):
+        _prepare_local_leveldb(builds)
+        names = TERMINAL_SOURCES
+    else:
+        acquire_published_craftmaster(builds, targets)
+        names = (name for name in TERMINAL_SOURCES if name not in SOURCES)
+    return _ensure_dependency_sources(builds, names)
 
 
 def _host_user_home() -> Path:
@@ -106,7 +437,8 @@ def _world_artifacts(builds: Path):
     # Delegate package validation and installation to the owning CraftMaster
     # implementation; never implement a second world generator or converter.
     import importlib.util
-    source = builds.parent / 'cinterforge-craftmaster/lifecycle/world_artifacts.py'
+    source = (dependency_source(builds, 'cinterforge-craftmaster') / 'lifecycle/world_artifacts.py'
+              if _local_craftmaster(builds) else _published_data(builds) / 'world_artifacts.py')
     spec = importlib.util.spec_from_file_location('_terminal_test_world_artifacts', source)
     module = importlib.util.module_from_spec(spec)
     exec(compile(source.read_bytes(), str(source), 'exec'), module.__dict__)
@@ -279,20 +611,32 @@ def setup_receipts_present(builds: Path, targets: tuple[str, ...]) -> bool:
     if any(target not in TARGETS for target in targets):
         return False
     try:
+        local = _local_craftmaster(builds)
+        if not local:
+            for target in targets:
+                _published_stage(builds, target)
+            owner = craftmaster_bedrock_module(builds, 'CinterForgeJava')
+            cm = owner.provider(_published_data(builds))
+            root = builds / 'CinterForgeCraftMaster/Server/Java'
+            for target in targets:
+                owner.ensure_runtime(root, cm, target=target,
+                                     arch=owner.native_target()[1] if target == 'mac' else 'x64',
+                                     offline=True, setup_mac_builds=builds if target == 'mac' else None)
+            return True
         source, _ = _source_roots(builds)
         result = subprocess.run(
             [sys.executable, '-B', str(source / 'Cinter'), 'setup', 'status', *targets],
             cwd=source, env=_host_environment(builds), check=False)
         if result.returncode != 0:
             return False
-        from webapp.runtime.CinterForgeJava import provider, ensure_runtime, native_target
-        cm = provider(source / 'lifecycle', staged=False)
+        owner = craftmaster_bedrock_module(builds, 'CinterForgeJava')
+        cm = owner.provider(source / 'lifecycle', staged=False)
         root = builds / 'CinterForgeCraftMaster/Server/Java'
         if not cm.java_eula_accepted(root):
             return False
         for target in targets:
-            ensure_runtime(root, cm, target=target,
-                           arch=native_target()[1] if target == 'mac' else 'x64',
+            owner.ensure_runtime(root, cm, target=target,
+                           arch=owner.native_target()[1] if target == 'mac' else 'x64',
                            offline=True, setup_mac_builds=builds if target == 'mac' else None)
         return True
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
@@ -300,15 +644,7 @@ def setup_receipts_present(builds: Path, targets: tuple[str, ...]) -> bool:
 
 
 def _source_roots(builds: Path) -> tuple[Path, Path]:
-    repo = Path(__file__).resolve().parents[2]
-    roots = (repo.parent / 'cinterforge-craftmaster', repo.parent / 'cinterforge-leveldb')
-    for root in roots:
-        if root.is_symlink() or not root.is_dir():
-            raise RuntimeError('CraftMaster source missing; rerun Terminal Setup: ' + str(root))
-    for source, required in zip(roots, SOURCES.values()):
-        if any(not (source / name).is_file() for name in required):
-            raise RuntimeError('CraftMaster source incomplete; rerun Setup: ' + str(source))
-    return roots
+    return tuple(dependency_source(builds, name) for name in SOURCES)
 
 
 def _mac_lifecycle(builds: Path, action: str) -> None:
@@ -355,13 +691,15 @@ def _prepare_guest_cmake_generator(builds: Path, target: str) -> None:
         shutil.rmtree(root)
 
 
-def _guest_lifecycle(builds: Path, action: str, target: str, *, docker: str | None = None) -> None:
+def _guest_lifecycle(builds: Path, action: str, target: str, *, docker: str | None = None,
+                     cross=None, acceptance: Path | None = None, test_python: Path | None = None) -> None:
     """Run standalone Cinter in Terminal's pre-existing AMD64 Debian image.
 
     Both source trees mount readonly; software outputs remain under /builds.
     Only the host's non-world ReferenceData directory is mounted for compilation.
-    No host saves, maps, annotations or acceptance directories are exposed as
-    guest saves. The guest's temporary Linux home owns its smoke fixtures.
+    No user saves, maps or annotations are exposed as guest saves. Compiler
+    smoke fixtures use the disposable Linux home. Explicit standalone Test
+    mounts only its owned fixture directory, with no access to user worlds.
     """
     if target not in ('linux', 'win'):
         raise ValueError('Unexpected CraftMaster guest platform: ' + target)
@@ -373,12 +711,12 @@ def _guest_lifecycle(builds: Path, action: str, target: str, *, docker: str | No
                        cwd=source, env=_host_environment(builds), check=True)
     from host.windows.windows_environment import WindowsCrossEnvironment
     from host.lifecycle.amd64_backend import docker_bind_source
-    cross = WindowsCrossEnvironment(builds)
     # Setup alone created the pinned Windows/Linux closure. Build may import its
     # saved image but must never download or alter its package recipe.
-    if action != 'setup':
-        WindowsCrossEnvironment.validate_staged(builds)
-    cross.ensure_portable_image()
+    if cross is None:
+        if action != 'setup':
+            WindowsCrossEnvironment.validate_staged(builds)
+        cross = WindowsCrossEnvironment(builds).ensure_portable_image()
     docker = docker or cross.docker
     if not docker or not cross.image:
         raise RuntimeError('Setup-provisioned AMD64 compiler image unavailable')
@@ -394,28 +732,62 @@ def _guest_lifecycle(builds: Path, action: str, target: str, *, docker: str | No
               ('--mount', f'type=bind,src={docker_bind_source(leveldb)},dst=/leveldb,readonly'),
               ('--mount', f'type=bind,src={docker_bind_source(builds)},dst=/builds'),
               ('--mount', f'type=bind,src={docker_bind_source(shared)},dst=/craftmaster-reference')]
+    if action == 'test':
+        expected = workspace / 'Acceptance' / target
+        if (acceptance != expected or not expected.is_dir() or
+                any(p.is_symlink() for p in (expected, expected.parent, workspace)) or
+                (target == 'win') != (test_python is not None)):
+            raise RuntimeError('Invalid isolated CraftMaster guest acceptance inputs')
+        mounts.append(('--mount', f'type=bind,src={docker_bind_source(expected)},dst=/craftmaster-saves/CinterForge/Acceptance/{target}'))
+    elif acceptance is not None or test_python is not None:
+        raise RuntimeError('Guest acceptance inputs are only valid for Test')
     cmd = [docker, 'run', '--rm', '--platform', 'linux/amd64', '--network', 'none']
     for item in mounts:
         cmd.extend(item)
-    cmd.extend(['--workdir', '/craftmaster', '--env', 'CINTER_BUILDS_ROOT=/builds',
-                '--env', 'CINTER_LEVELDB_SOURCE=/leveldb',
-                '--env', 'PYTHONUNBUFFERED=1', '--env', 'CINTER_CRAFTMASTER_SKIP_WORLD_SETUP=1',
+    wine_test = action == 'test' and target == 'win'
+    def target_path(path):
+        return 'Z:' + path.replace('/', '\\') if wine_test else path
+    cmd.extend(['--workdir', '/craftmaster', '--env', 'CINTER_BUILDS_ROOT=' + target_path('/builds'),
+                '--env', 'CINTER_LEVELDB_SOURCE=' + target_path('/leveldb'),
+                '--env', 'PYTHONUNBUFFERED=1', '--env', 'PYTHONDONTWRITEBYTECODE=1',
+                '--env', 'CINTER_CRAFTMASTER_SKIP_WORLD_SETUP=1',
                 '--env', 'CINTER_CRAFTMASTER_DATA_OFFLINE=1',
-                '--env', 'CINTER_CRAFTMASTER_REFERENCE_ROOT=/craftmaster-reference',
-                '--env', 'HOME=/tmp/craftmaster-compiler-home'])
+                '--env', 'CINTER_CRAFTMASTER_REFERENCE_ROOT=' + target_path('/craftmaster-reference')])
+    if action == 'test':
+        temp = '/builds/Intermediates/CinterForgeCraftMaster/CompilerTemp'
+        (builds / temp.removeprefix('/builds/')).mkdir(parents=True, exist_ok=True)
+        cmd.extend(['--env', 'TMPDIR=' + temp, '--env', 'TEMP=' + target_path(temp), '--env', 'TMP=' + target_path(temp)])
+    if wine_test:
+        # Wine translates Windows Unicode paths to the Unix filesystem using
+        # the host locale. The pinned Debian image has glibc's C.UTF-8 locale;
+        # do not inherit Docker's potentially ASCII C locale. Keep redirected
+        # Windows Python diagnostics UTF-8 for the host lifecycle log as well.
+        cmd.extend(['--mount', f'type=volume,src={cross._require_wine_volume()},dst=/cinterwine',
+                    '--env', 'HOME=/cinterwine/home', '--env', 'XDG_CACHE_HOME=/cinterwine/home/.cache',
+                    '--env', 'LANG=C.UTF-8', '--env', 'LC_ALL=C.UTF-8',
+                    '--env', 'PYTHONUTF8=1', '--env', 'PYTHONIOENCODING=utf-8',
+                    '--env', 'WINEPREFIX=/cinterwine/prefix', '--env', 'WINEARCH=win64', '--env', 'WINEDEBUG=-all'])
+    else:
+        cmd.extend(['--env', 'HOME=/tmp/craftmaster-compiler-home'])
+    if action == 'test':
+        cmd.extend(['--env', 'CINTER_CRAFTMASTER_SAVES_ROOT=' + target_path('/craftmaster-saves')])
     if action == 'build':
         # Debian t guest contains ninja-build and GCC; it deliberately has no
         # GNU Make. CraftMaster's CMake defaults to Unix Makefiles otherwise.
         _prepare_guest_cmake_generator(builds, target)
         cmd.extend(['--env', 'CMAKE_GENERATOR=Ninja'])
-    if target == 'win':
+    if target == 'win' and not wine_test:
         from host.lifecycle.webview import TAG
         toolchain = ('/builds/Toolchains/WebView/' + TAG +
                      '/source/cmake/toolchains/x86_64-w64-mingw32.cmake')
         cmd.extend(['--env', 'CINTER_CRAFTMASTER_WIN_CMAKE_TOOLCHAIN_FILE=' + toolchain])
     if hasattr(os, 'getuid'):
         cmd.extend(['--user', str(os.getuid()) + ':' + str(os.getgid())])
-    cmd.extend([cross.image, 'python3', '-u', '/craftmaster/Cinter', action, target])
+    if wine_test:
+        assert test_python is not None
+        cmd.extend([cross.image, 'wine', cross.path(test_python), '-B', '-u', target_path('/craftmaster/Cinter'), action, target])
+    else:
+        cmd.extend([cross.image, 'python3', '-B', '-u', '/craftmaster/Cinter', action, target])
     from host.lifecycle.setup_progress import progress_step
     with progress_step('CraftMaster ' + target + ' ' + action, prefix='[CRAFTMASTER]'):
         subprocess.run(cmd, check=True)
@@ -428,12 +800,34 @@ def craftmaster_world_command(builds: Path, args: list[str], *, optional: bool =
     Explicit world commands invoke the documented CraftMaster CLI, never a guest
     or an embedded duplicate. Ordinary Setup acquires only the server fixture.
     """
-    source = Path(__file__).resolve().parents[2].parent / 'cinterforge-craftmaster'
-    if source.is_symlink() or not (source / 'Cinter').is_file():
-        if args[0] == 'setup':
-            source, _ = ensure_craftmaster_sources(builds)
+    if not _local_craftmaster(builds):
+        # Public world Setup/list uses the exact same packaged installer as the
+        # native owner. Private publication remains an explicit owner action.
+        if args[0] == 'publish' or (args[0] == 'worlds' and len(args) > 1 and args[1] in ('local', 'internal')):
+            raise RuntimeError('Run this explicit world action in the CraftMaster owner repository.')
+        if args[:2] == ['setup', 'worlds']:
+            if len(args) > 5:
+                raise ValueError('Usage: ./Cinter setup worlds [beta|release ["<worldname>" [<sha256>]]]')
+            channel = args[2] if len(args) >= 3 else 'release'
+            name = args[3] if len(args) >= 4 else None
+            pin = args[4] if len(args) >= 5 else None
+        elif args[0] == 'worlds' and len(args) <= 2:
+            channel = args[1] if len(args) == 2 else 'release'
+            name = pin = None
         else:
-            raise RuntimeError('CraftMaster checkout missing; run Terminal Setup first')
+            raise ValueError('Unsupported CraftMaster world command')
+        if channel not in ('beta', 'release'):
+            raise RuntimeError('Internal world actions require the CraftMaster owner repository.')
+        if args[0] == 'setup':
+            native = {'Darwin': 'mac', 'Linux': 'linux', 'Windows': 'win'}[platform.system()]
+            acquire_published_craftmaster(builds, (native,))
+        artifacts = _world_artifacts(builds)
+        if not hasattr(artifacts, 'install_public_worlds'):
+            raise RuntimeError('Publish current CraftMaster owner builds with the public world installer first.')
+        return artifacts.install_public_worlds(_host_saves_root(builds), channel, name=name,
+                     expected_sha256=pin, list_only=args[0] == 'worlds', optional=optional,
+                     report=lambda line: print(line, flush=True))
+    source = dependency_source(builds, 'cinterforge-craftmaster')
     env = dict(_host_environment(builds), PYTHONDONTWRITEBYTECODE='1')
     if optional:
         env['CINTER_CRAFTMASTER_OPTIONAL_WORLD_SETUP'] = '1'
@@ -443,7 +837,24 @@ def craftmaster_world_command(builds: Path, args: list[str], *, optional: bool =
 
 def setup_craftmaster(builds: Path, *, targets: tuple[str, ...] = TARGETS,
                       guest: bool = False, docker: str | None = None) -> None:
-    """Provision only: no Build/Stage or published-output requirements."""
+    """Provision selected local builds, or only runtime prerequisites for published Stage."""
+    if not _local_craftmaster(builds):
+        for target in targets:
+            _published_stage(builds, target)
+        if targets:
+            owner = craftmaster_bedrock_module(builds, 'CinterForgeJava')
+            cm = owner.provider(_published_data(builds))
+            root = builds / 'CinterForgeCraftMaster/Server/Java'
+            cm.require_java_eula(root)
+            if 'mac' in targets:
+                cm.setup_mac_jdk(builds, print)
+                cached = _host_saves_root(builds) / 'CinterForge/ReferenceData/Java' / cm.JAVA_VERSION / f'minecraft_server_{cm.JAVA_VERSION}.jar'
+                owner.server_jar(root, cm, acquire=True, cached=cached)
+            for target in targets:
+                owner.ensure_runtime(root, cm, target=target,
+                    arch=owner.native_target()[1] if target == 'mac' else 'x64',
+                    offline=(target == 'mac'), setup_mac_builds=builds if target == 'mac' else None)
+        return
     for target in targets:
         if target not in TARGETS:
             raise ValueError('Unknown CraftMaster target: ' + target)
@@ -455,52 +866,116 @@ def setup_craftmaster(builds: Path, *, targets: tuple[str, ...] = TARGETS,
             if not guest:
                 raise RuntimeError('Linux/Windows CraftMaster Setup requires the managed AMD64 guest')
             _guest_lifecycle(builds, 'setup', target, docker=docker)
-    # Terminal owns non-Mac JDK acquisition; standalone CraftMaster Setup stays Mac-only.
+    # Host-side acquisition for foreign targets uses the CraftMaster owner; compiler guests stay offline.
     if targets:
-        from webapp.runtime.CinterForgeJava import provider, ensure_runtime, native_target, server_jar
+        owner = craftmaster_bedrock_module(builds, 'CinterForgeJava')
         source, _ = _source_roots(builds)
-        cm = provider(source / 'lifecycle', staged=False)
+        cm = owner.provider(source / 'lifecycle', staged=False)
         root = builds / 'CinterForgeCraftMaster/Server/Java'
         cm.require_java_eula(root)
         cache = _host_saves_root(builds) / 'CinterForge/ReferenceData/Java' / cm.JAVA_VERSION
         cached = cache / f'minecraft_server_{cm.JAVA_VERSION}.jar'
         if 'mac' in targets:
             # CraftMaster already provisioned the shared Mac JDK above.
-            server_jar(root, cm, acquire=True, cached=cached)
-            ensure_runtime(root, cm, target='mac', arch=native_target()[1],
+            owner.server_jar(root, cm, acquire=True, cached=cached)
+            owner.ensure_runtime(root, cm, target='mac', arch=owner.native_target()[1],
                            offline=True, setup_mac_builds=builds)
         for target in targets:
             if target != 'mac':
-                ensure_runtime(root, cm, target=target, arch='x64', cached=cached)
+                owner.ensure_runtime(root, cm, target=target, arch='x64', cached=cached)
 
 
 def build_craftmaster(builds: Path, *, targets: tuple[str, ...] = TARGETS,
                       docker: str | None = None) -> None:
-    """Build three native CLIs from source, then stage their packaging inputs.
-
-    CraftMaster's internal Stage copies the new build into its verified closure;
-    Terminal Stage still only installs the completed Terminal release.
-    """
+    """Build changed local native dependencies; never compile a published product."""
+    if not _local_craftmaster(builds):
+        identities = craftmaster_source_identity(builds, setup=True)
+        for target in targets:
+            scopes = ('win', 'all') if target == 'win' else ('all',)
+            caches = (builds / 'Intermediates/CinterForgeTerminal/SetupCache' / (scope + '.json') for scope in scopes)
+            if not any(path.is_file() and not path.is_symlink() and
+                       json.loads(path.read_text('utf-8')).get('craftmaster_sources') == identities for path in caches):
+                raise RuntimeError('Published CraftMaster selection changed; run Terminal Setup for ' + target)
+            stage = _published_stage(builds, target)
+            if target == 'win':
+                # Current Terminal packaging still owns supplemental PE DLL
+                # closure; this is distribution assembly, not owner compilation.
+                _build_windows_runtime(builds)
+            print('[CRAFTMASTER BUILD] Using verified published ' + target + ': ' + str(stage), flush=True)
+        return
+    owner_root = builds / 'CinterForgeCraftMaster'
+    receipt_root = builds / 'CinterForgeTerminal/Dependencies/CraftMaster'
+    receipt_root.mkdir(parents=True, exist_ok=True)
+    sources = craftmaster_source_identity(builds)
     for target in targets:
+        if target not in TARGETS:
+            raise ValueError('Unknown CraftMaster target: ' + target)
+        receipt = receipt_root / ('build-' + target + '.json')
+        if receipt.is_symlink():
+            raise RuntimeError('Unsafe dependency receipt: ' + str(receipt))
+        setup = owner_root / 'Setup' / (target + '.json')
+        # Require the owner Setup and record the existing Terminal Setup
+        # fingerprint, including the verified toolchain closure. A changed
+        # setup, source revision or wrapper invalidates the prior reuse gate.
+        scopes = ('win', 'all') if target == 'win' else ('all',)
+        cache = next((builds / 'Intermediates/CinterForgeTerminal/SetupCache' / (scope + '.json')
+                      for scope in scopes if (builds / 'Intermediates/CinterForgeTerminal/SetupCache' / (scope + '.json')).is_file()), None)
+        if not setup.is_file() or cache is None:
+            raise RuntimeError('CraftMaster requires successful Terminal Setup for ' + target)
+        setup_cache = json.loads(cache.read_text(encoding='utf-8'))
+        if setup_cache.get('craftmaster_sources') != craftmaster_source_identity(builds, setup=True):
+            raise RuntimeError('CraftMaster local source selection changed after Setup; rerun Terminal Setup')
+        inputs = {'sources': sources, 'setup_sha256': _digest(setup),
+                  'terminal_setup_sha256': _digest(cache), 'integration_sha256': _digest(Path(__file__))}
+
+        def record():
+            stage = staged_craftmaster(builds, target)
+            built = owner_root / 'Build' / target / 'receipt.json'
+            result = {'inputs': inputs, 'build_sha256': _digest(built),
+                      'stage_sha256': _digest(stage / 'manifest.json')}
+            if target == 'win':
+                runtime, _ = _verified_windows_runtime(builds, stage / 'bin/CinterForgeCraftMaster.exe')
+                result['windows_runtime_sha256'] = _digest(runtime / 'manifest.json')
+            return result
+
+        if receipt.is_file():
+            try:
+                if json.loads(receipt.read_text(encoding='utf-8')) == record():
+                    print('[CRAFTMASTER BUILD] CURRENT ' + target + ': verified dependency outputs', flush=True)
+                    continue
+            except (OSError, ValueError, KeyError, RuntimeError):
+                pass
+        print('[CRAFTMASTER BUILD] DIRTY ' + target + ': source, inputs or outputs changed', flush=True)
+        if not setup_receipts_present(builds, (target,)):
+            raise RuntimeError('CraftMaster owner Setup is no longer current for ' + target)
+        receipt.unlink(missing_ok=True)
+        # Build and internal Stage are delegated to the owner. Terminal's
+        # public Stage later installs only the completed Terminal application.
         for action in ('build', 'stage'):
             if target == 'mac':
                 _mac_lifecycle(builds, action)
             else:
                 _guest_lifecycle(builds, action, target, docker=docker)
-        staged_craftmaster(builds, target)
         if target == 'win':
             _build_windows_runtime(builds)
+        if craftmaster_source_identity(builds) != sources:
+            raise RuntimeError('CraftMaster source changed during Build')
+        pending = receipt.with_suffix('.part')
+        pending.write_text(json.dumps(record(), indent=2, sort_keys=True) + '\n', encoding='utf-8')
+        pending.replace(receipt)
         print('[CRAFTMASTER BUILD] PASS new native target ' + target, flush=True)
 
 
-def staged_craftmaster(builds: Path, target: str) -> Path:
-    """Verify the native source-built Stage without downloading/building."""
+def staged_craftmaster(builds: Path, target: str, *, candidate: Path | None = None) -> Path:
+    """Verify the identical native Stage layout for local or published output."""
     if target not in TARGETS:
         raise ValueError('Unsupported CraftMaster target: ' + target)
-    candidates = (builds / 'CinterForgeCraftMaster/Stage' / target,)
+    if candidate is None and not _local_craftmaster(builds):
+        return _published_stage(builds, target)
+    candidates = (candidate if candidate is not None else builds / 'CinterForgeCraftMaster/Stage' / target,)
     problems = []
     for root in candidates:
-        if not root.is_dir() or root.is_symlink():
+        if not root.is_dir() or root.is_symlink() or root.resolve() != root.absolute():
             continue
         try:
             manifest_file = root / 'manifest.json'
@@ -513,8 +988,12 @@ def staged_craftmaster(builds: Path, target: str) -> Path:
             files = manifest.get('files')
             if not isinstance(files, dict) or not files:
                 raise RuntimeError('Stage has no file inventory')
-            if not {'data/world_artifacts.py', 'data/minecraft_data.py', 'data/java_server.py', 'data/JavaGenerate.mcfunction', 'data/ResourcesNew.json', 'data/AuxValueToBlockStateMap.md',
-                    'data/IntrinsicBlockStatesList.md', 'data/BlockStateAndTraitListings.md'} <= set(files):
+            if not {'data/world_artifacts.py', 'data/minecraft_data.py', 'data/java_server.py', 'data/CinterForgeJava.py', 'data/JavaGenerate.mcfunction', 'data/ResourcesNew.json', 'data/AuxValueToBlockStateMap.md',
+                    'data/IntrinsicBlockStatesList.md', 'data/BlockStateAndTraitListings.md',
+                    'data/CinterForgeBedrockAccess.py', 'data/CinterForgeBedrockProperties.py', 'data/CinterForgeLifecycleBedrock.py',
+                    'data/bedrock_status_bridge/manifest.json', 'data/bedrock_status_bridge/scripts/main.js',
+                    'data/bedrock_terminal_resources/manifest.json', 'data/bedrock_testgrounds/manifest.json',
+                    'data/bedrock_testgrounds/scripts/main.js'} <= set(files):
                 raise RuntimeError('Stage lacks restored Bedrock mappings or the Java publication installer; rebuild CraftMaster')
             expected = {'manifest.json', *files}
             # Re-evaluate the manifest and all file bytes, not merely a receipt
@@ -527,7 +1006,7 @@ def staged_craftmaster(builds: Path, target: str) -> Path:
                     observed.add(item.relative_to(root).as_posix())
                 elif not item.is_dir():
                     raise RuntimeError('Stage contains a nonregular entry')
-            if observed not in (expected, expected | {'publication.json'}):
+            if observed != expected and not (candidate is None and observed == expected | {'publication.json'}):
                 raise RuntimeError('Stage inventory differs from manifest')
             for name, digest in files.items():
                 relative = Path(name)
@@ -539,8 +1018,10 @@ def staged_craftmaster(builds: Path, target: str) -> Path:
                 if not file.is_file() or _digest(file) != digest:
                     raise RuntimeError('Stage file hash mismatch: ' + name)
             binary = root / 'bin' / ('CinterForgeCraftMaster.exe' if target == 'win' else 'CinterForgeCraftMaster')
-            if not binary.is_file() or binary.relative_to(root).as_posix() not in files:
+            if not binary.is_file() or binary.stat().st_size < 1024 or binary.relative_to(root).as_posix() not in files:
                 raise RuntimeError('CraftMaster binary missing from Stage receipt')
+            if target != 'win' and os.name != 'nt' and not os.access(binary, os.X_OK):
+                raise RuntimeError('CraftMaster Unix executable permissions missing')
             magic = binary.open('rb').read(4)
             if target == 'win' and magic[:2] != b'MZ':
                 raise RuntimeError('CraftMaster Windows binary is not PE')
@@ -552,7 +1033,7 @@ def staged_craftmaster(builds: Path, target: str) -> Path:
         except (OSError, ValueError, TypeError, RuntimeError) as error:
             problems.append(str(root) + ': ' + str(error))
     raise RuntimeError('Missing verified native CraftMaster ' + target + ' Build Stage. '
-                       'Run ./Cinter build all in Terminal after Setup. '
+                       'Run the owning local Build or Terminal Setup for published artifacts. '
                        + '; '.join(problems))
 
 
@@ -648,6 +1129,32 @@ def verify_packaged_windows_runtime(folder: Path, binary: Path) -> None:
                 file.open('rb').read(2) != b'MZ' or _digest(file) != digest):
             raise RuntimeError('Installed CraftMaster Windows DLL missing/corrupt: ' + name)
 
+
+
+def craftmaster_minecraft_runtime(builds: Path, target: str) -> dict[str, Path]:
+    """Embed owner-built modules at existing Terminal import locations.
+
+    This is distribution assembly, never a second authored implementation.
+    """
+    data = staged_craftmaster(builds, target) / 'data'
+    import ast
+    owner = ast.parse((data / 'CinterForgeBedrockAccess.py').read_bytes())
+    exports = {node.name for node in owner.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+    required = {'copy_managed_world', 'install_cinter_utility_pack', 'sync_package_run_tree', '_checked_url',
+                '_curl_download', 'discover_lan_bedrock', 'mac_bedrock_run_command',
+                'compatible_bds_entry', 'verified_bds_receipt', 'prepare_display_provider',
+                'install_display_native_plugin'}
+    if not required <= exports:
+        raise RuntimeError('CraftMaster Stage lacks the required Bedrock hosting interface: '
+                           + ', '.join(sorted(required - exports))
+                           + '; rebuild the local owner or publish an updated CraftMaster package')
+    files = {'runtime/' + name: data / name for name in (
+        'CinterForgeBedrockAccess.py', 'CinterForgeBedrockProperties.py')}
+    for pack in ('bedrock_status_bridge', 'bedrock_terminal_resources', 'bedrock_testgrounds'):
+        if not (data / pack / 'manifest.json').is_file():
+            raise RuntimeError('CraftMaster Stage missing ' + pack)
+        files.update({p.relative_to(data).as_posix(): p for p in (data / pack).rglob('*') if p.is_file()})
+    return files
 
 def packaged_craftmaster_assets(builds: Path, target: str, prefix: str) -> dict[str, Path]:
     """Return prevalidated regular files for Terminal Build's existing inventory."""

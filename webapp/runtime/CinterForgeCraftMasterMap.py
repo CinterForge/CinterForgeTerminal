@@ -31,7 +31,6 @@ from runtime.CinterForgeHTTPAuthorization import CinterForgeHTTPAuthorization
 MAP_HTTP_PORT = 20330
 MAX_VISIBLE_MAPS = 16
 MAX_MAP_ASSET_BYTES = 8 * 1024 * 1024
-_MAX_MAP_LAYOUT_ENTRIES = 4096
 
 
 _provider_lock = threading.RLock()
@@ -309,71 +308,7 @@ def run_map_conversion(server, name: str, *, enqueue: bool = True, update_served
 # CraftMaster owns the Zoomify/ZFY layout.  Do not assume its output directory
 # is literally "<world> Zoomify": locate the actual TileGroup tree beneath the
 # known world/dimension, without traversing other worlds or following links.
-_ZOOMIFY_TILE = re.compile(r'(\d+)-(\d+)-(\d+)\.(?:jpg|jpeg|png)', re.I)
-_TILE_GROUP = re.compile(r'TileGroup\d+')
-
-
-
-def _map_directories(state: dict) -> list[Path]:
-    """Stay under the selected world's Maps folder and select Overworld only."""
-    expected = state['directory']
-    world_root = expected.parent
-    if world_root.is_symlink() or not world_root.is_dir():
-        return []
-    directories = [expected] if expected.is_dir() and not expected.is_symlink() else []
-    try:
-        for candidate in world_root.iterdir():
-            if (candidate != expected and candidate.is_dir() and not candidate.is_symlink()
-                    and candidate.name.casefold() in ('overworld', 'minecraft_overworld', '0')):
-                directories.append(candidate)
-        # Some CraftMaster ZFY layouts put the Overworld tiles directly under
-        # Maps/<world>, rather than making a second dimension directory.
-        directories.append(world_root)
-    except OSError:
-        pass
-    return directories
-
-
-def _find_zoomify_root(dimension: Path) -> Path | None:
-    """Locate a produced TileGroup, preferring roots with committed tile files."""
-    frontier = [dimension]
-    empty_root = None
-    for _ in range(4):
-        upcoming = []
-        for parent in frontier:
-            try:
-                children = list(parent.iterdir())[:_MAX_MAP_LAYOUT_ENTRIES]
-            except OSError:
-                continue
-            for child in children:
-                if child.is_symlink() or not child.is_dir():
-                    continue
-                if _TILE_GROUP.fullmatch(child.name):
-                    if empty_root is None:
-                        empty_root = parent
-                    try:
-                        if any(_ZOOMIFY_TILE.fullmatch(tile.name) and tile.is_file()
-                               and not tile.is_symlink() and tile.stat().st_size >= 32
-                               for tile in child.iterdir()):
-                            return parent
-                    except OSError:
-                        pass
-                    continue
-                if (not child.name.startswith('.') and
-                        (parent != dimension or child.name.casefold() not in
-                         ('nether', 'the_end', 'theend', 'end', 'minecraft_nether', 'minecraft_the_end', 'dim-1', 'dim1'))):
-                    upcoming.append(child)
-        frontier = upcoming[:_MAX_MAP_LAYOUT_ENTRIES]
-    return empty_root
-
-
-def _map_layout(state: dict) -> tuple[Path, Path | None]:
-    candidates = _map_directories(state)
-    for dimension in candidates:
-        zoomify = _find_zoomify_root(dimension)
-        if zoomify is not None:
-            return dimension, zoomify
-    return (candidates[0], None) if candidates else (state['directory'], None)
+from runtime.CinterForgeBedrockMap import _ZOOMIFY_TILE, _TILE_GROUP, _map_layout, _find_zoomify_root
 
 
 def _authored_viewer_ready(state: dict, dimension: Path, zfy: Path | None) -> bool:

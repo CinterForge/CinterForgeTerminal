@@ -836,6 +836,12 @@ def stage_host(builds: Path) -> dict:
         # Generated caches and Finder metadata are not authored resources.
         shutil.copytree(repo / 'webapp', candidate / 'webapp',
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store'))
+        if app_shell:
+            from host.lifecycle.craftmaster_dependency import craftmaster_minecraft_runtime
+            for relative, source in craftmaster_minecraft_runtime(builds, system).items():
+                output = candidate / 'webapp' / relative
+                output.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, output)
         # Ship the existing Host-owned Cloudflare transport as a staged resource,
         # not a duplicated authored implementation or a source-checkout import.
         shutil.copy2(repo / 'host/publishing/cloudflare_r2_sync.py',

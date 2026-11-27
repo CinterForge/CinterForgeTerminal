@@ -83,17 +83,7 @@ packages a **dry run** without uploading. To upload explicitly, add `internal`,
 `beta` or `release` after `publish`. A failed phase stops the sequence before
 publication.
 
-Code-OSS Setup prints its pinned Git, npm, compiler and Web-staging phases,
-streams each child command's output into the normal lifecycle log, and reports
-elapsed and time-since-last-output every 15 seconds. A child producing no output
-for five minutes fails with its last output instead of silently blocking Setup;
-Git clone/fetch has a shorter three-minute inactivity limit, a bounded overall
-limit, and two HTTP/1.1 fetch attempts. If the pinned upstream commit is already
-present in the verified local checkout, Setup skips the network fetch. A changed
-CinterForge extension still triggers staging/verification, but macOS `.DS_Store`
-metadata cannot invalidate an otherwise current Web product. An interrupted
-Code-OSS Setup leaves the existing compiled/source caches available for the
-next Setup attempt; no provisioning is moved into Build, Stage, or Test.
+Code Setup uses the maintained CinterForgeCode fork. Prefer the complete local sibling checkout without pulling/resetting it; otherwise Setup clones/fast-forwards `cinterforge/cinterforge` under `Builds/CinterForgeTerminal/Dependencies/Sources`. The fork's `.nvmrc`, `packageManager` and `pnpm-lock.yaml` control provisioning. Setup installs the dependency closure in a disposable Builds worktree; it does not compile the browser workbench. Build uses the existing server-web bundler and Gulp scripts, applies the Terminal browser integration patches only in the disposable worktree, and assembles `Builds/InteractiveFiction/CodeOSS/Web`. The existing browser extension and static runtime validation remain mandatory. A metadata snapshot of the entire source checkout and verified output inventory skip unchanged compilation. If a source edit changes the snapshot without changing install inputs, Build refreshes the disposable worktree using the Setup-acquired pnpm store with offline resolution. Missing dependencies or changed lockfiles require Setup. The Voxel path follows the same maintained-fork policy, using npm and the fork's own `build-web` script through the existing Server adapter. No new public lifecycle commands. Native fork build and staged browser acceptance remain required.
 
 Windows Setup also prints START/PASS/FAIL lines and an elapsed-time heartbeat
 every 15 seconds during blocking dependency checks, Wine initialization,
@@ -371,7 +361,7 @@ The producer assumes the authored Terminal repository and documented external in
 2. Mac Bootstrap provisions Xcode-dependent tools, signed Lima, Docker CLI/Buildx, LinuxKit CLI and pinned, prebuilt native macOS ARM64 QEMU (both `qemu-img` and `qemu-system-x86_64`) **without starting a VM**. LinuxKit Setup starts the single `c` Docker producer for the ARM64 kernel and guest runtime inputs. Use short physical Lima/Colima paths under `Builds/CFTVM/U`, pinned tools and signed/entitled VM-host processes. No Docker Desktop/Homebrew dependency.
 3. Compile/verify the **custom ARM64 LinuxKit kernel with VirtioFS enabled**, package its kernel/initrd/cmdline and Mac LAN relayd launcher, and refresh its generated guest manifest when inputs change. Cache hits require hash/receipt validation; clean state builds from pinned source.
 4. Build/verify the ARM64 kernel, guest glibc and ARM64 NetherNet probe through the **same** `c` producer; release `c` before the actual LinuxKit/Bedrock guest acceptance. After Bedrock passes, start the separately managed QEMU **x86-64** `t` Docker guest and build the single Debian AMD64 Linux/Windows image there, not through ARM64 `c` binfmt/Rosetta. Reuse `t` for cross-build, Wine/MSYS2, Linux Bash and both VNC acceptances; release it on success, failure or interruption. Do not introduce a `w` VM or depend on CFOS's comprehensive Ubuntu image.
-5. Provision/check portable Python and native runtime closures for each release target, the Code-OSS web workbench and extensions, JS Z-machine, game/IF catalogs and native WebView dependencies. The pinned Code-OSS browser producer skips upstream `extensions/copilot` during its nested npm dependency pass: that GitHub-only extension is excluded from the web product, and its optional platform-specific SDK is not a Setup prerequisite. All other pinned extension dependencies and the CinterForge-owned browser extension remain intact. Connecting a local AI provider (including Pleias) is separate from provisioning the editor; this does not claim that chat inference is configured. For Lagomorph, **pull the complete authored `Builds/Lagomorph` tree from the authenticated internal CDN before generating its HFS disks**. Download a single `Builds-Lagomorph.zip` snapshot from the internal `cdn-assets-dev` R2 bucket; verify its committed manifest, whole-ZIP SHA-256, each file hash and empty directories before updating the local source. Previously published per-file snapshots remain readable for migration. A missing snapshot is a Setup error; the source pull must not contact public release media. Respect independent licensed media inputs rather than fabricating substitutes.
+5. Provision/check portable Python and native runtime closures for each release target, the Code-OSS web workbench and extensions, JS Z-machine, game/IF catalogs and native WebView dependencies. The maintained Code fork uses its own pnpm workspace and lockfiles, including its declared installation roots; the old upstream npm Copilot installation patch is retired. The existing nonproduction extension exclusion remains a browser packaging decision. The CinterForge-owned browser extension remains intact. Connecting a local AI provider (including Pleias) is separate from provisioning the editor; this does not claim that chat inference is configured. For Lagomorph, **pull the complete authored `Builds/Lagomorph` tree from the authenticated internal CDN before generating its HFS disks**. Download a single `Builds-Lagomorph.zip` snapshot from the internal `cdn-assets-dev` R2 bucket; verify its committed manifest, whole-ZIP SHA-256, each file hash and empty directories before updating the local source. Previously published per-file snapshots remain readable for migration. A missing snapshot is a Setup error; the source pull must not contact public release media. Respect independent licensed media inputs rather than fabricating substitutes.
 6. Provision and verify the official Bedrock archive and guest runtime inputs needed for later acceptance (respecting the official EULA). **Do not launch Bedrock or run an acceptance test during Setup.** Test subsequently starts a disposable isolated server, checks networking/console, and stops it; never touch the player's worlds.
 7. Write versioned setup manifests and logs. On success, error, interrupt or owning-process death, stop the owned `c` LinuxKit producer, `t` AMD64 producer and temporary children; leave unrelated VMs untouched. Persistent managed caches may be retained for the next validated build.
 
@@ -437,7 +427,7 @@ A Mac-target-native run cannot prove Windows/Linux GUI acceptance. A Wine PE tes
 
 ## Publishing, verification and distribution
 
-`four-artifacts.json` describes the **one macOS DMG + Linux/Windows ZIPs + one unified DevTools ZIP** with sizes, SHA-256 digests, release IDs and target metadata. Explicit private/public Publish selects the configured Cloudflare destination and checks remote results; Fetch verifies the same manifest and bytes before use. Client applications obtain public downloads without redistributing publisher secrets.
+`four-artifacts.json` describes the **one macOS DMG + Linux/Windows ZIPs (no DevTools ZIP)** with sizes, SHA-256 digests, release IDs and target metadata. Explicit private/public Publish selects the configured Cloudflare destination and checks remote results; Fetch verifies the same manifest and bytes before use. Client applications obtain public downloads without redistributing publisher secrets.
 
 For Lagomorph, `./Cinter publish lagomorph public` uploads a single ZIP of the complete original `Builds/Lagomorph` tree to internal `cdn-assets-dev` and its staged ISO plus HFS floppies to the public `cinterforge` bucket. `./Cinter pull lagomorph source` retrieves and verifies only the internal source; this command is automatically part of Setup and `./Cinter all all`. `./Cinter pull lagomorph` explicitly restores internal source **and** published HFS media. The internal source snapshot is independent of the public application release number. Publishing remains explicit; Setup, Build, Stage and Test never upload artwork.
 
@@ -447,12 +437,10 @@ Game/media publishing—including the existing **Lagomorph** image/manual/Battle
 
 The first section of the public repository `README.md` contains three **current
 native application download links** (macOS arm64, Windows x64, Linux x64),
-versioned from the public `four-artifacts.json` release. The separately
-installable DevTools archive is referenced through the release manifest, but
-is not a fourth application link.
+versioned from the public `four-artifacts.json` release. The separately installable DevTools archive uses its own `devtools-artifacts.json` manifest, not the application manifest.
 
 The repository entry point `./Cinter publish cfterminal release` uploads and SHA-checks the
-four release archives, verifies access to the **public** HTTPS download URLs,
+three native release archives and the MSI sidecar, verifies access to the **public** HTTPS download URLs,
 then updates the README links **locally** to that verified release. The download
 block is bounded by stable comments so an update cannot overwrite other README
 content. Repeated publication is idempotent and never runs `git push`.
@@ -573,3 +561,13 @@ Mac manages the writable per-session overlay: neither edits to `Game.txt` nor
 user files modify the published master. Real guest boot and game launching
 still require acceptance in a supported emulator; source and HFS checks do
 not establish guest acceptance.
+
+
+### Independent DevTools producer
+
+From the Terminal repository, `./Cinter all devtools publish beta` provisions the toolchain from upstream inputs, builds its inventory, stages and tests the SDK, and publishes only the existing DevTools ZIP with `devtools-artifacts.json`. It does not build Terminal, CraftMaster, Server, Code-OSS, game media, or any Creative Suite product. Mac/Xcode and network access to upstream tools are prerequisites; an existing SDK or another CinterForge build is not. The SDK remains in `Builds/Toolchains` and does not copy live VM disks. `./Cinter all all publish beta` builds/publishes applications, including 68K, but never builds or publishes the SDK. Terminal and Server Setup reuse a compatible local SDK, otherwise download the standalone beta archive and verify its manifest and bytes. `CINTER_DEVTOOLS_DISTRIBUTION` may select the existing production HTTPS Distribution instead. There is no source-build fallback in consumer Setup. Publish the independent beta SDK before testing a clean consumer. Native end-to-end acceptance of this split is pending.
+
+
+## Product dependency acquisition (Drop 16)
+
+Terminal uses a complete local CraftMaster sibling as-is and delegates local owner Setup/Build/Stage through the existing dirty gate. Otherwise Terminal Setup acquires the verified CraftMaster platform archive from the owner's public beta distribution (or release via `CINTER_CRAFTMASTER_DISTRIBUTION_CHANNEL=release`), restoring the canonical `Builds/CinterForgeCraftMaster/Stage/<platform>`. Build reuses that Stage without compiling CraftMaster. It contains the native binary and actual owner-authored runtime/data files. A missing/invalid publication is an error, not authorization to clone a product. For local CraftMaster only, its Setup may clone its maintained LevelDB source library if absent. Published CraftMaster requires no LevelDB source. Server/Code/Voxel prebuilt handoffs are not implemented yet; missing local inputs for those integrations still block Setup. DevTools remains an independent published SDK. Native acceptance remains required before release.

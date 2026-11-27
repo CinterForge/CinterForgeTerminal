@@ -171,18 +171,20 @@ def run_staged_java_smoke(builds: Path, app: Path, target: str, release: str) ->
     import uuid
     from host.lifecycle.craftmaster_dependency import verify_embedded_craftmaster, server_test_fixture
     from host.lifecycle.universal_package import FOUR_ARCH
-    from webapp.runtime.CinterForgeJava import provider, ensure_runtime, native_target
+    from webapp.runtime.CinterForgeJava import _verified_owner
     binary = verify_embedded_craftmaster(app, target)
     data = binary.parent.parent / 'data'
-    cm = provider(data)
+    owner = _verified_owner(data)
+    cm = owner.provider(data)
     root = builds / 'CinterForgeCraftMaster/Server/Java'
-    java, jar = ensure_runtime(root, cm, target=target,
-                               arch=native_target()[1] if target == 'mac' else 'x64',
+    java, jar = owner.ensure_runtime(root, cm, target=target,
+                               arch=owner.native_target()[1] if target == 'mac' else 'x64',
                                offline=True, setup_mac_builds=builds if target == 'mac' else None)
     embedded = app / 'Contents/Resources/Builds' if target == 'mac' else app / 'Builds'
     service = embedded / 'Python/Host' / target / FOUR_ARCH[target] / release / 'webapp'
     for name in ('runtime/CinterForgeJava.py', 'bedrock_status_bridge/manifest.json', 'bedrock_status_bridge/scripts/main.js', 'bedrock_status_bridge/items/terminal.json'):
-        if _sha256(service/name) != _sha256(REPO/'webapp'/name):
+        source = REPO/'webapp'/name if name.startswith('runtime/') else data/name
+        if _sha256(service/name) != _sha256(source):
             raise RuntimeError('Stale staged Java/communications asset: '+name)
     scratch = builds/'Acceptance/CinterForgeTerminal/Java'/target/uuid.uuid4().hex
     fixture, provenance = server_test_fixture(builds)
@@ -221,16 +223,14 @@ def run_staged_java_smoke(builds: Path, app: Path, target: str, release: str) ->
             def run(command,label):
                 print('[JAVA SMOKE] '+target+' '+label+' log='+str(logs/(label+'.log')),flush=True)
                 prefix = ['wine'] if target=='win' else []
-                # HotSpot 25 has crashed during Linux and Windows/Wine Java
-                # acceptance in the Mac ARM64 managed x86-64 QEMU guest.
-                # Limit compilation to C1 for these acceptance processes only.
-                # Keep Wine in the Windows prefix so its managed volume and
-                # Windows Python/JVM are still used. Retail JVMs are unchanged.
-                if (target in ('linux', 'win') and platform.system() == 'Darwin' and
+                # Linux x64 HotSpot 25 crashed in ciObjectFactory while running
+                # in the Mac ARM64 managed QEMU guest. Limit this acceptance
+                # process (and its JVM child) to C1; never alter retail JVMs,
+                # the native Mac test or the Windows/Wine test environment.
+                if (target == 'linux' and platform.system() == 'Darwin' and
                         platform.machine().lower() in ('arm64', 'aarch64')):
-                    prefix = ['env', 'JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1', *prefix]
-                    guest = 'Windows x64/Wine' if target == 'win' else 'Linux x64'
-                    print(f'[JAVA SMOKE] {guest} under Apple Silicon QEMU: '
+                    prefix = ['env', 'JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1']
+                    print('[JAVA SMOKE] Linux x64 under Apple Silicon QEMU: '
                           'JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1', flush=True)
                 result = cross.execute(prefix+command,cwd=scratch,timeout=900,
                                        diagnostic_log=logs/(label+'.log'),stream_output=True)
@@ -271,7 +271,7 @@ def test_linuxkit(repo: Path, *, offline: bool = False) -> None:
     service = embedded / 'Python/Host' / 'mac' / FOUR_ARCH['mac'] / HOST_RELEASE / 'webapp'
     pack = service / 'bedrock_status_bridge'
     for asset in ('manifest.json', 'scripts/main.js', 'items/terminal.json'):
-        if _sha256(pack / asset) != _sha256(repo / 'webapp/bedrock_status_bridge' / asset):
+        if _sha256(pack / asset) != _sha256(embedded / 'CinterForgeCraftMaster/mac/data/bedrock_status_bridge' / asset):
             raise RuntimeError('Stale staged communications asset: ' + asset)
     for asset in ('CinterForgeBedrock.py', 'CinterForgeCommands.py', 'CinterForgeHTTPRoutes.py', 'CinterForgeSessions.py'):
         if _sha256(service / 'runtime' / asset) != _sha256(repo / 'webapp/runtime' / asset):
@@ -343,7 +343,7 @@ def _test_installed_testgrounds(embedded: Path, builds: Path, fixture_receipt: P
         if not CinterForgeLifecycleBedrock(builds, 'mac').accepted():
             raise PermissionError('Bedrock EULA consent missing; rerun interactive Setup')
         manager.accept(True)
-    cached = builds / 'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-linux.zip'
+    cached = builds / 'CinterForgeCraftMaster/Server/Bedrock/Downloads/bedrock-server-linux.zip'
     state = manager.prepare_testgrounds(java, verify_server=True, server_archive=cached,
                                         progress=lambda line: print(line, flush=True))
     proof = state['testgrounds']

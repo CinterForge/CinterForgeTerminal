@@ -287,7 +287,8 @@ def _python_cache_member(name: str | Path) -> bool:
             path.suffix.casefold() in ('.pyc', '.pyo'))
 
 
-FOUR_TARGETS = ('mac', 'linux', 'win', 'devtools')
+APP_TARGETS = ('mac', 'linux', 'win')
+FOUR_TARGETS = (*APP_TARGETS, 'devtools')  # legacy manifests and scoped SDK support
 FOUR_ARCH = {'mac': 'arm64', 'linux': 'x64', 'win': 'x64'}
 STEAM_PLATFORMS = {'mac': 'macOS', 'linux': 'Linux', 'win': 'Windows', 'devtools': 'DevTools'}
 APP_ROOTS = {'mac': 'CinterForge Terminal.app', 'linux': 'CinterForge Terminal',
@@ -359,8 +360,16 @@ def _progress(label: str, done: int, total: int) -> None:
           f'({done / 1048576:.1f}/{total / 1048576:.1f} MiB)', flush=True)
 
 def _terminal_resource_members() -> tuple[str, ...]:
-    from webapp.runtime.CinterForgeBedrockAccess import TERMINAL_RESOURCE_PACK_MEMBERS
-    return tuple('bedrock_terminal_resources/' + name for name in TERMINAL_RESOURCE_PACK_MEMBERS)
+    # Resource packs are authored in CraftMaster and embedded from its Stage.
+    # Its installation policy is owned by CraftMaster; verify the complete pack
+    # inventory here without importing an application runtime at build time.
+    return ('bedrock_status_bridge/manifest.json', 'bedrock_status_bridge/scripts/main.js',
+            'bedrock_testgrounds/manifest.json', 'bedrock_testgrounds/scripts/main.js',
+            'bedrock_terminal_resources/manifest.json',
+            'bedrock_terminal_resources/textures/item_texture.json',
+            'bedrock_terminal_resources/ui/server_form.json',
+            *(f'bedrock_terminal_resources/textures/items/cinter_terminal_{size}.png'
+              for size in ('1', '2', '3', '4', 'sm', 'med', 'lg', 'xl')))
 
 
 def _require_terminal_resource_pack(files: dict, target: str, release: str) -> None:
@@ -478,10 +487,7 @@ def _provision_runtime_for_release(builds: Path, target: str) -> Path:
             from host.windows.windows_winpty import ensure as ensure_winpty
             ensure_winpty(builds, runtime)
         return runtime
-    triplet, digest = pp.PACKAGES[(target, arch)]
-    name = f'cpython-{pp.VERSION}+{pp.UPSTREAM}-{triplet}-install_only.tar.gz'
-    archive = builds / 'Intermediates/CinterForgeTerminal/PythonPackages' / name
-    pp._download_verified(archive, name, digest)
+    archive = pp.acquire_archive(builds, target, arch)
     runtime = builds / 'Intermediates/CinterForgeTerminal/ForeignPython' / target / arch / pp.VERSION
     binary = runtime / ('python.exe' if target == 'win' else 'bin/python3')
     if not runtime.exists():
@@ -567,6 +573,22 @@ def _verify_mac_if_runtime(app: Path) -> None:
         source = authored / name
         if not member.is_file() or not source.is_file() or member.read_bytes() != source.read_bytes():
             raise RuntimeError('Mac ZIP refused: bundled Terminal shell asset missing or stale: ' + name)
+    # The two owner modules must match the embedded CraftMaster payload,
+    # not an obsolete authored copy in the Terminal checkout.
+    for name in ('CinterForgeBedrockAccess.py', 'CinterForgeBedrockProperties.py'):
+        source = embedded / 'CinterForgeCraftMaster/mac/data' / name
+        member = shell / 'runtime' / name
+        if not source.is_file() or not member.is_file() or source.read_bytes() != member.read_bytes():
+            raise RuntimeError('Mac ZIP refused: stale CraftMaster runtime: ' + name)
+    for pack in ('bedrock_status_bridge', 'bedrock_terminal_resources', 'bedrock_testgrounds'):
+        owner = embedded / 'CinterForgeCraftMaster/mac/data' / pack
+        if not (owner / 'manifest.json').is_file():
+            raise RuntimeError('Mac ZIP refused: missing CraftMaster pack ' + pack)
+        for source in owner.rglob('*'):
+            if source.is_file():
+                member = shell / pack / source.relative_to(owner)
+                if not member.is_file() or member.read_bytes() != source.read_bytes():
+                    raise RuntimeError('Mac ZIP refused: stale CraftMaster pack asset ' + str(source))
     catalog = json.loads((shell / 'data/mac_games.json').read_text(encoding='utf-8'))
     if catalog.get('schema') != 'cinterforge.terminal.macgames.v1' or len(catalog.get('games', [])) != 61:
         raise RuntimeError('Mac ZIP refused: incomplete Macintosh game catalog')
@@ -782,6 +804,9 @@ exec "$HERE/CinterForge Terminal" --builds "$BUILDS" --python "$BUILDS/Python/En
         assets[host_root + '/python/worker.py'] = repo / 'host/worker.py'
         for name in _authored_webapp_assets(repo):
             assets[host_root + '/webapp/' + name] = repo / 'webapp' / name
+        from host.lifecycle.craftmaster_dependency import craftmaster_minecraft_runtime
+        for relative, source in craftmaster_minecraft_runtime(builds, target).items():
+            assets[host_root + '/webapp/' + relative] = source
         assets[host_root + '/webapp/data/cloudflare_r2_sync.py'] = (
             repo / 'host/publishing/cloudflare_r2_sync.py')
         # All three releases embed the Terminal-owned verified Asset Engine.
@@ -2054,7 +2079,7 @@ def _distribution_files(builds: Path, release: str, *,
         raise FileNotFoundError('Four-artifact distribution must be prepared by Publish: ' + str(receipt_path))
     report = json.loads(receipt_path.read_text())
     entries = report.get('artifacts', {})
-    if report.get('schema') != FOUR_SCHEMA or report.get('release') != release or set(entries) != set(FOUR_TARGETS):
+    if report.get('schema') != FOUR_SCHEMA or report.get('release') != release or set(entries) not in (set(APP_TARGETS), set(FOUR_TARGETS)):
         raise RuntimeError('Publish requires exactly one Mac DMG and three ZIPs')
     files = {'four-artifacts.json': receipt_path}
     for target, entry in entries.items():
@@ -2120,7 +2145,7 @@ def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path,
     parent = builds.resolve() / 'Intermediates/CinterForgeTerminal/CloudflareDownloads'
     parent.mkdir(parents=True, exist_ok=True)
     remote = r2._list_remote(cfg, prefix)
-    expected_names = {'four-artifacts.json'} | {artifact_filename(t) for t in FOUR_TARGETS}
+    expected_names = {'four-artifacts.json'} | {artifact_filename(t) for t in APP_TARGETS}
     if not expected_names <= set(remote):
         raise RuntimeError('Cloudflare release incomplete: ' + ', '.join(sorted(expected_names - set(remote))))
     staged = parent / release
@@ -2133,8 +2158,11 @@ def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path,
                  expected_size=int(remote['four-artifacts.json']['size']))
     record = json.loads((staged / 'four-artifacts.json').read_text())
     entries = record.get('artifacts', {})
-    if record.get('schema') != FOUR_SCHEMA or record.get('release') != release or set(entries) != set(FOUR_TARGETS):
+    if record.get('schema') != FOUR_SCHEMA or record.get('release') != release or set(entries) not in (set(APP_TARGETS), set(FOUR_TARGETS)):
         raise RuntimeError('Cloudflare four-artifact manifest invalid')
+    expected_names.update(artifact_filename(t) for t in entries)
+    if not expected_names <= set(remote):
+        raise RuntimeError('Cloudflare release incomplete')
     installers = record.get('installers', {})
     if installers:
         from host.lifecycle.target_publish import MSI_ZIP_NAME
@@ -2144,7 +2172,7 @@ def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path,
                 int(remote[MSI_ZIP_NAME]['size']) != item.get('bytes')):
             raise RuntimeError('Cloudflare Windows MSI ZIP missing/invalid')
         expected_names.add(MSI_ZIP_NAME)
-    for index, target in enumerate(FOUR_TARGETS, 1):
+    for index, target in enumerate(entries, 1):
         entry = entries[target]
         name = artifact_filename(target)
         if entry.get('filename') != name or int(entry.get('bytes', -1)) != int(remote[name]['size']):
@@ -2153,7 +2181,7 @@ def _download_four_to(builds: Path, release: str, cfg: dict, destination: Path,
             print(f'[TERMINAL PUBLISH] {target} unchanged; reusing prior '
                   'R2 SHA-256 verification (0 bytes downloaded)', flush=True)
             continue
-        print(f'[TERMINAL PUBLISH] download {target} ({index}/4) '
+        print(f'[TERMINAL PUBLISH] download {target} ({index}/{len(entries)}) '
               f'{entry["bytes"] / 1048576:.1f} MiB', flush=True)
         result = staged / name
         if result.is_file() and (result.stat().st_size != entry['bytes'] or
@@ -2366,7 +2394,7 @@ def update_readme_public_downloads(readme_path: Path, receipt: dict) -> bool:
     published_urls = receipt.get('public_urls')
     if not isinstance(published_urls, dict) or any(
             published_urls.get(target) != expected_urls[target]
-            for target in ('manifest', 'mac', 'linux', 'win', 'devtools')):
+            for target in ('manifest', 'mac', 'linux', 'win')):
         raise ValueError('Public receipt URL mismatch; README was not changed')
 
     readme_path = Path(readme_path)
@@ -2384,7 +2412,7 @@ def update_readme_public_downloads(readme_path: Path, receipt: dict) -> bool:
         f'- [Linux — x64]({expected_urls["linux"]})',
         f'- [Optional DevTools — all platforms]({expected_urls["devtools"]})',
         '',
-        f'The [release manifest]({expected_urls["manifest"]}) contains checksums and includes the separate, optional DevTools archive. '
+        f'The [release manifest]({expected_urls["manifest"]}) contains application checksums. DevTools has its own independent manifest and lifecycle. '
         '`./Cinter publish public` updates these links after public download verification; '
         'if CDN propagation is delayed, `./Cinter verify public` completes the update once verification succeeds.',
         README_DOWNLOADS_END,
@@ -2601,7 +2629,7 @@ def _remote_manifest_reusable(cfg: dict, prefix: str, remote: dict,
             return {}
         record = json.loads(payload)
         if (record.get('schema') != FOUR_SCHEMA or record.get('release') != release or
-                set(record.get('artifacts', {})) != set(FOUR_TARGETS)):
+                set(record.get('artifacts', {})) not in (set(APP_TARGETS), set(FOUR_TARGETS))):
             return {}
         reusable = {}
         release_items = {artifact_filename(t): item
@@ -2675,7 +2703,7 @@ def verify_public_four(builds: Path, *, release: str = HOST_RELEASE,
         raise RuntimeError('Local release manifest does not match verified R2 receipt')
     report = json.loads(manifest.read_text())
     entries = report.get('artifacts', {})
-    if report.get('schema') != FOUR_SCHEMA or report.get('release') != release or set(entries) != set(FOUR_TARGETS):
+    if report.get('schema') != FOUR_SCHEMA or report.get('release') != release or set(entries) not in (set(APP_TARGETS), set(FOUR_TARGETS)):
         raise RuntimeError('Invalid local four-artifact release manifest')
     files = {manifest.name: manifest}
     for target, item in entries.items():
@@ -2713,6 +2741,8 @@ def verify_public_four(builds: Path, *, release: str = HOST_RELEASE,
     receipt['public_urls'] = _release_public_urls(
         release, include_lagomorph=channel == 'public',
         include_windows_msi=bool(installers), prefix=expected_prefix)
+    if 'devtools' not in report['artifacts']:
+        receipt['public_urls'].pop('devtools', None)
     return _finalize_public_receipt(receipt_path, receipt, report, files)
 
 
@@ -2737,7 +2767,7 @@ def _require_notarized_mac_release(dmg: Path, builds: Path) -> None:
 
 def publish_four(builds: Path, *, release: str = HOST_RELEASE,
                  config: Path | None = None, channel: str = 'dryrun') -> dict:
-    """Publish the verified four-package distribution only for explicit channels.
+    """Publish verified application packages only for explicit channels.
 
     dryrun packages and checks connectivity to both R2 buckets read-only;
     it never uploads, downloads distribution payloads, or modifies README.
@@ -2780,7 +2810,7 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
     else:
         legacy_media_prefix = None
         media_remote = {}
-    print(f'[TERMINAL PUBLISH] upload Mac DMG + 4 ZIPs + manifest'
+    print(f'[TERMINAL PUBLISH] upload Mac DMG + 3 ZIPs + application manifest'
           f'{" + Lagomorph ISO" if channel in ("public", "release") else ""} -> {cfg["bucket"]}/{prefix}', flush=True)
     total_bytes = sum(x.stat().st_size for x in files.values())
     uploaded = 0
@@ -2822,7 +2852,7 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
                             remote_manifest_sha.get(name, {}).get('sha256') == expected_sha[name])
         if receipt_matches or manifest_matches:
             reuse_verified[name] = expected_sha[name]
-    devtools_info = report['artifacts']['devtools']
+    devtools_info = report['artifacts'].get('devtools', {})
     devtools_name = artifact_filename('devtools')
     if devtools_info.get('remote_only') is True:
         obj = remote.get(devtools_name, {})
@@ -2832,9 +2862,8 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
             raise RuntimeError('Previously published DevTools changed in R2; '
                                'cannot safely reuse the remote ZIP')
         reuse_verified[devtools_name] = devtools_info['sha256']
-    reusable = (devtools_name in files and
-                _verified_r2_cache(previous, files, remote_sources, cfg, prefix,
-                                   expected_sha, previous_receipt_mtime))
+    reusable = _verified_r2_cache(previous, files, remote_sources, cfg, prefix,
+                                   expected_sha, previous_receipt_mtime)
     if reusable:
         print('[TERMINAL PUBLISH] unchanged release has an authenticated SHA-256 R2 '
               'round-trip; skipping all uploads/downloads', flush=True)
@@ -2882,6 +2911,8 @@ def publish_four(builds: Path, *, release: str = HOST_RELEASE,
     public_urls = (_release_public_urls(release, include_lagomorph=channel in ('public', 'release'),
                                         include_windows_msi=bool(report.get('installers')),
                                         prefix=prefix) if provider == 'public' else {})
+    if 'devtools' not in report['artifacts']:
+        public_urls.pop('devtools', None)
     # Remote ETags allow later runs to reject same-size overwrites without
     # re-downloading unchanged SDK archives.
     final_remote = r2._list_remote(cfg, prefix)
@@ -3021,27 +3052,9 @@ _publish_four_archives = publish_four
 
 def publish_four(builds: Path, *, release: str = HOST_RELEASE,
                  config: Path | None = None, channel: str = 'dryrun') -> dict:
-    """Publish only changed packages, reusing R2 DevTools on fresh builders."""
-    remote_devtools = None
-    if channel not in ('dryrun',) and os.environ.get('CINTERFORGE_SETUP_DISABLE_UPLOADS') != '1':
-        from host.publishing import cloudflare_r2_sync as r2
-        _, prefix = _publish_destination(channel)
-        cfg = _cloudflare_config(config, channel=channel)
-        listing = r2._list_remote(cfg, prefix)
-        remote_entries = _remote_manifest_reusable(cfg, prefix, listing, release)
-        candidate = remote_entries.get(artifact_filename('devtools'), {})
-        if candidate:
-            # Content-based build fingerprint survives changing build machines,
-            # paths and mtimes. The remote object must also predate the manifest.
-            from host.lifecycle.unpacked_release import _load
-            devtools = _load(builds.resolve(), release)['targets']['devtools']
-            if (candidate.get('build_fingerprint') == devtools['fingerprint'] and
-                    candidate.get('target') == 'devtools' and
-                    candidate.get('filename') == artifact_filename('devtools')):
-                remote_devtools = candidate
-    prepare_publish_packages(builds, release=release,
-                             notarize=channel not in ('dryrun', 'dev', 'internal'),
-                             reuse_remote_devtools=remote_devtools)
+    """Publish native Terminal apps; DevTools is a separately published product."""
+    prepare_publish_packages(builds, release=release, targets=APP_TARGETS,
+                             notarize=channel not in ('dryrun', 'dev', 'internal'))
     return _publish_four_archives(builds, release=release, config=config, channel=channel)
 
 

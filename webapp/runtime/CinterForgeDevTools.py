@@ -179,7 +179,10 @@ def _setup_receipt_verifies_toolchains(builds: Path) -> bool:
 
 def _devtools_destination(release: str) -> Path:
     """Small installation receipt; tools themselves go in canonical Builds."""
-    return _devtools_builds_root() / 'CinterForgeTerminal/DevTools' / release
+    root = _devtools_builds_root() / 'CinterForgeTerminal/DevTools'
+    current = root / 'current'
+    legacy = root / release
+    return legacy if not current.exists() and (legacy / 'stage-receipt.json').is_file() else current
 
 
 def _save_devtools_builds_root(builds: Path) -> None:
@@ -209,7 +212,7 @@ def _save_devtools_builds_root(builds: Path) -> None:
         Path(name).unlink(missing_ok=True)
 
 
-def _public_manifest(release: str) -> tuple[dict, str]:
+def _public_manifest(release: str, *, distribution: str | None = None) -> tuple[dict, str]:
     """Read the public release manifest, tolerating short CDN visibility delays.
 
     The user has not approved a download at this point: this GET is only a
@@ -220,7 +223,7 @@ def _public_manifest(release: str) -> tuple[dict, str]:
     import time
     from urllib.request import Request, urlopen
     from urllib.error import HTTPError, URLError
-    url = f'{_CinterForgeSettings.PUBLIC_DISTRIBUTION}/four-artifacts.json'
+    url = f'{distribution or _CinterForgeSettings.PUBLIC_DISTRIBUTION}/devtools-artifacts.json'
     headers = {'Accept': 'application/json', 'Cache-Control': 'no-cache',
                'User-Agent': ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                               'AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -243,13 +246,16 @@ def _public_manifest(release: str) -> tuple[dict, str]:
     if len(raw) > 1024 * 1024:
         raise RuntimeError('Public release manifest is unexpectedly large')
     data = json.loads(raw)
-    if (data.get('schema') != _CinterForgeSettings.FOUR_SCHEMA or data.get('release') != release or
+    name = 'CinterForgeTerminal-devtools.zip'
+    sdk_release = data.get('release')
+    if (data.get('schema') != 'cinterforge.terminal.scoped-distribution.v1' or
+            data.get('target') != 'devtools' or
+            not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', str(sdk_release or '')) or
             not isinstance(data.get('artifacts'), dict) or
-            set(data['artifacts']) != {'mac', 'linux', 'win', 'devtools'}):
-        raise RuntimeError('Public release manifest does not identify all four bundles')
-    entry = data['artifacts']['devtools']
-    if (entry.get('filename') != 'CinterForgeTerminal-devtools.zip' or
-            not isinstance(entry.get('bytes'), int) or entry['bytes'] <= 0 or
+            set(data['artifacts']) != {name} or not isinstance(data['artifacts'][name], dict)):
+        raise RuntimeError('Independent DevTools manifest is invalid')
+    entry = dict(data['artifacts'][name], filename=name, release=sdk_release)
+    if (not isinstance(entry.get('bytes'), int) or entry['bytes'] <= 0 or
             not re.fullmatch(r'[0-9a-f]{64}', str(entry.get('sha256', '')))):
         raise RuntimeError('Public DevTools release manifest is invalid')
     return entry, url
@@ -594,7 +600,7 @@ def install_devtools(source_path: str | None = None, *, update: bool = False) ->
         if not source_path:
             raise ValueError('Usage: devtools install <path/to/source>')
         builds = _builds_from_source(source_path)
-    destination = builds / 'CinterForgeTerminal/DevTools' / release
+    destination = builds / 'CinterForgeTerminal/DevTools' / 'current'
     receipt_file = destination / 'stage-receipt.json'
     # An existing successful ./Cinter setup all IS an installed local SDK.
     # Selecting it must not require a separate DevTools download/receipt.
@@ -635,10 +641,10 @@ def install_devtools(source_path: str | None = None, *, update: bool = False) ->
     if input('Type INSTALL to confirm: ').strip() != 'INSTALL':
         print('[DEVTOOLS] canceled; no files changed', flush=True)
         return 1
-    pending = _devtools_download_partial(builds, release, artifact['filename'])
+    pending = _devtools_download_partial(builds, artifact['release'], artifact['filename'])
     try:
         _download_public_devtools(url, pending, length=artifact['bytes'], digest=artifact['sha256'])
-        _stage_devtools_zip(pending, destination, release, artifact)
+        _stage_devtools_zip(pending, destination, artifact['release'], artifact)
     except (OSError, RuntimeError, ValueError, zipfile.BadZipFile) as error:
         print(f'[DEVTOOLS] install failed: {error}; verified download retained for repair', flush=True)
         return 1
@@ -651,7 +657,7 @@ def install_devtools(source_path: str | None = None, *, update: bool = False) ->
 
 def _selected_devtools_receipt() -> tuple[Path, Path, dict]:
     builds = _devtools_builds_root()
-    destination = builds / 'CinterForgeTerminal/DevTools' / _devtools_release()
+    destination = _devtools_destination(_devtools_release())
     receipt = destination / 'stage-receipt.json'
     if receipt.is_symlink() or not receipt.is_file():
         if _setup_receipt_verifies_toolchains(builds):
@@ -758,7 +764,7 @@ def uninstall_devtools() -> int:
     if pin is None or not pin.is_file() or pin.is_symlink():
         raise RuntimeError('No explicit DevTools installation to uninstall')
     builds = _devtools_builds_root()
-    destination = builds / 'CinterForgeTerminal/DevTools' / _devtools_release()
+    destination = _devtools_destination(_devtools_release())
     receipt = destination / 'stage-receipt.json'
     if receipt.is_symlink() or not receipt.is_file():
         raise RuntimeError('Missing managed DevTools receipt; refusing to delete shared toolchains')

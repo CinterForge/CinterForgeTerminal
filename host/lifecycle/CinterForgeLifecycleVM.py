@@ -649,6 +649,36 @@ class CinterForgeLifecycleVM:
             if removed.returncode:
                 raise RuntimeError('Cannot remove owned Docker guest: ' + name)
 
+    def wait_for_idle_docker(self, docker: str, env: dict[str, str]) -> None:
+        """Allow completed --rm jobs to drain; never stop an unidentified job.
+
+        Docker can still report a running container while its final process
+        and removal are being handled. Distinguish an active job from a
+        failed daemon query, and report the actual identity on failure.
+        """
+        detail = ''
+        for attempt in range(6):
+            try:
+                listing = self.docker_call(
+                    docker, env, 'ps', '--no-trunc', '--format',
+                    '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}', timeout=10)
+                if listing.returncode == 0:
+                    if not listing.stdout.strip():
+                        if attempt:
+                            self.progress('PASS t Docker jobs drained')
+                        return
+                    detail = 'active containers: ' + listing.stdout.strip()
+                else:
+                    detail = (f'Docker ps failed (exit {listing.returncode}): ' +
+                              (listing.stderr or listing.stdout).strip())
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                detail = 'Docker ps could not complete: ' + str(exc)
+            if attempt < 5:
+                if attempt == 0:
+                    self.progress('Waiting for t Docker jobs to drain: ' + detail)
+                time.sleep(2)
+        raise RuntimeError('Leaving t running: ' + detail)
+
     def owned_qemu_pids(self, env: dict[str, str], sdk: Path) -> list[int]:
         """Inspect only QEMU matching both the bundled binary and t state."""
         binary = str(sdk / 'mac/qemu/bin/qemu-system-x86_64')
@@ -724,9 +754,7 @@ class CinterForgeLifecycleVM:
                                           '{{.ServerVersion}}', timeout=20)
                 if engine.returncode == 0:
                     self.stop_owned_guests_locked(docker, env)
-                    foreign = self.docker_call(docker, env, 'ps', '--quiet', timeout=25)
-                    if foreign.returncode or foreign.stdout.strip():
-                        raise RuntimeError('Leaving t running: unknown containers may be active')
+                    self.wait_for_idle_docker(docker, env)
                 else:
                     listing = subprocess.run(
                         [colima, 'ssh', '--profile', self.profile, '--', 'docker', 'ps',

@@ -91,7 +91,7 @@ def sdk_root() -> Path | None:
                 raise RuntimeError('Malformed DevTools installation receipt: ' + str(receipt))
             public_install = (record.get('schema') == _CinterForgeSettings.FOUR_SCHEMA and
                               record.get('target') == 'devtools' and
-                              record.get('release') == devtools._devtools_release() and
+                              isinstance(record.get('release'), str) and bool(record['release']) and
                               record.get('source') == 'public' and
                               isinstance(record.get('artifact'), dict))
             if not public_install:

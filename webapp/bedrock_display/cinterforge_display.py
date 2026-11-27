@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from endstone import Player
 from endstone.event import event_handler, ScriptMessageEvent, PlayerQuitEvent
-from endstone.form import ModalForm, TextInput
+from endstone.form import ActionForm, ModalForm, TextInput
 from endstone.plugin import Plugin
 from endstone_mediaplayer import mediaplayer
 from PIL import Image, ImageDraw, ImageFont
@@ -79,6 +79,9 @@ class CinterForgeDisplay(Plugin):
         self.transcripts = {}
         self.story_modes = set()
         self.map_modes = {}
+        self.dialog_maps = set()
+        self.restored = set()
+        self.resume_requests = set()
         self.map_refresh = {}
         self.map_clicks = {}
         self.focus = {}
@@ -146,7 +149,7 @@ class CinterForgeDisplay(Plugin):
                     player.close_form()
                 return
             if event.message_id=='cinter:terminal_map_click_provider':
-                if q['screen'] in self.map_modes:
+                if q['screen'] in self.map_modes and q['screen'] not in self.dialog_maps:
                     self.map_request(q['screen'],'click',q.get('point'),player)
                 return
             if event.message_id=='cinter:terminal_open_provider':
@@ -200,7 +203,7 @@ class CinterForgeDisplay(Plugin):
         else:
             screen=self.mp.screen(q['screen'])
         if recover:
-            self.render(screen,PROMPT)
+            self.restore_screen(q['screen'])
         if screen.info().pixel_width!=w*128 or screen.info().pixel_height!=h*128:
             raise RuntimeError('MediaPlayer screen dimensions do not match the wall')
         labels={tile_label(q['screen'],i,w,h):i for i in indices}
@@ -221,7 +224,7 @@ class CinterForgeDisplay(Plugin):
         slot=f'panel{self.mount_slot:03}'; self.mount_slot+=1
         remember_map_ids(Path.cwd(),q,ids)
         structure=write_slot(Path.cwd(),slot,filled_panel(q,ids))
-        self.mounts[q['id']]={'request':q,'player':player.name,'tiles':tiles,'started':time.monotonic()}
+        self.mounts[q['id']]={'request':q,'player':player.name,'tiles':tiles,'started':time.monotonic(),'recover':recover}
         self.emit_mount('mount_load',{'id':q['id'],'screen':q['screen'],'structure':structure,
                                     'low':dict(zip('xyz',low)),'size':dict(zip('xyz',size)), 'indices':indices})
 
@@ -237,6 +240,10 @@ class CinterForgeDisplay(Plugin):
             raise RuntimeError('Exit the active application or wait for the command before removing this Terminal')
         screen.delete()
         self.transcripts.pop(q['screen'],None)
+        self.restored.discard(q['screen'])
+        if getattr(self,'hosted',False):
+            for suffix in ('.state.json','.transcript.json'):
+                (self.io/(q['screen']+suffix)).unlink(missing_ok=True)
         self.emit_mount('remove_result',{'id':q['id'],'screen':q['screen'],'ok':True,'reason':''})
 
     def relabel(self,player,q):
@@ -288,8 +295,8 @@ class CinterForgeDisplay(Plugin):
             for i in mounted: inventory.set_item(tiles[i][0],None)
             if ack.get('ok') is not True or set(mounted)!=set(tiles):
                 raise RuntimeError(ack.get('reason') or 'Native structure load did not fill every requested frame')
-            text=PROMPT
-            self.transcripts[q['screen']]=text
+            if state.get('recover'):self.restore_screen(q['screen'])
+            else:self.store_transcript(q['screen'],PROMPT)
             self.logger.info('CINTERFORGE_TERMINAL_MATERIALIZED '+q['screen']+'; mounted '+str(len(mounted))+' map tiles')
             self.result(q,True)
         except Exception as exc:
@@ -299,16 +306,96 @@ class CinterForgeDisplay(Plugin):
     def end_focus(self,player):
         self.server.dispatch_command(self.server.command_sender, 'scriptevent cinter:terminal_focus_end '+json.dumps({'player':player.name},separators=(',',':')))
 
+    def saved_transcript(self,name):
+        if name in self.transcripts:return self.transcripts[name]
+        if getattr(self,'hosted',False):
+            path=self.io/(name+'.transcript.json')
+            if path.is_file() and not path.is_symlink() and path.stat().st_size<=131072:
+                try:
+                    text=json.loads(path.read_text('utf-8'))
+                    if isinstance(text,str):self.transcripts[name]=text[-16384:];return self.transcripts[name]
+                except (OSError,ValueError):pass
+        return PROMPT
+
+    def store_transcript(self,name,text):
+        self.transcripts[name]=text[-16384:]
+        if getattr(self,'hosted',False):
+            write_json(self.io/(name+'.transcript.json'),self.transcripts[name])
+
+    def request_resume(self,name):
+        if not getattr(self,'hosted',False) or name in self.restored:return False
+        if any(v[0]==name for v in self.pending.values()):return True
+        request=uuid.uuid4().hex;info=self.mp.screen(name).info()
+        write_json(self.io/(request+'.request.json'),{'screen':name,'command':'','action':'resume','width':info.pixel_width,'height':info.pixel_height})
+        self.pending[request]=(name,'',time.monotonic());self.resume_requests.add(request)
+        return True
+
     def open_form(self,player,name):
         screen=self.mp.screen(name)
         key=str(player.unique_id)
         if key in self.focus:return
-        if name in self.map_modes:
+        if self.request_resume(name):
+            self.focus[key]=(name,player.name,time.monotonic()+FOCUS_SECONDS,uuid.uuid4().hex)
+            return
+        if name in self.map_modes and name not in self.dialog_maps:
             self.end_focus(player)
             self.emit_mount('map_mode',{'screen':name,'active':True})
             return
-        self.render(screen,self.transcripts.get(name,PROMPT))
-        self.show_command_form(player,name)
+        if name not in self.map_modes:self.render(screen,self.saved_transcript(name))
+        self.show_mode_form(player,name)
+
+    def show_mode_form(self,player,name):
+        if name in self.dialog_maps:self.show_map_form(player,name)
+        else:self.show_command_form(player,name)
+
+    def switch_forms(self,name):
+        # A consumed or closed native form can still send a late close event.
+        # Invalidate its token before closing it; reopen after native teardown.
+        for key,state in list(self.focus.items()):
+            if state[0]!=name:continue
+            player=self.server.get_player(state[1])
+            if player is None:self.focus.pop(key,None);continue
+            token=uuid.uuid4().hex
+            self.focus[key]=(name,player.name,time.monotonic()+FOCUS_SECONDS,token)
+            try:player.close_form()
+            except Exception as exc:self.logger.warning('CINTERFORGE_DISPLAY_FORM_CLOSE '+str(exc))
+            def reopen(key=key,token=token):
+                current=self.focus.get(key)
+                if current is None or current[3]!=token:return
+                p=self.server.get_player(current[1])
+                if p is None or str(p.unique_id)!=key:self.focus.pop(key,None);return
+                try:self.show_mode_form(p,name)
+                except Exception as exc:
+                    self.focus.pop(key,None);self.end_focus(p);p.send_message(str(exc))
+            self.server.scheduler.run_task(self,reopen,delay=3)
+
+    def show_map_form(self,player,name):
+        key=str(player.unique_id);token=uuid.uuid4().hex
+        self.focus[key]=(name,player.name,time.monotonic()+FOCUS_SECONDS,token)
+        actions=(('up','↑ Pan up'),('left','← Pan left'),('fit','Fit map'),('right','→ Pan right'),('down','↓ Pan down'),
+                 ('zoom+','+ Zoom in'),('zoom-','− Zoom out'),('overworld','Overworld'),('nether','Nether'),('end','End'),('exit','Return to Terminal'))
+        def active():
+            state=self.focus.get(key);return state is not None and state[3]==token
+        def close(p):
+            if active():self.focus.pop(key,None);self.end_focus(p)
+        def submit(p,index):
+            if not active():return
+            # No second form until the viewport response has been painted.
+            self.focus[key]=(name,p.name,time.monotonic()+FOCUS_SECONDS,uuid.uuid4().hex)
+            try:
+                if type(index) is not int or not 0<=index<len(actions):raise ValueError('Invalid Atlas navigation')
+                if any(v[0]==name for v in self.pending.values()):raise RuntimeError('Wait for the current map update.')
+                self.map_request(name,actions[index][0],player=p)
+                self.emit_mount('focus_keepalive',{'player':p.name,'screen':name})
+            except Exception as exc:
+                p.send_message(str(exc));self.switch_forms(name)
+        form=ActionForm(title='Atlas Navigation',content='',on_submit=submit,on_close=close)
+        for _,label in actions:form.add_button(label)
+        try:
+            player.send_form(form)
+            self.emit_mount('focus_keepalive',{'player':player.name,'screen':name})
+        except Exception:
+            close(player);raise
 
     def show_command_form(self,player,name):
         # A Bedrock ModalForm response consumes the native form. Keep the
@@ -334,6 +421,7 @@ class CinterForgeDisplay(Plugin):
                 if not isinstance(values,list) or len(values)!=1 or not isinstance(values[0],str):
                     raise ValueError('Invalid Terminal form response')
                 command=values[0].strip()
+                if name in self.dialog_maps:raise RuntimeError('Use the Atlas navigation dialog.')
                 if command.casefold()=='exit' and name not in self.story_modes:
                     self.focus.pop(key,None)
                     self.end_focus(p)
@@ -350,7 +438,7 @@ class CinterForgeDisplay(Plugin):
                     write_json(self.io/(request+'.request.json'),{'screen':name,'player':p.name,'command':command,'operator':bool(p.is_op),'width':info.pixel_width,'height':info.pixel_height})
                     self.pending[request]=(name,command,time.monotonic())
                     if name not in self.story_modes:
-                        self.transcripts[name]=(self.transcripts.get(name,PROMPT).rstrip()+' '+command+'\n')[-16384:]
+                        self.store_transcript(name,self.saved_transcript(name).rstrip()+' '+command+'\n')
                         self.render(self.mp.screen(name),self.transcripts[name])
                     self.logger.info('CINTERFORGE_TERMINAL_COMMAND_SUBMITTED '+name)
             except Exception as exc:
@@ -364,7 +452,7 @@ class CinterForgeDisplay(Plugin):
                     self.focus.pop(key,None)
                     return
                 try:
-                    self.show_command_form(current,name)
+                    self.show_mode_form(current,name)
                 except Exception as exc:
                     self.logger.error('CINTERFORGE_TERMINAL_FORM_FAILED: '+str(exc))
                     current.send_message(str(exc))
@@ -390,8 +478,8 @@ class CinterForgeDisplay(Plugin):
         if name in self.map_modes:
             im=self.map_modes[name]
             screen.update_region(0,0,im.width,im.height,im.tobytes(),format='rgba8888')
-        else:
-            self.render(screen,self.transcripts.get(name,PROMPT))
+        elif not self.request_resume(name):
+            self.render(screen,self.saved_transcript(name))
 
     def map_request(self,name,action,point=None,player=None):
         if any(v[0]==name for v in self.pending.values()):
@@ -402,14 +490,14 @@ class CinterForgeDisplay(Plugin):
         if point is not None:data['point']=point
         if player is not None:data['player']=player.name
         write_json(self.io/(request+'.request.json'),data)
-        self.pending[request]=(name,'',time.monotonic())
+        self.pending[request]=(name,action,time.monotonic())
         self.map_refresh[name]=time.monotonic()+5
 
     def render_map(self,name,frame,bundle):
         screen=self.mp.screen(name);info=screen.info();w,h=info.pixel_width,info.pixel_height
         if (frame['width'],frame['height'])!=(w,h):raise ValueError('Map surface dimensions changed')
         vh=frame['view_height'];im=Image.new('RGBA',(w,h),(0,0,0,255))
-        if not 0<vh<h or len(frame['tiles'])>64:raise ValueError('Invalid map viewport')
+        if not 0<vh<=h or len(frame['tiles'])>64:raise ValueError('Invalid map viewport')
         for filename,x0,y0,x1,y1 in frame['tiles']:
             if not re.fullmatch(r'\d+-\d+-\d+\.png',filename):raise ValueError('Invalid map tile')
             a,b,c,d=max(0,x0),max(0,y0),min(w,x1),min(vh,y1)
@@ -423,10 +511,33 @@ class CinterForgeDisplay(Plugin):
                     im.paste(pixels,(a,b))
             except (OSError,ValueError) as exc:
                 self.logger.warning('CINTERFORGE_DISPLAY_MAP_TILE_RETRY '+str(exc))
+        dialog=vh==h and not frame['buttons']
         draw=ImageDraw.Draw(im);font=ImageFont.load_default(size=10 if w<256 else 13)
+        # Paint the existing Atlas annotation geometry in the terrain viewport,
+        # clipped before drawing the native title/control bar.
+        overlays=frame.get('overlays',[])
+        if len(overlays)>4096:raise ValueError('Invalid Atlas overlay count')
+        surface=im.crop((0,0,w,vh)); od=ImageDraw.Draw(surface); labels=[]
+        for item in overlays:
+            color=item['color']; name=item['name']
+            if not re.fullmatch(r'#[0-9a-fA-F]{6}',color) or not isinstance(name,str):continue
+            if item['kind']=='village':
+                a,b,c,d=item['box']; od.rectangle((max(-1,a),max(-1,b),min(w,c),min(vh,d)),outline=color,width=2)
+                labels.append((a,b-13,name,color))
+            elif item['kind'] in ('player','spawn'):
+                x,y=item['point']; od.ellipse((x-6,y-6,x+6,y+6),fill=color,outline='#152235')
+                if item['kind']=='player':od.text((x,y),str(item['number']),font=font,anchor='mm',fill='#101927')
+                labels.append((x+8,y-7,name,color))
+        for x,y,name,color in labels:
+            while name and font.getlength(name)>w-6:name=name[:-1]
+            if not name:continue
+            x=max(2,min(x,w-round(font.getlength(name))-3));y=max(2 if dialog else 16,min(y,vh-14))
+            od.text((x,y),name,font=font,fill=color,stroke_width=1,stroke_fill='#202020')
+        im.paste(surface,(0,0))
         title=(frame['title']+' · '+frame['status'])
         while len(title)>1 and font.getlength(title)>w-8:title=title[:-1]
-        draw.rectangle((0,0,w-1,15),fill=(10,16,18,255));draw.text((4,2),title,font=font,fill='white')
+        if not dialog:
+            draw.rectangle((0,0,w-1,15),fill=(10,16,18,255));draw.text((4,2),title,font=font,fill='white')
         if not frame['tiles']:
             msg=frame['status']
             for i,line in enumerate(wrap_pixels(msg,font,w-8)[:max(1,(vh-20)//13)]):draw.text((4,20+i*13),line,font=font,fill='white')
@@ -439,6 +550,14 @@ class CinterForgeDisplay(Plugin):
         screen.update_region(0,0,w,h,im.tobytes(),format='rgba8888')
         entering=name not in self.map_modes
         self.map_modes[name]=im;self.map_refresh[name]=time.monotonic()+5
+        if dialog:
+            self.dialog_maps.add(name)
+            # The original pack routes normal interaction to focus when the
+            # physical-click mode is inactive. No pack modification required.
+            if entering:
+                self.emit_mount('map_mode',{'screen':name,'active':False})
+                self.logger.info('CINTERFORGE_DISPLAY_MAP_READY '+name)
+            return
         if entering:
             # Release the native command form and camera, so the player can aim
             # at the actual map controls. Do not change the normal/IF form path.
@@ -480,27 +599,54 @@ class CinterForgeDisplay(Plugin):
             path=self.io/(request+'.response.json')
             if not path.is_file() and time.monotonic()-started<150: continue
             try:
-                result=json.loads(path.read_text('utf-8')) if path.is_file() else {'output':'Terminal command timed out.','mode':'if' if name in self.story_modes else 'terminal'}
-                if result.get('mode')=='map':
-                    self.render_map(name,result['map'],self.io/(request+'.tiles'))
+                resume=request in self.resume_requests
+                result=json.loads(path.read_text('utf-8')) if path.is_file() else {'output':'Terminal command timed out.','error':True}
+                if result.get('error'):
+                    self.logger.warning('CINTERFORGE_DISPLAY_COMMAND_FAILED '+result.get('output',''))
+                    if name in self.story_modes or resume:self.restored.discard(name)
+                    for key,state in list(self.focus.items()):
+                        if state[0]!=name:continue
+                        p=self.server.get_player(state[1])
+                        if p is not None:p.send_message(result.get('output','Terminal command failed.'))
+                        if resume or name in self.story_modes:
+                            self.focus.pop(key,None)
+                            if p is not None:p.close_form();self.end_focus(p)
+                    if name in self.dialog_maps and command!='refresh':self.switch_forms(name)
+                    elif not resume and name not in self.story_modes and name not in self.map_modes:
+                        self.store_transcript(name,self.saved_transcript(name)+result.get('output','')+'\n> ')
+                        self.render(self.mp.screen(name),self.transcripts[name])
                     continue
+                if result.get('mode')=='map':
+                    entering=name not in self.map_modes
+                    self.render_map(name,result['map'],self.io/(request+'.tiles'))
+                    self.restored.add(name)
+                    if name in self.dialog_maps and (entering or resume or command!='refresh'):self.switch_forms(name)
+                    continue
+                was_dialog=name in self.dialog_maps
                 if name in self.map_modes:
-                    self.map_modes.pop(name,None);self.map_refresh.pop(name,None);self.map_clicks.pop(name,None)
+                    self.map_modes.pop(name,None);self.dialog_maps.discard(name);self.map_refresh.pop(name,None);self.map_clicks.pop(name,None)
                     self.emit_mount('map_mode',{'screen':name,'active':False})
                 output=result.get('output','')
                 if result.get('mode')=='if':
                     self.story_modes.add(name)
                 else:
                     self.story_modes.discard(name)
-                text=output if result.get('replace') else self.transcripts.get(name,GREETING)+output
-                if name not in self.story_modes: text+='\n> '
-                self.transcripts[name]=text[-16384:]
+                if result.get('resume'):
+                    text=self.saved_transcript(name)
+                else:
+                    text=output if result.get('replace') else self.saved_transcript(name)+output
+                    if name not in self.story_modes:text+='\n> '
+                self.store_transcript(name,text)
                 self.render(self.mp.screen(name),self.transcripts[name])
+                self.restored.add(name)
+                if resume or was_dialog:self.switch_forms(name)
             except Exception as exc: self.logger.error('CINTERFORGE_TERMINAL_RENDER_FAILED: '+str(exc))
             finally:
                 path.unlink(missing_ok=True)
                 shutil.rmtree(self.io/(request+'.tiles'),ignore_errors=True)
                 self.pending.pop(request,None)
+                self.resume_requests.discard(request)
+                (self.io/(request+'.request.json')).unlink(missing_ok=True)
         for name,(point,player_name) in list(self.map_clicks.items()):
             if name not in self.map_modes:self.map_clicks.pop(name,None);continue
             if any(v[0]==name for v in self.pending.values()):continue
@@ -510,6 +656,6 @@ class CinterForgeDisplay(Plugin):
                 try:self.map_request(name,'click',point,player)
                 except Exception as exc:self.logger.error('CINTERFORGE_DISPLAY_MAP_CLICK_FAILED '+str(exc))
         for name,due in list(self.map_refresh.items()):
-            if time.monotonic()>=due:
+            if time.monotonic()>=due and not (name in self.dialog_maps and any(v[0]==name for v in self.focus.values())):
                 try:self.map_request(name,'refresh')
                 except Exception as exc:self.logger.error('CINTERFORGE_DISPLAY_MAP_REFRESH_FAILED '+str(exc))

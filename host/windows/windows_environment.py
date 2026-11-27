@@ -389,12 +389,14 @@ class WindowsCrossEnvironment:
                 hashed.update(block)
         return hashed.hexdigest()
 
-    def ensure_portable_image(self) -> 'WindowsCrossEnvironment':
+    def ensure_portable_image(self, *, acquire: bool = False) -> 'WindowsCrossEnvironment':
         """Require a transferrable Linux/amd64 MinGW+Wine image under Builds.
 
         A host-global compiler is not an acceptable substitute: an uploaded
         Toolchains tree must contain the complete cross-toolchain closure.
         """
+        if not acquire:
+            self.validate_staged(self.builds)
         self.provider = 'docker-linux-amd64-wine'
         self.docker = self._docker_available()
         self._ensure_image()
@@ -431,10 +433,8 @@ class WindowsCrossEnvironment:
             print('[WINDOWS CROSS] Reusing host/staged MinGW-w64 and Wine', flush=True)
             self.provider = 'host'
             return self
-        self.provider = 'docker-linux-amd64-wine'
-        self.docker = self._docker_available()
-        self._ensure_image()
-        return self
+        raise RuntimeError('Verified DevTools cross image is missing; run the consumer Setup to download it, '
+                           'or explicitly run ./Cinter all devtools on the DevTools producer')
 
     def path(self, path: Path) -> str:
         path = path.resolve()
@@ -577,7 +577,10 @@ class WindowsCrossEnvironment:
     def execute(self, command: list[str], *, cwd: Path, timeout: int = 600,
                 graphical: bool = False, network: bool = False,
                 diagnostic_log: Path | None = None,
-                stream_output: bool = False) -> subprocess.CompletedProcess:
+                stream_output: bool = False,
+                native_workspace: bool = False) -> subprocess.CompletedProcess:
+        if native_workspace and self.provider == 'host':
+            raise RuntimeError('Guest-native workspace requires the managed AMD64 image')
         if self.provider == 'host':
             # A host Wine run must not put its prefix, caches or runtime state
             # under ~/.wine, ~/.cache, or /tmp; keep all generated files in Builds.
@@ -601,7 +604,8 @@ class WindowsCrossEnvironment:
         if not self.docker or not self.image:
             raise RuntimeError('Windows cross environment was not successfully provisioned')
         # Native Linux filesystems are required for Wine's registry, DLL
-        # cache, and drive mapping. Only non-Wine build output uses /builds.
+        # cache, and drive mapping. Server may explicitly request the same
+        # guest-native storage for offline environment assembly.
         # Setup must have provisioned this named volume; other lifecycle
         # phases cannot create or repair it implicitly.
         uses_wine = self._uses_wine_prefix(command)
@@ -611,19 +615,22 @@ class WindowsCrossEnvironment:
                           '--mount', f'type=bind,src={docker_bind_source(self.repository)},dst=/source,readonly',
                           '--mount', f'type=bind,src={docker_bind_source(self.builds)},dst=/builds',
                           '--workdir', self.path(cwd)]
-        if uses_wine:
+        if uses_wine or native_workspace:
             volume = self._require_wine_volume()
             docker_command += [
                 '--mount', f'type=volume,src={volume},dst=/cinterwine',
                 '--env', 'HOME=/cinterwine/home',
-                '--env', 'WINEPREFIX=/cinterwine/prefix',
                 '--env', 'XDG_CACHE_HOME=/cinterwine/home/.cache',
-                '--env', 'WINEARCH=win64',
-                '--env', 'WINEDEBUG=-all',
             ]
         else:
             docker_command += [
                 '--env', 'HOME=/builds/Run/CinterForgeTerminal/WindowsCross/Home',
+            ]
+        if uses_wine:
+            docker_command += [
+                '--env', 'WINEPREFIX=/cinterwine/prefix',
+                '--env', 'WINEARCH=win64',
+                '--env', 'WINEDEBUG=-all',
             ]
         if hasattr(os, 'getuid'):
             docker_command.extend(['--user', f'{os.getuid()}:{os.getgid()}'])

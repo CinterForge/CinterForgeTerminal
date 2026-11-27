@@ -12,7 +12,7 @@ Builds Working, Missing Features, Known Blockers
 - [Windows — x64](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/beta/CinterForgeTerminal-win-msi.zip)
 - [Linux — x64](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/beta/CinterForgeTerminal-linux.zip)
 
-The [release manifest](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/2026.11.23/four-artifacts.json) contains checksums and includes the separate, optional DevTools archive. `./Cinter publish public` updates these links after public download verification; if CDN propagation is delayed, `./Cinter verify public` completes the update once verification succeeds.
+The [release manifest](https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/2026.11.23/four-artifacts.json) contains checksums for the historical application release. New application publications exclude DevTools; the independent SDK has its own `devtools-artifacts.json` manifest. `./Cinter publish public` updates these links after public download verification; if CDN propagation is delayed, `./Cinter verify public` completes the update once verification succeeds.
 
 Build Status Details can be found here:
 [CinterForgeTerminal Beta Checklist](docs/CinterForgeTerminal%20Beta%20Checklist.md)
@@ -61,7 +61,7 @@ Type `code` to open the Code-OSS development workbench. Work with local folders 
 
 ### Build and distribute across platforms
 
-For developers, `./Cinter` manages **Setup → Build → Stage → Test** for the macOS, Windows and Linux applications and the separate optional DevTools package. Setup provisions required tools and performs preflight checks; lifecycle results are written to persistent logs. Publishing is a **separate explicit command** and can use Cloudflare R2/CDN to distribute versioned application releases and selected content.
+For developers, `./Cinter` manages **Setup → Build → Stage → Test** for the macOS, Windows and Linux applications and the separate optional DevTools package. For application Setup, reuse compatible `Builds/Toolchains` or download the independently published DevTools SDK. Publish the SDK separately with `./Cinter all devtools publish <channel>`; application publication does not build or upload it. Setup provisions application-specific inputs and performs preflight checks; lifecycle results are written to persistent logs. Publishing is a **separate explicit command** and can use Cloudflare R2/CDN to distribute versioned application releases and selected content.
 
 Successful Cloudflare publication purges the entire CDN hostname for the destination bucket. In the existing external `cfdev/config.json` R2 provider, set `cache_zone_id` and `cache_api_token` (a Cloudflare API token with **Cache Purge** permission for that zone), or supply `CLOUDFLARE_ZONE_ID` and `CLOUDFLARE_API_TOKEN` in the environment. The existing public `cinterforge` and internal `cdn-assets-dev` buckets map to `cinterforge.ucreg.io` and `cdn-dev.ucreg.io` respectively. Other buckets must explicitly configure `cache_hostnames` (comma-separated CDN hostnames in the selected zone). Publish refuses missing purge configuration before upload and reports failed purges; dry runs and downloads do not purge. Never commit tokens.
 

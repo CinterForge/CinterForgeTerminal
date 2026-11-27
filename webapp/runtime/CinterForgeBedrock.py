@@ -61,7 +61,11 @@ if os.name != 'nt':
     import termios
 
 from runtime import CinterForgeSettings as _CinterForgeSettings
-from runtime.CinterForgeBedrockAccess import BedrockServerAccess, install_world_status_bridge
+from runtime.CinterForgeBedrockAccess import (BedrockServerAccess, install_world_status_bridge,
+                                            install_selected_world_pack, extract_bedrock_archive, install_testgrounds_pack,
+                                            copy_managed_world, install_cinter_utility_pack, sync_package_run_tree,
+                                            _checked_url, _curl_download, discover_lan_bedrock,
+                                            mac_bedrock_run_command, compatible_bds_entry, verified_bds_receipt)
 from runtime.CinterForgeBedrockProperties import BedrockProperties, read_world_settings, _atomic_write, _merge_text
 from runtime.CinterForgeCode import CinterForgeCodeWorkspace
 from runtime.CinterForgeGuest import CinterForgeGuestSupervisor
@@ -130,120 +134,9 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _checked_url(url: str) -> str:
-    parsed = urlparse(url)
-    if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError('Bedrock downloads require an HTTPS official source URL')
-    hostname = parsed.hostname.lower()
-    if not (hostname == 'minecraft.net' or hostname.endswith('.minecraft.net')
-            or hostname == 'minecraft.azureedge.net'):
-        raise ValueError('Bedrock package URL must point to the official Minecraft distribution')
-    return url
-
-
-def _safe_extract(
-    archive: Path,
-    target: Path,
-    *,
-    max_uncompressed_bytes: int | None = None,
-) -> None:
-    """Extract a Bedrock ZIP only after validating every entry and total size.
-
-    ZIP extraction is kept inside `target`. Never extract a traversal path,
-    absolute path, or symlink supplied by a downloaded archive.
-    """
-    from runtime import CinterForgeSettings as _CinterForgeSettings
-
-    with zipfile.ZipFile(archive) as source_archive:
-        archive_entries = source_archive.infolist()
-        if len(archive_entries) > 25000:
-            raise ValueError('Bedrock archive has too many entries')
-
-        total_uncompressed_bytes = sum(entry.file_size for entry in archive_entries)
-        maximum_allowed_bytes = (
-            4 * _CinterForgeSettings.MAX_DOWNLOAD_BYTES
-            if max_uncompressed_bytes is None else max_uncompressed_bytes
-        )
-        if total_uncompressed_bytes > maximum_allowed_bytes:
-            raise ValueError('Bedrock archive uncompressed size exceeds limit')
-
-        resolved_destination_root = target.resolve()
-        for archive_entry in archive_entries:
-            entry_name = archive_entry.filename.replace('\\', '/')
-            relative_entry_path = Path(entry_name)
-            is_zip_symlink = (
-                (archive_entry.external_attr >> 16) & 0o170000
-            ) == 0o120000
-            if (
-                relative_entry_path.is_absolute()
-                or '..' in relative_entry_path.parts
-                or not entry_name
-                or is_zip_symlink
-            ):
-                raise ValueError('Bedrock archive contains a traversal or symlink entry')
-
-            extracted_path = (target / relative_entry_path).resolve()
-            if not extracted_path.is_relative_to(resolved_destination_root):
-                raise ValueError('Bedrock archive escapes installation root')
-
-        source_archive.extractall(target)
-
-
-def _curl_download(url: str, archive: Path, report: Callable[[str], None]) -> None:
-    """Fallback when Python's connection to Mojang stalls or is rejected.
-
-    curl writes only into the selected installation staging directory. The caller
-    still compares the complete archive against independently obtained SHA-256
-    metadata before extracting anything.
-    """
-    from runtime import CinterForgeSettings as _CinterForgeSettings
-    binary = shutil.which('curl')
-    if not binary:
-        raise RuntimeError('curl is unavailable; official download cannot use fallback transport')
-    _checked_url(url)
-    diagnostic = archive.with_suffix('.curl.log')
-    initial_size = archive.stat().st_size if archive.exists() else 0
-    report(f'Python download stalled; trying curl from {initial_size / 1048576:.2f} MiB...')
-    # Partial responses are handled by curl's -C -, and --fail ensures HTTP
-    # errors (including a 403) are treated as failures, not ZIP content.
-    command = [binary, '--fail', '--location', '--proto', '=https',
-               '--proto-redir', '=https', '--max-redirs', '4',
-               '--connect-timeout', '15', '--max-time', '300',
-               '--speed-limit', '1024', '--speed-time', '25',
-               '--retry', '2', '--retry-delay', '2', '--retry-all-errors',
-               '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15',
-               '--referer', _CinterForgeSettings.DOWNLOAD_URL,
-               '--silent', '--show-error', '--continue-at', '-',
-               '--output', str(archive), '--write-out', '\nHTTP %{http_code} final=%{url_effective} bytes=%{size_download}\n',
-               url]
-    with diagnostic.open('wb') as errors:
-        process = subprocess.Popen(command, stdout=errors, stderr=subprocess.STDOUT)
-        previous = -1
-        deadline = time.monotonic() + 320
-        try:
-            while process.poll() is None:
-                count = archive.stat().st_size if archive.exists() else 0
-                if count > _CinterForgeSettings.MAX_DOWNLOAD_BYTES:
-                    process.kill()
-                    raise RuntimeError('Bedrock download exceeds size limit')
-                if count != previous:
-                    report(f'curl download: {count / 1048576:.2f} MiB received')
-                    previous = count
-                if time.monotonic() > deadline:
-                    process.kill()
-                    raise RuntimeError('curl exceeded its bounded download time')
-                time.sleep(1)
-            result = process.wait()
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-    tail = diagnostic.read_text('utf-8', errors='replace')[-2048:].strip()
-    if result:
-        raise RuntimeError(f'curl failed with exit {result}: {tail or "no HTTP response"}')
-    if not archive.is_file() or archive.stat().st_size == 0:
-        raise RuntimeError(f'curl returned no archive bytes: {tail}')
-    report(f'curl completed ({archive.stat().st_size / 1048576:.2f} MiB): {tail}')
+def _safe_extract(archive: Path, target: Path, *, max_uncompressed_bytes: int | None = None) -> None:
+    extract_bedrock_archive(archive, target, max_uncompressed_bytes=(
+        4 * _CinterForgeSettings.MAX_DOWNLOAD_BYTES if max_uncompressed_bytes is None else max_uncompressed_bytes))
 
 
 def _user_steamapps(builds: Path) -> Path:
@@ -293,87 +186,6 @@ def _user_steamapps(builds: Path) -> Path:
             return steam.resolve(strict=True)
     raise RuntimeError('Host steamapps library not found; set CINTER_STEAMAPPS '
                        'to an existing Steam library: ' + ', '.join(map(str, candidates)))
-
-
-_RAKNET_MAGIC = bytes.fromhex('00ffff00fefefefefdfdfdfd12345678')
-
-
-def _parse_raknet_pong(packet: bytes, address: str, port: int) -> dict | None:
-    """Read a RakNet unconnected-pong MOTD without trusting arbitrary UDP data."""
-    if len(packet) < 35 or packet[0] != 0x1C or packet[17:33] != _RAKNET_MAGIC:
-        return None
-
-    motd_length_bytes = int.from_bytes(packet[33:35], 'big')
-    if motd_length_bytes > 2048 or 35 + motd_length_bytes > len(packet):
-        return None
-
-    motd = packet[35:35 + motd_length_bytes].decode('utf-8', errors='replace')
-    motd_fields = motd.split(';')
-    return {
-        'address': address,
-        'port': port,
-        'name': (motd_fields[1] if len(motd_fields) > 1 else motd)[:160],
-        'protocol': 'RakNet unconnected pong',
-    }
-
-
-def discover_lan_bedrock(*, timeout: float = 1.5, ports=(19132, 19133)) -> list[dict]:
-    """Discover nearby Bedrock servers with a bounded host-side UDP scan.
-
-    This proves only host-side UDP reception. The separate guest-relay marker
-    is required to establish whether a packet crossed LinuxKit's boundary.
-    """
-    timeout = max(0.1, min(float(timeout), 3.0))
-    discovery_sockets = []
-    discovered_servers = {}
-
-    try:
-        for bedrock_port in dict.fromkeys(ports):
-            udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            udp_socket.bind(('0.0.0.0', 0))
-            discovery_sockets.append((udp_socket, bedrock_port))
-
-            # RakNet Unconnected Ping: packet ID + timestamp + magic + GUID.
-            ping = (
-                b'\x01'
-                + struct.pack('>Q', int(time.time() * 1000))
-                + _RAKNET_MAGIC
-                + b'CINTERFG'
-            )
-            try:
-                udp_socket.sendto(ping, ('255.255.255.255', bedrock_port))
-            except OSError:
-                pass  # Restricted hosts may still receive other LAN traffic.
-
-        deadline = time.monotonic() + timeout
-        while discovery_sockets and time.monotonic() < deadline:
-            remaining_seconds = max(0, deadline - time.monotonic())
-            ready_sockets, _, _ = select.select(
-                [udp_socket for udp_socket, _ in discovery_sockets],
-                [], [], remaining_seconds,
-            )
-            for udp_socket in ready_sockets:
-                try:
-                    packet, (address, port) = udp_socket.recvfrom(4096)
-                except OSError:
-                    continue
-
-                discovered_server = _parse_raknet_pong(packet, address, port)
-                if discovered_server:
-                    discovered_servers[(address, port)] = discovered_server
-    finally:
-        for udp_socket, _ in discovery_sockets:
-            udp_socket.close()
-
-    return sorted(
-        discovered_servers.values(),
-        key=lambda server: (
-            server['name'].casefold(), server['address'], server['port']
-        ),
-    )
-
-
 
 
 class CinterForgeBedrockManager:
@@ -1654,7 +1466,7 @@ class CinterForgeBedrockManager:
                     abs(proof['x'] - proof['spawn']['x']) <= 4 and abs(proof['z'] - proof['spawn']['z']) <= 4 and
                     proof['y'] == proof['spawn']['y'] and
                     proof['chest'] == {'x': proof['x']+4, 'y': proof['y'], 'z': proof['z']-5})
-        prepared = (isinstance(prior, dict) and prior.get('schema') == 'cinterforge.terminal.testgrounds.v1'
+        prepared = (isinstance(prior, dict) and prior.get('schema') == 'cinterforge.terminal.testgrounds.v2'
                     and prior.get('archive_sha256') == digest and prior.get('graceful_stop') is True
                     and prior.get('native_server_verified') is True and valid_fixture(prior.get('fixture')))
         if prepared and not verify_server:
@@ -1663,6 +1475,7 @@ class CinterForgeBedrockManager:
             return {**state, 'testgrounds': prior}
         if state.get('running'):
             raise RuntimeError('Stop Bedrock before preparing or testing TestGrounds')
+        install_testgrounds_pack(self.run_root, target, ASSET_LOCATION / 'bedrock_testgrounds')
         # Use authenticated connections without allowlist enforcement for both
         # retail preparation and native acceptance. Do not clear player lists.
         # Restore the actual user policy before normal hosting.
@@ -1753,9 +1566,6 @@ class CinterForgeBedrockManager:
                     areas_added.append(area)
                     wait_for(lambda: 'Added ticking area' in output[after:], 'spawn chunks loaded')
                 load_area(spawn, 'cinter_terminal_smoke')
-                previous = locations.get('previous')
-                if previous and (abs(previous['x']-spawn['x']) > 4 or abs(previous['z']-spawn['z']) > 4):
-                    load_area(previous, 'cinter_terminal_legacy')
                 time.sleep(3)
                 self.console_command('scriptevent cinter:terminal_smoke TestGrounds')
                 marker = 'CINTERFORGE_TERMINAL_WALL_READY:'
@@ -1777,7 +1587,7 @@ class CinterForgeBedrockManager:
                 raise RuntimeError('TestGrounds graceful shutdown not verified; see ' + str(log))
             if not (target / 'db/CURRENT').is_file():
                 raise RuntimeError('TestGrounds LevelDB missing after native shutdown')
-            result = {'schema': 'cinterforge.terminal.testgrounds.v1', 'archive_sha256': digest,
+            result = {'schema': 'cinterforge.terminal.testgrounds.v2', 'archive_sha256': digest,
                       'fixture': proof, 'native_server_verified': True, 'graceful_stop': True}
             _atomic_write(receipt, (json.dumps(result, indent=2) + '\n').encode('utf-8'))
             report('TestGrounds materials ready in installed world: ' + str(target))
@@ -1867,292 +1677,23 @@ class CinterForgeBedrockManager:
                 'selected': settings.get('selected'), 'worlds': entries,
                 'java_worlds': java, 'java_error': java_error}
 
-    @staticmethod
-    def _safe_world_copy(source: Path, destination: Path) -> None:
-        # Never follow Minecraft-world symlinks or overwrite an existing server save.
-        if source.is_symlink() or not source.is_dir():
-            raise RuntimeError('World source is not a safe directory')
-        for parent, dirs, files in os.walk(source, followlinks=False):
-            for name in dirs + files:
-                if (Path(parent) / name).is_symlink():
-                    raise RuntimeError('World contains a symlink: ' + name)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temp = destination.parent / ('world-import-' + uuid.uuid4().hex)
-        try:
-            shutil.copytree(source, temp, symlinks=False)
-            if destination.exists():
-                raise RuntimeError('Selected server world already exists unexpectedly')
-            temp.rename(destination)
-        finally:
-            if temp.exists():
-                shutil.rmtree(temp)
+    _safe_world_copy = staticmethod(copy_managed_world)
 
     def _install_world_status_bridge(self, target: Path) -> None:
         install_world_status_bridge(self.run_root, target, ASSET_LOCATION / 'bedrock_status_bridge')
 
     def _install_selected_world_pack(self, target: Path, world: dict) -> None:
-        """Install verified selected .mcaddon modules on the managed Bedrock COPY.
-
-        World-native packs and the built-in status bridge are left untouched;
-        only entries recorded by this installer are replaced or removed.
-        """
         record = self.selected_pack_record(world)
-        previous_receipt = target / 'cinterforge-selected-pack.json'
-        if previous_receipt.is_symlink():
-            raise RuntimeError('Unsafe Bedrock pack receipt')
-        previous = (json.loads(previous_receipt.read_text('utf-8'))
-                    if previous_receipt.is_file() else {})
-        old = previous.get('entries', [])
-        if not isinstance(old, list):
-            raise RuntimeError('Invalid previously applied pack state')
-        additions: list[tuple[str, dict]] = []
+        source = None
         if record:
-            from io import BytesIO
-            name = record['name']
+            name = record.get('name')
+            if not isinstance(name, str) or not name or Path(name).name != name or name in ('.', '..') or '\\' in name:
+                raise RuntimeError('Invalid selected world pack name')
             source = self.world_data_root(world) / 'Packs' / 'Downloaded' / name / (name + '.mcaddon')
-            if (source.is_symlink() or not source.is_file() or
-                    source.stat().st_size != record['bytes'] or
-                    _sha256(source) != record['sha256']):
-                raise RuntimeError('Selected world pack is missing or failed SHA-256 verification')
-            with tempfile.TemporaryDirectory(prefix='bedrock-pack-', dir=self.run_root) as scratch:
-                temp = Path(scratch)
-                with zipfile.ZipFile(source) as addon:
-                    nested = [row for row in addon.infolist() if row.filename.lower().endswith('.mcpack') and not row.is_dir()]
-                    if not nested or len(nested) > 32:
-                        raise RuntimeError('Selected Add-On must contain 1–32 .mcpack archives')
-                    if sum(row.file_size for row in nested) > 4 * 1024**3:
-                        raise RuntimeError('Selected pack exceeds unpacked size limit')
-                    for index, member in enumerate(nested):
-                        embedded = temp / ('module-' + str(index) + '.mcpack')
-                        with addon.open(member) as reader, embedded.open('wb') as output:
-                            shutil.copyfileobj(reader, output, length=1024 * 1024)
-                        extracted = temp / ('unpacked-' + str(index))
-                        extracted.mkdir()
-                        _safe_extract(embedded, extracted, max_uncompressed_bytes=4 * 1024**3)
-                        roots = [extracted] if (extracted / 'manifest.json').is_file() else [
-                            row for row in extracted.iterdir() if row.is_dir() and (row / 'manifest.json').is_file()]
-                        if len(roots) != 1:
-                            raise RuntimeError('Pack module must contain exactly one manifest.json')
-                        manifest = json.loads((roots[0] / 'manifest.json').read_text('utf-8'))
-                        header = manifest.get('header') or {}
-                        pack_id, version = header.get('uuid'), header.get('version')
-                        modules = manifest.get('modules') or []
-                        if (not isinstance(pack_id, str) or not re.fullmatch(r'[0-9a-fA-F-]{36}', pack_id)
-                                or not isinstance(version, list) or len(version) != 3 or
-                                any(type(v) is not int or v < 0 for v in version)):
-                            raise RuntimeError('Selected pack has an invalid UUID/version')
-                        kinds = {m.get('type') for m in modules if isinstance(m, dict)}
-                        kind = 'resource' if 'resources' in kinds else 'behavior' if kinds.intersection(('data', 'script')) else None
-                        if kind is None:
-                            raise RuntimeError('Pack module has no behavior/resource modules')
-                        # The client downloads resource textures; behavior code
-                        # remains on this server. Validate its declared entry
-                        # before registering a seemingly successful Add-On.
-                        if kind == 'behavior':
-                            for module in modules:
-                                if not isinstance(module, dict) or module.get('type') != 'script':
-                                    continue
-                                entry = module.get('entry')
-                                if (not isinstance(entry, str) or not entry.endswith(('.js', '.mjs'))
-                                        or not re.fullmatch(r'[A-Za-z0-9_./-]+', entry)
-                                        or any(part in ('', '.', '..') for part in entry.split('/'))
-                                        or not (roots[0] / entry).is_file()):
-                                    raise RuntimeError('Selected behavior pack is missing declared script: ' + str(entry))
-                        key = 'cinterforge-selected-' + record['sha256'][:12] + '-' + str(index)
-                        root = self.run_root / (kind + '_packs')
-                        if root.is_symlink():
-                            raise RuntimeError('Unsafe managed pack root')
-                        root.mkdir(parents=True, exist_ok=True)
-                        destination = root / key
-                        if destination.is_symlink():
-                            raise RuntimeError('Unsafe managed selected-pack directory')
-                        if not destination.exists():
-                            shutil.copytree(roots[0], destination, symlinks=False)
-                        additions.append((kind, {'pack_id': pack_id, 'version': version}))
-        if record and not any(kind == 'behavior' for kind, _ in additions):
-            raise RuntimeError('Selected Add-On has no server behavior pack; resource download alone cannot provide items or commands')
-        if record:
-            behavior = sum(kind == 'behavior' for kind, _ in additions)
-            resources = sum(kind == 'resource' for kind, _ in additions)
-            self._append_log(f'CINTER_ADDON_VALIDATED name={record["name"]} '
-                             f'archive_bytes={record["bytes"]} behavior_packs={behavior} resource_packs={resources}')
-        # Commit the manifest registrations after the modules themselves were
-        # prepared. Unknown user/addon entries and the status bridge survive.
-        for kind, filename in (('behavior', 'world_behavior_packs.json'),
-                               ('resource', 'world_resource_packs.json')):
-            path = target / filename
-            if path.is_symlink():
-                raise RuntimeError('Unsafe Bedrock pack registry')
-            entries = json.loads(path.read_text('utf-8')) if path.is_file() else []
-            if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
-                raise RuntimeError('Invalid Bedrock pack registry')
-            removed_ids = {row['pack_id'] for row in old if isinstance(row, dict) and
-                           row.get('kind') == kind and isinstance(row.get('pack_id'), str)}
-            updated = [row for row in entries if row.get('pack_id') not in removed_ids]
-            for category, entry in additions:
-                if category == kind:
-                    updated = [row for row in updated if row.get('pack_id') != entry['pack_id']]
-                    updated.append(entry)
-            temporary = path.with_name(filename + '-' + uuid.uuid4().hex + '.tmp')
-            try:
-                temporary.write_text(json.dumps(updated, indent=2) + '\n', encoding='utf-8')
-                os.replace(temporary, path)
-            finally:
-                temporary.unlink(missing_ok=True)
-        active = {'schema': 'cinterforge.terminal.applied-pack.v1',
-                  'name': record['name'] if record else None,
-                  'entries': [{'kind': kind, **entry} for kind, entry in additions]}
-        temporary = previous_receipt.with_name(previous_receipt.name + '-' + uuid.uuid4().hex + '.tmp')
-        try:
-            temporary.write_text(json.dumps(active, indent=2) + '\n', encoding='utf-8')
-            os.replace(temporary, previous_receipt)
-        finally:
-            temporary.unlink(missing_ok=True)
+        install_selected_world_pack(self.run_root, target, record, source, report=self._append_log)
 
     def _install_cinter_utility_pack(self, target: Path) -> dict:
-        """Install the existing Cinter chest command AFTER the selected Add-On.
-
-        The legacy guest CraftMaster helper provides this exact command, but is
-        not packaged inside the lightweight Terminal WebApp. This runtime owner
-        must generate the function in the managed BDS copy, never in a Java save.
-        Only item definitions belonging to the selected, registered behavior
-        modules are included; an unrelated server pack cannot contaminate it.
-        """
-        pack_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
-            'https://cinterforge.com/minecraft/cinter-utility-pack'))
-        module_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
-            'https://cinterforge.com/minecraft/cinter-utility-pack/module'))
-        registry = target / 'world_behavior_packs.json'
-        applied = target / 'cinterforge-selected-pack.json'
-        if registry.is_symlink() or applied.is_symlink():
-            raise RuntimeError('Unsafe world pack registration path')
-        references = json.loads(registry.read_text('utf-8')) if registry.is_file() else []
-        receipt = json.loads(applied.read_text('utf-8')) if applied.is_file() else {}
-        if (not isinstance(references, list) or
-                any(not isinstance(row, dict) for row in references) or
-                not isinstance(receipt, dict) or not isinstance(receipt.get('entries', []), list)):
-            raise RuntimeError('Invalid selected pack registration for utility commands')
-        selected_ids = {row.get('pack_id') for row in receipt.get('entries', [])
-                        if isinstance(row, dict) and row.get('kind') == 'behavior'
-                        and isinstance(row.get('pack_id'), str)}
-        active_ids = {row.get('pack_id') for row in references}
-        selected_ids.intersection_update(active_ids)
-        behavior_root = self.run_root / 'behavior_packs'
-        if behavior_root.is_symlink():
-            raise RuntimeError('Unsafe Bedrock behavior pack root')
-        item_ids: set[str] = set()
-        matched_ids: set[str] = set()
-        if selected_ids:
-            for pack_root in behavior_root.iterdir():
-                if pack_root.is_symlink():
-                    raise RuntimeError('Unsafe symlinked server behavior pack')
-                if not pack_root.is_dir() or not (pack_root / 'manifest.json').is_file():
-                    continue
-                manifest_file = pack_root / 'manifest.json'
-                if manifest_file.is_symlink():
-                    raise RuntimeError('Unsafe symlinked pack manifest')
-                manifest = json.loads(manifest_file.read_text('utf-8'))
-                identity = (manifest.get('header') or {}).get('uuid')
-                if identity not in selected_ids:
-                    continue
-                matched_ids.add(identity)
-                items = pack_root / 'items'
-                if not items.is_dir():
-                    continue
-                if items.is_symlink():
-                    raise RuntimeError('Unsafe symlinked item definitions')
-                for path in items.rglob('*.json'):
-                    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents
-                                               if parent == items or items in parent.parents):
-                        raise RuntimeError('Unsafe linked item definition: ' + str(path))
-                    entry = json.loads(path.read_text('utf-8'))
-                    identifier = str((((entry.get('minecraft:item') or {}).get('description') or {})
-                                      .get('identifier') or '')).strip()
-                    if identifier.startswith('cinter:'):
-                        if not re.fullmatch(r'cinter:[a-z0-9_./-]+', identifier):
-                            raise RuntimeError('Invalid Cinter item identifier: ' + identifier)
-                        item_ids.add(identifier)
-        if matched_ids != selected_ids:
-            raise RuntimeError('A selected behavior pack was not installed in the managed Bedrock server')
-        if len(item_ids) + (len(item_ids) + 26) // 27 > 10000:
-            raise RuntimeError('Cinter chest function exceeds Minecraft command limit')
-        utility_dir = behavior_root / ('cinterforge_' + pack_id)
-        if utility_dir.is_symlink():
-            raise RuntimeError('Unsafe generated Cinter utility pack path')
-        # No selected behavior pack: retire ONLY our own utility registration.
-        # Preserve the status bridge and other user-owned pack references.
-        if not selected_ids:
-            updated = [row for row in references if row.get('pack_id') != pack_id]
-            if updated != references:
-                replacement = registry.with_name(registry.name + '-' + uuid.uuid4().hex + '.tmp')
-                try:
-                    replacement.write_text(json.dumps(updated, indent=2) + '\n', 'utf-8')
-                    os.replace(replacement, registry)
-                finally:
-                    replacement.unlink(missing_ok=True)
-            self._append_log('Cinter utility commands: no selected behavior pack; previous utility disabled')
-            return {'items': 0, 'chests': 0, 'enabled': False}
-
-        sorted_items = sorted(item_ids)
-        # Change the pack version with the actual command contents so a different
-        # per-world pack does not reuse Minecraft's cached utility definition.
-        signature = hashlib.sha256('\n'.join(sorted_items).encode('utf-8')).digest()
-        version = [1, int.from_bytes(signature[:2], 'big'),
-                   int.from_bytes(signature[2:4], 'big')]
-        manifest = {'format_version': 2,
-                    'header': {'name': 'Cinter Utility Commands',
-                               'description': 'World-level utilities generated by CinterForge.',
-                               'uuid': pack_id, 'version': version,
-                               'min_engine_version': [1, 20, 0]},
-                    'modules': [{'type': 'data', 'uuid': module_id, 'version': version}]}
-        lines = []
-        # Preserve the original CraftMaster two-chest behavior: 27 items per
-        # chest, five columns, spaced two blocks, starting three ahead.
-        for index, item in enumerate(sorted_items):
-            chest, slot = divmod(index, 27)
-            x = (chest % 5) * 2
-            z = 3 + (chest // 5) * 2
-            if slot == 0:
-                lines.append(f'setblock ^{x} ^ ^{z} chest replace')
-            lines.append(f'replaceitem block ^{x} ^ ^{z} slot.container {slot} {item} 1')
-        if not lines:
-            lines.append('say CinterForge: the selected pack contains no cinter items')
-        behavior_root.mkdir(parents=True, exist_ok=True)
-        staging = behavior_root / ('cinterforge-utility-stage-' + uuid.uuid4().hex)
-        backup = behavior_root / ('cinterforge-utility-backup-' + uuid.uuid4().hex)
-        try:
-            (staging / 'functions' / 'cinter').mkdir(parents=True)
-            (staging / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', 'utf-8')
-            (staging / 'functions' / 'cinter' / 'makechests.mcfunction').write_text(
-                '\n'.join(lines) + '\n', 'utf-8')
-            if utility_dir.exists():
-                utility_dir.rename(backup)
-            try:
-                staging.rename(utility_dir)
-            except BaseException:
-                if backup.exists():
-                    backup.rename(utility_dir)
-                raise
-            updated = [row for row in references if row.get('pack_id') != pack_id]
-            updated.append({'pack_id': pack_id, 'version': version})
-            replacement = registry.with_name(registry.name + '-' + uuid.uuid4().hex + '.tmp')
-            try:
-                replacement.write_text(json.dumps(updated, indent=2) + '\n', 'utf-8')
-                os.replace(replacement, registry)
-            finally:
-                replacement.unlink(missing_ok=True)
-        finally:
-            if staging.exists():
-                shutil.rmtree(staging)
-            if backup.exists():
-                shutil.rmtree(backup)
-        chests = (len(sorted_items) + 26) // 27
-        self._append_log(f'CINTER_UTILITY_READY items={len(sorted_items)} chests={chests} '
-                         'command=/function cinter/makechests')
-        if not item_ids:
-            self._append_log('Cinter utility commands: selected Add-On provides no cinter:* items')
-        return {'items': len(sorted_items), 'chests': chests,
-                'enabled': True, 'command': '/function cinter/makechests'}
+        return install_cinter_utility_pack(self.run_root, target, report=self._append_log)
 
     # --- Bedrock world selection and managed server copy ---------------------
     def run_world(self, name: str, *, launch: bool = True, selected_world: dict | None = None) -> dict:
@@ -2253,59 +1794,9 @@ class CinterForgeBedrockManager:
         recovery.unlink()
 
     def _sync_package_run_tree(self) -> None:
-        """Refresh official runtime files on package changes, never user state.
-
-        A pre-existing Run directory used to keep the old executable even
-        after the verified package changed. The receipt is committed only
-        after all package-owned runtime files have been copied successfully.
-        """
-        receipt = json.loads((self.package / 'receipt.json').read_text('utf-8'))
-        digest = receipt.get('sha256')
-        if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
-            raise RuntimeError('Invalid Bedrock package digest')
-        marker = self.run_root / '.cinter/run-package.json'
-        if marker.is_symlink():
-            raise RuntimeError('Linked Bedrock run package receipt')
-        previous = json.loads(marker.read_text('utf-8')) if marker.is_file() else {}
-        executable = 'bedrock_server.exe' if self.target == 'win' else 'bedrock_server'
-        current_binary = self.run_root / executable
-        if current_binary.is_symlink():
-            raise RuntimeError('Linked Bedrock run executable')
-        # A legacy or interrupted Run tree has no matching receipt. Refresh
-        # every package-owned file, not just the executable (which may have
-        # already been copied before an interruption).
-        refresh = previous.get('sha256') != digest or not current_binary.is_file()
-        if refresh and self._live_session_locked()[0] is not None:
-            raise RuntimeError('Stop Bedrock before refreshing its runtime files')
-        mutable_roots = {'worlds', 'plugins', 'logs', 'config', 'development_behavior_packs',
-                         'development_resource_packs', 'server.properties', 'allowlist.json',
-                         'whitelist.json', 'permissions.json', 'valid_known_packs.json'}
-        for source in self.package.rglob('*'):
-            relative = source.relative_to(self.package)
-            if relative == Path('receipt.json'):
-                continue
-            destination = self.run_root / relative
-            if destination.is_symlink() or not destination.resolve().is_relative_to(self.run_root.resolve()):
-                raise RuntimeError('Linked Bedrock runtime destination: ' + str(destination))
-            if source.is_dir():
-                destination.mkdir(parents=True, exist_ok=True)
-            elif source.is_file():
-                if destination.exists() and (not refresh or relative.parts[0] in mutable_roots):
-                    continue
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                # Atomic per-file promotion preserves executable mode and makes
-                # an interrupted upgrade retryable without touching world data.
-                fd, temp_name = tempfile.mkstemp(prefix='bedrock-runtime-', dir=destination.parent)
-                os.close(fd)
-                temp = Path(temp_name)
-                try:
-                    shutil.copy2(source, temp)
-                    os.replace(temp, destination)
-                finally:
-                    temp.unlink(missing_ok=True)
-        _atomic_write(marker, (json.dumps({'sha256': digest, 'version': receipt.get('version')})+'\n').encode('utf-8'))
-        if refresh:
-            self._append_log('Bedrock run package refreshed; preserving worlds and server settings: ' + str(receipt.get('version')))
+        sync_package_run_tree(self.package, self.run_root, self.target,
+                              live=lambda: self._live_session_locked()[0] is not None,
+                              report=self._append_log)
 
     def _prepare_run_tree(self) -> None:
         self.run_root.mkdir(parents=True, exist_ok=True)
@@ -2604,7 +2095,6 @@ class CinterForgeBedrockManager:
         Test supplies Setup's verified archive; retail obtains the exact
         official package on demand. No unrelated server or save is deleted.
         """
-        from runtime.CinterForgeBedrockDisplay import compatible_bds_entry, verified_bds_receipt
         entry = compatible_bds_entry(self.target)
         with self._package_install_lock:
             if self.installed():
@@ -2805,28 +2295,7 @@ class CinterForgeBedrockManager:
     # --- Server launch and shutdown ------------------------------------------
     def _run_command(self) -> tuple[list[str], dict[str,str]]:
         if self.platform == 'mac':
-            # The original locally signed Mac VM uses a host-side LAN relay.
-            guest = self.builds / 'CinterForgeTerminal/Dependencies/LinuxKit/mac/arm64'
-            launcher = guest / 'run-mac-bds.sh'
-            required = ('CinterBDSVM', 'cinter-bds-kernel',
-                        'cinter-bds-initrd.img', 'cinter-bds-cmdline',
-                        'GuestRuntime/glibc-x86_64/ld-linux-x86-64.so.2',
-                        'GuestRuntime/cinter-nethernet-probe',
-                        'CinterBDSNetRelay')
-            for name in ('run-mac-bds.sh', *required):
-                path = guest / name
-                if not path.is_file():
-                    raise RuntimeError('LinuxKit networking dependency missing: ' + str(path))
-            # Keep the locally signed VM and its LAN relay together.
-            script = launcher.read_text(encoding='utf-8', errors='replace')
-            if ('CinterBDSNetRelay' not in script or
-                    'CINTER_BDS_PROPERTY_PORTS_V1' not in script):
-                raise RuntimeError('Installed LinuxKit launcher is stale (missing LAN relay). '
-                                   'Run ./Cinter setup all, ./Cinter build all and ./Cinter stage all.')
-            for name in ('bedrock_server', 'server.properties'):
-                if not (self.run_root / name).is_file():
-                    raise RuntimeError('LinuxKit server runtime incomplete: ' + str(self.run_root / name))
-            return ['/bin/sh', str(launcher), str(self.run_root)], {}
+            return mac_bedrock_run_command(self.builds, self.run_root)
         display = self.run_root / '.cinter/display-runtime'
         if not (display / 'enabled').is_file():
             executable = self.run_root / ('bedrock_server.exe' if self.platform == 'win' else 'bedrock_server')

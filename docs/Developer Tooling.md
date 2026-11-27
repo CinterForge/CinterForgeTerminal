@@ -161,3 +161,6 @@ published as `CinterForgeTerminal.68k.img` alongside other application
 releases using `./Cinter all 68k publish beta` (or the scoped Publish command).
 The 68K-only Setup check is offline and never reprovisions other toolchains. Retro68 is strictly a development
 compiler, not a runtime service.
+
+
+The SDK has an independent producer lifecycle: `./Cinter all devtools publish beta` from Terminal. Application `all all` consumes the existing SDK or downloads the standalone manifest/ZIP during Setup; it never publishes the SDK. The in-app installer reads `devtools-artifacts.json` rather than the application release manifest. Installation metadata uses a stable `DevTools/current` directory so app releases do not force SDK updates.

@@ -37,6 +37,7 @@ from pathlib import Path
 import platform
 import secrets
 import stat
+import subprocess
 import tempfile
 import time
 
@@ -53,6 +54,7 @@ ALL_OUTPUTS = (
     'Toolchains/WindowsCross',
     'Toolchains/Windows',
     'Toolchains/Linux',
+    'Toolchains/Retro68',
     'Toolchains/WebView',
     'Toolchains/WebView2',
     'CinterForgeTerminal/Dependencies/LinuxKit/mac/arm64',
@@ -60,18 +62,18 @@ ALL_OUTPUTS = (
     'CinterForgeTerminal/Dependencies/ZMachine/0.3.2',
     'CreativeSuite/CFOS/LinuxKit',
     'Intermediates/CinterForgeTerminal/ForeignPython',
-    'Intermediates/CinterForgeTerminal/WebView2',
     'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-linux.zip',
     'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-win.zip',
     'Python/Environments/mac/arm64/cinterterminalenv',
-    'InteractiveFiction/CodeOSS/Web',
-    'CinterForgeTerminal/Dependencies/Voxel/Web',
+    'InteractiveFiction/CodeOSS/code-setup.json',
+    'CinterForgeTerminal/Dependencies/Voxel/voxel-setup.json',
     'Applications/CinterForgeCode/Emulators/Quadra650/Lagomorph',
     'Lagomorph',
     'CinterForgeCraftMaster/Setup',
     'Run/CinterForgeTerminal/WindowsCross/WineVolume.json',
 )
 WIN_OUTPUTS = (
+    'InteractiveFiction/CodeOSS/code-setup.json',
     'Intermediates/CinterForgeTerminal/LinuxKit/Downloads/bedrock-server-win.zip',
     'CinterForgeTerminal/Dependencies/BedrockDisplay/win',
     'Toolchains/mac',
@@ -79,10 +81,9 @@ WIN_OUTPUTS = (
     'Toolchains/Windows',
     'Toolchains/WebView',
     'Toolchains/WebView2',
-    'Intermediates/CinterForgeTerminal/WebView2',
     'Run/CinterForgeTerminal/WindowsCross/WineVolume.json',
     'CinterForgeCraftMaster/Setup',
-    'CinterForgeTerminal/Dependencies/Voxel/Web',
+    'CinterForgeTerminal/Dependencies/Voxel/voxel-setup.json',
 )
 # Runtime/test activity is allowed to write ephemeral caches; those bytes are
 # not part of the Setup closure.  Everything else remains a dirty input.
@@ -312,6 +313,9 @@ def is_current(repo: Path, builds: Path, scope: str = 'all') -> bool:
         if data.get('schema') != SCHEMA or data.get('scope') != scope or \
                 data.get('builds') != str(builds.resolve()):
             raise ValueError('Setup receipt schema/scope/builds differs')
+        from host.lifecycle.craftmaster_dependency import craftmaster_source_identity
+        if data.get('craftmaster_sources') != craftmaster_source_identity(builds, setup=True):
+            raise ValueError('CraftMaster or LevelDB source selection or managed revision changed')
         if data.get('source_sha256') != _sources(repo, scope):
             raise ValueError('Setup authored inputs changed')
         _require_verified_t_guest(builds, scope)
@@ -324,7 +328,7 @@ def is_current(repo: Path, builds: Path, scope: str = 'all') -> bool:
               f'{sum(i["files"] for i in observed.values())} staged files; '
               'skipping unchanged provisioning and VM startup', flush=True)
         return True
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f'[TERMINAL SETUP] DIRTY {scope}: {exc}; normal Setup required', flush=True)
         return False
 
@@ -344,7 +348,9 @@ def commit(repo: Path, builds: Path, scope: str = 'all') -> Path:
     if path.is_symlink():
         raise RuntimeError(f'Unsafe Setup receipt path: {path}')
     _require_verified_t_guest(builds, scope)
+    from host.lifecycle.craftmaster_dependency import craftmaster_source_identity
     data = {'schema': SCHEMA, 'scope': scope,
+            'craftmaster_sources': craftmaster_source_identity(builds, setup=True),
             'builds': str(builds.resolve()),
             'source_sha256': _sources(repo, scope),
             'outputs': _output_state(builds, scope)}

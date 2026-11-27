@@ -1,8 +1,5 @@
-"""Build and stage the pinned Code - OSS browser workbench for CinterForge.
-
-Only the Setup producer path may acquire/build upstream
-Code - OSS. Consumer machines receive ``Builds/InteractiveFiction/CodeOSS/Web`` through the shared
-third-party-web-tool package and never require Git, Node, npm, or node_modules.
+"""Setup acquires the maintained Code fork; Build compiles a disposable worktree.
+The existing static Web adapter remains the packaged browser runtime.
 """
 # CINTERFORGE SOURCE HEADER — host/codeoss/producer.py
 # PURPOSE: Owns Code-OSS producer setup/staging and host integration, not a second editor or command service.
@@ -19,7 +16,6 @@ third-party-web-tool package and never require Git, Node, npm, or node_modules.
 #   validate_codeoss_web: Validate the staged tree exactly as a static consumer sees it.
 #   codeoss_is_installed: Handle codeoss is installed through this component's established interfaces.
 #   _run_checked: Run run checked for this module.
-#   _sync_checkout: Handle sync checkout through this component's established interfaces.
 #   _patch_cinterforge_bootstrap_provider: Register CinterForge's virtual filesystem before Code resolves workspace.
 #   _patch_codeoss_menubar_bridge: Expose Code-OSS's own live MenubarControl actions to its embedding host.
 #   ...and 41 additional internal entry points; see their local documentation.
@@ -49,13 +45,9 @@ import zipfile
 
 from .adapters import run_process
 
-CODEOSS_REPOSITORY = "https://github.com/microsoft/vscode.git"
-# VS Code / Code - OSS 1.137.0, released 2026-09-08. Pin the actual release
-# commit rather than tracking main so every maintainer produces the same tree.
-CODEOSS_REF = "645f29cc3176500b4b5762ba887cf2a7f0ffdf2c"
-CODEOSS_VERSION = "1.137.0"
-CODEOSS_SCHEMA = "cinterforge.codeoss-web.v45"
-CODEOSS_BUILD_CACHE_SCHEMA = "cinterforge.codeoss-build-cache.v10"
+CODEOSS_REPOSITORY = "https://github.com/CinterForge/CinterForgeCode.git"
+CODEOSS_REF = "cinterforge/cinterforge"
+CODEOSS_SCHEMA = "cinterforge.codeoss-web.v46"
 CODEOSS_TEST_WEB_VERSION = "0.0.81"
 
 
@@ -120,10 +112,10 @@ def validate_codeoss_web(web: Path) -> None:
         )
     if "cinterforge-codeoss-menu-model" not in (web / "out/vs/code/browser/workbench/workbench.js").read_text(encoding="utf-8"):
         raise RuntimeError(
-            "Code-OSS compiled workbench lacks the real MenubarControl bridge; rebuild through Setup"
+            "Code-OSS compiled workbench lacks the real MenubarControl bridge; rebuild through Build"
         )
     if 'cinterforge.newWindowsTerminal' not in (web / 'out/vs/code/browser/workbench/workbench.js').read_text(encoding='utf-8'):
-        raise RuntimeError('Compiled Code-OSS Terminal menu lacks the CinterForge command actions; rebuild through Setup')
+        raise RuntimeError('Compiled Code-OSS Terminal menu lacks the CinterForge command actions; rebuild through Build')
     if "{{" in text:
         raise RuntimeError(f"Code - OSS static workbench has unresolved template substitutions: {workbench}")
     # The web workbench revives folderUri with URI.revive(), not URI.parse().
@@ -211,52 +203,6 @@ def _run_checked(
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip()
         raise RuntimeError(f"Code - OSS command failed ({' '.join(args)}): {detail[-4000:]}")
-
-
-def _sync_checkout(source: Path, *, refresh: bool, ref: str) -> str:
-    git = shutil.which("git")
-    if not git:
-        raise RuntimeError("Code - OSS maintainer setup requires git")
-    if not (source / ".git").is_dir():
-        if source.exists():
-            shutil.rmtree(source)
-        source.parent.mkdir(parents=True, exist_ok=True)
-        _run_checked([git, "-c", "http.version=HTTP/1.1", "clone", "--progress", "--filter=blob:none",
-                      "--no-checkout", CODEOSS_REPOSITORY, str(source)],
-                     timeout=900, inactivity_timeout=180, label="Code-OSS Git clone")
-    # A source-only extension change does not invalidate the pinned upstream
-    # commit. Avoid contacting GitHub when the complete object is already local.
-    present = run_process([git, "cat-file", "-e", f"{ref}^{{commit}}"],
-                          cwd=str(source), capture_output=True, text=True, timeout=20)
-    if present.returncode == 0:
-        _log(f"pinned upstream commit {ref[:12]} already cached; skipping network fetch")
-    else:
-        # Fail a stalled/incomplete transfer within a bounded interval and
-        # retry transient HTTP errors without changing the pinned ref.
-        command = [git, "-c", "http.version=HTTP/1.1", "-c", "http.lowSpeedLimit=1024",
-                   "-c", "http.lowSpeedTime=60", "fetch", "--progress", "origin", ref, "--depth", "1"]
-        for attempt in range(1, 3):
-            try:
-                _log(f"fetching pinned Code-OSS commit {ref[:12]} attempt={attempt}/2 via HTTP/1.1")
-                _run_checked(command, cwd=source, timeout=600,
-                             inactivity_timeout=180, label=f"Code-OSS Git fetch {attempt}/2")
-                break
-            except RuntimeError:
-                if attempt == 2:
-                    raise
-                _log("Code-OSS Git transfer interrupted; retrying pinned commit (no checkout deleted)")
-                time.sleep(2)
-    _run_checked([git, "checkout", "--detach", ref], cwd=source,
-                 timeout=120, label="Code-OSS Git checkout")
-    _run_checked([git, "reset", "--hard", ref], cwd=source,
-                 timeout=120, label="Code-OSS Git reset")
-    completed = run_process([git, "rev-parse", "HEAD"], cwd=str(source), capture_output=True, text=True, timeout=15)
-    if completed.returncode != 0:
-        raise RuntimeError("Code - OSS checkout has no readable git revision")
-    commit = completed.stdout.strip()
-    if commit != ref:
-        raise RuntimeError(f"Code - OSS revision mismatch: expected {ref}, got {commit}")
-    return commit
 
 
 CINTERFORGE_PROVIDER_SOURCE = "// CINTERFORGE_BOOTSTRAP_FILESYSTEM_PROVIDER_V1\nclass CinterForgeBootstrapFileSystemProvider implements IFileSystemProvider {\n\treadonly capabilities = FileSystemProviderCapabilities.FileReadWrite;\n\treadonly onDidChangeCapabilities = Event.None;\n\tprivate readonly _onDidChangeFile = new Emitter<readonly IFileChange[]>();\n\treadonly onDidChangeFile = this._onDidChangeFile.event;\n\tprivate revision = '';\n\tprivate watchers = 0;\n\tprivate timer: Timeout | undefined;\n\t// Coalesce Code's duplicate startup probes before they reach /code/command.\n\tprivate readonly pendingReads = new Map<string, Promise<any>>();\n\tprivate readonly readCache = new Map<string, { expires: number; value: any }>();\n\n\tprivate async rawRequest(operation: string, resource?: URI, extra: Record<string, unknown> = {}): Promise<any> {\n\t\tif (globalThis.location?.protocol === 'file:') {\n\t\t\tconst id = `cinterforge-code-${Date.now()}-${Math.random().toString(36).slice(2)}`;\n\t\t\treturn await new Promise<any>((resolve, reject) => {\n\t\t\t\tconst onMessage = (event: MessageEvent) => {\n\t\t\t\t\tif (event.source !== globalThis.parent || event.data?.type !== 'cinterforge-code-response' || event.data?.id !== id) return;\n\t\t\t\t\tclearTimeout(timer); globalThis.removeEventListener('message', onMessage);\n\t\t\t\t\tif (event.data?.ok === false) { const code=String(event.data?.error_code||''); const message=String(event.data?.error||'Local workspace request failed'); if(code==='not_found') reject(createFileSystemProviderError(message,FileSystemProviderErrorCode.FileNotFound)); else if(code==='not_directory') reject(createFileSystemProviderError(message,FileSystemProviderErrorCode.FileNotADirectory)); else if(code==='permission_denied') reject(createFileSystemProviderError(message,FileSystemProviderErrorCode.NoPermissions)); else reject(createFileSystemProviderError(message,FileSystemProviderErrorCode.Unknown)); }\n\t\t\t\t\telse resolve(event.data?.payload || {});\n\t\t\t\t};\n\t\t\t\tconst timer = setTimeout(() => { globalThis.removeEventListener('message', onMessage); reject(new Error('Local CinterForge workspace bridge timed out')); }, 5000);\n\t\t\t\tglobalThis.addEventListener('message', onMessage);\n\t\t\t\tglobalThis.parent.postMessage({ type: 'cinterforge-code-request', id, body: { operation, path: resource?.path ?? '', ...extra } }, '*');\n\t\t\t});\n\t\t}\n\t\tconst controller = new AbortController();\n\t\tconst timeout = setTimeout(() => controller.abort(), 10000);\n\t\tlet response: Response;\n\t\ttry {\n\t\t\tresponse = await fetch('/code/command', { method: 'POST', cache: 'no-store', signal: controller.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operation, path: resource?.path ?? '', ...extra }) });\n\t\t} catch (error) {\n\t\t\tconsole.error('[cinterforge-code] workspace request failed', operation, resource?.path ?? '', error);\n\t\t\tthrow createFileSystemProviderError(`CinterForge workspace ${operation} failed: ${String(error)}`, FileSystemProviderErrorCode.Unavailable);\n\t\t} finally {\n\t\t\tclearTimeout(timeout);\n\t\t}\n\t\tconst payload = await response.json().catch(() => ({}));\n\t\tif (!response.ok || payload.ok === false) {\n\t\t\tconst code = String(payload.error_code || '');\n\t\t\tif (code === 'not_found') throw createFileSystemProviderError(String(payload.error || 'Not found'), FileSystemProviderErrorCode.FileNotFound);\n\t\t\tif (code === 'not_directory') throw createFileSystemProviderError(String(payload.error || 'Not a directory'), FileSystemProviderErrorCode.FileNotADirectory);\n\t\t\tif (code === 'permission_denied') throw createFileSystemProviderError(String(payload.error || 'Permission denied'), FileSystemProviderErrorCode.NoPermissions);\n\t\t\tthrow createFileSystemProviderError(String(payload.error || `HTTP ${response.status}`), FileSystemProviderErrorCode.Unknown);\n\t\t}\n\t\treturn payload;\n\t}\n\tprivate async request(operation: string, resource?: URI, extra: Record<string, unknown> = {}): Promise<any> {\n\t\tconst readOnly = operation === 'stat' || operation === 'read-directory' || operation === 'read-file' || operation === 'workspace-state';\n\t\tif (!readOnly) { this.readCache.clear(); return this.rawRequest(operation, resource, extra); }\n\t\tconst key = `${operation}|${resource?.toString(true) ?? ''}|${JSON.stringify(extra)}`;\n\t\tconst now = Date.now();\n\t\tconst cached = this.readCache.get(key);\n\t\tif (cached && cached.expires > now) return cached.value;\n\t\tconst pending = this.pendingReads.get(key);\n\t\tif (pending) return pending;\n\t\tconst promise = this.rawRequest(operation, resource, extra).then(value => {\n\t\t\tthis.readCache.set(key, { expires: Date.now() + 250, value });\n\t\t\treturn value;\n\t\t}).finally(() => this.pendingReads.delete(key));\n\t\tthis.pendingReads.set(key, promise);\n\t\treturn promise;\n\t}\n\tprivate decode(value: string): Uint8Array { const binary = atob(value || ''); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i); return bytes; }\n\tprivate encode(bytes: Uint8Array): string { let binary = ''; for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(binary); }\n\twatch(_resource: URI, _opts: IWatchOptions): IDisposable { this.watchers++; this.startPolling(); return toDisposable(() => { this.watchers = Math.max(0, this.watchers - 1); if (!this.watchers && this.timer) { clearInterval(this.timer); this.timer = undefined; } }); }\n\tprivate startPolling(): void { if (this.timer) return; const poll = async () => { try { const state = await this.request('workspace-state'); const next = String(state.revision || ''); if (this.revision && next && next !== this.revision) this._onDidChangeFile.fire([{ type: FileChangeType.UPDATED, resource: URI.parse('cinterforge:/') }]); this.revision = next; } catch { } }; void poll(); this.timer = setInterval(poll, 5000); }\n\tasync stat(resource: URI): Promise<IStat> { const p = await this.request('stat', resource); return { type: p.type === 'directory' ? FileType.Directory : FileType.File, ctime: 0, mtime: Number(p.mtime || 0), size: Number(p.size || 0) }; }\n\tasync readdir(resource: URI): Promise<[string, FileType][]> { const p = await this.request('read-directory', resource); return (p.entries || []).map((e: any) => [String(e.name), e.type === 'directory' ? FileType.Directory : FileType.File]); }\n\tasync readFile(resource: URI): Promise<Uint8Array> { const p = await this.request('read-file', resource); return this.decode(String(p.data || '')); }\n\tasync writeFile(resource: URI, content: Uint8Array, opts: IFileWriteOptions): Promise<void> { await this.request('write-file', resource, { data: this.encode(content), create: !!opts.create, overwrite: !!opts.overwrite }); this._onDidChangeFile.fire([{ type: FileChangeType.UPDATED, resource }]); }\n\tasync mkdir(resource: URI): Promise<void> { await this.request('create-directory', resource); this._onDidChangeFile.fire([{ type: FileChangeType.ADDED, resource }]); }\n\tasync delete(resource: URI, opts: IFileDeleteOptions): Promise<void> { await this.request('delete', resource, { recursive: !!opts.recursive }); this._onDidChangeFile.fire([{ type: FileChangeType.DELETED, resource }]); }\n\tasync rename(from: URI, to: URI, opts: IFileOverwriteOptions): Promise<void> { await this.request('rename', from, { target: to.path, overwrite: !!opts.overwrite }); this._onDidChangeFile.fire([{ type: FileChangeType.DELETED, resource: from }, { type: FileChangeType.ADDED, resource: to }]); }\n}\n\n"
@@ -598,7 +544,7 @@ def _required_node_version(source: Path) -> str:
     if not nvmrc.is_file():
         raise RuntimeError(f"Code - OSS checkout is missing its pinned Node version: {nvmrc}")
     version = nvmrc.read_text(encoding="utf-8").strip().lstrip("v")
-    if not version or any(part == "" for part in version.split(".")):
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise RuntimeError(f"Code - OSS has an invalid .nvmrc: {version!r}")
     return version
 
@@ -625,7 +571,7 @@ def _download(url: str, destination: Path) -> None:
         shutil.copyfileobj(response, output)
 
 
-def _ensure_pinned_node(source: Path, root: Path) -> tuple[Path, Path, str]:
+def _ensure_pinned_node(source: Path, root: Path, *, acquire: bool = True) -> tuple[Path, Path, str]:
     """Return the exact Node/npm toolchain pinned by upstream Code - OSS.
 
     This is a maintainer-only build dependency stored under Builds/InteractiveFiction/CodeOSS; it is
@@ -643,6 +589,8 @@ def _ensure_pinned_node(source: Path, root: Path) -> tuple[Path, Path, str]:
     if node.is_file() and npm_cli.is_file():
         return node, npm_cli, version
 
+    if not acquire:
+        raise RuntimeError("Code Node toolchain missing; run Terminal Setup")
     suffix = "zip" if archive_kind == "zip" else "tar.gz"
     archive_name = f"{dirname}.{suffix}"
     base_url = f"https://nodejs.org/dist/v{version}"
@@ -795,39 +743,6 @@ def _audit_ascii_javascript_tree(root: Path, *, label: str) -> None:
     _log(f"{label} JavaScript ASCII audit passed")
 
 
-def _skip_upstream_copilot_install(source: Path) -> None:
-    """Exclude upstream's non-shipped Copilot SDK from maintainer npm ci.
-
-    The pinned Code-OSS root postinstall installs every entry from
-    build/npm/dirs.ts.  Its Copilot extension has a separate postinstall that
-    requires an optional host-specific GitHub SDK, even though upstream's
-    packageAllLocalExtensionsStream explicitly excludes the Copilot extension.
-    CinterForge's browser package provides its own extension instead.
-
-    Patch only the one pinned npm directory entry, never the user's checkout,
-    package manifests, lockfiles, or installed consumer application.
-    """
-    target = source / "build" / "npm" / "dirs.ts"
-    if not target.is_file():
-        raise RuntimeError(f"Pinned Code-OSS npm directory list is missing: {target}")
-    content = target.read_text(encoding="utf-8")
-    anchor = "\t'extensions/copilot',\n"
-    marker = "// CINTERFORGE_SKIP_OPTIONAL_COPILOT_NPM_V1"
-    if marker in content:
-        if anchor in content:
-            raise RuntimeError("Code-OSS Copilot npm patch is inconsistent")
-        return
-    if content.count(anchor) != 1:
-        raise RuntimeError("Pinned Code-OSS npm directory list changed; cannot exclude optional Copilot safely")
-    content = content.replace(
-        anchor,
-        "\t" + marker + " (not shipped in browser runtime)\n",
-        1,
-    )
-    target.write_text(content, encoding="utf-8")
-    _log("excluded non-shipped upstream Copilot SDK from nested npm ci; other pinned extensions unchanged")
-
-
 def _codeoss_npm_environment(inherited: dict[str, str]) -> dict[str, str]:
     """Use the build host's npm platform and retain platform optional packages.
 
@@ -856,49 +771,56 @@ def _codeoss_npm_environment(inherited: dict[str, str]) -> dict[str, str]:
     return environment
 
 
-def _build_web(source: Path) -> None:
-    if not (source / "package.json").is_file() or not (source / "package-lock.json").is_file():
-        raise RuntimeError(f"Code - OSS checkout is incomplete: {source}")
+def _code_tools(source: Path, *, acquire: bool = False):
+    """Use the fork's exact pnpm and Node pins, never the upstream npm lock."""
     root = source.parent
-    node, npm_cli, version = _ensure_pinned_node(source, root)
+    node, npm_cli, version = _ensure_pinned_node(source, root, acquire=acquire)
+    manifest = json.loads((source / "package.json").read_text(encoding="utf-8"))
+    match = re.fullmatch(r"pnpm@(\d+\.\d+\.\d+)(?:\+[^ ]+)?", str(manifest.get("packageManager", "")))
+    if not match or not (source / "pnpm-lock.yaml").is_file():
+        raise RuntimeError("Code fork must provide its pinned pnpm packageManager and lockfile")
+    pin = match.group(1)
+    prefix = root / "Toolchain" / ("pnpm-" + pin)
+    package = prefix / "node_modules/pnpm/package.json"
     env = _codeoss_npm_environment(dict(os.environ))
-    path_parts = [str(node.parent)]
-    # node-gyp's Unix make generator invokes `libtool -static` for static
-    # archives. On macOS that is Apple's /usr/bin/libtool syntax. A Homebrew
-    # GNU libtool earlier on PATH rejects `-static` and breaks @vscode/sqlite3
-    # during npm ci. Make the native macOS build tools authoritative while
-    # retaining the caller PATH for all other dependencies.
-    if platform.system().lower() == "darwin":
-        path_parts.extend(["/usr/bin", "/bin"])
-    path_parts.append(env.get("PATH", ""))
-    env["PATH"] = os.pathsep.join(part for part in path_parts if part)
-    _log(f"using upstream-pinned Node.js v{version}: {node}")
-    npm = [str(node), str(npm_cli)]
-    # npm ci is only reproducible when it starts without an install tree. Git
-    # reset cannot remove ignored node_modules directories, including package-
-    # local installs under extensions/. A previously interrupted/update-data
-    # build can therefore make npm's own cleanup fail with ENOTEMPTY before it
-    # installs anything. Remove install trees explicitly and fail loudly if any
-    # survive; source/build products outside node_modules remain available for
-    # the existing compiled-product cache.
-    install_trees = sorted(
-        (path for path in source.rglob("node_modules") if path.is_dir()),
-        key=lambda path: len(path.parts),
-        reverse=True,
-    )
-    for install_tree in install_trees:
-        _rmtree_generated_strict(install_tree)
-    survivors = [path for path in source.rglob("node_modules") if path.exists()]
-    if survivors:
-        raise RuntimeError(
-            "Code - OSS npm install cleanup failed; node_modules remain: "
-            + ", ".join(str(path) for path in survivors[:20])
-        )
-    if install_trees:
-        _log(f"removed {len(install_trees)} stale node_modules tree(s) before npm ci")
-    _log("npm ci: preserving host-platform optional dependencies; non-shipped Copilot SDK excluded")
-    _run_checked([*npm, "ci", "--include=optional"], cwd=source, timeout=3600,
-                 env=env, label="Code-OSS npm ci")
+    env["PATH"] = os.pathsep.join([str(node.parent), str(prefix / "node_modules/.bin"),
+                                  "/usr/bin", "/bin", env.get("PATH", "")])
+    env["npm_config_cache"] = str(root / "npm-cache")
+    env["npm_config_store_dir"] = str(root / "pnpm-store")
+    env["PNPM_CONFIG_STORE_DIR"] = str(root / "pnpm-store")
+    env["XDG_CACHE_HOME"] = str(root / "cache")
+    env["pnpm_config_frozen_lockfile"] = "true"
+    if not package.is_file():
+        if not acquire:
+            raise RuntimeError("Code pnpm toolchain missing; run Terminal Setup")
+        _run_checked([str(node), str(npm_cli), "install", "--prefix", str(prefix),
+                      "--no-package-lock", "--no-audit", "--no-fund", "pnpm@" + pin],
+                     cwd=root, env=env, label="Code fork pinned pnpm")
+    installed = json.loads(package.read_text(encoding="utf-8"))
+    if installed.get("version") != pin:
+        raise RuntimeError("Code pnpm version mismatch; run Terminal Setup")
+    binary = installed.get("bin")
+    entry = package.parent / (binary.get("pnpm", "") if isinstance(binary, dict) else str(binary or ""))
+    if not entry.is_file() or not entry.resolve().is_relative_to(prefix.resolve()):
+        raise RuntimeError("Code pnpm executable missing or invalid")
+    pnpm = [str(node), str(entry)] if entry.suffix in (".js", ".cjs", ".mjs") else [str(entry)]
+    return node, pnpm, env, version
+
+
+def _install_code_dependencies(source: Path, *, acquire: bool) -> None:
+    node, pnpm, env, _ = _code_tools(source, acquire=acquire)
+    if not acquire:
+        env["npm_config_offline"] = "true"
+        env["pnpm_config_offline"] = "true"
+    _run_checked([*pnpm, "install", "--frozen-lockfile", "--store-dir", str(source.parent / "pnpm-store"), *([] if acquire else ["--offline"])],
+                 cwd=source, env=env, label="Code fork pnpm install")
+
+
+def _build_web(source: Path) -> None:
+    node, npm, env, version = _code_tools(source)
+    env["npm_config_offline"] = "true"
+    env["pnpm_config_offline"] = "true"
+    _log(f"using fork-pinned Node.js v{version} and pnpm: {node}")
     # The build-next server-web bundle resolves codicon.css from the source tree,
     # but a clean checkout does not carry the generated font beside that CSS.
     # Upstream VS Code build workflows seed it from the pinned @vscode/codicons
@@ -998,10 +920,9 @@ def _ensure_browser_extension_products(source: Path) -> int:
         _log("packaged built-in browser extensions already complete; skipping extension packaging")
         return 0
 
-    node, npm_cli, version = _ensure_pinned_node(source, source.parent)
-    env = dict(os.environ)
-    env["PATH"] = str(node.parent) + os.pathsep + env.get("PATH", "")
-    npm = [str(node), str(npm_cli)]
+    node, npm, env, version = _code_tools(source)
+    env["npm_config_offline"] = "true"
+    env["pnpm_config_offline"] = "true"
     _log(
         f"packaged browser extensions incomplete count={len(missing)}; "
         f"running upstream compile-web + compile-extensions-build with Node.js v{version}"
@@ -1044,20 +965,6 @@ def _ensure_browser_extension_products(source: Path) -> int:
     _log(f"upstream packaged Code - OSS browser extensions repaired count={len(missing)}")
     return len(missing)
 
-def _compiled_web_products_ready(source: Path) -> bool:
-    """Return whether the expensive upstream compile products are reusable."""
-    return (
-        (source / "out-vscode-reh-web" / "vs" / "code" / "browser" / "workbench" / "workbench.html").is_file()
-        and (source / "out-vscode-reh-web" / "vs" / "code" / "browser" / "workbench" / "workbench.js").is_file()
-        and (source / "out-vscode-reh-web" / "nls.messages.js").is_file()
-        and (source / ".build" / "extensions").is_dir()
-    )
-
-
-def _build_cache_path(root: Path) -> Path:
-    return root / "compiled-products.json"
-
-
 CODEOSS_PATCHED_COMPILE_INPUTS = (
     "src/vs/workbench/browser/web.main.ts",
     "src/vs/workbench/browser/parts/titlebar/menubarControl.ts",
@@ -1068,59 +975,6 @@ CODEOSS_PATCHED_COMPILE_INPUTS = (
     "src/vs/workbench/api/common/extHost.protocol.ts",
     "src/vs/workbench/api/worker/extHostExtensionService.ts",
 )
-
-
-def _patched_bootstrap_digest(source: Path) -> str:
-    """Fingerprint every CinterForge-patched source that feeds the Web compile.
-
-    The compiled-product cache must never be reusable merely because web.main.ts
-    is unchanged.  In particular, builtinExtensionsScannerService.ts controls
-    whether the stock bundled extensions (including github-authentication) enter
-    the production extension registry.
-    """
-    digest = hashlib.sha256()
-    for rel in CODEOSS_PATCHED_COMPILE_INPUTS:
-        path = source / rel
-        digest.update(rel.encode("utf-8"))
-        digest.update(b"\0")
-        if not path.is_file():
-            digest.update(b"<missing>")
-        else:
-            digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
-def _build_cache_matches(root: Path, source: Path, commit: str) -> bool:
-    marker = _build_cache_path(root)
-    if not marker.is_file() or not _compiled_web_products_ready(source):
-        return False
-    try:
-        value = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return (
-        isinstance(value, dict)
-        and value.get("schema") == CODEOSS_BUILD_CACHE_SCHEMA
-        and value.get("commit") == commit
-        and value.get("bootstrap_sha256") == _patched_bootstrap_digest(source)
-    )
-
-
-def _record_build_cache(root: Path, source: Path, commit: str) -> None:
-    marker = _build_cache_path(root)
-    marker.write_text(
-        json.dumps(
-            {
-                "schema": CODEOSS_BUILD_CACHE_SCHEMA,
-                "commit": commit,
-                "bootstrap_sha256": _patched_bootstrap_digest(source),
-            },
-            indent=2,
-            sort_keys=True,
-        ) + "\n",
-        encoding="utf-8",
-    )
 
 
 def _strip_dangling_source_map_references(root: Path) -> int:
@@ -1938,110 +1792,163 @@ def _stage_web(source: Path, web: Path) -> None:
         raise
 
 
-def ensure_codeoss(repo_root: Path | None = None, *, refresh: bool = False, force: bool = False) -> dict[str, Any]:
-    """Ensure the staged Code - OSS web runtime exists.
-
-    ``refresh=True``/``force=True`` is maintainer-only. Ordinary consumers never
-    acquire or compile source; product sync installs the packaged Web tree.
-    """
-    repo = Path(repo_root).expanduser().resolve() if repo_root else _project_root()
+def _selected_code(repo: Path, *, snapshot: bool = True):
+    from host.lifecycle.craftmaster_dependency import dependency_source, _git_output, _local_source_fingerprint
     root = codeoss_build_root(repo)
-    web = root / "Web"
-    manifest_path = root / "codeoss.json"
-    if codeoss_is_installed(repo) and not refresh and not force:
-        return json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
-    if not refresh and not force:
-        # Source checkouts never embed precompiled .cflib archives. A consumer
-        # obtains the finished runtime through the published WebApp package;
-        # WebApp Setup explicitly requests refresh=True for source compilation.
-        raise RuntimeError(
-            f"Packaged Code - OSS web runtime is missing: {web}. "
-            "Build with WebApp Setup or install the published WebApp runtime."
-        )
+    builds = root.parents[1]
+    selected = dependency_source(builds, "CinterForgeCode")
+    for name in (".nvmrc", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "build/next/index.ts"):
+        if not (selected / name).is_file():
+            raise RuntimeError(f"Complete Code fork required; missing {selected / name}")
+    return selected, _git_output(selected, "rev-parse", "HEAD"), _local_source_fingerprint(selected) if snapshot else None
 
-    ref = str(os.environ.get("CINTERFORGE_CODEOSS_REF") or CODEOSS_REF).strip() or CODEOSS_REF
-    source = root / "Source"
-    root.mkdir(parents=True, exist_ok=True)
-    _log(f"maintainer build ref={ref} source={source} web={web}")
-    _log("phase 1/4: resolve pinned upstream checkout")
-    commit = _sync_checkout(source, refresh=True, ref=ref)
-    _log("phase 2/4: apply and verify CinterForge source patches")
-    _skip_upstream_copilot_install(source)
+
+def _code_setup_inputs(selected: Path) -> str:
+    """Only install inputs invalidate Setup; ordinary edits invalidate Build."""
+    raw = subprocess.check_output(["git", "--no-optional-locks", "-C", str(selected),
+                                   "ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+    h = hashlib.sha256(str(selected.resolve()).encode())
+    for name in sorted(set(os.fsdecode(v) for v in raw.split(b"\0") if v)):
+        rel = Path(name)
+        if (rel.name not in {"package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc", ".nvmrc", ".pnpmfile.mjs", ".pnpmfile.cjs"}
+                and not name.startswith(("build/npm/", "build/lib/pnpm", "build/lib/node"))):
+            continue
+        path = selected / rel
+        if path.is_symlink() or not path.resolve().is_relative_to(selected.resolve()):
+            raise RuntimeError("Unsafe Code install input: " + name)
+        h.update(os.fsencode(name) + b"\0")
+        h.update(hashlib.sha256(path.read_bytes()).digest() if path.is_file() else b"missing")
+    h.update(Path(__file__).read_bytes())
+    h.update((platform.system() + platform.machine()).encode())
+    return h.hexdigest()
+
+
+def _apply_code_patches(source: Path) -> None:
+    # The newer fork's pnpm workspace owns Copilot installation. Do not apply
+    # the retired npm directory-list patch to its new workspace/lock structure.
     _patch_cinterforge_bootstrap_provider(source)
     _patch_codeoss_menubar_bridge(source)
     _patch_codeoss_terminal_menus(source)
     _patch_builtin_extension_scanner(source)
     _patch_file_onboarding_editor_detection(source)
     _patch_file_extension_module_loading(source)
-    existing: dict[str, Any] = {}
-    if manifest_path.is_file():
-        try:
-            value = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if isinstance(value, dict):
-                existing = value
-        except Exception:
-            pass
-    installed_same_commit = (
-        not force
-        and codeoss_is_installed(repo)
-        and existing.get("commit") == commit
-        and existing.get("schema") == CODEOSS_SCHEMA
-    )
-    compiled_cache_matches = not force and _build_cache_matches(root, source, commit)
-    if installed_same_commit and compiled_cache_matches:
-        # The compiled upstream products are reusable, but Web is derived output.
-        # Reconstruct it atomically from the proven source/build products on every
-        # refresh so an incomplete or stale consumer tree can never survive merely
-        # because its manifest and a few bootstrap files still validate.
-        _ensure_browser_extension_products(source)
-        _log("phase 4/4: stage cached Code-OSS browser product")
-        _stage_web(source, web)
-        _log(
-            f"upstream + compiled bootstrap unchanged commit={commit[:12]}; "
-            f"reconstructed complete staged web runtime={web}"
-        )
-        return existing
-    if installed_same_commit and not compiled_cache_matches:
-        _log(
-            f"compiled bootstrap cache changed/invalid commit={commit[:12]}; "
-            "rejecting staged Web reuse and rebuilding Code - OSS"
-        )
 
-    # Keep expensive upstream compilation independent from final Web staging.
-    # If staging/auditing fails, the successful compile products remain reusable
-    # on the next maintainer run instead of repeating npm ci + both gulp builds.
-    cache_matches = compiled_cache_matches
-    # Reuse compiled products only when our own build-cache marker proves they
-    # were compiled by this producer schema.  The pinned upstream commit alone
-    # is insufficient because CinterForge patches web.main.ts before compiling.
-    # Adopting arbitrary products from the same upstream commit can therefore
-    # stage an unpatched workbench that has no early cinterforge: provider.
-    _log("phase 3/4: verify or rebuild compiled Code-OSS products")
-    if cache_matches:
-        _log(f"compiled Code - OSS unchanged commit={commit[:12]}; reusing build products")
-    else:
-        _build_web(source)
-        _record_build_cache(root, source, commit)
-        _log(f"compiled Code - OSS cached commit={commit[:12]}")
-    # Modern built-in extensions (Markdown, Emmet, TypeScript, etc.) own
-    # their browser bundles in package-level compile scripts. The root gulp
-    # extension build alone does not guarantee those dist/browser products.
-    # Fill only missing bundles here; successful products remain in Source and
-    # subsequent update-data runs are a fast no-op.
+
+def codeoss_setup_ready(repo_root: Path | None = None) -> bool:
+    repo = Path(repo_root).resolve() if repo_root else _project_root()
+    root = codeoss_build_root(repo)
+    try:
+        selected, _, _ = _selected_code(repo, snapshot=False)
+        receipt = json.loads((root / "code-setup.json").read_text(encoding="utf-8"))
+        if receipt.get("inputs") != _code_setup_inputs(selected) or not (root / "pnpm-store").is_dir():
+            return False
+        _code_tools(root / "Source")
+        return (root / "Source/node_modules").is_dir()
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        return False
+
+
+def _write_code_receipt(path: Path, value: dict) -> None:
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    os.replace(temp, path)
+
+
+def provision_codeoss(repo_root: Path | None = None, *, force: bool = False) -> dict:
+    """Setup only: install the real fork's dependency closure in Builds."""
+    from host.lifecycle.assets_dependency import _copy_dependency_snapshot
+    repo = Path(repo_root).resolve() if repo_root else _project_root()
+    root = codeoss_build_root(repo)
+    selected, commit, fingerprint = _selected_code(repo)
+    inputs = _code_setup_inputs(selected)
+    receipt = root / "code-setup.json"
+    if not force and codeoss_setup_ready(repo):
+        _log("reusing acquired Code fork dependencies")
+        return json.loads(receipt.read_text(encoding="utf-8"))
+    root.mkdir(parents=True, exist_ok=True)
+    receipt.unlink(missing_ok=True)
+    (root / "compiled-products.json").unlink(missing_ok=True)
+    (root / "codeoss.json").unlink(missing_ok=True)
+    source = root / "Source"
+    _copy_dependency_snapshot(selected, source, commit)
+    _install_code_dependencies(source, acquire=True)
+    if _selected_code(repo)[2] != fingerprint:
+        raise RuntimeError("Code source changed during Setup; rerun Setup")
+    result = {"inputs": inputs, "snapshot": fingerprint, "commit": commit}
+    _write_code_receipt(receipt, {"inputs": inputs})
+    _write_code_receipt(root / "compiled-products.json", result)
+    return result
+
+
+def _code_output_inventory(web: Path) -> str:
+    """Detect missing/changed output members without rereading the full Web tree."""
+    if not web.is_dir():
+        raise RuntimeError("Code Web output is missing")
+    digest = hashlib.sha256()
+    for item in sorted(web.rglob("*")):
+        if item.is_symlink():
+            raise RuntimeError("Unexpected link in Code Web output: " + str(item))
+        if item.is_file():
+            meta = item.stat()
+            digest.update(os.fsencode(item.relative_to(web)) + b"\0")
+            digest.update(f"{meta.st_size}:{meta.st_mtime_ns}:{meta.st_ctime_ns}".encode() + b"\0")
+    return digest.hexdigest()
+
+
+def ensure_codeoss(repo_root: Path | None = None, *, refresh: bool = False, force: bool = False) -> dict[str, Any]:
+    """Build only: compile changed maintained fork and stage the browser adapter."""
+    from host.lifecycle.assets_dependency import _copy_dependency_snapshot
+    repo = Path(repo_root).resolve() if repo_root else _project_root()
+    root = codeoss_build_root(repo)
+    web, source = root / "Web", root / "Source"
+    manifest_path = root / "codeoss.json"
+    selected, commit, fingerprint = _selected_code(repo)
+    if not codeoss_setup_ready(repo):
+        raise RuntimeError("Code fork dependencies missing or changed; run Terminal Setup")
+    # Include host adapter/extension in the dirty key, not just fork source.
+    from host.lifecycle.craftmaster_dependency import _local_source_fingerprint
+    adapter = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    extension = _local_source_fingerprint(_project_root() / "webapp/codeoss/extension")
+    key = {"schema": CODEOSS_SCHEMA, "repository": CODEOSS_REPOSITORY, "ref": CODEOSS_REF,
+           "commit": commit, "source_fingerprint": fingerprint, "adapter": adapter, "extension": extension}
+    try:
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not force and all(existing.get(k) == v for k,v in key.items()) and existing.get("output_inventory") == _code_output_inventory(web) and codeoss_is_installed(repo):
+            _log("unchanged Code fork and valid Web output; skipping compilation")
+            return existing
+    except (OSError, ValueError, RuntimeError):
+        pass
+    receipt_path = root / "compiled-products.json"
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        receipt = {}
+    # A new worktree snapshot consumes the same Setup-acquired pnpm store.
+    # Never reset/pull the developer checkout in Build.
+    if receipt.get("snapshot") != fingerprint:
+        receipt_path.unlink(missing_ok=True)
+        _copy_dependency_snapshot(selected, source, commit)
+        try:
+            _install_code_dependencies(source, acquire=False)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            (root / "code-setup.json").unlink(missing_ok=True)
+            raise
+        receipt["snapshot"] = fingerprint
+        receipt["commit"] = commit
+        _write_code_receipt(receipt_path, receipt)
+    manifest_path.unlink(missing_ok=True)
+    _apply_code_patches(source)
+    for output in (source / "out-vscode-reh-web", source / ".build/extensions"):
+        if output.exists():
+            _rmtree_generated_strict(output)
+    _build_web(source)
     _ensure_browser_extension_products(source)
-    _log("phase 4/4: stage and validate Code-OSS browser product")
     _stage_web(source, web)
-    manifest = {
-        "schema": CODEOSS_SCHEMA,
-        "repository": CODEOSS_REPOSITORY,
-        "ref": ref,
-        "commit": commit,
-        "version": CODEOSS_VERSION if ref == CODEOSS_REF else "custom",
-        "web": str(web),
-    }
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    _log(f"staged Code - OSS {manifest['version']} commit={commit[:12]} web={web}")
-    return manifest
+    if _selected_code(repo)[2] != fingerprint:
+        raise RuntimeError("Code source changed during Build; rerun Build")
+    result = {**key, "version": json.loads((selected / "package.json").read_text(encoding="utf-8"))["version"], "web": str(web), "output_inventory": _code_output_inventory(web)}
+    _write_code_receipt(manifest_path, result)
+    return result
 
 
 def ensure_codeoss_test_node(repo_root: Path | None = None) -> Path:
@@ -2057,7 +1964,7 @@ def ensure_codeoss_test_node(repo_root: Path | None = None) -> Path:
     source = root / "Source"
     if not source.is_dir():
         raise RuntimeError(f"Code - OSS source checkout is required before acceptance: {source}")
-    node, _npm_cli, _version = _ensure_pinned_node(source, root)
+    node, _npm_cli, _version = _ensure_pinned_node(source, root, acquire=False)
     return node
 
 

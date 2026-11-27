@@ -17,46 +17,19 @@ from pathlib import Path
 ASSETS=Path(__file__).resolve().parents[1]
 
 
-# Endstone 0.11.16's supported BDS release. Pin the actual official archive
-# as recorded in EndstoneMC/bedrock-server-data v2/release/1.26.65/metadata.json.
-# The registry version is 1.26.65; the official ZIP and server report 1.26.65.1.
-BDS_VERSION = '1.26.65'
-BDS_ARCHIVE_VERSION = '1.26.65.1'
-BDS_ARCHIVE_SHA256 = {
-    'linux': '4443e58064f5fa96f3464ab46c20cd89b631f7117e4c94d327f48c4eb64f9969',
-    'win': 'c98b9824783b000b8a8d602e6f58467725316c8f635739b1e31998871995621e',
-}
-
-
-def compatible_bds_entry(target):
-    kind = 'win' if target == 'win' else 'linux'
-    return {'version': BDS_VERSION, 'sha256': BDS_ARCHIVE_SHA256[target],
-            'url': f'https://www.minecraft.net/bedrockdedicatedserver/bin-{kind}/bedrock-server-{BDS_ARCHIVE_VERSION}.zip'}
-
-
-def verified_bds_receipt(receipt, target):
-    """Recognize the exact supported official package, including legacy null versions.
-
-    Never infer a version from a filename, a log, or an arbitrary checksum.
-    The prior Setup/Test installer saved the verified archive digest but no
-    version; only the exact pinned archive can be migrated without a download.
-    """
-    expected = compatible_bds_entry(target)
-    if (not isinstance(receipt, dict) or receipt.get('schema') != 'cinterforge.bedrock.package.v1'
-            or receipt.get('platform') != target):
-        raise ValueError('invalid installed Bedrock package receipt')
-    version = receipt.get('version')
-    if (receipt.get('sha256') != expected['sha256'] or
-            version not in (None, '', BDS_VERSION, BDS_ARCHIVE_VERSION)):
-        raise ValueError(f'installed Bedrock version={version!r}, archive SHA-256={receipt.get("sha256")!r}; '
-                         f'Endstone 0.11.16 requires the official {BDS_ARCHIVE_VERSION} {target} archive '
-                         f'({expected["sha256"]})')
-    return {**receipt, 'version': expected['version'], 'source': expected['url']}
+# Compatibility identity and provider-file installation are CraftMaster-owned.
+from runtime.CinterForgeBedrockAccess import (
+    BDS_VERSION, BDS_ARCHIVE_VERSION, BDS_ARCHIVE_SHA256,
+    compatible_bds_entry, verified_bds_receipt, prepare_display_provider,
+    install_display_native_plugin,
+)
 
 
 def install(manager):
     root=manager.run_root/'.cinter/display-runtime'
     enabled=root/'enabled'
+    if root.is_symlink() or root.parent.is_symlink() or manager.run_root.is_symlink():
+        raise RuntimeError('Linked Bedrock display runtime')
     enabled.unlink(missing_ok=True)
     manager._display_unavailable_reason = ''
     package_receipt = manager.package/'receipt.json'
@@ -78,18 +51,7 @@ def install(manager):
         manager._append_log('CINTERFORGE_DISPLAY_BDS_RECEIPT_VERIFIED: '
                             + BDS_ARCHIVE_VERSION + ' ' + verified['sha256'])
     source=manager.builds/'CinterForgeTerminal/Dependencies/BedrockDisplay'/manager.target
-    receipt=source/'receipt.json'
-    if not receipt.is_file(): raise RuntimeError('Bedrock display dependencies missing: run ./Cinter setup all, build and stage')
-    meta=json.loads(receipt.read_text('utf-8'))
-    if meta.get('schema')!='cinterforge.terminal.bedrock-display.v1' or meta.get('target')!=manager.target:
-        raise RuntimeError('Invalid Bedrock display dependency receipt')
-    marker=root/'receipt.json'
-    if not marker.is_file() or marker.read_bytes()!=receipt.read_bytes():
-        temp=root.with_name('display-runtime-install')
-        if temp.exists(): shutil.rmtree(temp)
-        shutil.copytree(source,temp)
-        if root.exists(): shutil.rmtree(root)
-        temp.rename(root)
+    root = prepare_display_provider(source, manager.run_root, manager.target)
     for name in ('launch.py','cinterforge_display.py','terminal_mount.py'):
         dst=root/name if name=='launch.py' else root/'site'/name
         shutil.copy2(ASSETS/'bedrock_display'/name,dst)
@@ -100,9 +62,7 @@ def install(manager):
     (info/'entry_points.txt').write_text('[endstone]\ncinterforge-display = cinterforge_display:CinterForgeDisplay\n')
     (info/'WHEEL').write_text('Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n')
     (info/'RECORD').write_text('cinterforge_display.py,,\nterminal_mount.py,,\n')
-    plugin='endstone_mediaplayer.dll' if manager.target=='win' else 'endstone_mediaplayer.so'
-    plugins=manager.run_root/'plugins'; plugins.mkdir(exist_ok=True)
-    shutil.copy2(root/plugin,plugins/plugin)
+    install_display_native_plugin(root, manager.run_root, manager.target)
     io=manager.run_root/'.cinter/display-io'
     io.mkdir(parents=True,exist_ok=True)
     for pattern in ('*.request.json','*.response.json','*.tmp'):

@@ -35,7 +35,7 @@ PUBLIC INTERFACES
 
 BUILD SAFETY
     Setup prepares pinned dependencies and runs real Bedrock acceptance.
-    Build produces three unpacked apps and unified optional DevTools inputs.
+    Build produces three unpacked apps and the 68K disk; DevTools is independent.
     Stage installs and checks unpacked Build outputs; ``all all`` never publishes unless
     the user explicitly requests ``all all publish``.
     Child build tools, not this CLI, own their detailed platform implementations.
@@ -384,8 +384,54 @@ def main(argv: list[str]) -> int:
     if argv == ['setup', 'testgrounds']:
         # World-only Setup: use the same verified beta fixture acquisition as
         # full Setup, without provisioning toolchains or starting either VM.
-        from host.lifecycle.craftmaster_dependency import prepare_server_test_fixture
+        from host.lifecycle.craftmaster_dependency import (prepare_server_test_fixture,
+            _local_craftmaster, acquire_published_craftmaster)
+        if not _local_craftmaster(BUILDS):
+            native = {'Darwin': 'mac', 'Linux': 'linux', 'Windows': 'win'}[platform.system()]
+            acquire_published_craftmaster(BUILDS, (native,))
         prepare_server_test_fixture(BUILDS)
+        return 0
+    if len(argv) >= 2 and argv[1] == 'devtools' and argv[0] in ('setup', 'build', 'stage', 'test', 'all'):
+        action = argv[0]
+        if action == 'all':
+            if len(argv) != 2 and (len(argv) != 4 or argv[2] != 'publish' or
+                    argv[3] not in ('dryrun', 'internal', 'beta', 'release', 'public')):
+                raise ValueError('Usage: ./Cinter all devtools [publish <channel>]')
+            for phase in ('setup', 'build', 'stage', 'test'):
+                invoke(sys.executable, '-B', str(REPO / 'Cinter'), phase, 'devtools')
+            if len(argv) == 4:
+                invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'publish', 'devtools', argv[3])
+            return 0
+        if len(argv) != 2 or platform.system() != 'Darwin':
+            raise RuntimeError('DevTools producer requires the macOS build host')
+        from host.lifecycle.unpacked_release import build_four, devtools_stage, _require_devtools
+        from host.lifecycle.amd64_backend import managed_amd64_backend
+        if action == 'setup':
+            BUILDS.mkdir(parents=True, exist_ok=True)
+            from host.mac.mac_bootstrap import ensure
+            ensure(BUILDS)
+            with managed_amd64_backend(BUILDS):
+                from host.windows.windows_dependencies import ensure as windows_setup
+                windows_setup(BUILDS)
+                from host.lagomorph.lagomorph_setup import _hfs_package
+                _hfs_package(BUILDS)
+                from host.devtools.devtooling import _retro68_probe
+                _retro68_probe(BUILDS, '', provision_only=True)
+            _require_devtools(BUILDS)
+        elif action == 'build':
+            _require_devtools(BUILDS)
+            build_four(BUILDS, targets=('devtools',))
+        elif action == 'stage':
+            devtools_stage(BUILDS)
+        elif action == 'test':
+            from host.lifecycle.unpacked_release import require_devtools_test
+            require_devtools_test(BUILDS, stage_only=True)
+            _require_devtools(BUILDS)
+            with managed_amd64_backend(BUILDS, setup=False):
+                from host.devtools.devtooling import ensure as verify_tools, smoke_media_toolchain
+                verify_tools(BUILDS)
+                smoke_media_toolchain(BUILDS)
+            devtools_stage(BUILDS, tested=True)
         return 0
     if argv == ['setup', 'win']:
         # A Windows-only lifecycle must not provision LinuxKit,
@@ -394,19 +440,22 @@ def main(argv: list[str]) -> int:
         if platform.system() not in ('Darwin', 'Linux'):
             raise RuntimeError('Windows producer Setup currently requires macOS or Linux cross-build host')
         BUILDS.mkdir(parents=True, exist_ok=True)
-        from host.lifecycle.craftmaster_dependency import ensure_craftmaster_sources, setup_craftmaster
-        ensure_craftmaster_sources(BUILDS)
+        from host.lifecycle.unpacked_release import setup_restore_if_needed
+        setup_restore_if_needed(BUILDS)
+        from host.lifecycle.craftmaster_dependency import ensure_terminal_sources, setup_craftmaster
+        ensure_terminal_sources(BUILDS, targets=('win',))
         from host.lifecycle.craftmaster_dependency import prepare_server_test_fixture
         prepare_server_test_fixture(BUILDS)
         from host.lifecycle.setup_dirty import is_current, invalidate, commit
         from host.lifecycle.craftmaster_dependency import setup_receipts_present
         from host.lifecycle.assets_dependency import (media_toolchains_ready,
-            asset_dependencies_ready, voxel_browser_ready,
+            asset_dependencies_ready, voxel_setup_ready,
             provision_asset_dependencies, provision_voxel_browser)
+        from host.codeoss.producer import codeoss_setup_ready, provision_codeoss
         if (is_current(REPO, BUILDS, 'win') and
                 setup_receipts_present(BUILDS, ('win',)) and
                 media_toolchains_ready(BUILDS) and asset_dependencies_ready(BUILDS)
-                and voxel_browser_ready(BUILDS)):
+                and voxel_setup_ready(BUILDS) and codeoss_setup_ready(REPO)):
 
             return 0
         invalidate(BUILDS, 'win')
@@ -415,15 +464,17 @@ def main(argv: list[str]) -> int:
         require_bedrock_eula(BUILDS, 'win')
         prepare_official_bedrock_archive(REPO, 'win')
         if platform.system() == 'Darwin':
-            invoke(sys.executable, '-B', '-m', 'host.mac.mac_bootstrap', '--builds', str(BUILDS))
             from host.mac.mac_bootstrap import managed_environment
             os.environ.pop('DOCKER_CONTEXT', None)
             os.environ.update(managed_environment(BUILDS))
         provision_asset_dependencies(BUILDS)
         provision_voxel_browser(BUILDS)
+        provision_codeoss(REPO)
         from host.lifecycle.amd64_backend import managed_amd64_backend
         with managed_amd64_backend(BUILDS):
-            invoke(sys.executable, '-B', '-m', 'host.windows.windows_dependencies', '--builds', str(BUILDS))
+            from host.windows.windows_environment import WindowsCrossEnvironment
+            from host.windows.windows_dependencies import _verify_wine_runtime
+            _verify_wine_runtime(WindowsCrossEnvironment(BUILDS).ensure_portable_image(), cwd=BUILDS)
             from host.lifecycle.webview import provision
             provision(BUILDS)
             setup_craftmaster(BUILDS, targets=('win',), guest=True)
@@ -444,48 +495,46 @@ def main(argv: list[str]) -> int:
         # Setup owns preflight diagnostics: prepare its one permitted output root
         # and run the native sign-of-life before any build or download.
         BUILDS.mkdir(parents=True, exist_ok=True)
+        from host.lifecycle.unpacked_release import setup_restore_if_needed
+        setup_restore_if_needed(BUILDS)
         # Always refresh/verify the *internal* Lagomorph snapshot before deciding
         # the local Setup cache is current; remote updates must invalidate HFS.
         invoke(sys.executable, '-B', str(REPO / 'Cinter'),
                'pull', 'lagomorph', 'source')
-        # Acquire the standalone maintained CraftMaster + Bedrock LevelDB Git
-        # sources during Setup. Do not require published or staged binaries;
-        # Terminal Build will compile all three native CLIs from these sources.
-        from host.lifecycle.craftmaster_dependency import ensure_craftmaster_sources, setup_craftmaster
+        # Resolve local siblings or verified owner distributions in Setup.
+        # Never create dependency source checkouts implicitly.
+        from host.lifecycle.craftmaster_dependency import ensure_terminal_sources, setup_craftmaster
         requested = os.environ.get('CINTER_CRAFTMASTER_SETUP_TARGETS', 'all')
         if requested not in ('mac', 'linux', 'win', 'all'):
             raise RuntimeError('Invalid CraftMaster Setup target selection')
         craft_targets = ('mac', 'linux', 'win') if requested == 'all' else (requested,)
-        ensure_craftmaster_sources(BUILDS)
+        ensure_terminal_sources(BUILDS, targets=craft_targets)
         from host.lifecycle.craftmaster_dependency import prepare_server_test_fixture
         prepare_server_test_fixture(BUILDS)
         from host.lifecycle.setup_dirty import is_current, invalidate, commit
         from host.lifecycle.craftmaster_dependency import setup_receipts_present
         from host.lifecycle.assets_dependency import (asset_dependencies_ready,
-                                                      media_toolchains_ready, voxel_browser_ready)
+                                                      media_toolchains_ready, voxel_setup_ready)
+        from host.codeoss.producer import codeoss_setup_ready, provision_codeoss
         if (is_current(REPO, BUILDS, 'all') and
                 setup_receipts_present(BUILDS, craft_targets) and
                 asset_dependencies_ready(BUILDS) and media_toolchains_ready(BUILDS)
-                and voxel_browser_ready(BUILDS)):
+                and voxel_setup_ready(BUILDS) and codeoss_setup_ready(REPO)):
             from host.linux.bedrock_consent import require_bedrock_eula
             require_bedrock_eula(BUILDS, 'mac')
             return 0
         invalidate(BUILDS, 'all')
-        # Setup is the only lifecycle phase allowed to download or extract
-        # verified published release ZIPs/DMGs. Existing valid Builds toolchains
-        # are reused; Build, Stage and Test never call this path.
-        from host.lifecycle.unpacked_release import setup_restore_if_needed
-        setup_restore_if_needed(BUILDS)
+        # Shared DevTools already verified/restored above, before cache lookup.
         if platform.system() == 'Darwin':
             # Xcode alone must be sufficient to ENTER Setup. Stage all other
             # tools (and the container backend) before probing their versions.
-            invoke(sys.executable, '-B', '-m', 'host.mac.mac_bootstrap',
-                   '--builds', str(BUILDS))
             # Subsequent child lifecycles MUST use the staged Colima Docker
             # context, Lima state, caches and VM under sibling Builds.
             from host.mac.mac_bootstrap import managed_environment
             os.environ.pop('DOCKER_CONTEXT', None)
             os.environ.update(managed_environment(BUILDS))
+            from host.mac.mac_bootstrap import _ensure_buildx_plugin
+            _ensure_buildx_plugin(BUILDS, os.environ)
             if 'mac' in craft_targets:
                 setup_craftmaster(BUILDS, targets=('mac',))
         # Asset technology is owned by Terminal; Setup downloads and verifies
@@ -520,19 +569,16 @@ def main(argv: list[str]) -> int:
             # Builds BEFORE any other cross build or Linux SDK preflight. Verify
             # local dependency closure; DevTools transfer packaging comes later.
             if platform.system() in ('Darwin', 'Linux'):
-                invoke(sys.executable, '-B', '-m', 'host.windows.windows_dependencies',
-                       '--builds', str(BUILDS))
+                from host.windows.windows_environment import WindowsCrossEnvironment
+                from host.windows.windows_dependencies import _verify_wine_runtime
+                _verify_wine_runtime(WindowsCrossEnvironment(BUILDS).ensure_portable_image(), cwd=BUILDS)
                 from host.lifecycle.webview import provision
                 provision(BUILDS)
                 guests = tuple(t for t in craft_targets if t in ('linux', 'win'))
                 if guests:
                     setup_craftmaster(BUILDS, targets=guests, guest=True)
                 # Setup provisions WiX tools; tiny-MSI execution is Test-only.
-            # For this Setup phase, verify the full developer tool inventory first.
-            # The resulting Markdown inventory includes failed tool checks as well as
-            # successful versions and measured executable sizes.
-            invoke(sys.executable, '-B', '-m', 'host.devtools.devtooling',
-                   '--builds', str(BUILDS))
+            # DevTools are a verified prerequisite, not a Terminal Setup product.
             from host.lifecycle.bootstrap_bundle import provision_zmachine
             provision_zmachine(BUILDS)
             # Setup prepares EVERY dependency (including foreign Python runtimes);
@@ -543,8 +589,7 @@ def main(argv: list[str]) -> int:
             runtimes = provision_release_runtimes(BUILDS)
             from host.lifecycle.bedrock_display import provision as provision_display
             provision_display(BUILDS, runtimes)
-            invoke(sys.executable, '-B', str(REPO / 'host/codeoss/setup.py'),
-                   '--workspace', str(REPO.parent))
+            provision_codeoss(REPO)
             invoke(sys.executable, '-B', '-m', 'host.lagomorph.lagomorph_setup', '--builds', str(BUILDS))
             # Setup provisions the sealed Retro68 DevTools toolchain only;
             # the classic APPL and public HFS master are built during Build.
@@ -557,12 +602,12 @@ def main(argv: list[str]) -> int:
         commit(REPO, BUILDS, 'all')
         print('[CinterForgeTerminal] Setup complete: dependencies and guest inputs provisioned; acceptance belongs to Test', flush=True)
         return 0
-    # Four unpacked Build outputs; ZIP files are exclusively Publish outputs.
+    # Three unpacked native Build outputs plus the 68K disk; ZIP files are exclusively Publish outputs.
     # Mac orchestrates real Linux OCI/Windows cross builds, without presenting
     # Wine or Xvfb execution as native Windows/Linux GUI certification.
     if argv in (['build', 'all'], ['build', 'cfterminal', 'all']):
         if platform.system() != 'Darwin':
-            raise RuntimeError('The four-target release orchestrator currently requires macOS/Xcode; '
+            raise RuntimeError('The application release orchestrator currently requires macOS/Xcode; '
                                'run target-native acceptance separately before production publish')
         # Read the Release Team / Developer ID choice set once in Xcode's UI.
         # This only selects signing references from Keychain: no provisioning,
@@ -580,27 +625,29 @@ def main(argv: list[str]) -> int:
         os.environ.pop('DOCKER_CONTEXT', None)
         os.environ.update(managed_environment(BUILDS))
         invoke(sys.executable, '-B', '-m', 'host.devtools.toolchain', '--builds', str(BUILDS))
+        from host.lifecycle.craftmaster_dependency import build_craftmaster
+        build_craftmaster(BUILDS, targets=('mac',))
+        from host.codeoss.producer import ensure_codeoss
+        ensure_codeoss(REPO)
+        from host.lifecycle.assets_dependency import build_voxel_browser
+        build_voxel_browser(BUILDS)
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'build', '--application-shell')
         invoke(sys.executable, '-B', str(REPO / 'host/linux/lifecycle.py'), 'verify')
         invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'stage')
-        from host.lifecycle.craftmaster_dependency import build_craftmaster
-        # Build owns dependency integration: embed the verified native CraftMaster
-        # Stage *before* Mac app assembly and the final code-signing pass.
-        build_craftmaster(BUILDS, targets=('mac',))
         invoke(sys.executable, '-B', '-m', 'host.mac.mac_app', 'stage', '--builds', str(BUILDS))
         # Build only uses Setup-provisioned t; no ARM64 c, image creation, or packages.
         with managed_amd64_backend(BUILDS, setup=False) as docker:
+            build_craftmaster(BUILDS, targets=('linux', 'win'), docker=docker)
             invoke(sys.executable, '-B', '-m', 'host.lifecycle.cross_build', '--builds', str(BUILDS))
             from host.linux.linux_runner import build_terminal
             build_terminal(BUILDS, docker=docker,
                            logfile=BUILDS / 'Logs/CinterForgeTerminal/linux-native-build.log')
-            build_craftmaster(BUILDS, targets=('linux', 'win'), docker=docker)
             from host.infinitemac.launcher_setup import build as build_infinitemac_hd
             build_infinitemac_hd(BUILDS)
         from host.lifecycle.universal_package import build_four
-        report = build_four(BUILDS)
-        if set(report['artifacts']) != {'mac', 'linux', 'win', 'devtools'}:
-            raise RuntimeError('Build did not capture exactly four unpacked outputs')
+        report = build_four(BUILDS, targets=('mac', 'linux', 'win'))
+        if not {'mac', 'linux', 'win'} <= set(report['artifacts']):
+            raise RuntimeError('Build did not capture all three native app outputs')
         return 0
     if argv == ['build', '68k']:
         if platform.system() != 'Darwin':
@@ -700,26 +747,49 @@ def main(argv: list[str]) -> int:
             os.environ.pop('DOCKER_CONTEXT', None)
             os.environ.update(managed_environment(BUILDS))
             invoke(sys.executable, '-B', '-m', 'host.devtools.toolchain', '--builds', str(BUILDS))
-            invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'build', '--application-shell')
-            invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'stage')
             from host.lifecycle.craftmaster_dependency import build_craftmaster
             build_craftmaster(BUILDS, targets=('mac',))
+            from host.codeoss.producer import ensure_codeoss
+            ensure_codeoss(REPO)
+            from host.lifecycle.assets_dependency import build_voxel_browser
+            build_voxel_browser(BUILDS)
+            invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'build', '--application-shell')
+            invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'stage')
             invoke(sys.executable, '-B', '-m', 'host.mac.mac_app', 'stage', '--builds', str(BUILDS))
         elif target == 'win' and native in ('mac', 'linux'):
+            if native == 'mac':
+                from host.mac.mac_bootstrap import managed_environment
+                os.environ.pop('DOCKER_CONTEXT', None)
+                os.environ.update(managed_environment(BUILDS))
+            from host.codeoss.producer import ensure_codeoss
+            ensure_codeoss(REPO)
+            from host.lifecycle.assets_dependency import build_asset_engine
+            build_asset_engine(BUILDS)
             from host.lifecycle.amd64_backend import managed_amd64_backend
             with managed_amd64_backend(BUILDS, setup=False) as docker:
-                invoke(sys.executable, '-B', '-m', 'host.lifecycle.cross_build', '--builds', str(BUILDS))
                 from host.lifecycle.craftmaster_dependency import build_craftmaster
                 build_craftmaster(BUILDS, targets=('win',), docker=docker)
+                invoke(sys.executable, '-B', '-m', 'host.lifecycle.cross_build', '--builds', str(BUILDS))
         elif target == 'linux' and native == 'mac':
+            from host.mac.mac_bootstrap import managed_environment
+            os.environ.pop('DOCKER_CONTEXT', None)
+            os.environ.update(managed_environment(BUILDS))
+            from host.codeoss.producer import ensure_codeoss
+            ensure_codeoss(REPO)
+            from host.lifecycle.assets_dependency import build_asset_engine
+            build_asset_engine(BUILDS)
             from host.lifecycle.amd64_backend import managed_amd64_backend
             from host.linux.linux_runner import build_terminal
             with managed_amd64_backend(BUILDS, setup=False) as docker:
-                build_terminal(BUILDS, docker=docker,
-                               logfile=BUILDS / 'Logs/CinterForgeTerminal/linux-native-build.log')
                 from host.lifecycle.craftmaster_dependency import build_craftmaster
                 build_craftmaster(BUILDS, targets=('linux',), docker=docker)
+                build_terminal(BUILDS, docker=docker,
+                               logfile=BUILDS / 'Logs/CinterForgeTerminal/linux-native-build.log')
         elif target == native:
+            from host.codeoss.producer import ensure_codeoss
+            ensure_codeoss(REPO)
+            from host.lifecycle.assets_dependency import build_voxel_browser
+            build_voxel_browser(BUILDS)
             invoke(sys.executable, '-B', '-m', 'host.devtools.toolchain', '--builds', str(BUILDS))
             invoke(sys.executable, '-B', str(REPO / 'Cinter'), 'host', 'build', '--application-shell')
         else:
@@ -728,8 +798,9 @@ def main(argv: list[str]) -> int:
         build_four(BUILDS, targets=(target,))
         return 0
     if argv == ['setup', '68k']:
-        # Very fast, offline receipt/toolchain presence check; never run the
-        # normal multi-platform Setup or contact the Retro68 registry.
+        BUILDS.mkdir(parents=True, exist_ok=True)
+        from host.lifecycle.unpacked_release import setup_restore_if_needed
+        setup_restore_if_needed(BUILDS)
         from host.infinitemac.launcher_setup import setup_check
         setup_check(BUILDS)
         return 0
@@ -809,13 +880,13 @@ def main(argv: list[str]) -> int:
         if options and options[0] == 'cfterminal':
             options = options[1:]
         target = 'all'
-        if options and options[0] in ('mac', 'win', 'linux', '68k', 'all'):
+        if options and options[0] in ('mac', 'win', 'linux', '68k', 'devtools', 'all'):
             target, options = options[0], options[1:]
         if len(options) > 1:
-            raise ValueError('Usage: ./Cinter publish cfterminal [mac|win|linux|68k|all] [dryrun|internal|beta|public]')
+            raise ValueError('Usage: ./Cinter publish cfterminal [mac|win|linux|68k|devtools|all] [dryrun|internal|beta|public]')
         selected = {'public': 'release'}.get(options[0], options[0]) if options else 'dryrun'
         if selected not in ('dryrun', 'internal', 'beta', 'release'):
-            raise ValueError('Usage: ./Cinter publish cfterminal [mac|win|linux|68k|all] [dryrun|internal|beta|public]')
+            raise ValueError('Usage: ./Cinter publish cfterminal [mac|win|linux|68k|devtools|all] [dryrun|internal|beta|public]')
         # No beta-specific signing override: both public channels package the
         # already-built Developer ID signed Mac app with identical entitlements.
         if selected in ('release', 'beta') and target in ('all', 'mac') and platform.system() == 'Darwin':
@@ -839,8 +910,8 @@ def main(argv: list[str]) -> int:
                                    'refusing to publish an unstapled DMG.')
             from host.lifecycle.universal_package import publish_four
             channel = {'internal': 'dev', 'release': 'public'}.get(selected, selected)
-            # Publish first prepares all four artifacts (including MSI-only
-            # Windows ZIP) before any Cloudflare upload.
+            # Publish prepares application artifacts (including MSI-only Windows
+            # ZIP) before any Cloudflare upload. DevTools is independent.
             report = publish_four(BUILDS, channel=channel)
             # The legacy four-artifacts.json format remains intact. Publish
             # the 68K raw HFS image as a fifth, independently sealed target in
@@ -938,35 +1009,37 @@ def main(argv: list[str]) -> int:
                     HOST_RELEASE) / APP_ROOTS[target], target)
         result = status_four(BUILDS)
         if not result['complete_build_receipt'] or not result['complete_stage_receipt']:
-            raise RuntimeError('Automated Test requires four built and staged verified releases; '
+            raise RuntimeError('Automated Test requires three built and staged native releases; '
                                'run ./Cinter all all. Stage state: ' +
                                str(result['steam_destination']))
         if not all(item['build_present'] and item['steam_app_root_present']
                    for item in result['targets'].values()):
-            raise RuntimeError('Four-artifact automated Test found missing unpacked builds or staged apps')
-        print('[Cinter test] PASS four unpacked Build/Stage receipts and Mac '
+            raise RuntimeError('Automated Test found missing unpacked native builds or staged apps')
+        print('[Cinter test] PASS three unpacked native Build/Stage receipts plus 68K and Mac '
               'signature/resources (interactive native GUI acceptance deferred)', flush=True)
         return 0
     raise ValueError('Usage: ./Cinter host <legacy-host-action> [options]\n'
+                     '       ./Cinter all devtools [publish <channel>] # independent SDK product\n'
+                     '       ./Cinter setup|build|stage|test devtools\n'
                      '       ./Cinter setup all\n'
                      '       ./Cinter setup testgrounds # refresh only the beta server fixture\n'
                      '       ./Cinter setup worlds [internal|beta|release]\n'
                      '       ./Cinter worlds [internal|beta|release]\n'
                      '       ./Cinter publish world ["<worldname>" <internal|beta|release|all>]\n'
                      '       ./Cinter toolchain check\n'
-                     '       ./Cinter build cfterminal all # 3 native apps + DevTools, unpacked\n'
+                     '       ./Cinter build cfterminal all # 3 native apps, unpacked; DevTools independent\n'
                      '       ./Cinter reboot server|docker|colima|app # restart only, no build\n'
                      '       ./Cinter stage all  # copy unpacked Builds into Steam steamapps\n'
                      '       ./Cinter status all # unpacked Build/Stage receipts (read-only)\n'
                      '       ./Cinter all mac    # setup, build/stage/test Mac only; no publish\n'
                      '       ./Cinter all all    # setup, build, stage, native Mac test; no publish\n'
-                     '       ./Cinter all mac|win|linux|68k|all publish [internal|beta|public] # omitted mode = dryrun\n'
+                     '       ./Cinter all mac|win|linux|68k|devtools|all publish [internal|beta|public] # omitted mode = dryrun\n'
                      '       ./Cinter setup 68k # fast offline check of installed Retro68/HFS inputs\n'
                      '       ./Cinter build mac|linux|win|68k\n'
                      '       ./Cinter stage|test 68k # verify raw HFS app disk, no ZIP\n'
                      '       ./Cinter stage|test|launch|all mac\n'
                      '       ./Cinter windows cross-test\n'
-                     '       ./Cinter publish cfterminal [mac|win|linux|68k|all] [dryrun|internal|beta|public] # default dryrun\n'
+                     '       ./Cinter publish cfterminal [mac|win|linux|68k|devtools|all] [dryrun|internal|beta|public] # default dryrun\n'
                      '       ./Cinter verify beta|public # retry unsigned HTTP; no archive re-upload\n'
                      '       ./Cinter publish lagomorph public # public HFS media + private Builds/Lagomorph to internal CDN\n'
                      '       ./Cinter pull lagomorph source # required internal folder pull (also in setup/all)\n'

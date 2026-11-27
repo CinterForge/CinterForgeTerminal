@@ -87,20 +87,29 @@ def _atomic_json(path: Path, record: dict) -> None:
         Path(filename).unlink(missing_ok=True)
 
 
-def _built_receipt(builds: Path, release: str) -> Path:
-    return builds / 'CinterForgeTerminal/Distribution/four-built.json'
+def _built_receipt(builds: Path, release: str, *, devtools: bool = False) -> Path:
+    return builds / 'CinterForgeTerminal/Distribution' / ('devtools-built.json' if devtools else 'four-built.json')
 
 
-def _load(builds: Path, release: str) -> dict:
+def _load(builds: Path, release: str, *, devtools: bool = False) -> dict:
     up = _up()
-    path = _built_receipt(builds, release)
+    path = _built_receipt(builds, release, devtools=devtools)
     if path.is_symlink() or not path.is_file():
-        raise FileNotFoundError('Run ./Cinter build cfterminal all before Stage or Publish: ' + str(path))
+        raise FileNotFoundError('Run ./Cinter build ' + ('devtools' if devtools else 'all') + ' before Stage or Publish: ' + str(path))
     record = json.loads(path.read_text('utf-8'))
     if (record.get('schema') != BUILT_SCHEMA or record.get('release') != release or
             (not record.get('targets') or
              not set(record['targets']) <= set(up.FOUR_TARGETS))):
-        raise RuntimeError('Incomplete four-target unpacked Build receipt')
+        raise RuntimeError('Incomplete unpacked Build receipt')
+    if devtools:
+        if set(record['targets']) != {'devtools'}:
+            raise RuntimeError('Invalid independent DevTools Build receipt')
+    else:
+        # Older combined app receipts may contain a DevTools entry. Never
+        # carry it into the application Build, Stage or Publish.
+        record['targets'].pop('devtools', None)
+        if not record['targets']:
+            raise RuntimeError('No application Build targets in receipt')
     return record
 
 
@@ -194,18 +203,21 @@ def build_four(builds: Path, *, release: str | None = None,
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', release):
         raise ValueError('Invalid release identifier')
     builds = _safe_builds(builds)
-    selected = targets or up.FOUR_TARGETS
+    selected = targets or up.APP_TARGETS
     if not selected or len(set(selected)) != len(selected) or not set(selected) <= set(up.FOUR_TARGETS):
         raise ValueError('Invalid unpacked Build target selection')
+    sdk = selected == ('devtools',)
+    if 'devtools' in selected and not sdk:
+        raise ValueError('DevTools Build must be independent of applications')
     previous = {}
     try:
-        previous = _load(builds, release)
+        previous = _load(builds, release, devtools=sdk)
     except (FileNotFoundError, ValueError, RuntimeError, KeyError):
         pass
     # Rebuild only requested targets; a partial Build must not invalidate
     # another target's valid prior receipt or fabricate that target's result.
     target_records: dict[str, dict] = (dict(previous.get('targets', {}))
-                                      if set(selected) != set(up.FOUR_TARGETS) else {})
+                                      if not sdk and set(selected) != set(up.APP_TARGETS) else {})
     for target in selected:
         print(f'[TERMINAL BUILD] Gathering unpacked {target} inputs...', flush=True)
         assets = up._devtools_assets(builds) if target == 'devtools' else up._app_assets(builds, target, release)
@@ -252,7 +264,7 @@ def build_four(builds: Path, *, release: str | None = None,
               f'{target_records[target]["bytes"] / 1048576:.1f} MiB, no ZIP', flush=True)
     output = {'schema': BUILT_SCHEMA, 'release': release, 'targets': target_records,
               'bedrock': 'excluded-until-app-eula-acceptance'}
-    _atomic_json(_built_receipt(builds, release), output)
+    _atomic_json(_built_receipt(builds, release, devtools=sdk), output)
     return {'schema': BUILT_SCHEMA, 'release': release,
             'artifacts': {target: {'bytes': data['bytes'], 'files': data['file_count'],
                                    'fingerprint': data['fingerprint']}
@@ -625,7 +637,7 @@ def status_four(builds: Path, *, release: str | None = None, steamapps: Path | N
             'distribution': str(builds / 'CinterForgeTerminal/Distribution'),
             'steam_destination': str(steam / 'common/CinterForge/Applications') if steam else None,
             'targets': states,
-            'complete_build_receipt': set(record.get('targets', {})) == set(up.FOUR_TARGETS),
+            'complete_build_receipt': set(up.APP_TARGETS) <= set(record.get('targets', {})),
             'complete_stage_receipt': all(s['steam_receipt_matches'] for s in states.values())}
 
 
@@ -638,12 +650,12 @@ def prepare_publish_packages(builds: Path, *, release: str | None = None,
     up = _up()
     release = release or up.HOST_RELEASE
     builds = _safe_builds(builds)
-    record = _load(builds, release)
-    selected = targets or up.FOUR_TARGETS
+    selected = targets or up.APP_TARGETS
+    record = _load(builds, release, devtools=(selected == ('devtools',)))
     if (not selected or len(set(selected)) != len(selected) or
             not set(selected) <= set(record['targets']) or
             (receipt_name != 'four-artifacts.json' and
-             not re.fullmatch(r'(mac|win|linux)-(artifacts|packages)\.json', receipt_name))):
+             not re.fullmatch(r'(mac|win|linux|devtools)-(artifacts|packages)\.json', receipt_name))):
         raise ValueError('Publish target(s) missing from unpacked Build receipt')
     # Public channels must never silently fall back to an ad-hoc DMG.
     if notarize and 'mac' in selected and not os.environ.get('CINTER_MAC_SIGN_IDENTITY', '').strip():
@@ -762,7 +774,7 @@ def setup_unpack_published(builds: Path, *, release: str | None = None) -> dict:
     root = builds / 'CinterForgeTerminal/Distribution'
     _, report, paths = up._distribution_files(builds, release, verify_installers=False)
     count = {}
-    for target in up.FOUR_TARGETS:
+    for target in report['artifacts']:
         archive = paths[up.artifact_filename(target)]
         if target == 'mac':
             # Only macOS can mount a DMG; cross-platform Setup restores its
@@ -829,95 +841,139 @@ def setup_unpack_published(builds: Path, *, release: str | None = None) -> dict:
     return {'release': release, 'restored_files': count}
 
 
-def setup_restore_if_needed(builds: Path, *, release: str | None = None,
-                            distribution_url: str = 'https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution') -> dict:
-    """Setup-only published-package cache: HTTPS download and extract into Builds.
+def _require_devtools(builds: Path) -> None:
+    """Read-only prerequisite check; never build or download an SDK here."""
+    from host.windows.windows_environment import WindowsCrossEnvironment
+    from host.lifecycle.webview import provision, provision_webview2
+    from host.windows.windows_fixed_runtime import verify as verify_fixed
+    from host.lagomorph.lagomorph_setup import HFS_DEB_NAME, HFS_DEB_SHA256
+    required = (
+        'Toolchains/mac/env/bin/colima', 'Toolchains/mac/env/bin/docker',
+        'Toolchains/mac/env/bin/docker-buildx', 'Toolchains/mac/env/bin/python3',
+        'Toolchains/mac/env/bin/cmake', 'Toolchains/mac/env/bin/ninja',
+        'Toolchains/mac/env/bin/node', 'Toolchains/mac/env/bin/skopeo',
+        'Toolchains/mac/env/bin/wixl', 'Toolchains/mac/lima/bin/limactl',
+        'Toolchains/mac/qemu/bin/qemu-system-x86_64',
+        'Toolchains/mac/linuxkit/bin/linuxkit',
+        'Toolchains/Windows/MSYS2/usr/bin/bash.exe',
+        'Toolchains/Retro68/retro68-image.json', 'Toolchains/Retro68/retro68-amd64.tar',
+    )
+    for rel in required:
+        path = builds / rel
+        if not path.is_file() or not path.resolve().is_relative_to(builds.resolve()):
+            raise RuntimeError('DevTools prerequisite missing: ' + str(path))
+    from host.devtools.devtooling import RETRO68_SCHEMA, RETRO68_IMAGE, RETRO68_SOURCE
+    retro = builds / 'Toolchains/Retro68'
+    receipt = retro / 'retro68-image.json'
+    archive = retro / 'retro68-amd64.tar'
+    data = json.loads(receipt.read_text(encoding='utf-8'))
+    if (receipt.is_symlink() or archive.is_symlink() or
+            data.get('schema') != RETRO68_SCHEMA or data.get('image') != RETRO68_IMAGE or
+            data.get('source') != RETRO68_SOURCE or data.get('platform') != 'linux/amd64' or
+            not re.fullmatch(r'sha256:[0-9a-f]{64}', data.get('registry_digest', '')) or
+            data.get('archive_bytes') != archive.stat().st_size or
+            data.get('archive_sha256') != _sha(archive)):
+        raise RuntimeError('DevTools Retro68 archive/receipt failed verification')
+    from host.lifecycle.assets_dependency import media_toolchains_ready
+    if not media_toolchains_ready(builds):
+        raise RuntimeError('DevTools media or cross-toolchain closure missing')
+    folder, chosen = WindowsCrossEnvironment.validate_staged(builds)
+    selector = folder / 'active-image.json'
+    if not selector.is_file() or selector.is_symlink():
+        raise RuntimeError('Missing active DevTools OCI image selector')
+    active = json.loads(selector.read_text(encoding='utf-8'))
+    if any(active.get(key) != chosen.get(key) for key in
+           ('dockerfile_sha256', 'image', 'archive_sha256', 'wine_version')):
+        raise RuntimeError('Active DevTools OCI image differs from verified recipe')
+    provision(builds)
+    provision_webview2(builds)
+    verify_fixed(builds)
+    package = builds / 'Toolchains/Linux/hfsutils/3.2.6-15' / HFS_DEB_NAME
+    if not package.is_file() or _sha(package) != HFS_DEB_SHA256:
+        raise RuntimeError('DevTools HFS assembly package missing or modified')
 
-    No network work occurs when the required producer toolchains already
-    exist. A missing/unpublished release falls back to traditional Setup;
-    a fetched release with bad checksums fails closed, never silently used.
+
+def setup_restore_if_needed(builds: Path, *, release: str | None = None,
+                            distribution_url: str | None = None) -> dict:
+    """Setup consumes only the independently published SDK; never builds it.
+
+    Existing compatible shared tools take precedence. Default to the beta SDK
+    on the developer build host; installed retail apps use their public channel.
     """
-    from urllib.request import Request, urlopen
-    from urllib.error import HTTPError, URLError
-    up = _up()
-    release = release or up.HOST_RELEASE
+    import sys
     builds = _safe_builds(builds)
-    required = (builds / 'Toolchains/mac/env/bin/colima',
-                builds / 'Toolchains/Windows/MSYS2/usr/bin/bash.exe',
-                builds / 'Toolchains/WindowsCross')
-    if all(path.exists() and not path.is_symlink() for path in required):
-        return {'source': 'existing-provisioned-Builds', 'downloaded': False}
-    destination = builds / 'CinterForgeTerminal/Distribution'
-    destination.mkdir(parents=True, exist_ok=True)
-    receipt_path = destination / 'four-artifacts.json'
-    if receipt_path.is_file() and not receipt_path.is_symlink():
-        try:
-            if up._distribution_files(builds, release, verify_installers=False):
-                return {'source': 'verified-cache', **setup_unpack_published(builds, release=release)}
-        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
-            pass
-    # The four published ZIPs use stable unversioned URLs. Only small manifest
-    # is requested until Setup confirms this release actually exists.
-    manifest_url = distribution_url.rstrip('/') + '/four-artifacts.json'
     try:
-        with urlopen(Request(manifest_url, headers={'Cache-Control': 'no-cache'}), timeout=12) as response:
-            raw = response.read(1024 * 1024 + 1)
-    except (HTTPError, URLError, TimeoutError, OSError) as error:
-        print('[TERMINAL SETUP] No published package accessible; provisioning from pinned source: ' + str(error), flush=True)
-        return {'source': 'pinned-local-provisioning', 'downloaded': False}
-    if len(raw) > 1024 * 1024:
-        raise RuntimeError('Oversized published four-artifact manifest')
-    report = json.loads(raw)
-    if (report.get('schema') != up.FOUR_SCHEMA or report.get('release') != release or
-            set(report.get('artifacts', {})) != set(up.FOUR_TARGETS)):
-        # A different release is not a valid Setup package for this source.
-        print('[TERMINAL SETUP] Published release differs from pinned Build; using source Setup', flush=True)
-        return {'source': 'pinned-local-provisioning', 'downloaded': False}
-    intermediates = builds / 'Intermediates/CinterForgeTerminal/SetupDownloads'
-    intermediates.mkdir(parents=True, exist_ok=True)
-    downloads = {}
-    for target in up.FOUR_TARGETS:
-        entry = report['artifacts'][target]
-        name = up.artifact_filename(target)
-        if (entry.get('filename') != name or not isinstance(entry.get('sha256'), str)
-                or not isinstance(entry.get('bytes'), int) or entry['bytes'] <= 0):
-            raise RuntimeError('Unsafe published package metadata: ' + target)
-        cached = destination / name
-        if cached.is_file() and not cached.is_symlink() and cached.stat().st_size == entry['bytes'] and _sha(cached) == entry['sha256']:
-            downloads[target] = cached
-            print('[TERMINAL SETUP] Cached ZIP verified: ' + target, flush=True)
-            continue
-        candidate = intermediates / name
-        fd, temporary = tempfile.mkstemp(prefix='Download-', dir=intermediates)
-        try:
-            os.close(fd)
-            digest = hashlib.sha256()
-            with urlopen(Request(distribution_url.rstrip('/') + '/' + name), timeout=60) as response, open(temporary, 'wb') as output:
-                count = 0
-                for block in iter(lambda: response.read(4*1024*1024), b''):
-                    count += len(block)
-                    if count > entry['bytes']:
-                        raise RuntimeError('Published package exceeds advertised size: ' + name)
-                    digest.update(block)
-                    output.write(block)
-            if count != entry['bytes'] or digest.hexdigest() != entry['sha256']:
-                raise RuntimeError('Published package SHA-256 verification failed: ' + name)
-            Path(temporary).replace(candidate)
-            if target == 'mac' and __import__('sys').platform == 'darwin':
-                from host.mac.mac_dmg import verify_dmg
-                verify_dmg(candidate, builds, app_name=up.APP_ROOTS['mac'])
-            else:
-                up._verify_release_zip(candidate, target=target, release=release)
-            downloads[target] = candidate
-            print('[TERMINAL SETUP] Download verified: ' + target, flush=True)
-        finally:
-            Path(temporary).unlink(missing_ok=True)
-    for target, source in downloads.items():
-        if source != destination / source.name:
-            up._replace_generated_output(source, destination / source.name, builds)
-    _atomic_json(receipt_path, report)
-    restored = setup_unpack_published(builds, release=release)
-    return {'source': manifest_url, 'downloaded': True, **restored}
+        _require_devtools(builds)
+    except (OSError, RuntimeError, ValueError, KeyError) as error:
+        print('[DEVTOOLS] local prerequisites incomplete: ' + str(error), flush=True)
+    else:
+        print('[DEVTOOLS] reusing existing shared Toolchains', flush=True)
+        return {'source': 'existing-provisioned-Builds', 'downloaded': False}
+    url = distribution_url or os.environ.get('CINTER_DEVTOOLS_DISTRIBUTION',
+        'https://cinterforge.ucreg.io/CinterForgeTerminal/Distribution/beta')
+    from urllib.parse import urlsplit
+    parsed = urlsplit(url)
+    if (parsed.scheme, parsed.netloc) != ('https', 'cinterforge.ucreg.io') or parsed.path not in (
+            '/CinterForgeTerminal/Distribution', '/CinterForgeTerminal/Distribution/beta'):
+        raise RuntimeError('DevTools Setup requires the approved public Distribution or beta channel')
+    webapp = str(Path(__file__).resolve().parents[2] / 'webapp')
+    sys.path.insert(0, webapp)
+    try:
+        from runtime.CinterForgeDevTools import (_public_manifest, _download_public_devtools,
+            _devtools_download_partial, _stage_devtools_zip)
+        artifact, manifest = _public_manifest(release or _up().HOST_RELEASE, distribution=url)
+        sdk_release = artifact['release']
+        pending = _devtools_download_partial(builds, sdk_release, artifact['filename'])
+        destination = builds / 'CinterForgeTerminal/DevTools' / 'current'
+        _download_public_devtools(url + '/' + artifact['filename'], pending,
+                                  length=artifact['bytes'], digest=artifact['sha256'])
+        _stage_devtools_zip(pending, destination, sdk_release, artifact)
+        _require_devtools(builds)
+        pending.unlink(missing_ok=True)
+    finally:
+        sys.path.remove(webapp)
+    return {'source': manifest, 'downloaded': True, 'release': sdk_release}
+
+
+def devtools_stage(builds: Path, *, tested: bool = False) -> dict:
+    """Stage the SDK in its existing shared Toolchains; seal its inventory.
+
+    Test uses the same inventory, after real tool execution. No Steam copy.
+    """
+    builds = _safe_builds(builds)
+    release = _up().HOST_RELEASE
+    info = _load(builds, release, devtools=True)['targets']['devtools']
+    for name, detail in info['files'].items():
+        _source(builds, name, detail, 'devtools', verify=True)
+    root = builds / 'CinterForgeTerminal/DevTools' / release
+    record = {'schema': BUILT_SCHEMA, 'release': release, 'target': 'devtools',
+              'build_fingerprint': info['fingerprint']}
+    stage = root / 'build-stage.json'
+    if tested:
+        if not stage.is_file() or stage.is_symlink() or json.loads(stage.read_text()) != record:
+            raise RuntimeError('DevTools must be staged before Test')
+        _atomic_json(root / 'build-test.json', record)
+    else:
+        _atomic_json(stage, record)
+        (root / 'build-test.json').unlink(missing_ok=True)
+    return record
+
+
+def require_devtools_test(builds: Path, *, stage_only: bool = False) -> None:
+    release = _up().HOST_RELEASE
+    info = _load(builds, release, devtools=True)['targets']['devtools']
+    root = builds / 'CinterForgeTerminal/DevTools' / release
+    expected = {'schema': BUILT_SCHEMA, 'release': release, 'target': 'devtools',
+                'build_fingerprint': info['fingerprint']}
+    for name, detail in info['files'].items():
+        _source(builds, name, detail, 'devtools', verify=True)
+    for filename in (('build-stage.json',) if stage_only else ('build-stage.json', 'build-test.json')):
+        path = root / filename
+        if (not path.is_file() or path.is_symlink() or
+                json.loads(path.read_text()) != expected):
+            raise RuntimeError('DevTools must pass its own Stage and Test before Publish')
+    if stage_only:
+        (root / 'build-test.json').unlink(missing_ok=True)
 
 
 # Compatibility for callers predating the Mac DMG distribution format.
