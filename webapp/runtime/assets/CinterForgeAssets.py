@@ -17,7 +17,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import Callable, Iterable
 
 CSV_COLUMNS = (
     'Asset Name', 'Minecraft Name', 'Command Name', 'Pack Name',
@@ -149,11 +149,12 @@ def inspect_asset(root: Path) -> dict:
             'representations': tuple(sorted(representations)), 'files_verified': len(set(checked))}
 
 
-def inventory(assets_root: Path) -> dict:
+def inventory(assets_root: Path, *, exclude_file: Callable[[str], bool] | None = None) -> dict:
     """SHA-256 inventory of *every* regular file in the complete Assets tree.
 
     Dotfiles, arbitrary folders and provider downloads are data too. Unsafe
     filesystem entries fail explicitly instead of being silently excluded.
+    A transport may opt out of hashing explicitly identified local metadata.
     """
     files = {}
     directories = []
@@ -166,6 +167,9 @@ def inventory(assets_root: Path) -> dict:
         if path.is_dir():
             directories.append(rel.as_posix())
             continue
+        if exclude_file is not None and exclude_file(rel.as_posix()):
+            if path.is_file() or not path.exists():
+                continue
         if not path.is_file():
             raise ValueError(f'Unsupported Assets entry: {rel}')
         h = hashlib.sha256()

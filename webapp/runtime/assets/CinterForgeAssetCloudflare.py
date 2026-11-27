@@ -191,13 +191,41 @@ def _fetch_index(r2, cfg: dict, prefix: str, objects: dict[str, dict]) -> dict |
     return doc
 
 
-def _canonical_inventory(root: Path) -> dict:
-    """Publish and restore the *entire* Assets directory, without a file allowlist.
+def _local_metadata(relative: str) -> bool:
+    """Only Finder metadata and the root transport hash cache are local state."""
+    return (safe_relative(relative).name == '.DS_Store' or
+            relative in ('.cinterforge_sync_hashes.json', 'cinterforge_sync_hashes.json'))
 
-    Keep the existing SHA-256 integrity, symlink and path-safety checks. No
-    file or folder is excluded based on name, format, depth or provenance.
+
+def _canonical_inventory(root: Path) -> dict:
+    """Inventory all authored Assets, excluding volatile host/transport files.
+
+    Retain hidden authored data, directories and all SHA-256/path safety checks.
+    Ignore local metadata before hashing, including in the final recheck.
     """
-    return inventory(root)
+    return inventory(root, exclude_file=_local_metadata)
+
+def _remove_finder_metadata(root: Path) -> int:
+    """Remove only regular Finder metadata files, without following symlinks."""
+    if root.is_symlink() or not root.is_dir():
+        raise FileNotFoundError(f'Assets directory missing: {root}')
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    removed = 0
+    for directory, _, names in os.walk(root, followlinks=False, onerror=raise_walk_error):
+        if '.DS_Store' not in names:
+            continue
+        path = Path(directory) / '.DS_Store'
+        if path.is_symlink() or not path.is_file():
+            continue  # Existing inventory safety checks reject unsafe entries.
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue  # Finder or another process already removed it.
+        removed += 1
+    return removed
 
 
 def _source_file_list(root: Path) -> tuple[dict, list[tuple[str, Path]]]:
@@ -254,6 +282,9 @@ def publish(channel: str, assets_root: Path, *, transport=None) -> dict:
     if (root / 'AssetGallery.html').is_file():
         from runtime.assets import asset_gallery
         asset_gallery.generate(root.parent)
+    removed = _remove_finder_metadata(root)
+    print(f'[assets publish] Pre-scan cleanup: removed {removed} .DS_Store files from {root}',
+          flush=True)
     doc, files = _source_file_list(root)
     if not files and not doc['directories']:
         raise RuntimeError('Assets library is empty; refusing to publish')
@@ -428,8 +459,9 @@ def setup(channel: str, assets_root: Path, *, transport=None) -> dict:
     root = Path(assets_root).absolute()
     if root.is_symlink() or (root.exists() and not root.is_dir()):
         raise RuntimeError('Unsafe existing Assets root')
-    # Every indexed file and directory belongs to the full Assets snapshot.
-    files = index['files']
+    # Older indexes may contain volatile metadata. Never restore it locally.
+    files = {rel: entry for rel, entry in index['files'].items()
+             if not _local_metadata(rel)}
     directories = index.get('directories', [])
     for rel, entry in files.items():
         if rel not in remote:
