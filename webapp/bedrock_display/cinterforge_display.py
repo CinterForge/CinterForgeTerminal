@@ -80,6 +80,7 @@ class CinterForgeDisplay(Plugin):
         self.story_modes = set()
         self.map_modes = {}
         self.dialog_maps = set()
+        self.map_details = {}
         self.restored = set()
         self.resume_requests = set()
         self.map_refresh = {}
@@ -372,14 +373,25 @@ class CinterForgeDisplay(Plugin):
     def show_map_form(self,player,name):
         key=str(player.unique_id);token=uuid.uuid4().hex
         self.focus[key]=(name,player.name,time.monotonic()+FOCUS_SECONDS,token)
-        actions=(('up','↑ Pan up'),('left','← Pan left'),('fit','Fit map'),('right','→ Pan right'),('down','↓ Pan down'),
-                 ('zoom+','+ Zoom in'),('zoom-','− Zoom out'),('overworld','Overworld'),('nether','Nether'),('end','End'),('exit','Return to Terminal'))
+        details=getattr(self,'map_details',{}).get(name,{})
+        actions=[('done','Done'),('up','↑ Pan up'),('left','← Pan left'),('fit','Home / Fit map'),('right','→ Pan right'),('down','↓ Pan down'),
+                 ('zoom+','+ Zoom in'),('zoom-','− Zoom out'),('overworld','Overworld'),('nether','Nether'),('end','End')]
+        if details.get('layers'):
+            actions.append(('layer:all','Hide all layers' if all(layer['visible'] for layer in details['layers']) else 'Show all layers'))
+            actions.extend(('layer:'+layer['key'],('Hide ' if layer['visible'] else 'Show ')+layer['label']) for layer in details['layers'])
+        for kind,listing in details.get('directory',{}).items():
+            label=kind.capitalize();page=listing['page'];pages=listing['pages']
+            if page>0:actions.append((f'list:{kind}:prev',f'← {label} ({page+1}/{pages})'))
+            if page+1<pages:actions.append((f'list:{kind}:next',f'{label} ({page+1}/{pages}) →'))
+        actions.append(('exit','Return to Terminal'))
         def active():
             state=self.focus.get(key);return state is not None and state[3]==token
         def close(p):
             if active():self.focus.pop(key,None);self.end_focus(p)
         def submit(p,index):
             if not active():return
+            if type(index) is int and 0<=index<len(actions) and actions[index][0]=='done':
+                close(p);return
             # No second form until the viewport response has been painted.
             self.focus[key]=(name,p.name,time.monotonic()+FOCUS_SECONDS,uuid.uuid4().hex)
             try:
@@ -389,7 +401,7 @@ class CinterForgeDisplay(Plugin):
                 self.emit_mount('focus_keepalive',{'player':p.name,'screen':name})
             except Exception as exc:
                 p.send_message(str(exc));self.switch_forms(name)
-        form=ActionForm(title='Atlas Navigation',content='',on_submit=submit,on_close=close)
+        form=ActionForm(title='CinterForge Terminal — Atlas',content=details.get('status','') or 'Atlas Navigation',on_submit=submit,on_close=close)
         for _,label in actions:form.add_button(label)
         try:
             player.send_form(form)
@@ -454,6 +466,7 @@ class CinterForgeDisplay(Plugin):
                 try:
                     self.show_mode_form(current,name)
                 except Exception as exc:
+                    self.focus.pop(key,None);self.end_focus(current)
                     self.logger.error('CINTERFORGE_TERMINAL_FORM_FAILED: '+str(exc))
                     current.send_message(str(exc))
             # Do not wait for the host command: poll() renders its output while
@@ -496,11 +509,11 @@ class CinterForgeDisplay(Plugin):
     def render_map(self,name,frame,bundle):
         screen=self.mp.screen(name);info=screen.info();w,h=info.pixel_width,info.pixel_height
         if (frame['width'],frame['height'])!=(w,h):raise ValueError('Map surface dimensions changed')
-        vh=frame['view_height'];im=Image.new('RGBA',(w,h),(0,0,0,255))
-        if not 0<vh<=h or len(frame['tiles'])>64:raise ValueError('Invalid map viewport')
+        vh=frame['view_height'];mw=frame.get('map_width',w);im=Image.new('RGBA',(w,h),(0,0,0,255))
+        if not (0<mw<=w and (mw==w or (w,h)==(640,512))) or not 0<vh<=h or len(frame['tiles'])>64:raise ValueError('Invalid map viewport')
         for filename,x0,y0,x1,y1 in frame['tiles']:
             if not re.fullmatch(r'\d+-\d+-\d+\.png',filename):raise ValueError('Invalid map tile')
-            a,b,c,d=max(0,x0),max(0,y0),min(w,x1),min(vh,y1)
+            a,b,c,d=max(0,x0),max(0,y0),min(mw,x1),min(vh,y1)
             if a>=c or b>=d:continue
             try:
                 with Image.open(bundle/filename) as tile:
@@ -517,30 +530,49 @@ class CinterForgeDisplay(Plugin):
         # clipped before drawing the native title/control bar.
         overlays=frame.get('overlays',[])
         if len(overlays)>4096:raise ValueError('Invalid Atlas overlay count')
-        surface=im.crop((0,0,w,vh)); od=ImageDraw.Draw(surface); labels=[]
-        for item in overlays:
-            color=item['color']; name=item['name']
-            if not re.fullmatch(r'#[0-9a-fA-F]{6}',color) or not isinstance(name,str):continue
-            if item['kind']=='village':
-                a,b,c,d=item['box']; od.rectangle((max(-1,a),max(-1,b),min(w,c),min(vh,d)),outline=color,width=2)
-                labels.append((a,b-13,name,color))
+        surface=im.crop((0,0,mw,vh)); od=ImageDraw.Draw(surface); labels=[]
+        for item in sorted(overlays,key=lambda item:0 if item['kind']=='content' else 1):
+            color=item['color']; label_text=item['name']
+            if not re.fullmatch(r'#[0-9a-fA-F]{6}',color) or not isinstance(label_text,str):continue
+            if item['kind']=='content':
+                x,y=item['point'];colors=item.get('colors',[])
+                for i,c in enumerate(colors):
+                    if re.fullmatch(r'#[0-9a-fA-F]{6}',c):
+                        a=x+round((i-(len(colors)-1)/2)*5)-2
+                        od.rectangle((a,y-2,a+3,y+1),fill=c,outline='#352719')
+            elif item['kind']=='village':
+                a,b,c,d=item['box']; od.rectangle((max(-1,a),max(-1,b),min(mw,c),min(vh,d)),outline=color,width=2)
+                labels.append((a,b-13,label_text,color))
             elif item['kind'] in ('player','spawn'):
                 x,y=item['point']; od.ellipse((x-6,y-6,x+6,y+6),fill=color,outline='#152235')
                 if item['kind']=='player':od.text((x,y),str(item['number']),font=font,anchor='mm',fill='#101927')
-                labels.append((x+8,y-7,name,color))
-        for x,y,name,color in labels:
-            while name and font.getlength(name)>w-6:name=name[:-1]
-            if not name:continue
-            x=max(2,min(x,w-round(font.getlength(name))-3));y=max(2 if dialog else 16,min(y,vh-14))
-            od.text((x,y),name,font=font,fill=color,stroke_width=1,stroke_fill='#202020')
+                labels.append((x+8,y-7,label_text,color))
+        for x,y,label_text,color in labels:
+            while label_text and font.getlength(label_text)>mw-6:label_text=label_text[:-1]
+            if not label_text:continue
+            x=max(2,min(x,mw-round(font.getlength(label_text))-3));y=max(2 if dialog else 16,min(y,vh-14))
+            od.text((x,y),label_text,font=font,fill=color,stroke_width=1,stroke_fill='#202020')
         im.paste(surface,(0,0))
+        directory=frame.get('directory',{})
+        if (w,h)==(640,512) and mw<w:
+            draw.rectangle((mw,0,w-1,h-1),fill='#101c29',outline='#53738b')
+            for i,kind in enumerate(('players','places')):
+                listing=directory.get(kind,{'rows':[],'total':0,'page':0,'pages':1});y=i*(h//2)
+                draw.rectangle((mw+1,y+1,w-2,y+26),fill='#263c50')
+                heading=f"{kind.capitalize()} ({listing['total']}) {listing['page']+1}/{listing['pages']}"
+                draw.text((mw+6,y+5),heading,font=font,fill='#ffffff')
+                for j,row in enumerate(listing['rows'][:14]):
+                    text=row['name'];rowcolor=row['color']
+                    if not re.fullmatch(r'#[0-9a-fA-F]{6}',rowcolor):continue
+                    while text and font.getlength(text)>w-mw-12:text=text[:-1]
+                    draw.text((mw+6,y+30+j*15),text,font=font,fill=rowcolor)
         title=(frame['title']+' · '+frame['status'])
         while len(title)>1 and font.getlength(title)>w-8:title=title[:-1]
         if not dialog:
             draw.rectangle((0,0,w-1,15),fill=(10,16,18,255));draw.text((4,2),title,font=font,fill='white')
         if not frame['tiles']:
             msg=frame['status']
-            for i,line in enumerate(wrap_pixels(msg,font,w-8)[:max(1,(vh-20)//13)]):draw.text((4,20+i*13),line,font=font,fill='white')
+            for i,line in enumerate(wrap_pixels(msg,font,mw-8)[:max(1,(vh-20)//13)]):draw.text((4,20+i*13),line,font=font,fill='white')
         labels={'zoom+':'+','zoom-':'-','left':'<','right':'>','up':'^','down':'v','home':'H','dimension':{'Overworld':'OW','Nether':'N','End':'E'}.get(frame['dimension'],'D'),'exit':'X'}
         for action,x0,y0,x1,y1 in frame['buttons']:
             draw.rectangle((x0,y0,x1-1,y1-1),fill=(18,29,26,255),outline=(112,145,128,255))
@@ -550,6 +582,8 @@ class CinterForgeDisplay(Plugin):
         screen.update_region(0,0,w,h,im.tobytes(),format='rgba8888')
         entering=name not in self.map_modes
         self.map_modes[name]=im;self.map_refresh[name]=time.monotonic()+5
+        if not hasattr(self,'map_details'):self.map_details={}
+        self.map_details[name]={key:frame[key] for key in ('layers','directory','dimension','status') if key in frame}
         if dialog:
             self.dialog_maps.add(name)
             # The original pack routes normal interaction to focus when the
@@ -625,6 +659,7 @@ class CinterForgeDisplay(Plugin):
                 was_dialog=name in self.dialog_maps
                 if name in self.map_modes:
                     self.map_modes.pop(name,None);self.dialog_maps.discard(name);self.map_refresh.pop(name,None);self.map_clicks.pop(name,None)
+                    getattr(self,'map_details',{}).pop(name,None)
                     self.emit_mount('map_mode',{'screen':name,'active':False})
                 output=result.get('output','')
                 if result.get('mode')=='if':
@@ -640,7 +675,18 @@ class CinterForgeDisplay(Plugin):
                 self.render(self.mp.screen(name),self.transcripts[name])
                 self.restored.add(name)
                 if resume or was_dialog:self.switch_forms(name)
-            except Exception as exc: self.logger.error('CINTERFORGE_TERMINAL_RENDER_FAILED: '+str(exc))
+            except Exception as exc:
+                self.logger.error('CINTERFORGE_TERMINAL_RENDER_FAILED: '+str(exc))
+                # A failed frame/form transition must never trap the player's
+                # camera. Retain the screen's last valid mode and transcript.
+                for key,state in list(self.focus.items()):
+                    if state[0]!=name:continue
+                    self.focus.pop(key,None)
+                    p=self.server.get_player(state[1])
+                    if p is not None:
+                        try:p.close_form()
+                        finally:self.end_focus(p)
+
             finally:
                 path.unlink(missing_ok=True)
                 shutil.rmtree(self.io/(request+'.tiles'),ignore_errors=True)

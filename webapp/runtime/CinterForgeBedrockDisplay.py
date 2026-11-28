@@ -188,8 +188,8 @@ def serve(session,manager,env):
     from types import SimpleNamespace
     root=manager.run_root/'.cinter/display-io'; root.mkdir(parents=True,exist_ok=True)
     fiction=session.display_fiction
-    from runtime.CinterForgeBedrockMap import DisplayMaps
-    maps=DisplayMaps(manager,root)
+    from runtime.CinterForgeBedrockMap import DisplayMaps, MAP_ACTIONS
+    maps=DisplayMaps(manager,root,dialog_controls=True)
     try:
         while not session.closed:
             for request in sorted(root.glob('*.request.json'), key=lambda p:p.stat().st_mtime_ns if p.exists() else 0):
@@ -207,7 +207,7 @@ def serve(session,manager,env):
                         raise ValueError('Invalid display input')
                     action=data.get('action')
                     if action is not None:
-                        if screen not in maps.active or action not in ('click','refresh'):
+                        if screen not in maps.active or action not in (*MAP_ACTIONS,'click'):
                             raise ValueError('No active CraftMaster map')
                         point=None
                         if action=='click':
@@ -252,10 +252,8 @@ def serve(session,manager,env):
                 except Exception as exc:
                     screen = data.get('screen') if isinstance(data,dict) else None
                     manager._append_log('CINTERFORGE_DISPLAY_COMMAND_FAILED '+str(screen)+' '+str(exc))
-                    if isinstance(screen,str) and screen in maps.active:
-                        maps.active.pop(screen,None)
                     shutil.rmtree(root/(request.name.split('.')[0]+'.tiles'),ignore_errors=True)
-                    result={'output':str(exc),'mode':'if' if isinstance(screen,str) and screen in fiction.active else 'terminal'}
+                    result={'output':str(exc),'error':True}
                 tmp=response.with_suffix('.tmp');tmp.write_text(json.dumps(result),encoding='utf-8');tmp.replace(response)
                 request.unlink(missing_ok=True)
             time.sleep(.15)

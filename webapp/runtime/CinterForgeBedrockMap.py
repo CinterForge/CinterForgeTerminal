@@ -86,6 +86,21 @@ def _map_layout(state: dict) -> tuple[Path, Path | None]:
 DIMENSIONS = ('Overworld', 'Nether', 'End')
 TILE = 512
 MAX_TILE_BYTES = 8 * 1024 * 1024
+# Same content keys and palette as the browser Atlas, plus its permanent
+# people, place and spawn annotations. No independent content index.
+CONTENT_LAYERS = {'chests':('Chests','#ffd24a'),'signs':('Signs','#55e8ff'),
+    'books':('Books','#f78bd4'),'terminals':('Terminals','#83f28e'),
+    'binders':('Binders','#ff9b51'),'cards':('Cards','#bca4ff'),
+    'graphic_novels':('Graphic Novels','#ff8fa5'),'collections':('Collections','#6ab0ef'),
+    'magazine_racks':('Magazine Racks','#c9ab78'),'arcades':('Arcades','#ff783b')}
+LAYERS = {'players':('Players',None),'places':('Places',None),'spawn':('World spawn',None),**CONTENT_LAYERS}
+DEFAULT_LAYERS = ('players','places','spawn')
+LIST_ROWS = 14
+LIST_WIDTH = 208
+MAP_ACTIONS = ('refresh','zoom+','zoom-','left','right','up','down','fit','home','overworld','nether','end','exit',
+               'layer:all',*('layer:'+k for k in LAYERS),
+               *(f'list:{k}:{direction}' for k in ('players','places') for direction in ('prev','next')))
+
 
 
 def read_spawn(path):
@@ -205,7 +220,8 @@ class DisplayMaps:
         world=self.manager.find_java_world(name)
         if world is None:raise ValueError('No local Java world named '+repr(name))
         root=self.manager.craftmaster_output_root(world)/'Maps'/Path(world['path']).name
-        self.active[screen]={'world':world,'root':root,'name':world['name'],'dimension':0,'size':(w,h),'view':None,'spawn':read_spawn(Path(world['path'])/'level.dat')}
+        self.active[screen]={'world':world,'root':root,'name':world['name'],'dimension':0,'size':(w,h),'view':None,'spawn':read_spawn(Path(world['path'])/'level.dat'),
+                             'layers':list(DEFAULT_LAYERS),'list_pages':{'players':0,'places':0}}
         # Reuse existing authored maps. Generate only when absent, without importing
         # or restarting the currently served Bedrock world.
         dim, existing=self.layout(self.active[screen])
@@ -231,7 +247,20 @@ class DisplayMaps:
         return dim,_find_zoomify_root(dim) if dim.is_dir() else None
 
     def turn(self,screen,request,action='refresh',point=None):
-        state=self.active[screen];w,h=state['size']; vh,buttons=(h,[]) if self.dialog_controls else controls(w,h)
+        state=self.active[screen];surface_width,h=state['size']; vh,buttons=(h,[]) if self.dialog_controls else controls(surface_width,h)
+        directory_enabled=self.dialog_controls and (surface_width,h)==(640,512)
+        w=surface_width-LIST_WIDTH if directory_enabled else surface_width
+        layers=state['layers']; pages=state['list_pages']
+        if action=='layer:all':
+            state['layers']=layers=[] if len(layers)==len(LAYERS) else list(LAYERS)
+        elif action.startswith('layer:'):
+            key=action.split(':')[1]
+            if key not in LAYERS:raise ValueError('Invalid Atlas layer')
+            if key in layers:layers.remove(key)
+            else:layers.append(key)
+        elif action.startswith('list:'):
+            if not directory_enabled or action not in MAP_ACTIONS:raise ValueError('Lists require a 5×4 Terminal')
+            _,key,direction=action.split(':');pages[key]=max(0,pages[key]+(1 if direction=='next' else -1))
         if action=='click':
             x,y=point
             action=next((a for a,x0,y0,x1,y1 in buttons if x0<=x<x1 and y0<=y<y1),'center') if y>=vh else 'center'
@@ -241,10 +270,19 @@ class DisplayMaps:
             state['dimension']=(state['dimension']+1)%3;state['view']=None
         elif action in ('overworld','nether','end'):
             dimension=('overworld','nether','end').index(action)
-            if dimension!=state['dimension']:state['dimension']=dimension;state['view']=None
+            if dimension!=state['dimension']:state['dimension']=dimension;state['view']=None;pages['places']=0
         dim,root=self.layout(state)
-        result={'mode':'map','map':{'title':state['name'],'dimension':DIMENSIONS[state['dimension']],'width':w,'height':h,'view_height':vh,'buttons':buttons,'tiles':[],'status':''}}
+        result={'mode':'map','map':{'title':state['name'],'dimension':DIMENSIONS[state['dimension']],'width':surface_width,'height':h,'view_height':vh,'map_width':w,'buttons':buttons,'tiles':[],'status':'',
+                                      'layers':[{ 'key':key,'label':label,'visible':key in layers} for key,(label,_) in LAYERS.items()]}}
         frame=result['map']
+        directory={'players':[],'places':[]} if directory_enabled else None
+        def add_directory():
+            if directory is None:return
+            frame['directory']={}
+            for key,entries in directory.items():
+                last=max(0,(len(entries)-1)//LIST_ROWS);pages[key]=min(pages[key],last)
+                frame['directory'][key]={'page':pages[key],'pages':last+1,'total':len(entries),
+                    'rows':entries[pages[key]*LIST_ROWS:(pages[key]+1)*LIST_ROWS]}
         packed=dim/(Path(state['world']['path']).name+' Zoomify.pff')
         use_pff=False
         try:
@@ -256,10 +294,12 @@ class DisplayMaps:
         except (OSError,ValueError,KeyError,ET.ParseError,struct.error):
             with self.lock:job=self.jobs.get(state['world']['id'],{})
             frame['status']=job.get('message','No map for this dimension yet')
+            if directory is not None:
+                map_overlays(state,dim,0,0,1,0,0,self.town_names,directory=directory);add_directory()
             return result
         fit=min(w/mw,vh/mh,1)
         if state['view'] is None or state['view'][3:]!=(mw,mh):state['view']=(mw/2,mh/2,fit,mw,mh)
-        cx,cy,scale,_,_=state['view']
+        cx,cy,scale,_,_=state['view'];scale=max(fit,scale)
         if action=='zoom+':scale=min(8,scale*2)
         elif action=='zoom-':scale=max(fit,scale/2)
         elif action=='left':cx-=w/scale*.35
@@ -302,7 +342,8 @@ class DisplayMaps:
                 x1p=round(left+(x*TILE+min(TILE,lw-x*TILE))*factor*scale)
                 y1p=round(top+(y*TILE+min(TILE,lh-y*TILE))*factor*scale)
                 if x1p>x0p and y1p>y0p:frame['tiles'].append([filename,x0p,y0p,x1p,y1p])
-        frame['overlays']=map_overlays(state,dim,left,top,scale,w,vh,self.town_names)
+        frame['overlays']=map_overlays(state,dim,left,top,scale,w,vh,self.town_names,directory=directory)
+        add_directory()
         frame['status']=f'{DIMENSIONS[state["dimension"]]}  {scale:.2g}x'
         return result
 
@@ -347,32 +388,42 @@ def _town_name(v,signs,key,names):
     return name if isinstance(name,str) and name else 'Village'
 
 
-def map_overlays(state,dim,left,top,scale,w,vh,town_names):
+def map_overlays(state,dim,left,top,scale,w,vh,town_names,*,directory=None):
     origin=_map_json(dim/'LiveMap POIs.json')
-    if not all(_finite(origin.get(k)) for k in ('originX','originZ')):return []
+    has_origin=all(_finite(origin.get(k)) for k in ('originX','originZ'))
+    if not has_origin and directory is None:return []
+    layers=state.get('layers',DEFAULT_LAYERS)
     root=state['root']; folder=Path(state['world']['path']).name
     record=_map_json(dim/(folder+' POIs.json'))
     edits=_map_json(root/'MapAnnotations.json',1024*1024)
     names=_map_json(town_names or dim/'TownNames.json')
     dimension=DIMENSIONS[state['dimension']].lower()
-    def point(x,z):return [round(left+(x-origin['originX'])*scale),round(top+(z-origin['originZ'])*scale)]
+    def point(x,z):return [round(left+(x-origin.get('originX',0))*scale),round(top+(z-origin.get('originZ',0))*scale)]
     def edit(key):return edits.get(key) if isinstance(edits.get(key),dict) else {}
     def color(key,i):
         c=edit(key).get('color','')
         return c if isinstance(c,str) and re.fullmatch(r'#[0-9a-fA-F]{6}',c) else PALETTE[i%len(PALETTE)]
     def label(value):return value[:100] if isinstance(value,str) else ''
-    out=[]; seen=set()
+    out=[]; seen=set(); hidden_bounds=[]; place_rows=[]
     fields=('minX','minZ','maxX','maxZ')
     for i,v in enumerate(record.get('villages',[])):
         if not isinstance(v,dict) or not all(_finite(v.get(k)) for k in (*fields,'bellX','bellZ')):continue
         key=f"village:{dimension}:{v['bellX']}:{v['bellZ']}"
-        if key in seen or edit(key).get('hidden') is True:continue
+        if key in seen:continue
         seen.add(key); v=dict(v); bounds=edit(key).get('bounds')
         if isinstance(bounds,dict) and all(type(bounds.get(k)) is int and abs(bounds[k])<=30000000 for k in fields) and bounds['minX']<=bounds['maxX'] and bounds['minZ']<=bounds['maxZ']:v.update({k:bounds[k] for k in fields})
+        if edit(key).get('hidden') is True:
+            hidden_bounds.append(tuple(v[k] for k in fields));continue
+        name=label(edit(key).get('name')).strip() or _town_name(v,record.get('signs',[]),folder+':'+key,names)
+        place_rows.append((key,i,{'name':label(name),'color':color(key,i)}))
+        if not has_origin or 'places' not in layers:continue
         a,b=point(v['minX'],v['minZ']); c,d=point(v['maxX']+1,v['maxZ']+1)
         if c<0 or d<0 or a>=w or b>=vh:continue
-        name=label(edit(key).get('name')).strip() or _town_name(v,record.get('signs',[]),folder+':'+key,names)
         out.append({'kind':'village','box':[a,b,max(a+2,c),max(b+2,d)],'color':color(key,i),'name':label(name)})
+    if directory is not None:
+        order=edit('place-order:'+dimension).get('order',[])
+        ranks={key:i for i,key in enumerate(order) if isinstance(key,str)} if isinstance(order,list) else {}
+        directory['places']=[row for key,i,row in sorted(place_rows,key=lambda item:(ranks.get(item[0],100000),item[1]))]
     players=_map_json(root/'MapPlayers.json').get('players',[])
     order=edit('player-order').get('order',[]); ranks={key:i for i,key in enumerate(order) if isinstance(key,str)} if isinstance(order,list) else {}
     ordered=[]
@@ -381,13 +432,39 @@ def map_overlays(state,dim,left,top,scale,w,vh,town_names):
         key='player:'+p['uuid']; seed=edit(key).get('number',p.get('number',i+1)); seed=seed if type(seed) is int and seed>0 else i+1
         ordered.append((ranks.get(key,100000),seed,i,p,key))
     for number,(_,seed,i,p,key) in enumerate(sorted(ordered,key=lambda q:q[:3]),1):
-        if p.get('hasPosition') and p.get('dimension')==dimension and all(_finite(p.get(k)) for k in ('posX','posZ')):
+        if directory is not None:
+            profile=_map_json(root/'Profiles'/(p['uuid']+'.json'))
+            name=label(edit(key).get('name')) or label(profile.get('name')) or label(p.get('playerName')) or p['uuid']
+            directory['players'].append({'name':f'{number}. {name}','color':color(key,seed-1)})
+        if has_origin and 'players' in layers and p.get('hasPosition') and p.get('dimension')==dimension and all(_finite(p.get(k)) for k in ('posX','posZ')):
             x,y=point(p['posX'],p['posZ'])
             if 0<=x<w and 0<=y<vh:
-                profile=_map_json(root/'Profiles'/(p['uuid']+'.json'))
-                name=label(edit(key).get('name')) or label(profile.get('name')) or label(p.get('playerName')) or str(number)
+                if directory is None:
+                    profile=_map_json(root/'Profiles'/(p['uuid']+'.json'))
+                    name=label(edit(key).get('name')) or label(profile.get('name')) or label(p.get('playerName')) or str(number)
                 out.append({'kind':'player','point':[x,y],'color':color(key,seed-1),'number':number,'name':name})
-    if dimension=='overworld' and state.get('spawn') is not None:
+    if not has_origin or not w or not vh:return []
+    if has_origin and 'spawn' in layers and dimension=='overworld' and state.get('spawn') is not None:
         x,y=point(*state['spawn'])
         if 0<=x<w and 0<=y<vh:out.append({'kind':'spawn','point':[x,y],'color':'#ffffff','name':'World spawn'})
+    # Aggregate coincident and nearby visible indexed locations to bound the
+    # response on large worlds. Use the actual saved POI arrays, never guesses.
+    content={}
+    budget=max(1,4096-len(out))
+    cell=4
+    while math.ceil(w/cell)*math.ceil(vh/cell)>budget:cell*=2
+    for kind,(_,color_value) in CONTENT_LAYERS.items():
+        if kind not in layers:continue
+        entries=record.get(kind,[])
+        if not isinstance(entries,list):continue
+        for p in entries:
+            if not isinstance(p,dict) or not all(_finite(p.get(k)) for k in ('x','y','z')):continue
+            if any(a<=p['x']<=c and b<=p['z']<=d for a,b,c,d in hidden_bounds):continue
+            x,y=point(p['x']+.5,p['z']+.5)
+            if not (0<=x<w and 0<=y<vh):continue
+            # Quantize only the display marker, not source coordinates.
+            bucket=(min(w-1,x//cell*cell+cell//2),min(vh-1,y//cell*cell+cell//2))
+            colors=content.setdefault(bucket,[])
+            if color_value not in colors:colors.append(color_value)
+    out.extend({'kind':'content','point':list(p),'colors':colors,'color':colors[0],'name':''} for p,colors in content.items())
     return out[:4096]
