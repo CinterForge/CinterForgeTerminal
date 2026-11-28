@@ -242,7 +242,7 @@ def mark_finished(server, map_id: str, error: Exception | None = None) -> None:
 
 
 def run_map_conversion(server, name: str, *, enqueue: bool = True, update_served_world: bool = True) -> dict:
-    """Start `craftmaster <world>` in a worker; return before conversion ends."""
+    """Start the requested Java conversion in a worker; return before it ends."""
     if server.bedrock is None:
         raise RuntimeError(server.bedrock_error or 'CraftMaster is unavailable')
     world = server.bedrock.find_java_world(name)
@@ -360,6 +360,58 @@ def serve_map_asset(handler, path: str) -> bool:
         return True
     # World-level manifest and explicit canonical dimensions only; no raw save access.
     world_root = state['directory'].parent
+    if parts[0] == 'Sounds':
+        # Audio is scoped to this issued map's verified Java save. No general
+        # file-serving route, no tile-size limit on a legitimate MP3 stream.
+        try:
+            source = _local_java_source(handler.server, state)
+            if source is None:
+                raise ValueError('No local Java source')
+            root = source / 'CinterForge'
+            provider = _map_provider(handler.server)
+            tracks = provider.sound_tracks(root)
+            if relative_text == 'Sounds/Tracks.json':
+                handler._json(200, {'tracks': tracks, 'updating': bool(state.get('working'))})
+                return True
+            if len(parts) != 2 or parts[1] not in tracks:
+                raise ValueError('Unknown soundtrack')
+            asset = root / 'Sounds' / parts[1]
+            with asset.open('rb') as stream:
+                size = os.fstat(stream.fileno()).st_size
+                start, end = 0, size - 1
+                requested = handler.headers.get('Range')
+                if requested:
+                    match = re.fullmatch(r'bytes=(\d*)-(\d*)', requested)
+                    if match and match.group(1):
+                        start = int(match.group(1))
+                        end = min(end, int(match.group(2))) if match.group(2) else end
+                    elif match and match.group(2):
+                        start = max(0, size - int(match.group(2)))
+                    else:
+                        start = size
+                if start >= size or end < start:
+                    handler.send_response(416); handler.send_header('Content-Range', f'bytes */{size}')
+                    handler.send_header('Content-Length', '0'); handler.end_headers(); return True
+                handler.send_response(206 if requested else 200)
+                handler.send_header('Content-Type', 'audio/mpeg')
+                handler.send_header('Cache-Control', 'no-store')
+                handler.send_header('X-Content-Type-Options', 'nosniff')
+                handler.send_header('Accept-Ranges', 'bytes')
+                handler.send_header('Content-Length', str(end - start + 1))
+                if requested:
+                    handler.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+                handler.end_headers()
+                stream.seek(start)
+                remaining = end - start + 1
+                while remaining:
+                    chunk = stream.read(min(remaining, 1024 * 1024))
+                    if not chunk: break
+                    handler.wfile.write(chunk); remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except (OSError, ValueError, RuntimeError, AttributeError):
+            handler._json(404, {'error': 'World soundtrack unavailable'})
+        return True
     if relative_text == 'MapCapabilities.json':
         handler._json(200, {'editable': _local_java_source(handler.server, state) is not None})
         return True
